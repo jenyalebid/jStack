@@ -204,6 +204,34 @@ def cancelled(presented: str) -> bool:
     return hmac.compare_digest(row["token_hash"], _hash(secret))
 
 
+def orphaned(presented: str) -> bool:
+    """True when this token is well-formed but names a device id no row
+    matches — the other stale credential (jStack#50).
+
+    `cancelled` covers the row that was revoked; this covers the row that is
+    GONE — a store wiped and re-provisioned, a row deleted under a keychain
+    entry, a credential minted for some other host entirely. Nothing exists
+    behind the id for a guess to converge on, so the limiter protects nothing
+    by counting these; what counting bought was a phone arming a
+    fifteen-minute relock against itself with a credential this host will
+    never take.
+
+    No secret check, because there is nothing to check against — and unlike
+    `cancelled`'s carve-out, this one gives an attacker nothing: a made-up id
+    draws the same uniform 401 either way. The one id that can go from
+    unknown to known, `legacy`, is materialized by `_grandfather` inside
+    `authenticate` BEFORE the denial is noted — so only its very first
+    presentation reads as orphaned, and every wrong secret after that counts
+    against a row that now exists.
+    """
+    if not presented:
+        return False
+    device_id, _secret = parse(presented)
+    if not device_id:
+        return False
+    return _store().device(device_id) is None
+
+
 def authenticate(presented: str) -> str | None:
     """The device id this token proves, or None. The one auth answer.
 

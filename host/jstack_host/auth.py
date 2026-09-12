@@ -35,6 +35,14 @@ secret means hammering one device id, which is exactly what the tight tier
 counts. Spraying random ids never yields a lockout of a real credential, so the
 loose tier catches that instead — at a threshold no misconfigured client reaches,
 because a client only ever presents the handful of tokens it was given.
+
+UNKNOWN IDS METER ONCE (jStack#50). A token whose id matches no row at all is
+the other thing a stale client holds — a store wiped and re-provisioned, a
+keychain entry outliving its host. No secret exists behind it, so its retries
+feed no credential lock; each distinct id ticks the address meter once per
+window. A scan is many ids, so the address wall stands; a client hammering its
+one dead credential meters as one tick and never locks anything — including
+the live credential it presents right beside it.
 """
 
 import ipaddress
@@ -81,6 +89,9 @@ _failures: dict[str, list[float]] = {}
 _spray: dict[str, list[float]] = {}
 # keyed by either: a scope locks one credential, a bare ip locks the address
 _locked_until: dict[str, float] = {}
+# keyed by scope — unknown device ids already metered this window, so a stale
+# credential retrying forever is one spray tick, not a stream (jStack#50)
+_unknown_seen: dict[str, float] = {}
 
 
 def _limiter_exempt(client_ip: str) -> bool:
@@ -134,15 +145,20 @@ def _prune(tracked: dict[str, list[float]], now: float) -> None:
         del tracked[key]
 
 
-def _record_failure(client_ip: str, scope: str) -> None:
+def _record_failure(client_ip: str, scope: str | None) -> None:
+    """Count one failure — against the credential and the address, or with
+    `scope=None` against the address alone (an unknown id has no credential
+    tier: there is no row behind it for a guess to converge on)."""
     if _limiter_exempt(client_ip):
         return
     now = time.time()
+    tiers: list[tuple[dict[str, list[float]], str, int, str]] = [
+        (_spray, client_ip, _SPRAY_MAX, "address")]
+    if scope is not None:
+        tiers.insert(0, (_failures, scope, _FAIL_MAX, "credential"))
     tripped: list[tuple[str, str, int]] = []
     with _limiter_lock:
-        for table, key, ceiling, what in (
-                (_failures, scope, _FAIL_MAX, "credential"),
-                (_spray, client_ip, _SPRAY_MAX, "address")):
+        for table, key, ceiling, what in tiers:
             recent = [t for t in table.get(key, ()) if now - t < _FAIL_WINDOW]
             recent.append(now)
             table[key] = recent
@@ -173,11 +189,51 @@ def _note_denial(client_ip: str, scope: str, presented: str) -> None:
     Locking them out denies nothing the 401 had not already denied, and costs
     the one thing a lockout can cost — the machine's own way back, for fifteen
     minutes after the row is put right.
+
+    An id with no row at all (jStack#50) is the other non-guess: `cancelled`
+    spared the revoked row's own token, but a row that is *gone* — a store
+    wiped and re-provisioned, a keychain entry outliving its host — left the
+    retrying client branded an attacker, relocking itself every window. Those
+    are metered through `_note_orphan` instead: never the credential tier,
+    one address tick per distinct id per window.
     """
     from . import devices
     if devices.cancelled(presented):
         return
+    if devices.orphaned(presented):
+        _note_orphan(client_ip, presented)
+        return
     _record_failure(client_ip, scope)
+
+
+def _note_orphan(client_ip: str, presented: str) -> None:
+    """An unknown device id: one spray tick per distinct id per window, and
+    never a credential-tier count.
+
+    There is no row, so there is no secret a retry converges on — counting
+    every attempt protected nothing, and it is what armed the fifteen-minute
+    relock loop a phone ran against itself with one stale credential
+    (jStack#50, the three-day "off-network just stops working"). But the
+    id-space scan the address tier exists for is many DISTINCT ids, not one
+    id many times — so a first sighting still ticks the address meter, and
+    only the repeats are free. Fifty fresh ids in a window still lock the
+    address; one dead id hammered forever never locks anything.
+    """
+    if _limiter_exempt(client_ip):
+        return
+    from . import devices
+    device_id, _secret = devices.parse(presented)
+    now = time.time()
+    key = f"{client_ip}|{device_id}"
+    with _limiter_lock:
+        if now - _unknown_seen.get(key, 0.0) < _FAIL_WINDOW:
+            return
+        _unknown_seen[key] = now
+        if len(_unknown_seen) > _MAX_TRACKED:
+            for k in [k for k, t in _unknown_seen.items()
+                      if now - t >= _FAIL_WINDOW]:
+                del _unknown_seen[k]
+    _record_failure(client_ip, None)
 
 
 def lockout_remaining(client_ip: str, scope: str) -> float:
@@ -205,6 +261,7 @@ def reset_limiter() -> None:
         _failures.clear()
         _spray.clear()
         _locked_until.clear()
+        _unknown_seen.clear()
 
 
 # ── the gate ──
