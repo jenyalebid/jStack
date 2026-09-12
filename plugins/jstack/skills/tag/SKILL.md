@@ -47,6 +47,13 @@ A near match beats a new tag nearly every time; the vocabulary is worth sharing 
 while it stays small. Two tags on a session is a session that did two things. Four is a
 subject being described rather than named.
 
+**Tags are siblings, never nested.** A second tag is a second subject, never a wider
+one the first already sits inside. Work on something that runs on the substrate is not
+also work on the substrate, however much of it the work touched — file it under the
+narrower subject and stop. Stacking the containing tag beside the specific one is what
+turns a subject into a bucket, and a bucket is the thing whoever opens that subject
+asked to get away from.
+
 A tag on a session with no timeline entry is invisible to every read — `tail`, `show`
 and `grep` all reach entries through the session. Tag anyway; the entry the session
 ends with files itself under it.

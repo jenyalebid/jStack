@@ -621,6 +621,21 @@ def _dialog_sids() -> set[str]:
     return out
 
 
+def awaiting_dialog() -> set[str]:
+    """Session ids sitting on a dialog — the public read of the same markers the
+    board's red dot uses.
+
+    Public because it is load-bearing for anything outside the board that decides
+    whether a quiet session is stuck. It cannot be inferred from the transcript: the
+    assistant line that OPENS a dialog is sometimes buffered and appended only when the
+    dialog is answered (a tool_use stamped 01:32:26 landed on disk at 01:34:37, at the
+    answer), so a session waiting on a permission prompt is byte-for-byte
+    indistinguishable from one that died, for the whole wait. A caller that guesses
+    types into a prompt somebody is in the middle of answering.
+    """
+    return _dialog_sids()
+
+
 def _line_epoch(d: dict) -> float:
     try:
         return datetime.fromisoformat(

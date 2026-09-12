@@ -7,12 +7,15 @@
 # machine that is not the host. The coverage gate in tests-live/test_zz_coverage.py
 # is what makes "every action" checkable rather than claimed.
 #
-#   live-vm-test.sh [--vm NAME] [--ref GIT_REF] [--keep] [--reset]
+#   live-vm-test.sh [--vm NAME] [--ref GIT_REF] [--keep] [--reset] [--install-only]
 #
-#   --vm NAME     guest to use (default: live-actions)
-#   --ref REF     branch/tag/sha of THIS repo to install (default: the working tree)
-#   --reset       throw the guest away and clone a fresh one first
-#   --keep        leave the guest running afterwards (default: leave it running)
+#   --vm NAME       guest to use (default: live-actions)
+#   --ref REF       branch/tag/sha of THIS repo to install (default: the working tree)
+#   --reset         throw the guest away and clone a fresh one first
+#   --keep          leave the guest running afterwards (default: leave it running)
+#   --install-only  stop once the host answers — print its URL and token, skip
+#                   the suite. For rigs (the jRemote UI tests) that need a live
+#                   host but bring their own tests; one install path for all.
 #
 # Why a VM and not this Mac: the suite opens sessions, writes files and revokes
 # devices. tests-live/conftest.py refuses a base URL that resolves to the machine
@@ -33,6 +36,7 @@ VM_SH="${VM_SH:-$(command -v vm.sh 2>/dev/null || true)}"
 VM_NAME="live-actions"
 GIT_REF=""
 DO_RESET=0
+INSTALL_ONLY=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -40,6 +44,7 @@ while [ $# -gt 0 ]; do
         --ref)   GIT_REF="$2"; shift 2 ;;
         --reset) DO_RESET=1; shift ;;
         --keep)  shift ;;
+        --install-only) INSTALL_ONLY=1; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -52,12 +57,15 @@ die() { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 if [ "$DO_RESET" = "1" ]; then
     say "resetting $VM_NAME to a pristine clone"
     "$VM_SH" reset "$VM_NAME"
-else
-    "$VM_SH" up "$VM_NAME" >/dev/null 2>&1 || true
 fi
+# reset clones without booting — its job ends at "pristine". Booting is
+# always this script's to do, fresh clone or not. Keep up's last words: a
+# boot that dies (VM slot limit, wedged run) otherwise surfaces twenty
+# lines later as a bare "no address".
+UP_OUT="$("$VM_SH" up "$VM_NAME" 2>&1)" || true
 
 IP="$("$VM_SH" ip "$VM_NAME" | tail -1 | tr -d '[:space:]')"
-[ -n "$IP" ] || die "$VM_NAME has no address — is it booted?"
+[ -n "$IP" ] || die "$VM_NAME has no address — up said: $(printf '%s\n' "$UP_OUT" | tail -1)"
 say "guest $VM_NAME at $IP"
 
 vssh() { "$VM_SH" ssh "$VM_NAME" "$@"; }
@@ -96,11 +104,25 @@ else
     say "copying this working tree into the guest (without build artifacts)"
     STAGE="$(mktemp -d)"
     trap 'rm -rf "$STAGE"' EXIT
+    # Credentials never ride along, in either direction. Outbound, this
+    # Mac's own keys have no business in a guest. And the guest's copy is
+    # its mesh identity: a hub set up in there (install_hub.sh) keeps its
+    # server keys and peer table under host/Credentials, and regenerating
+    # those revokes every device that ever paired — so the refresh moves
+    # them aside and puts them back rather than rebuilding them away.
     rsync -a --exclude '.venv' --exclude '__pycache__' --exclude '.pytest_cache' \
-          --exclude '.git' --exclude '*.egg-info' \
+          --exclude '.git' --exclude '*.egg-info' --exclude 'Credentials' \
           "$HOST_DIR/" "$STAGE/host/" || die "could not stage the tree"
-    vssh 'rm -rf ~/jStack && mkdir -p ~/jStack'
+    vssh 'if [ -d ~/jStack/host/Credentials ]; then
+              rm -rf /tmp/jr-keep-credentials
+              mv ~/jStack/host/Credentials /tmp/jr-keep-credentials
+          fi
+          rm -rf ~/jStack && mkdir -p ~/jStack'
     "$VM_SH" cp "$VM_NAME" "$STAGE/host" '~/jStack/host' || die "copy failed"
+    vssh 'if [ -d /tmp/jr-keep-credentials ]; then
+              rm -rf ~/jStack/host/Credentials
+              mv /tmp/jr-keep-credentials ~/jStack/host/Credentials
+          fi'
 fi
 
 # ── install the host ──
@@ -145,6 +167,14 @@ from jstack_host import devices
 print(devices.internal_token())
 "' | tail -1 | tr -d '[:space:]')"
 [ -n "$TOKEN" ] || die "could not mint a device token in the guest"
+
+# ── a rig caller stops here: the live host is the product, not the suite ──
+# Parseable coordinates on stdout; everything above already went to the tty.
+if [ "$INSTALL_ONLY" = "1" ]; then
+    say "host is live — stopping before the suite (--install-only)"
+    printf 'JREMOTE_LIVE_URL=http://%s:9090\nJREMOTE_LIVE_TOKEN=%s\n' "$IP" "$TOKEN"
+    exit 0
+fi
 
 # ── run the suite from THIS machine, against the guest ──
 # From here, not inside the guest: half of what is being proven is that a second

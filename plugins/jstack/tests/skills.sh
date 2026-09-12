@@ -158,6 +158,7 @@ run_skill handoff open-terminal-here
 run_skill audit open-terminal-here
 run_skill push
 run_skill report file-issue
+run_skill elevator
 run_skill issue
 run_skill task task-create
 run_skill post-session-review file-followup log_event

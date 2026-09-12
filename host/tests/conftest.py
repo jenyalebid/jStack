@@ -50,6 +50,25 @@ def _isolate_devices(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_embed_marker(tmp_path, monkeypatch):
+    """No test reads the embedded-host marker this machine actually has.
+
+    `adopt_installed_environment` consults it, so every command that adopts —
+    which is all of them — now resolves against whatever host is embedded on
+    the developer's Mac. On a machine running one, that silently swapped the
+    profile mid-suite and `tunnel.WG_DIR` stopped matching the default the
+    package had already bound at import: one failure, in an unrelated file,
+    naming neither the marker nor the test that triggered it.
+
+    The fourth call-time seam, isolated for the same reason as the three
+    around it. A path inside `tmp_path` rather than one known-absent: a test
+    that means to exercise a marker writes it here and gets a real file, and
+    the suite still never touches the one on the machine.
+    """
+    monkeypatch.setenv("JREMOTE_EMBED_MARKER", str(tmp_path / "embedded.json"))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_open_registry(tmp_path, monkeypatch):
     """Point the open-session registry at a temp file for every test.
 

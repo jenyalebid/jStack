@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "jstack",
-      "description": "Agent workflow skills — /work, /handoff, /splitoff, /audit, /issue, /day-audit, /recall, /showme, /push, /report, /tag, /pict, /print, /install-rules — four of them (/tag, /pict, /print, /splitoff) answered in a UserPromptSubmit hook without a model turn, plus the timeline, inbox, rule-injection and scheduler they run on.",
+      "description": "Agent workflow skills — /work, /handoff, /splitoff, /audit, /issue, /day-audit, /recall, /showme, /push, /report, /elevator, /tag, /pict, /print, /install-rules — four of them (/tag, /pict, /print, /splitoff) answered in a UserPromptSubmit hook without a model turn, plus the timeline, inbox, rule-injection and scheduler they run on.",
       "source": "./plugins/jstack",
       "category": "productivity"
     }

@@ -32,3 +32,9 @@ write the entry, then file it.
 A tag names a subject several sessions share, never the seat, the date, or this
 session's headline. A near match beats a new tag nearly every time; the vocabulary is
 worth sharing only while it stays small. No entry, no tag.
+
+**One subject, not its container too.** Tags are siblings — a second one means the
+session did a second thing, never that a wider subject also covers the first. Work on
+something that runs on the substrate is not also work on the substrate, however much
+of it the work touched. File the narrower subject and stop; the wide tag is what
+someone opening the narrow one asked to get away from.

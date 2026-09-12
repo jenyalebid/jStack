@@ -134,8 +134,13 @@ def _is_host_only(iface: str) -> bool:
 
 def classify(inets: list[str], hostname: str, port: int,
              ifaces: dict[str, str] | None = None) -> list[dict]:
-    """The address list, ordered mesh → lan → local. Pure, so the ordering
+    """The address list, ordered lan → local → mesh. Pure, so the ordering
     and the exclusions are what the tests actually pin.
+
+    Every entry here is reachable only from this LAN or from something already
+    on this mesh. Nothing in this list gets a machine that is neither — see
+    `adopt`, which has to say so rather than offer three addresses that will
+    all time out.
 
     `ifaces` maps address → the interface holding it, and is what lets a VM
     bridge be told apart from the real LAN. Omitted, every address is treated

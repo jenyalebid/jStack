@@ -62,16 +62,22 @@ DEF_LABEL=$(basename "$target")
 DEF_LABEL=${DEF_LABEL%.plist}
 DEF_LABEL=${DEF_LABEL%.service}
 
-# The machine this package grew up on runs its daemon under this hand-rolled
-# label. The shipped default must differ, or `install` there would adopt — and
-# on the next run reload — a live service nobody asked it to manage. Hardcoded
-# on purpose: the day someone changes the default into a collision, this line
-# is what says so.
-LIVE_LABEL="com.jarvisandj.scheduler"
-if [ -n "$DEF_LABEL" ] && [ "$DEF_LABEL" != "$LIVE_LABEL" ]; then
-    pass "default label '$DEF_LABEL' does not collide with a pre-existing daemon's"
+# The shipped default must not name a service this machine already runs, or
+# `install` would adopt — and on the next run reload — a live daemon nobody
+# asked it to manage. Read off the real service dir rather than a hardcoded
+# label: the collision this guards against is whatever is actually installed
+# here, which differs per machine and changes without this file hearing of it.
+COLLIDES=""
+for svc in "$HOME/Library/LaunchAgents"/*.plist \
+           "$HOME/.config/systemd/user"/*.service; do
+    [ -e "$svc" ] || continue
+    name=$(basename "$svc"); name=${name%.plist}; name=${name%.service}
+    [ "$name" = "$DEF_LABEL" ] && COLLIDES="$svc"
+done
+if [ -n "$DEF_LABEL" ] && [ -z "$COLLIDES" ]; then
+    pass "default label '$DEF_LABEL' does not collide with a service already installed here"
 else
-    fail "default label '$DEF_LABEL' collides with the live daemon label"
+    fail "default label '$DEF_LABEL' collides with an installed service: $COLLIDES"
 fi
 
 printf '%s\n' "$out" | sed -n "/^--- begin /,/^--- end /p" | sed '1d;$d' > "$TMP/gen.def"

@@ -661,24 +661,62 @@ def gather_timeline(directory: Path, sources: list[Source]) -> None:
                     "reaches the workspace, wrapped in <jstack-identity>", identity)
 
     n, why = timeline_count(cfg, agent, submode)
-    if n <= 0:
-        add(sources, "start", f"(no timeline injection) seat `{seat}`",
-            mech + (f" — {why}" if why else ""), None)
-        return
     log_event = os.environ.get("PICT_LOG_EVENT", str(PLUGIN_BIN / "log_event"))
+
+    # A pinned session is opened on a SUBJECT, and the pin REPLACES the seat's
+    # window. Reading the seat here would preview a block this session never
+    # got, under a heading naming the wrong axis — the one place a person
+    # looks to find out what they were loaded with.
+    hook = _inject_hook()
+    tag = pin_note = ""
+    if hook is not None:
+        try:
+            tag = hook.pinned_tag()
+            if tag and not hook.tag_known(tag, binary=log_event):
+                pin_note = (f" — pin `{tag}` is not in the vocabulary, so the "
+                            "hook falls back to this seat and says so")
+                tag = ""
+        except Exception:
+            tag = ""
+
+    if tag:
+        # The pin floors at the fleet default: a seat that injects nothing
+        # still gets history when a pin explicitly asked for a subject.
+        depth = n if n > 0 else 10
+        why = (f"pinned by JSTACK_TIMELINE_TAG=`{tag}` — the subject's last "
+               f"{depth} sittings across every seat, in place of "
+               f"`{seat}`'s own")
+        head = f"timeline tail — subject `{tag}` (pinned; replaces seat `{seat}`)"
+        empty = f"(timeline empty) subject `{tag}`"
+    elif n <= 0:
+        add(sources, "start", f"(no timeline injection) seat `{seat}`",
+            mech + (f" — {why}" if why else "") + pin_note, None)
+        return
+    else:
+        depth = n
+        head = f"timeline tail — seat `{seat}`"
+        empty = f"(timeline empty) seat `{seat}`"
+
     try:
-        r = subprocess.run([log_event, "tail", seat, "-n", str(n),
-                            "--origin", "direct"],
-                           capture_output=True, text=True, timeout=8)
+        r = subprocess.run(
+            hook.tail_argv(None if tag else seat, depth, tag=tag or None,
+                           binary=log_event) if hook is not None else
+            [log_event, "tail", seat, "--sessions", str(depth),
+             "--origin", "direct"],
+            capture_output=True, text=True, timeout=8)
         entries = r.stdout.strip() if r.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         entries = ""
+    if not entries and tag:
+        # The pinned block ships even empty — a session that doesn't know it is
+        # pinned frames its work as the seat's, and a fresh subject is exactly
+        # when that matters.
+        entries = "(nothing recorded on this subject yet — this is its first sitting.)"
     if not entries:
-        add(sources, "start", f"(timeline empty) seat `{seat}`",
-            mech + f" — {why}", None)
+        add(sources, "start", empty, mech + f" — {why}" + pin_note, None)
         return
-    add(sources, "start", f"timeline tail — seat `{seat}`",
-        mech + f" — {why}, wrapped in <jstack-timeline>", entries)
+    add(sources, "start", head,
+        mech + f" — {why}{pin_note}, wrapped in <jstack-timeline>", entries)
 
 
 # ------------------------------------------------------------------- prompt

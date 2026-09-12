@@ -204,6 +204,34 @@ def cancelled(presented: str) -> bool:
     return hmac.compare_digest(row["token_hash"], _hash(secret))
 
 
+def orphaned(presented: str) -> bool:
+    """True when this token is well-formed but names a device id no row
+    matches — the other stale credential (jStack#50).
+
+    `cancelled` covers the row that was revoked; this covers the row that is
+    GONE — a store wiped and re-provisioned, a row deleted under a keychain
+    entry, a credential minted for some other host entirely. Nothing exists
+    behind the id for a guess to converge on, so the limiter protects nothing
+    by counting these; what counting bought was a phone arming a
+    fifteen-minute relock against itself with a credential this host will
+    never take.
+
+    No secret check, because there is nothing to check against — and unlike
+    `cancelled`'s carve-out, this one gives an attacker nothing: a made-up id
+    draws the same uniform 401 either way. The one id that can go from
+    unknown to known, `legacy`, is materialized by `_grandfather` inside
+    `authenticate` BEFORE the denial is noted — so only its very first
+    presentation reads as orphaned, and every wrong secret after that counts
+    against a row that now exists.
+    """
+    if not presented:
+        return False
+    device_id, _secret = parse(presented)
+    if not device_id:
+        return False
+    return _store().device(device_id) is None
+
+
 def authenticate(presented: str) -> str | None:
     """The device id this token proves, or None. The one auth answer.
 
@@ -284,6 +312,39 @@ def _note_seen(device_id: str) -> None:
             return
         _seen_at[device_id] = now
     _store().touch_device(device_id)
+
+
+# client_build is written on change, not on request — it moves once per app
+# update. The cache seeds lazily from the row so a restart doesn't buy one
+# redundant write per device.
+_build_seen: dict[str, str] = {}
+_build_lock = threading.Lock()
+
+
+def note_build(device_id: str, build: str) -> None:
+    """Record the build string an authenticated request carried.
+
+    This column is why "is the fix on the phone" is answerable from the host:
+    before it, a build's arrival could only be inferred from behaviour, and a
+    fix whose failure mode is silence is indistinguishable from a fix that
+    never installed.
+    """
+    build = build.strip()[:64]
+    if not build:
+        return
+    with _build_lock:
+        if _build_seen.get(device_id) == build:
+            return
+    row = _store().device(device_id)
+    if row is None:
+        return
+    if row.get("client_build") != build:
+        # If this throws it propagates (the auth caller swallows it) and the
+        # cache below is never reached — so a failed write is retried next
+        # request instead of being stranded as "done" until the build changes.
+        _store().note_device_build(device_id, build)
+    with _build_lock:
+        _build_seen[device_id] = build
 
 
 # ── minting ──
@@ -562,3 +623,5 @@ def reset_for_tests() -> None:
         _seen_at.clear()
     with _watch_lock:
         _watchers.clear()
+    with _build_lock:
+        _build_seen.clear()

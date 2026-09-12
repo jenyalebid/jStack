@@ -172,12 +172,29 @@ def installed_port(path: Path | None = None) -> int | None:
 
 def adopt_installed_environment(path: Path | None = None) -> None:
     """Apply `installed_environment()` beneath whatever the shell already
-    set — an explicit export or `--state-dir` still wins — and re-resolve."""
+    set — an explicit export or `--state-dir` still wins — and re-resolve.
+
+    Then the embedded host's marker, beneath both. A host mounted into another
+    server has no LaunchAgent by design, so the plist above answers nothing on
+    that machine and every read command fell through to the package defaults —
+    `~/.local/state/jremote`, a directory the live host has never once read.
+    That is #34 exactly, and writing `embed.declare()` did not end it: the
+    marker had no reader. `status` reported `not installed` against a host that
+    was up and serving, and a menu bar resolving the same defaults presented a
+    credential minted into that unread directory and was told, correctly,
+    `wrong secret for host-internal` — 1,548 times in one day.
+
+    Under the plist and not over it: a machine carrying both records has an
+    agent of its own, and the agent is the installed host. The marker is the
+    answer for the machine that has no plist to read.
+    """
     adopted = False
     for k, v in installed_environment(path).items():
         if k not in os.environ:
             os.environ[k] = v
             adopted = True
+    from . import embed
+    adopted = embed.adopt() or adopted
     if adopted:
         hostenv.reset_profile()
         # And whatever already resolved against the environment we just

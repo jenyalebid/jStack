@@ -244,6 +244,45 @@ ENV_VARS="JREMOTE_STATE_DIR JREMOTE_TOKEN_PATH JREMOTE_CREDENTIALS_DIR
           JREMOTE_HOST_ID JREMOTE_HOST_NAME JREMOTE_HOST_PROFILE
           JREMOTE_PEER_SCRIPT JREMOTE_AGENT_LABEL JREMOTE_MENUBAR_QUIT
           WG_PEER_DIR WG_ENDPOINT"
+# An embedded host's paths and its agent come off its marker, not off the
+# installing shell.
+#
+# Everything below pins only what the caller happened to export, which is the
+# same trap `install_host.render_plist` refuses: launchd builds the job from
+# the user record, not from the shell that installed it. A host embedded in
+# another server has no agent plist to read either, so an install run without
+# those exports wrote an EnvironmentVariables dict that was simply empty — and
+# the bar then resolved the package defaults, presented a credential from a
+# state dir the live hub has never read, and drew "No Access" beside a host
+# that was up and serving. That is exactly what happened here on 2026-09-11.
+#
+# The agent label is in the loop for the second half of that same morning. A
+# reinstall that exported the two paths and not the label left the bar hunting
+# for `com.jremote.host`, which an embedded host never has — so it read the hub
+# as not installed and dropped Restart and Shut Down off the menu entirely,
+# on the Mac that runs the hub. Whether a control appears must not depend on
+# what a shell had exported hours earlier.
+#
+# Read, never guessed, and only as a default: an explicit --state-dir or an
+# exported value still wins, because it is below these in the loop's `:-`.
+EMBED_MARKER="${JREMOTE_EMBED_MARKER:-$HOME/.local/state/jremote/embedded.json}"
+if [ -r "$EMBED_MARKER" ]; then
+    for pair in "JREMOTE_STATE_DIR:state_dir" "JREMOTE_TOKEN_PATH:token_path" \
+                "JREMOTE_AGENT_LABEL:agent_label"; do
+        var="${pair%%:*}"; key="${pair##*:}"
+        eval "cur=\${$var:-}"
+        [ -n "$cur" ] && continue
+        # sed and not a JSON parser: this installer ships to machines that are
+        # not guaranteed a python, and the file it reads is written by
+        # `embed.declare()` with `json.dumps(indent=2)` — one key per line,
+        # always quoted. A hand-mangled marker yields nothing here and the
+        # install carries on unpinned, which is the behaviour before this.
+        val=$(sed -n "s/^[[:space:]]*\"$key\"[[:space:]]*:[[:space:]]*\"\(.*\)\"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p" \
+              "$EMBED_MARKER" 2>/dev/null | head -1)
+        [ -n "$val" ] && eval "$var=\$val" && eval "export $var"
+    done
+fi
+
 ENV_XML=""
 for var in $ENV_VARS; do
     eval "val=\${$var:-}"

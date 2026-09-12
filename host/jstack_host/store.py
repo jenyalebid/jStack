@@ -240,7 +240,12 @@ CREATE TABLE IF NOT EXISTS devices (
   created_at INTEGER NOT NULL,
   last_seen_at INTEGER,
   revoked_at INTEGER,
-  identity TEXT
+  identity TEXT,
+  -- What the app last said it was ("1.0 (62)"), off the X-JRemote-Build
+  -- header on any authenticated request. NULL until a build that sends it
+  -- checks in. Exists so "did the fix reach the phone" is a row on the host
+  -- instead of another TestFlight build cut to find out.
+  client_build TEXT
 );
 -- One-time enrolment codes (docs/multi-host-access.md, P3). Host-only, and it
 -- never syncs for the same reason `devices` never does — a code is a
@@ -1113,6 +1118,13 @@ class SessionStore:
         with self._write_lock, self._conn() as db:
             db.execute("UPDATE devices SET last_seen_at=? WHERE id=?",
                        (int(time.time()), device_id))
+
+    def note_device_build(self, device_id: str, build: str) -> None:
+        """Record what the client says it is. Guarded by the caller's cache —
+        the value changes once per app update, not once per request."""
+        with self._write_lock, self._conn() as db:
+            db.execute("UPDATE devices SET client_build=? WHERE id=?",
+                       (build, device_id))
 
     # ── enrolment codes: credentials-in-waiting, also host-only ──
 

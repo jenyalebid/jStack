@@ -151,6 +151,13 @@ Lowercase, hyphens, no spaces. A tag names a **subject** — never the seat, the
 date, or a restatement of the headline. If only this one session would ever
 carry it, it isn't a tag.
 
+**Tags are siblings, never nested.** A second tag means the session did a
+second thing — never that a wider subject contains the first. Work on
+something that runs on the substrate is not also work on the substrate,
+whatever it touched getting there: file the narrower subject and stop.
+Stacking the container beside it turns that tag into a bucket, and the bucket
+is what whoever opens it asked to get away from.
+
 Reads filter with `--tag`, and that read is unbounded by seat — which is the
 whole point:
 

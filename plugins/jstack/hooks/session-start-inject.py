@@ -211,8 +211,15 @@ def inject_count(cfg: dict, agent: str, submode: str) -> int:
         seat = seat.rsplit("/", 1)[0]
 
 
-def tail(seat: str | None, n: int, as_json: bool = False,
-         tag: str | None = None) -> str:
+def tail_argv(seat: str | None, n: int, as_json: bool = False,
+              tag: str | None = None, binary: str | None = None) -> list:
+    """The window read, as argv — THE definition of what an injection carries.
+
+    Exported because `pict` previews this injection and must not re-derive it:
+    a second spelling of the window (entries where this counts sessions, a
+    dropped `--origin`, a missing `--tag`) is a preview that disagrees with
+    the thing it claims to show, and the preview is what a person checks.
+    `binary` is the caller's own log_event path — pict's test seam."""
     # --origin direct: the injection is a person sitting down mid-history —
     # it carries the seat's human-driven narrative only. Auto sessions
     # (origin=indirect: crons, publish wakes, spawned work) neither receive
@@ -221,7 +228,7 @@ def tail(seat: str | None, n: int, as_json: bool = False,
     # A tag read passes NO seat: the subject is the window, and who worked it
     # is what the read is meant to cross. log_event names the seat on every
     # line in that mode, so the block still says who did what.
-    cmd = [str(PLUGIN_BIN / "log_event"), "tail"]
+    cmd = [binary or str(PLUGIN_BIN / "log_event"), "tail"]
     if seat:
         cmd.append(seat)
     if tag:
@@ -229,6 +236,12 @@ def tail(seat: str | None, n: int, as_json: bool = False,
     cmd += ["--sessions", str(n), "--origin", "direct"]
     if as_json:
         cmd.append("--json")
+    return cmd
+
+
+def tail(seat: str | None, n: int, as_json: bool = False,
+         tag: str | None = None) -> str:
+    cmd = tail_argv(seat, n, as_json=as_json, tag=tag)
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
         return r.stdout.strip() if r.returncode == 0 else ""
@@ -247,13 +260,14 @@ def pinned_tag() -> str:
     return os.environ.get("JSTACK_TIMELINE_TAG", "").strip().lower()
 
 
-def tag_known(tag: str) -> bool:
+def tag_known(tag: str, binary: str | None = None) -> bool:
     """Is `tag` in the vocabulary? Unknown is NOT the same as empty — a typo'd
     pin must fall back to the seat's history and say so, not silently boot a
-    session blind on a subject that does not exist."""
+    session blind on a subject that does not exist. `binary` is the caller's
+    own log_event path (pict's test seam)."""
     try:
-        r = subprocess.run([str(PLUGIN_BIN / "log_event"), "tag", "list",
-                            "--json"], capture_output=True, text=True, timeout=8)
+        r = subprocess.run([binary or str(PLUGIN_BIN / "log_event"), "tag",
+                            "list", "--json"], capture_output=True, text=True, timeout=8)
         if r.returncode != 0:
             return False
         return any(t.get("name") == tag for t in json.loads(r.stdout or "[]"))

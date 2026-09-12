@@ -419,19 +419,47 @@ def test_a_wrong_row_does_not_lock_out_the_device_s_working_row(store):
     home Mac burned five rejects, and a per-address lockout took its correct
     home-Mac row down with it for fifteen minutes.
 
-    Both rows come from one address — that is the whole point. Only the
-    credential actually being refused may be locked.
+    Both rows come from one address — that is the whole point. And since
+    jStack#50, the wrong row locks NOTHING, itself included: this host has no
+    row for that id, so there is no secret its retries converge on, and a 429
+    here is what turned one misconfiguration into a fifteen-minute relock
+    loop. Every attempt reads 401 — deny_reason names the unknown id in the
+    host's log — and the working row never notices.
     """
     ip = "10.66.0.2"
     _, good = devices.mint("my-iphone")
     foreign = "jr1.670f3e8827e3." + "x" * 40      # another host's device id
-    for _ in range(6):
-        with pytest.raises(Exception):
+    for i in range(8):                            # past _FAIL_MAX, same id
+        with pytest.raises(Exception) as e:
             auth._gate(ip, f"Bearer {foreign}")
-    with pytest.raises(Exception) as e:           # the bad row is locked
-        auth._gate(ip, f"Bearer {foreign}")
-    assert e.value.status_code == 429
+        assert e.value.status_code == 401, f"locked out at attempt {i}"
     assert auth._gate(ip, f"Bearer {good}")       # the good row still works
+
+
+def test_an_orphaned_credential_never_locks_anything(store, monkeypatch):
+    """jStack#50, end to end: a credential whose row is GONE — not revoked,
+    gone — retries forever from one address, well past the ADDRESS ceiling.
+
+    Under per-attempt counting this armed a lockout every window for three
+    days: the credential tier first, and past fifty retries a minute the
+    address tier took the phone's live credential down alongside. An orphan
+    meters once per window per id, so no volume of retries on one dead id
+    reaches either ceiling, no alert fires, and the live credential riding
+    the same address never misses a beat.
+    """
+    alerts: list[str] = []
+    monkeypatch.setattr("jstack_host.hostenv.security_alert", alerts.append)
+    ip = "10.66.0.4"
+    row, token = devices.mint("wiped-mac")
+    store.delete_device(row["id"])                # the row is gone, not revoked
+    _, good = devices.mint("my-iphone")
+    for i in range(60):                           # past _SPRAY_MAX, one id
+        with pytest.raises(Exception) as e:
+            auth._gate(ip, f"Bearer {token}")
+        assert e.value.status_code == 401, f"locked out at attempt {i}"
+    assert auth._gate(ip, f"Bearer {good}")       # the live row never noticed
+    time.sleep(0.1)                               # alert would be threaded
+    assert alerts == [], f"an orphan's retries raised an alert: {alerts}"
 
 
 def test_spraying_many_device_ids_still_locks_the_address(store, monkeypatch):
@@ -466,15 +494,23 @@ def test_startup_reconciles_a_credential_that_drifted_from_its_row(store):
     already worked before this bug, it was simply never reached.
     """
     from fastapi.testclient import TestClient
-    from jstack_host import server
+    from jstack_host import hostenv, server
 
     devices.internal_token()                       # row + file agree
     path = devices._credential_dir() / "internal-token"
     path.write_text(f"{devices.TOKEN_PREFIX}.{devices.INTERNAL_ID}.drifted")
     assert devices.authenticate(path.read_text().strip()) is None
 
-    with TestClient(server.create_app()):          # runs the lifespan
-        pass
+    try:
+        with TestClient(server.create_app()):      # runs the lifespan
+            pass
+    finally:
+        # The lifespan resolves the host profile, and `profile()` caches. Left
+        # populated, it is read by any later test that blocks the `lib` import
+        # to assert a demanded profile RAISES — which it then does not, because
+        # nothing imports anything. Booting a real app in a unit test is the
+        # only thing here that reaches that cache, so it cleans up after itself.
+        hostenv.reset_profile()
 
     assert devices.authenticate(path.read_text().strip()) == devices.INTERNAL_ID
 
