@@ -419,6 +419,26 @@
       "notes": "Fixed, or filed - the rule the skill enforces. A break in reach gets fixed and becomes its own commit; a break not fixed becomes an issue in the owning repo, with a body a cold reader can act on. Replaces the reporting template that used to live in the host root CLAUDE.md, where findings could be mentioned in prose and lost at session end. Commit mechanics are NOT restated here - the skill hands committing to /jstack:push, which owns the commit contract. /jstack:report."
     },
     {
+      "id": "elevator",
+      "kind": "skill",
+      "name": "Elevator",
+      "status": "live",
+      "description": "Delivers a finished unit of work as one spoken paragraph - where it stands, what it took, what is next - with no paths, symbol names, shas, issue numbers or counts in it. Carries report's settling obligation: unsettled work is fixed-or-filed and pushed before the paragraph is spoken.",
+      "code": [
+        "skills/elevator/SKILL.md",
+        "commands-stage/elevator.md"
+      ],
+      "config": [],
+      "docs": [],
+      "test": {
+        "type": "script",
+        "path": "tests/skills.sh",
+        "description": "Validates SKILL.md exists, frontmatter is well-formed, and name matches directory."
+      },
+      "subsystems": [],
+      "notes": "Report's obligations, a person's mouth. Same gate as /jstack:report (settle every finding, then /jstack:push) with a different delivery: one paragraph, four to six sentences, no headers or bullets, nothing a listener would have to open. Blocked/unverified work rides as a clause rather than being dropped - compression buys no silence. Optional arg is a focus that narrows which aspect the paragraph answers; a focus on untouched work is declined in one line rather than inferred. Reachable unnamespaced as /elevator via commands-stage, installed by /jstack:install-rules. /jstack:elevator."
+    },
+    {
       "id": "issue",
       "kind": "skill",
       "name": "Issue",
