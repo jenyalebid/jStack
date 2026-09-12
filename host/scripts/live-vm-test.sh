@@ -59,11 +59,13 @@ if [ "$DO_RESET" = "1" ]; then
     "$VM_SH" reset "$VM_NAME"
 fi
 # reset clones without booting — its job ends at "pristine". Booting is
-# always this script's to do, fresh clone or not.
-"$VM_SH" up "$VM_NAME" >/dev/null 2>&1 || true
+# always this script's to do, fresh clone or not. Keep up's last words: a
+# boot that dies (VM slot limit, wedged run) otherwise surfaces twenty
+# lines later as a bare "no address".
+UP_OUT="$("$VM_SH" up "$VM_NAME" 2>&1)" || true
 
 IP="$("$VM_SH" ip "$VM_NAME" | tail -1 | tr -d '[:space:]')"
-[ -n "$IP" ] || die "$VM_NAME has no address — is it booted?"
+[ -n "$IP" ] || die "$VM_NAME has no address — up said: $(printf '%s\n' "$UP_OUT" | tail -1)"
 say "guest $VM_NAME at $IP"
 
 vssh() { "$VM_SH" ssh "$VM_NAME" "$@"; }
