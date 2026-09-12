@@ -57,9 +57,10 @@ die() { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 if [ "$DO_RESET" = "1" ]; then
     say "resetting $VM_NAME to a pristine clone"
     "$VM_SH" reset "$VM_NAME"
-else
-    "$VM_SH" up "$VM_NAME" >/dev/null 2>&1 || true
 fi
+# reset clones without booting — its job ends at "pristine". Booting is
+# always this script's to do, fresh clone or not.
+"$VM_SH" up "$VM_NAME" >/dev/null 2>&1 || true
 
 IP="$("$VM_SH" ip "$VM_NAME" | tail -1 | tr -d '[:space:]')"
 [ -n "$IP" ] || die "$VM_NAME has no address — is it booted?"
