@@ -40,4 +40,4 @@ The user skims. Declarative, no narration, no filler — full sentences, short o
 
 Read it back. Every **Issues** line carries `#N`, every **Fixed** line carries a sha, no finding sits in another block's prose. Nothing found is a normal outcome — send `Done` alone.
 
-Asked for it spoken instead — one paragraph, nothing in it to open — that is `/jstack:elevator`, which settles the same way first.
+Asked for it spoken instead — a few short blocks, nothing in them to open — that is `/jstack:elevator`, which settles the same way first.

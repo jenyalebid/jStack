@@ -423,7 +423,7 @@
       "kind": "skill",
       "name": "Elevator",
       "status": "live",
-      "description": "Delivers a finished unit of work as one spoken paragraph - where it stands, what it took, what is next - with no paths, symbol names, shas, issue numbers or counts in it. Carries report's settling obligation: unsettled work is fixed-or-filed and pushed before the paragraph is spoken.",
+      "description": "Delivers a finished unit of work spoken aloud in three or four short blocks - where it stands, what it took, what is next - with no paths, symbol names, shas, issue numbers or counts in it. Carries report's settling obligation: unsettled work is fixed-or-filed and pushed before it is spoken.",
       "code": [
         "skills/elevator/SKILL.md",
         "commands-stage/elevator.md"
@@ -436,7 +436,7 @@
         "description": "Validates SKILL.md exists, frontmatter is well-formed, and name matches directory."
       },
       "subsystems": [],
-      "notes": "Report's obligations, a person's mouth. Same gate as /jstack:report (settle every finding, then /jstack:push) with a different delivery: one paragraph, four to six sentences, no headers or bullets, nothing a listener would have to open. Blocked/unverified work rides as a clause rather than being dropped - compression buys no silence. Optional arg is a focus that narrows which aspect the paragraph answers; a focus on untouched work is declined in one line rather than inferred. Reachable unnamespaced as /elevator via commands-stage, installed by /jstack:install-rules. /jstack:elevator."
+      "notes": "Report's obligations, a person's mouth. Same gate as /jstack:report (settle every finding, then /jstack:push) with a different delivery: four to six sentences broken across a block per beat, blank line between, no headers or bullets, nothing a listener would have to open. A single unbroken wall is the failure the form exists to end, however short. Blocked/unverified work takes its own block rather than being folded away - compression buys no silence. Optional arg is a focus that narrows which aspect the paragraph answers; a focus on untouched work is declined in one line rather than inferred. Reachable unnamespaced as /elevator via commands-stage, installed by /jstack:install-rules. /jstack:elevator."
     },
     {
       "id": "issue",
