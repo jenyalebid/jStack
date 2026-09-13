@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -517,8 +518,15 @@ def pane(monkeypatch, reg):
 
 
 def _line(sent) -> str:
-    """The literal shell line — `send-keys -l`, not the bare Enter after it."""
-    return next(c[-1] for c in sent if "-l" in c)
+    """The shell line the pane actually runs.
+
+    Typed into the pane is only `source <boot>` — nothing that scales with
+    caller input may be typed, because a fresh pane's tty is still in canonical
+    mode and drops everything past MAX_CANON. The command itself lives in the
+    boot file, so that is what these assertions have to read.
+    """
+    typed = next(c[-1] for c in sent if "-l" in c)
+    return Path(typed.split(None, 1)[1]).read_text()
 
 
 @pytestmark_tmux

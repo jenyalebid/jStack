@@ -759,10 +759,11 @@ def open_managed(sid: str, cwd: str, resume: bool = True, displace=None,
     # next `claude` on this Mac reads a stale record as a failed start and drops
     # to the classic renderer; two of them turn fullscreen off machine-wide.
     # CLAUDE_CODE_NO_FLICKER=1 is the env entry path, which never arms it.
-    subprocess.run(_t("send-keys", "-t", name, "-l",
-                      f"export PATH={_PATH}; export CLAUDE_CODE_NO_FLICKER=1; "
-                      f"{pin}{_compose_exports(sid)}"
-                      f"unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION; {inner}"), check=True)
+    boot = _write_boot(sid,
+                       f"export PATH={_PATH}; export CLAUDE_CODE_NO_FLICKER=1; "
+                       f"{pin}{_compose_exports(sid)}"
+                       f"unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION; ", inner)
+    subprocess.run(_t("send-keys", "-t", name, "-l", f"source {boot}"), check=True)
     subprocess.run(_t("send-keys", "-t", name, "Enter"), check=True)
     # Each engine has its own unanswerable-from-a-phone startup prompt, and
     # both are dismissed the same way: watch the pane, act only once the
@@ -776,6 +777,56 @@ def open_managed(sid: str, cwd: str, resume: bool = True, displace=None,
         _auto_accept_bypass(name)
     if nudge:
         _nudge_when_ready(name, nudge, engine)
+
+
+#: Where a pane's boot line is staged. `/tmp`, not `$TMPDIR`: macOS hands each
+#: process a ~58-char per-user folder, and this path is the one part of the
+#: typed line that still has to be typed.
+_BOOT_DIR = Path("/tmp")
+
+#: Stale boot files are swept at this age. Long enough that a pane still
+#: coming up never has its own file pulled away, short enough that /tmp does
+#: not accumulate one per session forever.
+_BOOT_TTL = 3600
+
+#: The tty line-discipline's canonical-mode limit. Input past this is DROPPED,
+#: silently, and a fresh pane is still in canonical mode when it is typed to.
+_MAX_CANON = 1024
+
+
+def _write_boot(sid: str, exports: str, inner: str) -> str:
+    """Stage the pane's boot command as a file; return the path to `source`.
+
+    **Nothing typed into a pane may scale with caller input.** The boot command
+    is delivered by `send-keys` into a shell that has only just started, and a
+    fresh pane's tty is still in CANONICAL mode — where the line discipline
+    drops everything past MAX_CANON (1024 bytes) and says nothing. The exports
+    alone are ~820 of that, so the budget was always nearly spent: a takeover
+    whose focus text ran long crossed it, the line landed cut mid-quote, and
+    zsh sat at a `quote>` continuation forever. The window was up with the
+    briefing in it and `claude` had never been reached — a spawn that looks
+    like a spawn and runs nothing.
+
+    So the command goes to a file and the pane is typed a `source` whose length
+    is fixed by the sid. Bounded by construction, not by trusting any caller to
+    keep its prose short.
+
+    Not self-deleting. An `rm` inside the line would race the shell still
+    reading it, and the failure mode of getting that wrong is exactly the one
+    this function exists to remove. Stale files are swept here instead.
+    """
+    _BOOT_DIR.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - _BOOT_TTL
+    for old in _BOOT_DIR.glob("jremote-boot-*.sh"):
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+        except OSError:
+            pass
+    path = _BOOT_DIR / f"jremote-boot-{sid[:8]}.sh"
+    path.write_text(f"{exports}{inner}\n")
+    path.chmod(0o600)
+    return str(path)
 
 
 def _inner_command(sid: str, resume: bool, extra: str = "",

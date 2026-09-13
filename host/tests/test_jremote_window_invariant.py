@@ -228,8 +228,49 @@ def test_open_is_windowless_and_starts_claude(sock, no_iterm):
         monkey.undo()
 
     assert managed.is_open(SID)
-    assert any("exec claude" in c for c in sent), \
+    # The command lives in the boot file now; the pane is only typed a source
+    # line, so that is where `exec claude` has to be proven.
+    boot = managed._BOOT_DIR / f"jremote-boot-{SID[:8]}.sh"
+    assert boot.exists(), "the pane's boot command must be staged as a file"
+    assert "exec claude" in boot.read_text(), \
         "the pane must exec claude so the session dies with the process"
+    assert any("jremote-boot" in c and "source" in c for c in sent), \
+        "the pane is typed a source line, never the command itself"
+
+
+def test_nothing_typed_into_a_pane_scales_with_input(sock, no_iterm):
+    """A fresh pane's tty is still in CANONICAL mode, where the line discipline
+    drops everything past MAX_CANON (1024 bytes) without a word.
+
+    The exports alone were ~820 of that budget, so a takeover whose focus text
+    ran long crossed it: the line arrived cut mid-quote, zsh sat at a `quote>`
+    continuation, and `claude` was never reached — a window with a briefing in
+    it and no CLI. The payload belongs in a file; only a fixed-length `source`
+    may be typed."""
+    sent = []
+    real_run = managed.subprocess.run
+
+    def spy(cmd, *a, **k):
+        if isinstance(cmd, list) and "send-keys" in cmd:
+            sent.append(cmd)
+        return real_run(cmd, *a, **k)
+
+    huge = "z" * 8000
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(managed.subprocess, "run", spy)
+    try:
+        managed.open_managed(SID, os.path.expanduser("~"), resume=False,
+                             extra=f"'{huge}'")
+    finally:
+        monkey.undo()
+
+    for cmd in sent:
+        for part in cmd:
+            assert len(part.encode()) < managed._MAX_CANON, (
+                f"typed {len(part.encode())} bytes into a pane — anything past "
+                f"{managed._MAX_CANON} is silently dropped")
+    boot = managed._BOOT_DIR / f"jremote-boot-{SID[:8]}.sh"
+    assert huge in boot.read_text(), "the payload must survive, in the file"
 
 
 def test_windowed_open_without_a_window_leaves_no_session(sock, monkeypatch):
@@ -293,7 +334,7 @@ def test_takeover_runs_between_the_session_and_claude(sock, no_iterm):
     real_run = managed.subprocess.run
 
     def spy(cmd, *a, **k):
-        if isinstance(cmd, list) and "send-keys" in cmd and "claude" in " ".join(cmd):
+        if isinstance(cmd, list) and "send-keys" in cmd and "jremote-boot" in " ".join(cmd):
             order.append("claude")
         return real_run(cmd, *a, **k)
 
