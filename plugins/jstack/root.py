@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import NamedTuple
 
 
 def _shipping_tree_roots() -> "tuple[Path, ...]":
@@ -303,28 +304,23 @@ def seat_of(path, cfg: "dict|None" = None, base=None) -> "tuple[str|None, str|No
     was sitting in — mail could not say who sent it, and the tools read as
     simply not working there. One definition, asked once, cannot drift apart
     into three answers again.
+
+    The two-value shim over `seat_at`, kept because several callers want
+    exactly these two strings. Anything that also needs the directory, or the
+    address to name this seat elsewhere, should ask `seat_at` and let the
+    Seat derive them — see the drift its docstring describes.
     """
-    if path is None:
-        return None, None
-    # `base` lets a caller that already resolved the agents dir pass it
-    # straight in, so its answer cannot differ from the one it just computed.
-    base = agents_dir(cfg) if base is None else Path(base)
-    try:
-        rel = Path(path).resolve().relative_to(base.resolve())
-    except (ValueError, OSError):
-        return None, None
-    # `is_agent` directly, not `resolve_agent`: the name here was read off the
-    # path, so it needs no fuzzy matching, and routing through a lookup would
-    # re-resolve the agents dir and could answer about a different one.
-    if not rel.parts or not is_agent(base / rel.parts[0]):
-        return None, None
-    submode = "/".join(p.lower() for p in rel.parts[1:]) or "chat"
-    return rel.parts[0].lower(), submode
+    seat = seat_at(path, cfg, base)
+    return (None, None) if seat is None else (seat.agent, seat.submode)
 
 
 def seats(agent_id: str, cfg: "dict|None" = None) -> "list[str]":
     """Sorted seat names for an agent that resolves — its immediate non-dot
-    subdirectories carrying their own CLAUDE.md — else []."""
+    subdirectories carrying their own CLAUDE.md — else [].
+
+    Immediate children only. A nested seat (`social/threads`) is not in this
+    list; ask `resolve_seat` for those, which walks to any depth.
+    """
     ws = resolve_agent(agent_id, cfg)
     if ws is None:
         return []
@@ -336,3 +332,258 @@ def seats(agent_id: str, cfg: "dict|None" = None) -> "list[str]":
         c.name for c in children
         if c.is_dir() and not c.name.startswith(".") and _has_claude_md(c)
     )
+
+
+# ------------------------------------------------------------- addressing
+#
+# One grammar for naming a seat, everywhere: `agent-seat`, hyphens walking
+# down the seat tree, an agent alone meaning its cockpit.
+#
+#     alice                -> alice/chat        (the cockpit)
+#     alice-social         -> alice/social/chat (descends into chat/)
+#     alice-pm             -> alice/pm          (no pm/chat exists)
+#     alice-service-call   -> alice/service-call
+#     self                 -> the asking seat
+#
+# `resolve_agent`'s fold is the wrong tool here and must not be reached for:
+# it reads `-` as a spelling variant (`work-ops` == `workops`), while this
+# grammar reads it as structure. Both readings cannot be true of one string,
+# and the fold wins by accident when a caller picks it — every hyphenated
+# seat id resolves to None and the command answers "no such agent" about an
+# agent that plainly exists. resolve_agent answers "which agent is this
+# name"; resolve_seat answers "which seat does this address name". A command
+# that takes an @-token wants the second.
+
+
+class AddressError(ValueError):
+    """An address that names no seat.
+
+    Carries a message written for whoever typed it — the seats that do exist,
+    or the agents that do. Callers present it their own way (a hook blocks
+    with it, a CLI exits on it); raising rather than exiting is what lets the
+    same resolver serve both without one of them dying inside a library.
+    """
+
+
+class Seat(NamedTuple):
+    """A resolved seat, and every spelling of it derived from one resolution.
+
+    Three spellings of one thing were being hand-built at their use sites —
+    the hyphen id that addresses it, the slash form the timeline files it
+    under, and the directory a session boots in. Built by hand they drift:
+    a wake booked from `alice/social/threads` was labelled `alice-social`
+    and booted one seat above the session that asked for it. Derived from a
+    single resolution they cannot.
+    """
+
+    agent: str        #: lowercase base id, e.g. "alice"
+    submode: str      #: seat below the agent, "/"-joined, e.g. "social/chat"
+    path: Path        #: the seat directory a session boots in
+    agent_dir: Path   #: the agent root, in its on-disk case, e.g. .../Alice
+
+    @property
+    def id(self) -> str:
+        """The canonical address — `alice-social-chat`. Round-trips through
+        `resolve_seat`. A bare cockpit (CLAUDE.md at the agent root, no chat/
+        dir) is just the agent: there is no seat dir to name."""
+        if self.path == self.agent_dir:
+            return self.agent
+        return f"{self.agent}-{self.submode.replace('/', '-')}"
+
+    @property
+    def timeline(self) -> str:
+        """The timeline/log_event spelling — `alice/social/chat`."""
+        return f"{self.agent}/{self.submode or 'chat'}"
+
+
+def _agent_dirs(cfg: "dict|None" = None) -> "dict[str, Path]":
+    """lowercase agent id -> its workspace dir, in on-disk case."""
+    base = agents_dir(cfg)
+    return {name.lower(): base / name for name in agents(cfg)}
+
+
+def _seats_under(d: Path) -> "list[str]":
+    try:
+        return sorted(c.name for c in d.iterdir()
+                      if c.is_dir() and not c.name.startswith(".")
+                      and _has_claude_md(c))
+    except OSError:
+        return []
+
+
+#: Directories that are never a seat and are never walked through to find one.
+#: A pad is the seat's shared working room — `bin/msg` stashes attachments in
+#: it and `/pict` writes into it — and what lands there is checkouts, which
+#: carry CLAUDE.md files of their own. A CLAUDE.md is the evidence for a seat
+#: everywhere else in this module, so without this the repo a session parked
+#: in its pad this morning reads as a seat: addressable by mail that nobody
+#: will ever read, and offered as a wake target that boots into a checkout.
+_RESERVED_DIRS = frozenset({"pad"})
+
+
+def _walk_segments(base: Path, segs: "list[str]") -> "str|None":
+    """Resolve hyphen segments as a directory path under `base`.
+
+    `service-call` resolves as the single dir `service-call` before it is
+    tried as `service/call`: a hyphen inside a real directory name is far
+    commoner than a nested pair, and trying the whole string first is what
+    makes `alice-service-call` work without special-casing it. Recursion is
+    what reaches a seat at any depth — `alice-social-threads-x.words` finds
+    `social/threads-x.words` because each level retries the whole tail first.
+    """
+    if not segs:
+        return ""
+    whole = "-".join(segs)
+    if whole not in _RESERVED_DIRS and _has_claude_md(base / whole):
+        return whole
+    for i in range(1, len(segs)):
+        head = "-".join(segs[:i])
+        sub = base / head
+        if head in _RESERVED_DIRS or not sub.is_dir():
+            continue
+        tail = _walk_segments(sub, segs[i:])
+        if tail is not None:
+            return f"{head}/{tail}" if tail else head
+    return None
+
+
+def resolve_seat(spec: str, sender: "str|None" = None,
+                 cfg: "dict|None" = None) -> Seat:
+    """Resolve an address — `alice-social`, `@alice-social`, `self` — to a Seat.
+
+    A leading `@` is optional, so a token typed either way resolves the same.
+    `self`/`me` needs `sender` as the asking seat's `agent/submode`.
+
+    Raises AddressError when nothing on disk answers, naming what does — an
+    address that resolves to nowhere must fail where it was typed, never
+    downstream where the reason is gone.
+    """
+    spec = (spec or "").strip()
+    if spec.startswith("@"):
+        spec = spec[1:]
+    if not spec:
+        raise AddressError("no seat named — use agent, agent-seat, or self")
+
+    known = _agent_dirs(cfg)
+
+    if spec.lower() in ("self", "me"):
+        if not sender:
+            raise AddressError("self: could not tell which seat is asking")
+        agent, _, submode = sender.partition("/")
+        agent, submode = agent.lower(), (submode or "chat")
+        agent_dir = known.get(agent)
+        if agent_dir is None:
+            raise AddressError(
+                f"self: {agent!r} is not an agent under {agents_dir(cfg)}")
+        path = agent_dir / submode
+        if submode == "chat" and not _has_claude_md(path) \
+                and _has_claude_md(agent_dir):
+            path = agent_dir  # bare cockpit: the seat is the agent root
+        return Seat(agent, submode, path, agent_dir)
+
+    parts = [p for p in spec.lower().split("-") if p]
+    base = agent_dir = None
+    # Longest agent-name match first: an agent whose own name holds a hyphen
+    # must win over the same prefix read as agent + seat.
+    for i in range(len(parts), 0, -1):
+        cand = "-".join(parts[:i])
+        if cand in known:
+            base, agent_dir, parts = cand, known[cand], parts[i:]
+            break
+    if base is None:
+        have = ", ".join(sorted(known)) or "(none found)"
+        raise AddressError(f"unknown agent in {spec!r}. Known agents: {have}")
+
+    submode = _walk_segments(agent_dir, parts)
+    if submode is None:
+        raise AddressError(
+            f"{spec!r}: no seat {'-'.join(parts)!r} under {agent_dir}. "
+            f"Seats there: {', '.join(_seats_under(agent_dir)) or '(none)'}")
+
+    # The cockpit descent: a seat that itself holds a chat/ dir means the
+    # operator seat, not the container. alice-social -> alice/social/chat.
+    if not submode:
+        if _has_claude_md(agent_dir / "chat"):
+            submode = "chat"
+        elif _has_claude_md(agent_dir):
+            # A bare agent — CLAUDE.md at the top, no chat/ dir — keeps its
+            # cockpit at the agent root itself. A session booted there files
+            # as {agent}/chat, so that is the seat this address names;
+            # {root}/chat would be a directory no session ever boots in.
+            return Seat(base, "chat", agent_dir, agent_dir)
+        else:
+            submode = ""
+    elif _has_claude_md(agent_dir / submode / "chat"):
+        submode = f"{submode}/chat"
+
+    if not submode:
+        raise AddressError(f"{spec!r}: {agent_dir} has no chat/ seat")
+    path = agent_dir / submode
+    if not _has_claude_md(path):
+        raise AddressError(
+            f"{spec!r}: {path} is not a seat (no CLAUDE.md) — no session "
+            f"boots there. Seats: "
+            f"{', '.join(_seats_under(agent_dir)) or '(none)'}")
+    return Seat(base, submode, path, agent_dir)
+
+
+def seat_at(path, cfg: "dict|None" = None, base=None) -> "Seat|None":
+    """The Seat a directory sits in, or None when it is not inside an agent.
+
+    The reverse of `resolve_seat`: a session knows its cwd and needs the
+    address for it. `seat_at(cwd).id` is the only correct way to name the
+    seat that is asking — hand-building it from the first path segment names
+    the seat above a nested one.
+    """
+    if path is None:
+        return None
+    # `base` lets a caller that already resolved the agents dir pass it
+    # straight in, so its answer cannot differ from the one it just computed.
+    base = agents_dir(cfg) if base is None else Path(base)
+    try:
+        rel = Path(path).resolve().relative_to(base.resolve())
+    except (ValueError, OSError):
+        return None
+    # `is_agent` directly, not `resolve_agent`: the name here was read off the
+    # path, so it needs no fuzzy matching, and routing through a lookup would
+    # re-resolve the agents dir and could answer about a different one.
+    if not rel.parts or not is_agent(base / rel.parts[0]):
+        return None
+    agent_dir = base / rel.parts[0]
+    submode = "/".join(p.lower() for p in rel.parts[1:]) or "chat"
+    return Seat(rel.parts[0].lower(), submode,
+                agent_dir / "/".join(rel.parts[1:]) if rel.parts[1:]
+                else agent_dir,
+                agent_dir)
+
+
+def enclosing_seat(path, cfg: "dict|None" = None) -> "Seat|None":
+    """The nearest seat at or above `path`, or None outside the agent tree.
+
+    A session's cwd is not always a seat: it may be standing in a scratch dir
+    or a checkout below one. This walks up to the deepest directory that is a
+    seat, which is the seat whose CLAUDE.md and path rules that session is
+    actually running under.
+
+    Deepest, not first: `alice/social/threads` carries its own CLAUDE.md, so a
+    session there belongs to the threads seat and not to `social` above it.
+    Stopping at the first path component below the agent was how a wake booked
+    from the threads seat came back up in `social/` — a different seat, with
+    different rules, answering for work it had never seen.
+    """
+    seat = seat_at(path, cfg)
+    if seat is None:
+        return None
+    parts = [] if seat.path == seat.agent_dir else seat.submode.split("/")
+    for depth in range(len(parts), 0, -1):
+        # A checkout parked in a pad carries its own CLAUDE.md; the seat a
+        # session standing in one belongs to is the seat above the pad.
+        if any(p in _RESERVED_DIRS for p in parts[:depth]):
+            continue
+        here = seat.agent_dir / "/".join(parts[:depth])
+        if _has_claude_md(here):
+            return Seat(seat.agent, "/".join(parts[:depth]), here,
+                        seat.agent_dir)
+    # No seat below the agent: the agent dir is the seat, named as the cockpit
+    # because that is how a session booted there files itself.
+    return Seat(seat.agent, "chat", seat.agent_dir, seat.agent_dir)

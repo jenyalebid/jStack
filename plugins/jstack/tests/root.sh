@@ -187,6 +187,93 @@ else
     fail "agent definition: $out"
 fi
 
+# --- the address grammar -----------------------------------------------------
+#
+# One spelling of a seat, shared by mail, the scheduler and every command that
+# takes an @-token. The hyphen is structure here, never a spelling variant:
+# resolve_agent's fold reads `work-ops` and `workops` as one agent, and reached
+# for by an addressing caller it answers None for every hyphenated seat id.
+
+ADDR="$TMP/addrroot"
+mkdir -p "$ADDR/Agents/alice/chat" "$ADDR/Agents/alice/social/chat" \
+         "$ADDR/Agents/alice/social/threads" "$ADDR/Agents/alice/service-call" \
+         "$ADDR/Agents/alice/social/threads/worktree" \
+         "$ADDR/Agents/alice/pad/checkout" \
+         "$ADDR/Agents/work-ops/chat" \
+         "$ADDR/Agents/bare"
+touch "$ADDR/Agents/alice/CLAUDE.md" "$ADDR/Agents/alice/chat/CLAUDE.md" \
+      "$ADDR/Agents/alice/social/CLAUDE.md" \
+      "$ADDR/Agents/alice/social/chat/CLAUDE.md" \
+      "$ADDR/Agents/alice/social/threads/CLAUDE.md" \
+      "$ADDR/Agents/alice/service-call/CLAUDE.md" \
+      "$ADDR/Agents/alice/pad/checkout/CLAUDE.md" \
+      "$ADDR/Agents/work-ops/chat/CLAUDE.md" \
+      "$ADDR/Agents/bare/CLAUDE.md"
+
+out=$(HOME="$FAKEHOME" JSTACK_ROOT="$ADDR" "$PY" - <<'EOF' 2>&1
+import os, root
+from pathlib import Path
+A = Path(os.environ["JSTACK_ROOT"]) / "Agents"
+R = root.resolve_seat
+
+# an agent alone is its cockpit; a leading @ is optional; case does not matter
+assert R("alice").path == A / "alice/chat", R("alice")
+assert R("@alice").path == A / "alice/chat"
+assert R("ALICE").path == A / "alice/chat"
+# a bare agent — CLAUDE.md on top, no chat/ — keeps its cockpit at the root
+assert R("bare").path == A / "bare", R("bare")
+assert R("bare").id == "bare", R("bare").id   # no seat dir to name
+
+# hyphens walk down, and a seat holding its own chat/ means that operator seat
+assert R("alice-social").path == A / "alice/social/chat", R("alice-social")
+assert R("alice-social-threads").path == A / "alice/social/threads"
+# a hyphen inside a real directory name beats reading it as a nested pair
+assert R("alice-service-call").path == A / "alice/service-call"
+# an agent whose own name holds a hyphen wins over agent+seat on the same prefix
+assert R("work-ops-chat").path == A / "work-ops/chat", R("work-ops-chat")
+assert R("work-ops").path == A / "work-ops/chat"
+
+# a pad is never a seat and is never walked through to find one — what lands
+# in one is checkouts, and a checkout carries a CLAUDE.md of its own
+for miss in ("alice-pad", "alice-pad-checkout"):
+    try:
+        R(miss); raise SystemExit(f"{miss} resolved; a pad is not a seat")
+    except root.AddressError:
+        pass
+
+# a miss names what does exist and never joins a path blind
+for miss in ("ghost", "alice-nope", ""):
+    try:
+        R(miss); raise SystemExit(f"{miss!r} resolved to something")
+    except root.AddressError as exc:
+        # the message has to be usable by whoever typed it
+        assert "alice" in str(exc) or "agent" in str(exc), exc
+
+# every spelling comes from one resolution, and the id round-trips
+s = R("alice-social-threads")
+assert (s.agent, s.submode) == ("alice", "social/threads"), s
+assert s.id == "alice-social-threads" and s.timeline == "alice/social/threads"
+assert R(s.id).path == s.path
+
+# the reverse direction: a cwd names the seat it is standing in...
+assert root.seat_at(A / "alice/social/threads").id == "alice-social-threads"
+# ...and the nearest enclosing seat is what a session below one belongs to
+E = root.enclosing_seat
+assert E(A / "alice/social/threads/worktree").id == "alice-social-threads"
+assert E(A / "alice/pad/checkout").id == "alice", E(A / "alice/pad/checkout")
+assert E(A / "alice/chat").id == "alice-chat"
+assert E(Path("/tmp")) is None
+# seat_of stays the two-value shim its existing callers unpack
+assert root.seat_of(A / "alice/social/threads") == ("alice", "social/threads")
+print("OK")
+EOF
+)
+if [ "$out" = "OK" ]; then
+    pass "one address grammar: hyphens walk seats, cockpits descend, pads never resolve"
+else
+    fail "address grammar: $out"
+fi
+
 EMPTY="$TMP/empty-root"; mkdir -p "$EMPTY"
 out=$(HOME="$FAKEHOME" JSTACK_ROOT="$EMPTY" "$PY" - <<'EOF' 2>&1
 import root

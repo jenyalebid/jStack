@@ -154,7 +154,7 @@ run_skill() {
 # Skill → required bin adapters (referenced in its SKILL.md procedure)
 run_skill work
 run_skill install-rules
-run_skill handoff open-terminal-here
+run_skill handoff open-terminal-here seat
 run_skill audit open-terminal-here
 run_skill push
 run_skill report file-issue
@@ -168,7 +168,7 @@ run_skill recall log_event
 run_skill tag log_event
 run_skill pict pict open-artifact
 run_skill splitoff dub-session open-terminal-here
-run_skill takeover open-terminal-here
+run_skill takeover open-terminal-here seat
 run_skill print
 
 # Catch skills added to skills/ but not registered above
