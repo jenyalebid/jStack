@@ -1,7 +1,7 @@
 ---
 name: takeover
 description: Use only when the user asks to hand this session to a fresh one that reads it from source, and the jStack hook did not answer it.
-argument-hint: "[@agent[/seat]] [focus]"
+argument-hint: "[@agent[-seat]] [focus]"
 ---
 
 # /jstack:takeover — hand the work to a session that reads the source itself
@@ -24,17 +24,16 @@ fire. Say so in one line, then do it by hand — **without summarizing this sess
 
 ## Arguments
 
-`@agent` retargets the workspace, resolved against the agent root: exact, then
-case-insensitive, then `-`/`_` folded away. `@agent/seat` names a seat; otherwise `chat/`
-if it exists, else the agent root. Unknown name → list the agents and stop, never join a
-path blind. The rest is the **focus**: it scopes what the new session works on, never
-what it may read.
+`@agent` retargets the workspace — `seat @alice-social` prints where to boot, `seat
+--list` every address. One grammar, shared with mail and the scheduler: `@agent` is the
+cockpit, hyphens walk the seat tree, a seat with its own `chat/` resolves there. A miss
+names the seats that exist; stop there. The rest is the **focus**: it scopes what the
+new session works on, never what it may read.
 
 ## 1. Source, then briefing
 
 Take the transcript path from the hook payload or `/print`. Never rebuild it from the id
-and cwd: that is a guess about path encoding, and a takeover built on a guess reviews the
-wrong conversation.
+and cwd — a guess about path encoding reviews the wrong conversation.
 
 `hooks/takeover-command.py`'s `BRIEFING` is the template and the authority — it carries
 the verified jq recipes. Two things in it a rewrite tends to drop:

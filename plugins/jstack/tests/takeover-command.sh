@@ -159,15 +159,21 @@ run "/takeover @alpha the reply engine"
 run "/takeover @bravo"
 [[ $CODE == 2 && "$(opened_cwd)" == "$AGENTS/Bravo" ]] \
   && pass "an agent with no chat/ lands at its root" || fail "@bravo ($(opened_cwd))"
-run "/takeover @ALPHA/meta look again"
+run "/takeover @ALPHA-meta look again"
 [[ $CODE == 2 && "$(opened_cwd)" == "$AGENTS/Alpha/meta" ]] \
-  && pass "@agent/seat names a seat, case-blind" || fail "@alpha/meta ($(opened_cwd))"
+  && pass "@agent-seat names a seat, case-blind" || fail "@alpha-meta ($(opened_cwd))"
+
+# The slash was this command's own spelling for one release and no other
+# command's. It must name the mistake, not report the token as a bad agent.
+run "/takeover @alpha/meta look again"
+[[ $CODE == 2 && "$OUT" == *"hyphen, not a slash"* && "$OUT" == *"@alpha-meta"* && ! -f "$TMP/opened" ]] \
+  && pass "a slashed seat is corrected to the hyphen form" || fail "slash form ($OUT)"
 
 # 8. A name that resolves to nothing says so — it never joins a path blind
 run "/takeover @nobody fix it"
-[[ $CODE == 2 && "$OUT" == *"no agent named @nobody"* && "$OUT" == *"Alpha"* && ! -f "$TMP/opened" ]] \
+[[ $CODE == 2 && "$OUT" == *"unknown agent"* && "$OUT" == *"alpha"* && ! -f "$TMP/opened" ]] \
   && pass "an unknown agent lists the agents and spawns nothing" || fail "unknown agent ($OUT)"
-run "/takeover @alpha/nosuch"
+run "/takeover @alpha-nosuch"
 [[ $CODE == 2 && "$OUT" == *"no seat"* && ! -f "$TMP/opened" ]] \
   && pass "an unknown seat names the seats and spawns nothing" || fail "unknown seat ($OUT)"
 

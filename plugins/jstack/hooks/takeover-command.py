@@ -159,34 +159,32 @@ def seat_label(cwd: str) -> str:
 
 
 def target_cwd(token: str) -> "tuple[Path, str]":
-    """(workspace, agent-name) for an `@agent` or `@agent/seat` token.
+    """(workspace, agent display name) for an `@agent-seat` token.
 
-    Deterministic by construction, because a hook has no judgement to apply:
-    a named seat is used when it exists, otherwise `chat/` when it exists,
-    otherwise the agent root. Handoff picks a sub-mode by reading the focus;
-    that is a model's call and it is not available here — so the report names
-    the directory it chose and the user can see it landed somewhere else.
+    One grammar, `root.resolve_seat`, shared with mail and the scheduler:
+    hyphens walk down the seat tree and an agent alone means its cockpit.
+    Deterministic by construction, because a hook has no judgement to apply —
+    where handoff reads the focus to pick a sub-mode, which is a model's call
+    and not available here.
     """
     if _root is None:
         block("/takeover: this jStack install has no agent resolver "
               "(root.py missing) — drop the @agent and take over in place")
+    if not hasattr(_root, "resolve_seat"):
+        block("/takeover: this jStack install predates shared seat addressing "
+              "— update the plugin, or drop the @agent and take over in place")
 
-    name, _, seat = token.partition("/")
-    workspace = _root.resolve_agent(name)
-    if workspace is None:
-        known = ", ".join(_root.agents()) or "none found"
-        block(f"/takeover: no agent named @{name} — known agents: {known}")
-
-    if seat:
-        want = seat.strip("/").lower()
-        for candidate in _root.seats(workspace.name):
-            if candidate.lower() == want:
-                return workspace / candidate, workspace.name
-        seats = ", ".join(_root.seats(workspace.name)) or "none"
-        block(f"/takeover: @{name} has no seat '{seat}' — seats: {seats}")
-
-    chat = workspace / "chat"
-    return (chat if chat.is_dir() else workspace), workspace.name
+    # A slash was this command's own spelling for one release and never any
+    # other command's. Say so, rather than reporting the whole token as an
+    # unknown agent and leaving the user to guess which half was wrong.
+    if "/" in token:
+        block(f"/takeover: seats are addressed with a hyphen, not a slash — "
+              f"try @{token.replace('/', '-')}")
+    try:
+        seat = _root.resolve_seat(token)
+    except _root.AddressError as exc:
+        block(f"/takeover: {exc}")
+    return seat.path, seat.agent_dir.name
 
 
 def adapter_supports_first_prompt() -> bool:

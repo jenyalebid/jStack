@@ -1,7 +1,7 @@
 ---
 name: takeover
 description: Use only if /takeover was typed and the jStack hook did not answer it.
-argument-hint: "[@agent[/seat]] [focus]"
+argument-hint: "[@agent[-seat]] [focus]"
 ---
 
 JSTACK_TAKEOVER_CMD $ARGUMENTS
@@ -30,5 +30,7 @@ open-terminal-here "$TARGET_CWD" --prompt-file "$BRIEF" --name "TO · <focus>" \
 adapter on this machine does not advertise it (`open-terminal-here` with no args prints
 its usage), drop the flag and tell the user the window opened but did not start.
 
-`@agent` resolves case-insensitively under the agent root; `@agent/seat` names a seat
-directly. Unknown name → list the agents and stop, never guess a directory.
+Addressing is `root.resolve_seat` — the one grammar mail and the scheduler use.
+`@agent` is the cockpit, hyphens walk down the seat tree (`@alice-social-threads`), a
+seat holding its own `chat/` resolves to that operator seat. Unknown name → list the
+agents and stop, never guess a directory.
