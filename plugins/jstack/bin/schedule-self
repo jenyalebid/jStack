@@ -98,13 +98,17 @@ def _mail(cfg: dict) -> dict:
 def _identity(cfg: dict) -> "tuple[str, Path]":
     """(job agent id, workspace dir) for the calling cwd, or a loud exit.
 
-    The cwd sits somewhere under agents_dir(); the first component below it
-    is the agent and the next — when it is a real seat — the seat. Anything
-    deeper is just where the session happens to be standing: the wake runs in
-    the seat, not in whatever subdirectory booked it. From an agent dir with
-    no seat, the wake runs in the agent dir itself. From outside the tree
-    there is no honest answer, and a guessed one would book a session that
-    boots nowhere — so that is an error naming what was looked for.
+    The cwd sits somewhere under agents_dir(); the wake is booked for the
+    nearest enclosing seat, so a session standing in a scratch dir or a
+    checkout below its seat still books for the seat itself. From an agent dir
+    with no seat, the wake runs in the agent dir. From outside the tree there
+    is no honest answer, and a guessed one would book a session that boots
+    nowhere — so that is an error naming what was looked for.
+
+    `root.enclosing_seat` is what walks it, and the depth matters: a seat can
+    be nested (`alice/social/threads` carries its own CLAUDE.md). Reading only
+    the first component below the agent booked the threads seat's wake into
+    `social/`, which boots a different CLAUDE.md under different path rules.
     """
     base = root.agents_dir(cfg)
     cwd = Path.cwd()
@@ -128,10 +132,15 @@ def _identity(cfg: dict) -> "tuple[str, Path]":
     if ws is None:
         _fail(f"{base / name} is not an agent (no CLAUDE.md there or in any "
               f"seat below it) — nothing would boot for this wake.")
-    agent = name.lower()
-    if len(rel.parts) > 1 and rel.parts[1] in root.seats(name, cfg):
-        return f"{agent}-{rel.parts[1].lower()}", ws / rel.parts[1]
-    return agent, ws
+    seat = root.enclosing_seat(cwd, cfg) if hasattr(root, "enclosing_seat") \
+        else None
+    if seat is None:
+        # Older root.py without the seat walk: the pre-lift one-level read.
+        agent = name.lower()
+        if len(rel.parts) > 1 and rel.parts[1] in root.seats(name, cfg):
+            return f"{agent}-{rel.parts[1].lower()}", ws / rel.parts[1]
+        return agent, ws
+    return seat.id, seat.path
 
 
 # ------------------------------------------------------------------ scheduler
