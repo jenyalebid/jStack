@@ -233,6 +233,28 @@
       "notes": "Words are the copy's NAME, appended to the source title so the resume picker tells two forks apart — never a scope, since splitoff dubs the whole transcript and never narrows (/jstack:handoff is the scoped restart). Blocking at UserPromptSubmit also cuts at the last completed turn, so the branch does not carry the turn that made it. The fork is built from the payload's transcript_path, not reconstructed from id + cwd. A terminal that will not open is a missing convenience, not a lost fork: the id and the resume line go out either way. Recognized as /splitoff, /jstack:splitoff, and the JSTACK_SPLITOFF_CMD sentinel."
     },
     {
+      "id": "takeover",
+      "kind": "skill",
+      "name": "Takeover",
+      "status": "live",
+      "description": "Spawns a fresh session — here or in another agent's workspace — pointed at THIS session's transcript and told to take it over. It is handed no summary: it reads the JSONL from source, checks the claims against the tree, and continues. Typed by the user, `/takeover` never reaches the model: hooks/takeover-command.py answers it at UserPromptSubmit and blocks the prompt. Where handoff distills the session to a brief it wrote itself and splitoff dubs it whole, this one hands over a pointer and a mandate to verify.",
+      "code": [
+        "hooks/takeover-command.py",
+        "commands-stage/takeover.md",
+        "skills/takeover/SKILL.md",
+        "bin/open-terminal-here"
+      ],
+      "config": [],
+      "docs": [],
+      "test": {
+        "type": "script",
+        "path": "tests/takeover-command.sh",
+        "description": "Pipes fixture UserPromptSubmit payloads through the real hook against a temp agent tree with a faked terminal adapter; asserts the briefing is a pointer and a mandate rather than a summary, that its user-spine recipe selects queue-operation/enqueue so mid-turn corrections are not invisible, that --first-prompt is detected rather than assumed and its absence said out loud, that @agent/@agent/seat resolve and an unknown one spawns nothing, and that a missing transcript or a dead window reports a failure instead of a spawn."
+      },
+      "subsystems": [],
+      "notes": "Args: [@agent[/seat]] [focus]. Target cwd = the named seat, else chat/ if present, else the agent root — deterministic, because a hook has no judgement to apply; handoff's focus-aware sub-mode pick is a model's call and is not available here, so the report names the directory it chose. Two channels into the spawn and both are load-bearing: --prompt-file is the standing mandate (appended system prompt, survives compaction), --first-prompt is claude's positional argument and is what makes the spawn a TASK rather than a staged context. --first-prompt is newer than --prompt-file and the adapter is overridable by design, so support is probed (`open-terminal-here` with no args prints its usage) — an adapter that does not parse it would pass it to claude, which dies on an unknown option. The briefing's user-spine jq selects queue-operation/enqueue alongside user: a message typed while a turn was running is not filed as a user record, and those interjections are usually the corrections. Recognized as /takeover, /jstack:takeover, and the JSTACK_TAKEOVER_CMD sentinel."
+    },
+    {
       "id": "print",
       "kind": "skill",
       "name": "Print Transcript Path",

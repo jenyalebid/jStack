@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+"""UserPromptSubmit — `/takeover` hands this session's work to a fresh one.
+
+The third way out of a session, and the only one that does not trust it.
+
+    /handoff    the session distills ITSELF into a brief. Whatever it got
+                wrong, it gets wrong again in the doc — a summary written by
+                the session that made the mistake carries the mistake forward
+                with the session's own confidence attached.
+    /splitoff   a verbatim dub, resumed. Lossless and therefore inheriting:
+                the copy starts holding every conclusion the original reached,
+                including the wrong ones, and its compaction damage too.
+    /takeover   neither. The new session is handed a POINTER to the source
+                transcript and a mandate to read it itself. No distillation to
+                trust, no context to inherit — it forms its own read of what
+                happened, checks the claims against the tree, and continues.
+
+Which is why this is a hook and not a skill. Every step is fixed: the
+transcript path comes from the payload, the workspace from the agent registry,
+the briefing from a template that never varies. Nothing here is a judgement, so
+nothing here needs a model — and routing it through one would put the outgoing
+session's voice back into a payload whose whole purpose is to exclude it.
+
+Grammar:
+
+    /takeover                     this workspace, no focus
+    /takeover <focus...>          this workspace, scoped to <focus>
+    /takeover @agent              that agent's workspace
+    /takeover @agent/<seat>       that agent's named seat
+    /takeover @agent <focus...>   that agent's workspace, scoped
+
+The source session is untouched and keeps running — a takeover is a second
+pair of eyes arriving, not a handover the source has to survive. Closing it, if
+that is what is wanted, stays the user's call in the window that owns it.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(PLUGIN_ROOT))
+from _answer import block  # noqa: E402 — sibling module, path set above
+
+try:
+    import root as _root  # noqa: E402
+except ImportError:      # an install predating root.py — @agent is unavailable
+    _root = None
+
+#: Overridable so the test can stand a fake in its place rather than opening
+#: windows on whatever desktop happens to be running the suite.
+TERMINAL = os.environ.get("JSTACK_TERMINAL_BIN") or "open-terminal-here"
+
+#: The adapter probe is a usage print and the open is an osascript round-trip
+#: or a managed-spawn CLI. Both are seconds; the ceiling makes a hang read as
+#: a hang instead of a silently dead command.
+TIMEOUT = 30
+
+# `/takeover`, `/jstack:takeover`, or the stub's sentinel — then the rest.
+TRIGGER = re.compile(r"^\s*(?:/(?:jstack:)?takeover|JSTACK_TAKEOVER_CMD)\b[ \t]*(.*)$",
+                     re.IGNORECASE | re.DOTALL)
+
+# The briefing. Fixed text: the one thing a takeover must not contain is the
+# outgoing session's account of itself, and a template cannot smuggle one in.
+BRIEFING = """\
+# TAKEOVER — you are continuing another session's work
+
+You have been opened to take over a Claude Code session that is still running.
+Its transcript is on disk and you were handed no summary of it, deliberately: a
+handoff doc is the outgoing session's account of itself, and an account written
+by the session that made the mistakes repeats them with its own confidence
+attached. You read the source and decide for yourself what is true.
+
+## The source
+
+    session id   {sid}
+    seat         {source_seat}
+    workspace    {source_cwd}
+    transcript   {transcript}
+    focus        {focus_line}
+
+## First — read it from source
+
+Never `Read` that JSONL whole: it is mostly tool-result noise and a full read
+costs the context window you need for the actual work. Shape first, extract
+second. (`/jstack:post-session-review` is not the tool here — that reviews a
+FINISHED session and writes timeline entries. This one is still live.)
+
+```bash
+T='{transcript}'
+wc -l "$T"; jq -r '.type' "$T" | sort | uniq -c
+
+# what the user actually asked for, in order — the spine of the session
+jq -r 'select(.type=="user" or (.type=="queue-operation" and .operation=="enqueue"))
+       | (.content // (.message.content
+           | if type=="string" then . else map(select(.type=="text")|.text)|join(" ") end))
+       | gsub("\\\\s+";" ")' "$T" | grep -Ev '^[[:space:]]*$|^<' | tail -40
+
+# what the session claimed it did — the claims you are about to check
+jq -r 'select(.type=="assistant") | .message.content
+       | if type=="array" then map(select(.type=="text")|.text)|join(" ") else . end' \\
+      "$T" | grep -Ev '^[[:space:]]*$' | tail -30
+
+# every file it wrote, first-write order
+jq -r 'select(.message.content?) | .message.content[]? | select(.type=="tool_use")
+       | select(.name|test("^(Edit|Write|MultiEdit|NotebookEdit)$")) | .input.file_path' \\
+      "$T" | awk '!seen[$0]++'
+```
+
+The `queue-operation` clause in the first one is not decoration. A message the
+user typed WHILE a turn was running is not filed as a `user` record — it lands
+as `queue-operation`/`enqueue`, and those interjections are usually the
+corrections, the "no, not like that" that redirected the whole session. Select
+on `user` alone and the transcript reads as though the user never pushed back.
+Blank lines are dropped before `tail`, not after, or the tail is all blanks.
+
+`session-files --session {sid}` gives the same write list already filtered to
+what git still sees — the stage list, if this ends in a commit.
+
+## Then — verify before you build on it
+
+A takeover inherits state, never conclusions. Before treating anything the
+source session said as fact: open the files it says it wrote, run the tests it
+says pass, read the code instead of its description of the code. Anything that
+contradicts the transcript is the first thing you report.
+
+What the USER decided in that session stands and is not yours to relitigate.
+What the SESSION concluded on its own holds only once you have checked it.
+
+## Then — continue
+
+{continue_line}
+
+The source session is open, unchanged, and still running. Nothing you do here
+touches its transcript, and you cannot close it from this window.
+"""
+
+
+def payload_or_exit() -> dict:
+    try:
+        return json.load(sys.stdin)
+    except Exception:
+        sys.exit(0)
+
+
+def seat_label(cwd: str) -> str:
+    """`agent/submode` for a workspace dir, else the basename. Never blank —
+    the briefing names where the work came from, and "" names nowhere."""
+    if _root is not None:
+        agent, submode = _root.seat_of(cwd)
+        if agent:
+            return f"{agent}/{submode}"
+    return Path(cwd).name or cwd
+
+
+def target_cwd(token: str) -> "tuple[Path, str]":
+    """(workspace, agent-name) for an `@agent` or `@agent/seat` token.
+
+    Deterministic by construction, because a hook has no judgement to apply:
+    a named seat is used when it exists, otherwise `chat/` when it exists,
+    otherwise the agent root. Handoff picks a sub-mode by reading the focus;
+    that is a model's call and it is not available here — so the report names
+    the directory it chose and the user can see it landed somewhere else.
+    """
+    if _root is None:
+        block("/takeover: this jStack install has no agent resolver "
+              "(root.py missing) — drop the @agent and take over in place")
+
+    name, _, seat = token.partition("/")
+    workspace = _root.resolve_agent(name)
+    if workspace is None:
+        known = ", ".join(_root.agents()) or "none found"
+        block(f"/takeover: no agent named @{name} — known agents: {known}")
+
+    if seat:
+        want = seat.strip("/").lower()
+        for candidate in _root.seats(workspace.name):
+            if candidate.lower() == want:
+                return workspace / candidate, workspace.name
+        seats = ", ".join(_root.seats(workspace.name)) or "none"
+        block(f"/takeover: @{name} has no seat '{seat}' — seats: {seats}")
+
+    chat = workspace / "chat"
+    return (chat if chat.is_dir() else workspace), workspace.name
+
+
+def adapter_supports_first_prompt() -> bool:
+    """Does the `open-terminal-here` first in PATH take `--first-prompt`?
+
+    Asked, not assumed. The adapter is overridable by design — this machine
+    replaces it to route spawns through a managed host — so an install can
+    easily carry a new hook against an older adapter. An adapter that does not
+    parse the flag passes it through to `claude`, which dies on an unknown
+    option, and the takeover window opens and closes before anyone reads it.
+    """
+    try:
+        probe = subprocess.run([TERMINAL], capture_output=True, text=True,
+                               timeout=TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return "--first-prompt" in (probe.stdout + probe.stderr)
+
+
+def stage(text: str) -> str:
+    """Write the briefing outside every workspace and return its path.
+
+    A one-shot payload must not land in a tree somebody commits. The adapter
+    reads it into a variable and deletes it before `claude` starts, so on the
+    normal path nothing lingers even here.
+    """
+    fd, path = tempfile.mkstemp(prefix="jstack-takeover-", suffix=".md")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+    return path
+
+
+def title_for(agent: str, focus: str, source_seat: str) -> str:
+    """`TO · <topic>` / `TO→<Agent> · <topic>`, matching handoff's `HF ·`.
+
+    The topic is the focus as typed, clipped — there is no model here to name
+    the work in three words, and an invented title would be the one piece of
+    this payload that nobody wrote."""
+    words = " ".join(focus.split()[:5])
+    if len(words) > 40:
+        words = words[:39].rstrip() + "…"
+    topic = words or source_seat
+    return f"TO→{agent} · {topic}" if agent else f"TO · {topic}"
+
+
+def main() -> None:
+    payload = payload_or_exit()
+    match = TRIGGER.match(payload.get("prompt") or "")
+    if not match:
+        sys.exit(0)          # not ours — every other prompt passes untouched
+
+    # The harness hands every hook the file it is writing to. Reconstructing it
+    # from the session id and the cwd is a guess about path encoding, and a
+    # takeover built on a guess reviews the wrong conversation.
+    transcript = (payload.get("transcript_path") or "").strip()
+    if not transcript:
+        block("/takeover: no transcript path in the hook payload — "
+              "there is nothing for the new session to read")
+    if not Path(transcript).is_file():
+        block(f"/takeover: no transcript on disk yet — {transcript}")
+
+    source_cwd = str(payload.get("cwd") or Path.cwd())
+    sid = (payload.get("session_id") or Path(transcript).stem).strip()
+
+    rest = " ".join((match.group(1) or "").split())
+    agent = ""
+    if rest.startswith("@"):
+        token, _, rest = rest.partition(" ")
+        cwd, agent = target_cwd(token[1:])
+    else:
+        cwd = Path(source_cwd)
+    focus = rest.strip()
+
+    if not cwd.is_dir():
+        block(f"/takeover: target workspace does not exist — {cwd}")
+
+    source_seat = seat_label(source_cwd)
+    if focus:
+        focus_line = focus
+        continue_line = (
+            f"Your scope is: **{focus}**\n\n"
+            "That is an explicit narrowing from the person who opened you. Work it, "
+            "and leave the session's other threads alone unless one of them blocks "
+            "this. If the source session never got to this, say so plainly and start "
+            "it — a takeover is allowed to find that the answer is not in there.")
+    else:
+        focus_line = "(none — the session's live thread)"
+        continue_line = (
+            "No focus was given: pick up the thread that was live in the last "
+            "exchanges and carry it forward. If the session ended mid-step, finish "
+            "the step.")
+
+    briefing = BRIEFING.format(
+        sid=sid, source_seat=source_seat, source_cwd=source_cwd,
+        transcript=transcript, focus_line=focus_line, continue_line=continue_line)
+    brief_path = stage(briefing)
+
+    title = title_for(agent, focus, source_seat)
+    kick = ("Take over the session named in your briefing: read it from the "
+            "transcript, verify what it claims against the tree, then continue"
+            + (f" — focus: {focus}." if focus else "."))
+
+    if not shutil.which(TERMINAL):
+        block(f"/takeover: no terminal adapter on PATH ({TERMINAL}).\n"
+              f"  briefing staged at {brief_path}\n"
+              f"  cd {cwd} && claude --append-system-prompt \"$(cat {brief_path})\"")
+
+    cmd = [TERMINAL, str(cwd), "--prompt-file", brief_path, "--name", title]
+    autostart = adapter_supports_first_prompt()
+    if autostart:
+        cmd += ["--first-prompt", kick]
+
+    try:
+        opened = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=TIMEOUT).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        opened = False
+
+    where = f"@{agent.lower()} · {cwd}" if agent else str(cwd)
+    if not opened:
+        block(f"/takeover: the terminal would not open — nothing was spawned.\n"
+              f"  briefing staged at {brief_path}\n"
+              f"  cd {cwd} && claude --append-system-prompt \"$(cat {brief_path})\"")
+
+    lines = [f"takeover → {title}", f"  {where}",
+             f"  reading this session from source: {transcript}"]
+    if not autostart:
+        lines.append("  adapter takes no --first-prompt — the window opened with the "
+                     "briefing loaded but did NOT start; type anything to kick it off")
+        lines.append(f"  briefing left at {brief_path}")
+    lines.append("  this session is unchanged and still yours")
+    block("\n".join(lines))
+
+
+if __name__ == "__main__":
+    main()

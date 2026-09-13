@@ -168,6 +168,7 @@ run_skill recall log_event
 run_skill tag log_event
 run_skill pict pict open-artifact
 run_skill splitoff dub-session open-terminal-here
+run_skill takeover open-terminal-here
 run_skill print
 
 # Catch skills added to skills/ but not registered above

@@ -45,6 +45,11 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/splitoff-command.py",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/takeover-command.py",
+            "timeout": 60
           }
         ]
       }
