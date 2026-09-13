@@ -83,6 +83,26 @@ fi
 # Build the full command the new shell runs (cd then launch). Quote CWD.
 launch_cmd="cd \"$CWD\" && $claude_invoke"
 
+# macOS types this command into the new terminal's tty, and a terminal that has
+# only just opened is still in CANONICAL mode — where the line discipline drops
+# everything past MAX_CANON (1024 bytes) without a word. A long --first-prompt
+# crossed that on its own: the line arrived cut mid-quote, the shell sat at a
+# continuation prompt, and `claude` was never reached — a window with a briefing
+# in it and no CLI.
+#
+# So nothing that scales with caller input is typed. The command goes to a file
+# and the terminal is typed a `source` of fixed length. Not self-deleting: an
+# `rm` inside the line would race the shell still reading it, which is the
+# failure this avoids. Stale files are swept instead.
+BOOT_FILE=""
+if [ "$(uname -s)" = "Darwin" ]; then
+  find /tmp -maxdepth 1 -name 'jstack-boot-*.sh' -mmin +60 -delete 2>/dev/null || true
+  BOOT_FILE="$(mktemp /tmp/jstack-boot-XXXXXXXX.sh)"
+  chmod 600 "$BOOT_FILE"
+  printf '%s\n' "$launch_cmd" > "$BOOT_FILE"
+  launch_cmd="source \"$BOOT_FILE\""
+fi
+
 # AppleScript strings are double-quoted, so any " inside the embedded shell
 # command has to become \" before interpolation. Escape backslashes first,
 # then quotes, so we don't double-escape the result.
