@@ -13,6 +13,7 @@ import json
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from . import config, journal, occurrences, registry, runner, spawn
 
@@ -277,7 +278,7 @@ class Engine:
 
     def _try_fire(self, job: dict, eff: dict, scheduled_for: datetime,
                   defaults: dict, retry_of: "str|None" = None,
-                  advance: bool = True) -> None:
+                  advance: bool = True, retry_reason: str = "") -> None:
         jid = job["id"]
         st = self.state.setdefault(jid, {})
         policy = eff.get("concurrency", "skip")
@@ -297,6 +298,16 @@ class Engine:
         if advance:
             self._advance(job, st, after=scheduled_for)
         journal.save_state(self.state)  # persist BEFORE spawn — no double-fire
+        if retry_reason:
+            # Carried on `eff`, not on the spawn_fn signature. `eff` is the
+            # per-fire view of the job and is already where Run reads every
+            # other per-fire setting (model, claude_bin, permission_mode); the
+            # spawn_fn arity, by contrast, is a seam an install may have
+            # supplied its own callable for, and widening it would break that
+            # install at runtime in the retry path — the least-exercised path
+            # there is. Underscored so nobody reads it as a job setting.
+            eff = dict(eff)
+            eff["_retry_reason"] = retry_reason
         try:
             run = self._spawn_fn(job, eff, scheduled_for, retry_of)
         except Exception as e:
@@ -319,7 +330,8 @@ class Engine:
     def _spawn_run(self, job: dict, eff: dict, scheduled_for: datetime,
                    retry_of: "str|None"):
         run = runner.Run(job=eff, defaults=self.defaults(), scheduled_for=scheduled_for,
-                         on_finish=self._on_run_finish, retry_of=retry_of)
+                         on_finish=self._on_run_finish, retry_of=retry_of,
+                         retry_reason=eff.get("_retry_reason", ""))
         return run.spawn()
 
     def _spawn_failure(self, job: dict, eff: dict, scheduled_for: datetime,
@@ -346,8 +358,13 @@ class Engine:
         journal.save_state(self.state)
         if retry_of is None and eff.get("retry_on_stall", True):
             _log(f"retrying {jid} after spawn failure")
+            # No gate here, and none is needed: the spawn never happened, so
+            # there is no session and nothing it could have done. The banner
+            # still rides — it names the cause, and a run told a sibling failed
+            # to start loses nothing by checking.
             self._try_fire(job, eff, scheduled_for, defaults,
-                           retry_of=failed_run_id, advance=False)
+                           retry_of=failed_run_id, advance=False,
+                           retry_reason="a spawn failure")
         elif (job.get("schedule") or {}).get("kind") == "once":
             self._finalize_once(job, "error")
 
@@ -405,9 +422,19 @@ class Engine:
             # exactly the silent failure #17 exists to end. Computed here so the
             # record written below carries the delivery outcome, not a guess.
             transient = kill_reason in ("stall", "ttft") or status == "api_error"
-            will_retry = (status != "ok" and transient
-                          and eff.get("retry_on_stall", True)
-                          and run.retry_of is None and job.get("enabled", True))
+            retry_wanted = (status != "ok" and transient
+                            and eff.get("retry_on_stall", True)
+                            and run.retry_of is None and job.get("enabled", True))
+            # ...unless the run it would replace already acted. Read here rather
+            # than at the arm below because `will_retry` decides `terminal_failure`
+            # decides `delivery`: a gate consulted later would stamp every blocked
+            # retry `not-requested` and the human it hands the decision to would
+            # never be called.
+            blocked_by = self._retry_blocker(run) if retry_wanted else None
+            will_retry = retry_wanted and blocked_by is None
+            if blocked_by:
+                st["last_error"] = (f"{status} after acting ({blocked_by}) — "
+                                    f"not retried, a re-run would repeat it")
             terminal_failure = (status not in ("ok", "rate_limited")
                                 and not auth_retry_left and not will_retry)
             delivery = (self._deliver_failure(job, eff, st, run.session_id)
@@ -464,23 +491,60 @@ class Engine:
                     self._finalize_once(job, status)
                 return
 
-            retried = False
             # Retry transient faults once (same slot, tagged retry_of): a hung
             # session (stall/ttft) or a dropped/failed API connection mid-run
             # (api_error). Spawn failures retry above; rate limits defer above. A
             # genuine job error (real exception, bad content) is NOT retried — it
             # parks. Without the api_error arm a one-shot publish wake killed by a
             # transient "Connection closed mid-response" was lost silently.
-            transient = kill_reason in ("stall", "ttft") or status == "api_error"
-            if (status != "ok" and transient
-                    and eff.get("retry_on_stall", True) and run.retry_of is None
-                    and job.get("enabled", True)):
+            #
+            # `will_retry` above already withheld the retry from a run whose
+            # transcript shows it acted — `api_error` fires on the last turn of a
+            # finished run as readily as on the first turn of an untouched one,
+            # and a blind re-send repeats every action the dead run took. That
+            # case gets a terminal failure and a human instead, which the
+            # delivery above has already sent.
+            retried = False
+            if will_retry:
                 _log(f"retrying {jid} after {kill_reason or status}")
                 self._try_fire(job, eff, run.scheduled_for, self.defaults(),
-                               retry_of=run.run_id, advance=False)
+                               retry_of=run.run_id, advance=False,
+                               retry_reason=(kill_reason or status))
                 retried = True
+            elif blocked_by:
+                _log(f"NOT retrying {jid} after {kill_reason or status} — run "
+                     f"{run.run_id} already acted ({blocked_by}); a re-run would "
+                     f"repeat it. Terminal failure delivered instead.")
             if (job.get("schedule") or {}).get("kind") == "once" and not retried:
                 self._finalize_once(job, status)
+
+    def _retry_blocker(self, run) -> "str|None":
+        """What the failed run already did that a blind re-send would repeat, or
+        None when nothing in its transcript says it acted.
+
+        A run with no session never reached the model, so there is nothing to
+        repeat — that is the `ttft` kill and the fast spawn death, the cases the
+        retry arm exists for and must keep serving. A run that HAD a session but
+        no recorded workspace is the opposite reading: it ran, and we cannot find
+        what it wrote. `Run.spawn` sets the workspace before anything else, so in
+        practice this is an adopted run from a state entry written before the
+        field existed — it gets refused, not waved through.
+
+        Any fault reading the transcript blocks the retry for the same reason: we
+        went looking precisely because we could not afford to guess.
+        """
+        session_id = getattr(run, "session_id", None)
+        workspace = getattr(run, "workspace", None)
+        if not session_id:
+            return None
+        if not workspace:
+            return "transcript location unknown"
+        try:
+            return runner.first_action(
+                runner.session_jsonl_path(Path(workspace), session_id))
+        except Exception as e:
+            _log(f"retry gate: could not read {session_id}'s transcript: {e!r}")
+            return "unreadable transcript"
 
     def _deliver_failure(self, job: dict, eff: dict, st: dict,
                          session_id: "str|None") -> str:
