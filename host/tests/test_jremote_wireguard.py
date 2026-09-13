@@ -34,6 +34,7 @@ import ipaddress
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -313,6 +314,8 @@ def test_the_sync_daemon_follows_the_relocated_mesh(tmp_path):
     """The other hub-side reader. It is the one `WatchPaths` fires, so a sync
     script reading the tree's conf is a hub that never applies a new peer."""
     mesh = tmp_path / "elsewhere" / "wireguard"
+    mesh.mkdir(parents=True)
+    (mesh / "wg0.conf").write_text("[Interface]\n")
     name_file = tmp_path / "iface.name"
     name_file.write_text("utun9\n")
     r = _run_sh("wg_sync.sh", _sh_env(tmp_path, WG_PEER_DIR=str(mesh),
@@ -320,6 +323,44 @@ def test_the_sync_daemon_follows_the_relocated_mesh(tmp_path):
     assert r.returncode == 0, r.stderr
     assert f"wg_sync: {mesh / 'wg0.conf'} -> utun9" in r.stdout, (
         f"wg_sync.sh synced a conf the pairing tool does not write to: {r.stdout}")
+
+
+def test_the_sync_daemon_waits_out_the_rename_window(tmp_path):
+    """`wg_peer.py` replaces the conf by rename, and the WatchPaths fire can
+    land inside that window — the path briefly names no file. The old script
+    died there on fopen, and launchd never re-fires a failed run, so the peer
+    that triggered the fire stayed off the live interface until the *next*
+    pairing. The script has to outwait the window, not die in it."""
+    mesh = tmp_path / "wireguard"
+    mesh.mkdir()
+    name_file = tmp_path / "iface.name"
+    name_file.write_text("utun9\n")
+    env = _sh_env(tmp_path, WG_PEER_DIR=str(mesh), WG_NAME_FILE=str(name_file))
+    proc = subprocess.Popen(
+        ["/bin/bash", str(WG_ROOT / "wg_sync.sh")],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    # The fire has landed; the writer finishes its rename a beat later.
+    time.sleep(0.5)
+    (mesh / "wg0.conf").write_text("[Interface]\n")
+    out, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert f"wg_sync: {mesh / 'wg0.conf'} -> utun9" in out, (
+        f"the sync daemon died inside the rename window: {err}")
+
+
+def test_the_sync_daemon_is_loud_when_the_conf_never_lands(tmp_path):
+    """The bound on the wait. A conf that never appears is not a rename window,
+    it is a broken hub — the script must say so on stderr and exit non-zero
+    rather than report the quiet green of a sync that never happened."""
+    mesh = tmp_path / "wireguard"
+    mesh.mkdir()
+    name_file = tmp_path / "iface.name"
+    name_file.write_text("utun9\n")
+    r = _run_sh("wg_sync.sh", _sh_env(tmp_path, WG_PEER_DIR=str(mesh),
+                                      WG_NAME_FILE=str(name_file)))
+    assert r.returncode != 0
+    assert f"wg_sync: {mesh / 'wg0.conf'} -> utun9 failed" in r.stderr, (
+        f"a sync that never happened has to name the conf it waited for: {r.stderr}")
 
 
 def test_every_reader_of_the_mesh_lands_on_one_directory(tmp_path):

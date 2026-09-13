@@ -17,5 +17,20 @@ NAME_FILE="${WG_NAME_FILE:-/var/run/wireguard/jremote-wg.name}"
 [ -s "$NAME_FILE" ] || { echo "wg_sync: tunnel not up (no $NAME_FILE) — nothing to sync"; exit 0; }
 IFACE="$(cat "$NAME_FILE")"
 
-"$WG" syncconf "$IFACE" "$CONF"
-echo "wg_sync: $CONF -> $IFACE"
+# The conf is replaced by rename, and the WatchPaths fire can land inside that
+# window — for a moment the path names no file. One bare `syncconf` there dies
+# on fopen, and launchd never re-fires for a failed run: the new peer would
+# stay off the live interface until the next conf write, silently. Wait the
+# window out; hold `wg`'s complaints back unless every try is spent, so a
+# transient miss leaves one clean line instead of fopen noise.
+err=""
+for _ in 1 2 3 4 5; do
+    if [ -s "$CONF" ] && err="$("$WG" syncconf "$IFACE" "$CONF" 2>&1)"; then
+        echo "wg_sync: $CONF -> $IFACE"
+        exit 0
+    fi
+    sleep 1
+done
+[ -n "$err" ] && printf '%s\n' "$err" >&2
+echo "wg_sync: $CONF -> $IFACE failed after 5 tries — interface left unsynced" >&2
+exit 1
