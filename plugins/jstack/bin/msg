@@ -288,12 +288,30 @@ def resolve_seat(spec: str, sender: "str|None" = None) -> tuple:
 
     Raises SystemExit with a usable message when the seat is not a real dir —
     a message addressed to nowhere must fail loudly at send time, never land
-    in a table nobody reads."""
+    in a table nobody reads.
+
+    The grammar lives in `root.resolve_seat`, which every jStack command that
+    takes an @-token now shares. It was written here first and stayed here,
+    private to one CLI, while the commands that spawn sessions each grew a
+    weaker resolver of their own — so `@alice-social` addressed a seat in mail
+    and was refused as an unknown agent by handoff and takeover. The `@boss`
+    refusal stays local: that is a mail policy, not part of the grammar.
+    """
     spec = (spec or "").strip()
     if spec.startswith("@"):
         spec = spec[1:]
     if not spec:
         _fail("no recipient — use @agent, @agent-seat, or @self")
+    if spec.lower() == "boss":
+        _fail("@boss is not a mailbox — the host's own channel to its human "
+              "owns that contact and has its own reply path. Use it instead.")
+    if _root is not None and hasattr(_root, "resolve_seat"):
+        try:
+            seat = _root.resolve_seat(spec, sender=sender, cfg=_config())
+        except _root.AddressError as exc:
+            _fail(str(exc))
+        return seat.agent, seat.submode, seat.path
+    # Older install, no root.resolve_seat: the literal pre-lift resolver.
     if spec.lower() in ("self", "me"):
         if not sender:
             _fail("@self: could not resolve the sending seat from cwd")
@@ -311,9 +329,6 @@ def resolve_seat(spec: str, sender: "str|None" = None) -> tuple:
         if submode == "chat" and not _is_seat(seat_dir) and _is_seat(root):
             seat_dir = root  # bare cockpit: the seat is the agent root itself
         return agent, submode, seat_dir
-    if spec.lower() == "boss":
-        _fail("@boss is not a mailbox — the host's own channel to its human "
-              "owns that contact and has its own reply path. Use it instead.")
 
     agents = _agent_dirs()
     parts = [p for p in spec.lower().split("-") if p]
