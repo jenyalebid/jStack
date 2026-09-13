@@ -12,6 +12,12 @@
 #                          is a throwaway briefing: nothing lingers on disk.
 #   --name <title>         Passed to `claude --name <title>` (sets the session
 #                          display name AND the terminal title).
+#   --first-prompt <text>  Passed as claude's positional prompt, so the new
+#                          session STARTS on it instead of waiting at an empty
+#                          box. --prompt-file is standing context; this is the
+#                          first turn. A spawn that is a task (a takeover, an
+#                          audit) needs both: the mandate survives compaction in
+#                          system-prompt space, the kick happens once.
 #
 # Shipped in the plugin's bin/ (auto-added to PATH while jstack is enabled), so
 # skills call it as a bare command. Self-detects the terminal — no per-machine
@@ -20,7 +26,7 @@
 set -euo pipefail
 
 if [ "$#" -lt 1 ]; then
-  echo "usage: open-terminal-here <cwd> [--prompt-file <path>] [--name <title>] [claude-args...]" >&2
+  echo "usage: open-terminal-here <cwd> [--prompt-file <path>] [--name <title>] [--first-prompt <text>] [claude-args...]" >&2
   exit 64
 fi
 
@@ -30,11 +36,13 @@ CWD="$1"; shift
 # spaces stays one token here, unlike the flattened pass-through ARGS below).
 PROMPT_FILE=""
 NAME=""
+FIRST_PROMPT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --prompt-file) PROMPT_FILE="$2"; shift 2 ;;
-    --name)        NAME="$2"; shift 2 ;;
-    *)             break ;;
+    --prompt-file)  PROMPT_FILE="$2"; shift 2 ;;
+    --name)         NAME="$2"; shift 2 ;;
+    --first-prompt) FIRST_PROMPT="$2"; shift 2 ;;
+    *)              break ;;
   esac
 done
 
@@ -46,15 +54,30 @@ if [ -n "$NAME" ]; then
   name_arg=" --name \"$NAME\""
 fi
 
+# The positional prompt is user prose — it can hold quotes, $, backticks, the
+# lot — and it is about to be pasted into a shell command inside an AppleScript
+# string. Single-quoting (with the POSIX '\'' escape for embedded quotes) is the
+# only form that stays inert through the shell layer; applescript_escape below
+# then handles the AppleScript layer. The double-quoted --name above survives
+# only because titles are ours and tame.
+sh_quote() {
+  local s="$1"
+  printf "'%s'" "${s//\'/\'\\\'\'}"
+}
+first_arg=""
+if [ -n "$FIRST_PROMPT" ]; then
+  first_arg=" $(sh_quote "$FIRST_PROMPT")"
+fi
+
 # The claude invocation the new shell runs (the part after `cd`).
 # With --prompt-file: read the briefing into a var, delete the file, then launch
 # claude with the content inline. Only the PATH ever crosses into AppleScript /
 # the terminal command — the (possibly multi-line) content is read at runtime in
 # the new shell, so there is no escaping hazard and nothing is left to clean up.
 if [ -n "$PROMPT_FILE" ]; then
-  claude_invoke="__JSTACK_SP=\"\$(cat \"$PROMPT_FILE\")\" && rm -f \"$PROMPT_FILE\" && claude $ARGS$name_arg --append-system-prompt \"\$__JSTACK_SP\""
+  claude_invoke="__JSTACK_SP=\"\$(cat \"$PROMPT_FILE\")\" && rm -f \"$PROMPT_FILE\" && claude $ARGS$name_arg --append-system-prompt \"\$__JSTACK_SP\"$first_arg"
 else
-  claude_invoke="claude $ARGS$name_arg"
+  claude_invoke="claude $ARGS$name_arg$first_arg"
 fi
 
 # Build the full command the new shell runs (cd then launch). Quote CWD.
@@ -112,6 +135,9 @@ EOF
     # prompt file directly (it will linger — acceptable on this best-effort path).
     win_args="$ARGS$name_arg"
     [ -n "$PROMPT_FILE" ] && win_args="$win_args --append-system-prompt-file \"$PROMPT_FILE\""
+    # cmd does not read POSIX single quotes, so the prompt is re-quoted its way.
+    # Best-effort like the rest of this branch: an embedded " will still break it.
+    [ -n "$FIRST_PROMPT" ] && win_args="$win_args \"$FIRST_PROMPT\""
     if command -v wt.exe >/dev/null 2>&1; then
       wt.exe -d "$CWD" cmd /k "claude $win_args"
     else

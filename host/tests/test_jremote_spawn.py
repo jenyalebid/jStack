@@ -39,6 +39,23 @@ def test_claude_args_splice_verbatim():
     assert prelude.startswith('__JR_SP=')
 
 
+def test_first_prompt_is_positional_and_last():
+    """`claude [options] [prompt]` — the prompt is positional, so anything
+    appended after it would be read as part of the prompt rather than a flag.
+    It is quoted, not spliced like claude_args: this string is user prose."""
+    _, extra = spawn.build_shell_parts("T", "/tmp/b", "--foo",
+                                       first_prompt="it's \"live\" now")
+    assert extra.endswith(""" 'it'"'"'s "live" now'""")
+    assert extra.index("--foo") < extra.index("'it'")
+
+
+def test_first_prompt_absent_changes_nothing():
+    """A spawn that is staged context, not a task, must be byte-identical to
+    what it was before the flag existed — every handoff still goes this way."""
+    assert spawn.build_shell_parts("T", "/tmp/b", "--foo") == \
+        spawn.build_shell_parts("T", "/tmp/b", "--foo", first_prompt="")
+
+
 def test_inner_command_wraps_prelude_and_extra():
     # `exec` binds the session's life to the claude process (board invariant);
     # the prelude still runs in the shell before it.

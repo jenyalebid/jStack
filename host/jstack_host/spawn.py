@@ -20,13 +20,18 @@ adapter can fall back to a raw window.
 Run from the Infrastructure root:
 
     .venv/bin/python3 -m jstack_host.spawn --cwd DIR [--sid SID]
-        [--resume] [--name TITLE] [--prompt-file PATH] [--claude-args "FLAT"]
+        [--resume] [--name TITLE] [--prompt-file PATH] [--first-prompt TEXT]
+        [--claude-args "FLAT"]
 
 `--prompt-file` is the adapter's briefing contract: the pane's shell reads the
 file into a variable and deletes it before `claude` starts, so a multi-line
 briefing never has to survive quoting into tmux and nothing lingers on disk.
-`--claude-args` is one flat, pre-tokenized string spliced verbatim after the
-standard flags — exactly the stock adapter's pass-through contract.
+`--first-prompt` is the other half of a spawn that is a TASK rather than a
+staged context (`/takeover`): the briefing is standing mandate in system-prompt
+space, this is claude's positional argument, so the session starts working
+instead of waiting at an empty box. `--claude-args` is one flat, pre-tokenized
+string spliced verbatim after the standard flags — exactly the stock adapter's
+pass-through contract.
 
 Prints the sid on success. Exit 75 when the jRemote app is not installed (and
 then no session exists), so the adapter falls back to a raw window.
@@ -43,9 +48,17 @@ from pathlib import Path
 _DASHBOARD = "http://127.0.0.1:9090/api/jremote/v1"
 
 
-def build_shell_parts(name: str, prompt_file: str, claude_args: str) -> tuple[str, str]:
+def build_shell_parts(name: str, prompt_file: str, claude_args: str,
+                      first_prompt: str = "") -> tuple[str, str]:
     """(prelude, extra) for `open_managed` — the read-brief idiom and the
-    flags that reference it, quoted for the pane's shell."""
+    flags that reference it, quoted for the pane's shell.
+
+    `first_prompt` is claude's POSITIONAL argument, so it goes last — after the
+    flags and after the caller's pass-through args, which is the only place
+    `claude [options] [prompt]` accepts it. It is shell-quoted rather than
+    spliced verbatim: unlike `claude_args`, this string is user prose and may
+    carry quotes, `$`, or backticks that the pane's shell would otherwise eat.
+    """
     prelude, extra = "", ""
     if prompt_file:
         q = shlex.quote(prompt_file)
@@ -55,6 +68,8 @@ def build_shell_parts(name: str, prompt_file: str, claude_args: str) -> tuple[st
         extra += (" " if extra else "") + f"--name {shlex.quote(name)}"
     if claude_args:
         extra += (" " if extra else "") + claude_args
+    if first_prompt:
+        extra += (" " if extra else "") + shlex.quote(first_prompt)
     return prelude, extra
 
 
@@ -140,6 +155,9 @@ def main(argv=None) -> int:
                          "starting fresh under --session-id")
     ap.add_argument("--name", default="")
     ap.add_argument("--prompt-file", default="")
+    ap.add_argument("--first-prompt", default="",
+                    help="claude's positional prompt — the new session starts "
+                         "on it instead of waiting at an empty box")
     ap.add_argument("--claude-args", default="")
     a = ap.parse_args(argv)
 
@@ -155,7 +173,8 @@ def main(argv=None) -> int:
         print(f"spawn: {desk.APP} not installed", file=sys.stderr)
         return 75
     sid = a.sid or str(uuid.uuid4())
-    prelude, extra = build_shell_parts(a.name, a.prompt_file, a.claude_args)
+    prelude, extra = build_shell_parts(a.name, a.prompt_file, a.claude_args,
+                                       a.first_prompt)
     # Registered-first; the board row is the spawn's visibility from here on.
     managed.record_open(sid, agent_base_for(cwd), name=a.name)
     managed.open_managed(sid, cwd, resume=a.resume, extra=extra, prelude=prelude)
