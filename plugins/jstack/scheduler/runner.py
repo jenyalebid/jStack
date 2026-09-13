@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import threading
@@ -232,6 +233,180 @@ def reached_stop_hook(jsonl_path: Path) -> bool:
     return False
 
 
+# ------------------------------------------------ what a dead run already did
+#
+# A retry re-sends the job's payload from the top, so it is only safe when the
+# attempt it replaces took no action worth repeating. `api_error` is raised
+# whenever the connection drops — including on the LAST turn of a run that had
+# already done everything it was told to do — so "it failed" says nothing about
+# whether it acted. The transcript does: a `tool_use` block is the only thing in
+# a session that reaches outside the model.
+#
+# ALLOWLIST, never a denylist, and the asymmetry is the whole reason. Wrongly
+# calling a run dirty costs one occurrence, loudly, with a human notified.
+# Wrongly calling it clean is the defect this exists to end — a second push,
+# publish or send, silently. A denylist scores every tool nobody enumerated as
+# clean, which is exactly backwards on the surface that matters most here: the
+# MCP publish/send tools an install adds long after this file ships.
+#
+# `Task` is absent on purpose — a subagent can do anything its parent could.
+# `WebFetch` too: it reaches an external party, which is the category under
+# review, and a run whose only action was a GET is not the case this arm exists
+# to save.
+_READ_ONLY_TOOLS = frozenset({
+    "Read", "Glob", "Grep", "LS", "NotebookRead", "WebSearch",
+    "TodoRead", "TodoWrite", "ExitPlanMode",
+})
+
+# `Bash` is the one tool whose effect is unknowable from its name, and excluding
+# it outright would retire the retry arm in practice — nearly every run opens by
+# shelling out. So it is read by its command line, strictly. The list is
+# deliberately small: a command nobody thought about reads as mutating, which is
+# the safe direction.
+_READ_ONLY_COMMANDS = frozenset({
+    "awk", "basename", "cat", "cut", "date", "df", "diff", "dirname", "du",
+    "echo", "egrep", "fgrep", "file", "find", "grep", "head", "hostname", "id",
+    "jq", "ls", "printf", "ps", "pwd", "readlink", "realpath", "rg", "sed",
+    "sort", "stat", "tail", "tr", "uname", "uniq", "wc", "which", "whoami",
+})
+
+# git is read by its SUBcommand. Only the unambiguous readers are here: `config`
+# sets as readily as it gets, a bare `stash` stashes, and `branch`/`tag`/`remote`
+# mutate the moment they take an argument — none of them earn a place a blind
+# retry would rely on.
+_READ_ONLY_GIT = frozenset({
+    "blame", "cat-file", "describe", "diff", "log", "ls-files", "ls-tree",
+    "name-rev", "rev-list", "rev-parse", "shortlog", "show", "status",
+    "symbolic-ref", "whatchanged",
+})
+
+# Tokens that put a segment beyond this reader: a redirect writes, a substitution
+# runs a command this parse never sees, a stray `&` backgrounds one. Split on the
+# separators FIRST, so `&&` and `||` never reach the `&` test.
+_SEGMENT_SPLIT = re.compile(r"\|\||&&|;|\||\n")
+_SHELL_DANGER = (">", "$(", "`", "<(", "&")
+
+# Flags that turn a listed reader into a writer.
+_MUTATING_FLAGS = {
+    "sed": ("-i", "--in-place"),
+    "find": ("-delete", "-exec", "-execdir", "-ok", "-okdir",
+             "-fprint", "-fprintf", "-fls"),
+}
+
+
+def _git_subcommand(words: list) -> "str|None":
+    """The verb in a `git` invocation, skipping the global flags that may
+    precede it (`-C <path>`, `--no-pager`, `-c k=v`). None when there is no
+    verb, which is `git` alone — a usage dump, and harmless, but not worth a
+    special case."""
+    i = 1
+    while i < len(words):
+        w = words[i]
+        if w in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):
+            i += 2
+            continue
+        if w.startswith("-"):
+            i += 1
+            continue
+        return w
+    return None
+
+
+def is_read_only_bash(command: str) -> bool:
+    """True only when every segment of `command` provably reads and nothing
+    else. Anything this parse cannot account for — a redirect, a substitution,
+    an unlisted command, a quote it cannot balance — is False."""
+    if not command or not command.strip():
+        return True
+    for segment in _SEGMENT_SPLIT.split(command):
+        segment = segment.strip()
+        if not segment:
+            continue
+        if any(tok in segment for tok in _SHELL_DANGER):
+            return False
+        try:
+            words = shlex.split(segment)
+        except ValueError:          # unbalanced quotes — unparseable, so unknown
+            return False
+        if not words:
+            continue
+        head = os.path.basename(words[0])
+        if head == "git":
+            if _git_subcommand(words) not in _READ_ONLY_GIT:
+                return False
+            continue
+        if head not in _READ_ONLY_COMMANDS:
+            return False
+        flags = _MUTATING_FLAGS.get(head)
+        if flags and any(w.startswith(flags) for w in words[1:]):
+            return False
+    return True
+
+
+def first_action(jsonl_path: Path) -> "str|None":
+    """What in this session's transcript shows the run already acted — the first
+    tool call that is not provably read-only — or None when every call in it was
+    a read, or there were none at all.
+
+    A transcript that is MISSING answers None, deliberately: the CLI writes the
+    opening user turn as the session starts, so no file at all means the run
+    never reached the model and cannot have done anything. A file that exists but
+    cannot be read answers "unreadable transcript" — something was written, and
+    we cannot say what.
+
+    None is NOT proof of innocence and must not be read as such. The child writes
+    this file, so a connection death can lose its last buffered lines. That is
+    why the retry banner rides on every retry, not only the doubtful ones.
+    """
+    if not jsonl_path.exists():
+        return None
+    try:
+        lines = jsonl_path.read_text(errors="replace").splitlines()
+    except OSError:
+        return "unreadable transcript"
+    for line in lines:
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if d.get("type") != "assistant":
+            continue
+        for block in d.get("message", {}).get("content", []) or []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = block.get("name") or "an unnamed tool"
+            if name in _READ_ONLY_TOOLS:
+                continue
+            if name == "Bash":
+                cmd = str((block.get("input") or {}).get("command") or "").strip()
+                if is_read_only_bash(cmd):
+                    continue
+                return f"Bash: {cmd.splitlines()[0][:120]}" if cmd else "Bash"
+            return name
+    return None
+
+
+def retry_banner(retry_of: str, reason: str = "") -> str:
+    """The preamble a re-spawned run is given so it knows a sibling already ran.
+
+    Without this, a retry receives the message a FIRST attempt gets and has no
+    way to know it is a retry — `retry_of` was recorded on the run and in the
+    journal and reached nothing the session could read. Everything the session
+    needs to self-check is here: which run it replaces, what killed it, and the
+    instruction to establish current state before repeating any action. The
+    session is the only actor that can tell a booked cron from a pushed merge.
+    """
+    return (
+        f"[RETRY of run {retry_of}, which died with {reason or 'a transient fault'}] "
+        f"A previous session was given this exact instruction and may already have "
+        f"carried out part or all of it — the fault that killed it says nothing "
+        f"about how far it got. Before you take any outward action (a push, a "
+        f"publish, a send, a merge, a booked wake, a file written), check whether "
+        f"it is already done and skip it if it is. Do only what is left, and say "
+        f"in your answer what you found already done."
+    )
+
+
 def build_argv(claude_bin: str, model: str, session_id: str, message: str,
                resume_session_id: "str|None" = None,
                permission_mode: str = "bypassPermissions") -> list:
@@ -306,12 +481,14 @@ class Run:
     """One spawned claude run: process group owner + watchdog thread."""
 
     def __init__(self, job: dict, defaults: dict, scheduled_for: datetime,
-                 on_finish, retry_of: "str|None" = None):
+                 on_finish, retry_of: "str|None" = None,
+                 retry_reason: str = ""):
         self.job = job  # effective job dict (defaults already applied)
         self.defaults = defaults
         self.scheduled_for = scheduled_for
         self.on_finish = on_finish
         self.retry_of = retry_of
+        self.retry_reason = retry_reason
         self.run_id = uuid.uuid4().hex[:12]
         self.job_id = job["id"]
         self.model = job.get("model") or defaults.get("model", "opus")
@@ -344,8 +521,14 @@ class Run:
         self.session_id = fresh_session_id(self.workspace)
         self._jsonl = session_jsonl_path(self.workspace, self.session_id)
         # EXACT first-message shape — thread classification depends on the
-        # '[cron:' prefix.
-        message = f"[cron:{self.job_id} {self.job.get('name', '')}] {self.job['payload']['message']}"
+        # '[cron:' prefix, so it stays first and the retry banner goes after it,
+        # ahead of the payload. Ahead, not appended: the payload is an
+        # instruction, and a warning that arrives after the thing it qualifies
+        # is a warning the session has already acted past.
+        banner = (retry_banner(self.retry_of, self.retry_reason) + "\n\n"
+                  if self.retry_of else "")
+        message = (f"[cron:{self.job_id} {self.job.get('name', '')}] "
+                   f"{banner}{self.job['payload']['message']}")
         claude_bin = self.job.get("claude_bin") or self.defaults.get("claude_bin", "claude")
         # Install-owned: the marker env a run carries (autonomy gates, timeline
         # origin) and the tool dirs on its PATH.
