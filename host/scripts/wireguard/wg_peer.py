@@ -42,6 +42,11 @@ WG_DIR = Path(os.environ.get(
 ))
 WG_BIN = os.environ.get("WG_BIN", "/opt/homebrew/bin/wg")
 SUBNET_PREFIX = os.environ.get("WG_SUBNET_PREFIX", "10.66.0")  # server = .1
+# Every issued tunnel pins a conservative MTU: at wireguard-go's 1420 default,
+# any path narrower than ~1480 (cellular, VPN, CGNAT middleboxes) blackholes
+# bulk traffic while the handshake still succeeds — a connection that looks up
+# and dies on real payloads. 1240 inner + 60 encapsulation clears a 1300 path.
+MTU = os.environ.get("WG_MTU", "1240")
 
 
 def _endpoint() -> str:
@@ -137,8 +142,8 @@ def _leaf_readme(name, ip):
 def _emit_leaf_bundle(name, ip, client_key, server_pub):
     """A self-contained folder the leaf machine installs from.
 
-    The conf is setconf-style — no `Address` line, which `wg setconf` rejects
-    as wg-quick syntax; the address travels in leaf.env and wg_up.sh puts it
+    The conf is setconf-style — no `Address` or `MTU` line, which `wg setconf`
+    rejects as wg-quick syntax; both travel in leaf.env and wg_up.sh puts them
     on the interface. The bringup scripts are the hub's own, copied in: every
     path in them is env-overridable, and the installer writes those envs into
     the LaunchDaemons it generates.
@@ -160,6 +165,7 @@ def _emit_leaf_bundle(name, ip, client_key, server_pub):
         f"WG_ADDR={ip}/32\n"
         f"WG_SUBNET={SUBNET_PREFIX}.0/24\n"
         f"WG_HUB={SUBNET_PREFIX}.1\n"
+        f"WG_MTU={MTU}\n"
     )
     here = Path(__file__).resolve().parent
     for script in LEAF_SCRIPTS:
@@ -224,6 +230,7 @@ def add(name, leaf=False):
         f"[Interface]\n"
         f"PrivateKey = {client_key}\n"
         f"Address = {ip}/32\n"
+        f"MTU = {MTU}\n"
         f"\n"
         f"[Peer]\n"
         f"PublicKey = {server_pub}\n"

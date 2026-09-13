@@ -346,6 +346,9 @@ def relift(name: str) -> Path:
 
     subnet = allowed or f"{address.rsplit('.', 1)[0]}.0/24"
     hub_ip = subnet.split("/")[0].rsplit(".", 1)[0] + ".1"
+    # A conf minted before the MTU key existed still gets the clamp: at the
+    # 1420 default, constrained paths pass the handshake and drop bulk traffic.
+    mtu = _conf_field(conf, "MTU") or "1240"
 
     folder = tunnel.leaf_bundle_dir(name)
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -365,7 +368,8 @@ def relift(name: str) -> Path:
     (folder / "leaf.env").write_text(
         f"WG_ADDR={address if '/' in address else address + '/32'}\n"
         f"WG_SUBNET={subnet}\n"
-        f"WG_HUB={hub_ip}\n")
+        f"WG_HUB={hub_ip}\n"
+        f"WG_MTU={mtu}\n")
 
     # The bringup scripts are the hub's own, copied in — same three
     # `wg_peer.py` copies, read from where it reads them so a leaf rebuilt

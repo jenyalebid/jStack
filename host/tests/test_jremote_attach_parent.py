@@ -285,6 +285,12 @@ def test_the_bundle_we_write_installs_with_the_real_install_leaf_script(tmp_path
     assert (leaf_dest / "Library/LaunchDaemons/com.jremote.leaf-watch.plist").is_file()
     app = leaf_dest / "Library/Application Support/jRemote Leaf"
     assert (app / "wg_up.sh").is_file() and (app / "leaf.env").is_file()
+    # This bundle's leaf.env predates WG_MTU — the installer must still pin
+    # the clamp into the daemon, or re-installing an old bundle reverts the
+    # leaf to the 1420 default that stalls constrained paths (jStack#54).
+    plist = (leaf_dest / "Library/LaunchDaemons/com.jremote.leaf.plist").read_text()
+    assert "<key>WG_MTU</key>" in plist
+    assert "<string>1240</string>" in plist
     assert "installed com.jremote.leaf" in result["installer_output"]
 
 

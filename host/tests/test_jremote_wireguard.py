@@ -278,6 +278,12 @@ def test_the_installer_mints_into_the_relocated_directory(tmp_path):
         assert str(mesh / "wg0.conf") in (daemons / name).read_text(), (
             f"{name} names a conf the pairing tool does not write to")
 
+    # The hub daemon carries the MTU clamp: a leaf at 1240 still stalls if the
+    # hub keeps emitting 1420-sized datagrams toward it (jStack#54).
+    hub_plist = (daemons / "com.jremote.hub.plist").read_text()
+    assert "<key>WG_MTU</key>" in hub_plist
+    assert "<string>1240</string>" in hub_plist
+
 
 def test_the_tunnel_script_follows_the_relocated_mesh(tmp_path):
     """`wg_up.sh` resolves its conf before it touches the network, and says so
@@ -419,6 +425,9 @@ def test_the_real_tool_pairs_a_device(hub):
     assert "PrivateKey = CLIENT-PRIVATE-KEY" in conf
     assert "Endpoint = hub.example.com:51820" in conf
     assert "AllowedIPs = 10.66.0.0/24" in conf
+    # Without a pinned MTU the profile inherits 1420, and any path narrower
+    # than ~1480 passes the handshake then drops bulk traffic (jStack#54).
+    assert "MTU = 1240" in conf
 
 
 def test_the_real_tool_refuses_a_second_pairing_of_one_name(hub):
@@ -448,8 +457,14 @@ def test_a_leaf_bundle_carries_every_file_the_installer_reads(hub):
     bundle = wg_dir / "clients" / "studio-leaf"
     for name in tunnel.LEAF_FILES:
         assert (bundle / name).is_file(), f"leaf bundle is missing {name}"
-    assert "Address" not in (bundle / "jrleaf.conf").read_text(), (
+    leaf_conf = (bundle / "jrleaf.conf").read_text()
+    assert "Address" not in leaf_conf, (
         "jrleaf.conf is setconf-style — an Address line makes `wg setconf` reject it")
+    assert "MTU" not in leaf_conf, (
+        "MTU is wg-quick syntax too — it travels in leaf.env, not the conf")
+    assert "WG_MTU=1240" in (bundle / "leaf.env").read_text(), (
+        "a bundle without the clamp brings the leaf up at 1420 and stalls "
+        "constrained paths (jStack#54)")
 
 
 def test_revoking_removes_the_peer_and_the_client_files(hub):

@@ -37,6 +37,9 @@ done
 : "${WG_ADDR:?leaf.env must set WG_ADDR}"
 : "${WG_SUBNET:?leaf.env must set WG_SUBNET}"
 : "${WG_HUB:?leaf.env must set WG_HUB}"
+# Bundles minted before the MTU key existed have no WG_MTU line — they still
+# get the clamp, or a re-install would quietly revert the leaf to 1420.
+WG_MTU="${WG_MTU:-1240}"
 
 find_bin() {
     command -v "$1" 2>/dev/null && return 0
@@ -88,6 +91,8 @@ cat > "$DAEMONS/com.jremote.leaf.plist" <<EOF
         <string>$WG_ADDR</string>
         <key>WG_SUBNET</key>
         <string>$WG_SUBNET</string>
+        <key>WG_MTU</key>
+        <string>$WG_MTU</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>

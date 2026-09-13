@@ -271,8 +271,14 @@ def test_relift_rebuilds_a_bundle_without_touching_the_keypair(tmp_path, monkeyp
     # `wg setconf` rejects wg-quick syntax: the address has to move out of the
     # conf and into leaf.env, which is the only difference between the shapes.
     assert "Address" not in leaf
-    assert "WG_ADDR=10.66.0.7/32" in (folder / "leaf.env").read_text()
-    assert "WG_HUB=10.66.0.1" in (folder / "leaf.env").read_text()
+    assert "MTU" not in leaf
+    env = (folder / "leaf.env").read_text()
+    assert "WG_ADDR=10.66.0.7/32" in env
+    assert "WG_HUB=10.66.0.1" in env
+    # This conf predates the MTU key entirely — the rebuild must still clamp,
+    # or every relifted leaf comes back at the 1420 default that stalls
+    # constrained paths (jStack#54).
+    assert "WG_MTU=1240" in env
 
 
 def test_relift_refuses_when_the_private_key_is_gone(tmp_path, monkeypatch):

@@ -38,6 +38,9 @@ ENDPOINT=""
 ADDR="${WG_ADDR:-10.66.0.1/24}"
 SUBNET="${WG_SUBNET:-10.66.0.0/24}"
 PORT="${WG_PORT:-51820}"
+# Pinned into the daemon like every other knob: the hub must clamp too — a
+# leaf at 1240 still stalls if the hub keeps emitting 1420-sized datagrams.
+MTU="${WG_MTU:-1240}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -164,6 +167,8 @@ cat > "$DAEMONS/com.jremote.hub.plist" <<EOF
         <string>$ADDR</string>
         <key>WG_SUBNET</key>
         <string>$SUBNET</string>
+        <key>WG_MTU</key>
+        <string>$MTU</string>
         <key>WG_NAME_FILE</key>
         <string>$NAME_FILE</string>
         <key>WG_FORWARD</key>

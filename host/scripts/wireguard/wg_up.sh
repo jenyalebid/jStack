@@ -27,6 +27,11 @@ CONF="${WG_CONF:-${WG_PEER_DIR:-$SELF_DIR/../../Credentials/wireguard}/wg0.conf}
 RUN_DIR="${WG_RUN_DIR:-/var/run/wireguard}"
 ADDR="${WG_ADDR:-10.66.0.1/24}"
 SUBNET="${WG_SUBNET:-10.66.0.0/24}"
+# The conf is setconf-style, and `wg setconf` has no MTU key — the interface
+# MTU can only be set here. Left at wireguard-go's 1420 default, any real path
+# narrower than ~1480 (cellular, VPN, CGNAT middleboxes) blackholes bulk
+# traffic in whichever direction crosses it, so both ends run this clamp.
+MTU="${WG_MTU:-1240}"
 
 [ -f "$CONF" ] || { echo "wg_up: missing conf $CONF" >&2; exit 1; }
 
@@ -56,6 +61,7 @@ IFACE="$(cat "$NAME_FILE")"
 "$WG" setconf "$IFACE" "$CONF"
 IP="${ADDR%/*}"
 "$IFCONFIG" "$IFACE" inet "$ADDR" "$IP" alias
+"$IFCONFIG" "$IFACE" mtu "$MTU"
 "$IFCONFIG" "$IFACE" up
 "$ROUTE" -q -n add -inet "$SUBNET" -interface "$IFACE" >/dev/null 2>&1 || true
 
@@ -69,5 +75,5 @@ if [ "${WG_FORWARD:-0}" = "1" ]; then
   echo "wg_up: ip forwarding on — peers reach peers through this hub"
 fi
 
-echo "wg_up: $IFACE live at $ADDR"
+echo "wg_up: $IFACE live at $ADDR mtu $MTU"
 wait "$WG_PID"
