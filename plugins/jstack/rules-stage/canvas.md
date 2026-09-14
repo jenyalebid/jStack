@@ -6,7 +6,7 @@ paths:
 
 # Obsidian Canvas — Auto-loaded Rule
 
-When creating or editing `.canvas` files, follow `~/Prompts/commands/canvas-builder.md`.
+When creating or editing `.canvas` files, follow `~/Operations/Prompts/commands/canvas-builder.md`.
 
 Key rules (read the full routine for details):
 

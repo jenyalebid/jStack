@@ -33,6 +33,9 @@ import os
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _prompts import load as load_prompt  # noqa: E402 — sibling module
+
 PLUGIN_BIN = Path(__file__).resolve().parent.parent / "bin"
 STATE_DIR = Path(os.environ.get(
     "JSTACK_REVIEW_STATE", str(Path.home() / ".claude" / "jstack" / "review-state")
@@ -126,31 +129,8 @@ def main():
         allow()   # can't guarantee once-only → don't risk a loop
 
     source = agent_source(d.get("cwd") or "")
-    reason = (
-        "Final step before this session ends — the daily timeline. It is also your "
-        f"seat's running memory: the next {source} session boots on the last entries "
-        "under this source. If this session performed real work (shipped, published, "
-        "fixed, replied, decided, learned something durable), append ONE entry now, "
-        "written by you from what you actually did:\n\n"
-        f'  {PLUGIN_BIN}/log_event {source} --session {session_id} --origin indirect "<one-line headline, specific and past-tense>" '
-        '[--detail "<short detail — an open thread, a decision, a do-not-repeat>" ...max 3] '
-        '[--context "<longer state worth on-demand recall — never injected>"]\n\n'
-        "Pass --session exactly as written (it binds the entry to this session so the "
-        "dashboard can reopen it); it stamps now automatically — do not pass --at or --date.\n\n"
-        "Only if you wrote that entry, file it under its subject so the work is findable "
-        "across every seat that touched it. Read the shared vocabulary, then set the ONE "
-        "tag that says what this session was ABOUT:\n\n"
-        f"  {PLUGIN_BIN}/log_event tag list\n"
-        f"  {PLUGIN_BIN}/log_event tag set <name> --session {session_id}\n\n"
-        "Recurring work is the same subject every run — the tag your last run used is "
-        "almost always the right answer, and reusing it is the point. Mint one only if "
-        "nothing on the list plausibly covers this work:\n\n"
-        f'  {PLUGIN_BIN}/log_event tag new <name> --description "one line: what work belongs under this"\n\n'
-        "A tag names a subject many sessions share — never the seat, the date, or a "
-        "restatement of your headline.\n\n"
-        "Then stop. If this wake was a no-op (nothing notable happened) or you already "
-        "appended this session's entry, do nothing and stop. Do not start new work."
-    )
+    reason = load_prompt("stop-timeline-reminder.md").format(
+        source=source, session_id=session_id, plugin_bin=PLUGIN_BIN).rstrip("\n")
     print(json.dumps({"decision": "block", "reason": reason}))
     sys.exit(0)
 

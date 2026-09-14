@@ -71,7 +71,9 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_BIN = PLUGIN_ROOT / "bin"
 sys.path.insert(0, str(PLUGIN_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import repo_seat  # noqa: E402
+from _prompts import load as load_prompt  # noqa: E402 — sibling module
 
 try:
     import root as _root  # noqa: E402
@@ -366,10 +368,8 @@ def build_inbox(seat: str, rows: list) -> str:
     in the session it was sent to, not as something to find later."""
     lines = [
         "<jstack-updates>",
-        f"{len(rows)} note{'s' if len(rows) != 1 else ''} sent to {seat} since "
-        "your last session. Context only — nobody is waiting on any of it, "
-        "there is nothing to close, and you will not see it again. Act on one "
-        "only if it changes what you are about to do.",
+        load_prompt("session-start.md", "updates-head").format(
+            n=len(rows), s="s" if len(rows) != 1 else "", seat=seat),
         "",
     ]
     for r in rows:
@@ -393,14 +393,7 @@ def build_inbox(seat: str, rows: list) -> str:
 def build_context(agent: str, submode: str, entries: str, n: int,
                   note: str = "") -> str:
     seat = f"{agent}/{submode}"
-    head = (
-        f"Injected on entry by jStack — everything {seat} (your seat) wrote across "
-        f"its last {n} sessions, oldest first. This is your own recent history: "
-        "you are not starting "
-        "cold. Build on it — don't re-discover, re-propose, or re-litigate what's "
-        "already below. A `↳ verdict:` line is the independent review's call on that "
-        "run — if its note names a move to avoid, pick differently."
-    )
+    head = load_prompt("session-start.md", "seat-timeline").format(seat=seat, n=n)
     return (
         "<jstack-timeline>\n"
         + (f"{note}\n\n" if note else "")
@@ -416,16 +409,11 @@ def build_tag_context(tag: str, seat: str, entries: str, n: int) -> str:
     is a sitting with one subject, and the seat's other threads are noise
     against it. Whoever worked it is in the rows, because a subject is not
     one agent's — the seat here is only where the terminal happens to run."""
+    head = load_prompt("session-start.md", "tag-timeline").format(
+        tag=tag, n=n, seat=seat)
     return (
         "<jstack-timeline>\n"
-        f"Injected on entry by jStack — this session is pinned to **{tag}**, so "
-        f"what follows is the last {n} sittings ANY seat had on that subject, "
-        f"oldest first, each line naming who worked it. It is not "
-        f"{seat}'s own history: you are opening a subject, not a seat. Build on "
-        "it — don't re-discover, re-propose, or re-litigate what's already below. "
-        "Your own entries are tagged the same way automatically, so what you do "
-        "here continues this thread. A `↳ verdict:` line is the independent "
-        "review's call on that run.\n\n"
+        f"{head}\n\n"
         f"{entries}\n"
         "</jstack-timeline>"
     )
@@ -471,16 +459,11 @@ def build_identity(agent: str, submode: str, root: Path, registry: dict) -> str:
         return ""
 
     body = "\n\n".join(parts)
+    head = load_prompt("session-start.md", "identity").format(
+        agent=agent, submode=submode)
     return (
         "<jstack-identity>\n"
-        f"Injected on entry by jStack. Your working directory is a repo that "
-        f"{agent} owns, so you are the {agent} agent working in it — the seat is "
-        f"{agent}/{submode}. Your role files are below: CLAUDE.md walk-up climbs "
-        "from the working directory and your workspace is a sibling of this "
-        "checkout, not an ancestor, so it never reaches them. Read them as your "
-        "own identity, the same as if you had started in the workspace. Where "
-        "they describe your cockpit as the working directory, that part is the "
-        "terminal shape — here the working directory is the code.\n\n"
+        f"{head}\n\n"
         f"{body}\n"
         "</jstack-identity>"
     )

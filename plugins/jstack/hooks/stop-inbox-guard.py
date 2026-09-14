@@ -53,6 +53,8 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_BIN = PLUGIN_ROOT / "bin"
 sys.path.insert(0, str(PLUGIN_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _prompts import load as load_prompt  # noqa: E402 — sibling module
 try:
     import root as _root
 except ImportError:
@@ -193,12 +195,9 @@ def build_reason(rows: list, seat: str) -> str:
 
     if replies:
         n = len(replies)
-        lines += [
-            f"{n} answer{'s' if n != 1 else ''} to what this session sent "
-            f"{'have' if n != 1 else 'has'} come back. This is the reply you "
-            f"asked for — use it before the turn ends.",
-            "",
-        ]
+        lines += load_prompt("stop-inbox-guard.md", "replies-head").format(
+            n=n, s="s" if n != 1 else "",
+            have="have" if n != 1 else "has").splitlines() + [""]
         for r in replies:
             head = f"[#{r['id']}] from {r['from_seat']}"
             if r.get("reply_to"):
@@ -206,60 +205,34 @@ def build_reason(rows: list, seat: str) -> str:
             lines.append(head)
             lines += _body_lines(r)
             lines.append("")
-        lines += [
-            "Carry on with whatever you sent it for. If it answers the question, "
-            "the exchange is over — say nothing back; a message acknowledging a "
-            "message is traffic, not work. If it does not, the follow-up goes "
-            "into the same conversation on their side:",
-            f'  {PLUGIN_BIN}/msg reply <id> "the one thing that was missing"',
-            "",
-        ]
+        lines += load_prompt("stop-inbox-guard.md", "replies-coda").format(
+            plugin_bin=PLUGIN_BIN).splitlines() + [""]
 
     if injects:
         n = len(injects)
-        lines += [
-            f"{n} comment{'s' if n != 1 else ''} landed on GitHub issue"
-            f"{'s' if n != 1 else ''} this conversation created.",
-            "",
-        ]
+        lines += load_prompt("stop-inbox-guard.md", "injects-head").format(
+            n=n, s="s" if n != 1 else "",
+            s2="s" if n != 1 else "").splitlines() + [""]
         for r in injects:
             lines.append(f"[#{r['id']}] from {r['from_seat']}")
             lines += _body_lines(r)
             lines.append("")
-        lines += [
-            "You are the issue's creator. If a comment asks you something or "
-            "the work has gone wrong, answer on the issue itself — `gh issue "
-            'comment <N> -R <owner/repo> --body "…"` — digest form, a few '
-            "lines; the operator reads these. A progress note that needs nothing gets "
-            "nothing back.",
-            "",
-        ]
+        lines += load_prompt(
+            "stop-inbox-guard.md", "injects-coda").splitlines() + [""]
 
     if tasks:
         n = len(tasks)
-        lines += [
-            f"{n} task{'s' if n != 1 else ''} {'were' if n != 1 else 'was'} handed "
-            f"to this session and {'have' if n != 1 else 'has'} no answer yet. The "
-            f"sender is blocked waiting on it — answer before the turn ends.",
-            "",
-        ]
+        lines += load_prompt("stop-inbox-guard.md", "tasks-head").format(
+            n=n, s="s" if n != 1 else "", were="were" if n != 1 else "was",
+            have="have" if n != 1 else "has").splitlines() + [""]
         for r in tasks:
             lines.append(f"[#{r['id']}] from {r['from_seat']}")
             lines += _body_lines(r)
             lines.append("")
-        lines += [
-            "Do it, then answer — the reply IS the close, there is nothing else:",
-            f'  {PLUGIN_BIN}/msg reply <id> "what you did, or the answer they wanted"',
-            "",
-            "If you cannot do it, say that in the reply and why. An answer that "
-            "reports a refusal or a blocker is a real answer; silence is not. If "
-            "the ask is unclear, reply with the question — it reaches the session "
-            "that sent it and they can answer you.",
-            "",
-        ]
+        lines += load_prompt("stop-inbox-guard.md", "tasks-coda").format(
+            plugin_bin=PLUGIN_BIN).splitlines() + [""]
 
-    lines.append("Then stop. This is the only thing you owe anyone here — do not "
-                 "go looking for other mail and do not start unrelated work.")
+    lines.append(load_prompt("stop-inbox-guard.md", "closing"))
     return "\n".join(lines)
 
 
