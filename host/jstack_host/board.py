@@ -1273,6 +1273,24 @@ def active_sessions() -> list[dict]:
     def entry(sid, pd, label, window, headless=False, pids=(), window_name="",
               engine="", tty=False, running=True, model=""):
         agent_id, name, emoji, sub_mode = identity(pd, label)
+        # A managed session with no transcript yet — every phone-opened session
+        # until the user submits its first turn — has no project dir for
+        # identity() to read its seat from, so it came back blank. The seat is
+        # not unknown, though: the spawn recorded it in the open registry, which
+        # is exactly what open_sessions() and codex_row() read. Without this
+        # fallback such a session lands in the Active feed unattributed and never
+        # appears under its own seat, so the phone that just opened it cannot
+        # find it again to reattach. Mode is not in the registry — a managed
+        # pane is a chat pane, the same call codex_row makes for its own
+        # no-transcript rows.
+        if not agent_id and sid in reg:
+            base = (reg.get(sid) or {}).get("agent", "")
+            if base:
+                cfg = agents.get(base, {})
+                agent_id = base
+                name = cfg.get("name") or base.capitalize()
+                emoji = cfg.get("emoji", "")
+                sub_mode = _CHAT_MODE
         # A spawn's own title — argv `--name` wherever the process states one,
         # the open registry for a managed session (which states its title to
         # the registry instead). What the app shows for a session that has no
