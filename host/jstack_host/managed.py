@@ -759,10 +759,22 @@ def open_managed(sid: str, cwd: str, resume: bool = True, displace=None,
     # next `claude` on this Mac reads a stale record as a failed start and drops
     # to the classic renderer; two of them turn fullscreen off machine-wide.
     # CLAUDE_CODE_NO_FLICKER=1 is the env entry path, which never arms it.
+    # Anchor the pane in its workspace by absolute path, in the pane's own shell
+    # — never trust tmux's `-c` start-directory alone. `-c` is resolved against
+    # the tmux SERVER's cwd, and a long-lived server whose cwd was rebuilt out
+    # from under it (a host reinstall replaces ~/jStack; the server keeps a
+    # descriptor on the now-deleted inode) can no longer resolve `-c` at all —
+    # every new pane then silently inherits the server's DELETED cwd. Newer
+    # `claude` refuses to start in a deleted directory and exits on the spot, so
+    # the pane dies before it ever attaches and the phone sees a thread that
+    # never opens a terminal. `cd` re-walks the path from root in the pane, immune
+    # to the server's state; `|| exit 1` fails the pane cleanly if the workspace
+    # is genuinely gone rather than exec-ing claude into a bad directory.
+    enter = f"cd {shlex.quote(cwd)} || exit 1; "
     boot = _write_boot(sid,
                        f"export PATH={_PATH}; export CLAUDE_CODE_NO_FLICKER=1; "
                        f"{pin}{_compose_exports(sid)}"
-                       f"unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION; ", inner)
+                       f"unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION; {enter}", inner)
     subprocess.run(_t("send-keys", "-t", name, "-l", f"source {boot}"), check=True)
     subprocess.run(_t("send-keys", "-t", name, "Enter"), check=True)
     # Each engine has its own unanswerable-from-a-phone startup prompt, and
