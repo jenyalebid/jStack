@@ -8,6 +8,7 @@ in the package silently re-couples the host to this Mac, and the guard at the
 bottom is what catches that.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -311,3 +312,78 @@ def test_no_module_in_the_package_imports_lib_agents_directly():
             if "lib.agents" in code and "import" in code:
                 offenders.append(f"{path.name}:{n}: {line.strip()}")
     assert not offenders, "import lib.agents through hostenv:\n" + "\n".join(offenders)
+
+
+# ── minting an identity into a dir no host serves (#45) ──
+
+def _declare(marker: Path, state: Path) -> None:
+    """Write an embed marker naming `state` — an embedded host on this
+    machine saying, in writing, where it lives."""
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps(
+        {"server": "the dashboard", "port": 9090, "profile": "jj",
+         "state_dir": str(state), "token_path": str(state / "api-token")}))
+
+
+def test_host_id_refuses_to_mint_beside_a_host_that_declared_elsewhere(
+        monkeypatch, tmp_path):
+    """The whole of #45 in one assertion.
+
+    Something on the machine resolved the default state dir — a hook with a
+    hardcoded path, a test suite with no profile importable — and minted a
+    second `host-id` for one Mac. The app routes on that id, so it reads a
+    second host at the same address: every session on its board real, none of
+    them the ones asked for.
+    """
+    stray, served = tmp_path / "stray", tmp_path / "served"
+    _declare(tmp_path / "embedded.json", served)
+    monkeypatch.setenv("JREMOTE_EMBED_MARKER", str(tmp_path / "embedded.json"))
+    monkeypatch.setenv("JREMOTE_STATE_DIR", str(stray))
+    monkeypatch.delenv("JREMOTE_HOST_ID", raising=False)
+
+    with pytest.raises(hostenv.SecondIdentity) as caught:
+        hostenv.host_id()
+    assert str(served) in str(caught.value), "the refusal must name the real dir"
+    assert not (stray / "host-id").exists(), "it minted anyway"
+    assert not stray.exists(), "a refused call left the directory behind"
+
+
+def test_host_id_still_answers_from_the_dir_the_marker_names(
+        monkeypatch, tmp_path):
+    """Serving is what the marker asserts, and a host serving here mints here.
+    The refusal is about the dir being *wrong*, never about a marker existing."""
+    served = tmp_path / "served"
+    _declare(tmp_path / "embedded.json", served)
+    monkeypatch.setenv("JREMOTE_EMBED_MARKER", str(tmp_path / "embedded.json"))
+    monkeypatch.setenv("JREMOTE_STATE_DIR", str(served))
+    monkeypatch.delenv("JREMOTE_HOST_ID", raising=False)
+
+    minted = hostenv.host_id()
+    assert minted and hostenv.host_id() == minted, "the id must be stable"
+
+
+def test_an_id_already_on_disk_is_read_back_even_from_a_stray_dir(
+        monkeypatch, tmp_path):
+    """Reading is not claiming. A dir that already holds an id answers for
+    whoever put it there, and refusing that would break every reader of a
+    second host's dir to prevent a write that is not happening."""
+    stray, served = tmp_path / "stray", tmp_path / "served"
+    stray.mkdir()
+    (stray / "host-id").write_text("already-here")
+    _declare(tmp_path / "embedded.json", served)
+    monkeypatch.setenv("JREMOTE_EMBED_MARKER", str(tmp_path / "embedded.json"))
+    monkeypatch.setenv("JREMOTE_STATE_DIR", str(stray))
+    monkeypatch.delenv("JREMOTE_HOST_ID", raising=False)
+
+    assert hostenv.host_id() == "already-here"
+
+
+def test_no_marker_is_no_opinion_and_a_fresh_host_mints(monkeypatch, tmp_path):
+    """A machine that never embedded a host has nothing to disagree with, and
+    a first install has to mint or it cannot come up at all. Refusing on
+    absence would protect a new host from a second one it does not have."""
+    monkeypatch.setenv("JREMOTE_EMBED_MARKER", str(tmp_path / "absent.json"))
+    monkeypatch.setenv("JREMOTE_STATE_DIR", str(tmp_path / "fresh"))
+    monkeypatch.delenv("JREMOTE_HOST_ID", raising=False)
+
+    assert hostenv.host_id(), "a host with no rival could not name itself"

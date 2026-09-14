@@ -600,6 +600,13 @@ def _internal_token_locked() -> str:
         _, secret = parse(token)
         if secret and hmac.compare_digest(row["token_hash"], _hash(secret)):
             return token
+    # Past here is a mint or a re-key, which is this host claiming an identity
+    # — and a process that resolved the wrong state dir claims it into a store
+    # the real host never reads. The plaintext and the hash both land in that
+    # world, so nothing later reconciles them and every caller re-keys again.
+    # Reading an existing credential above is unaffected: it answers for
+    # whoever wrote it, and that is the same answer whoever asks.
+    hostenv.refuse_second_identity(path.parent, "the host's internal token")
     secret = secrets.token_urlsafe(32)
     if row is None:
         if not store.add_device(INTERNAL_ID, INTERNAL_ID, _hash(secret)):

@@ -510,7 +510,15 @@ def install(*, port: int = DEFAULT_PORT, bind: str = DEFAULT_BIND,
 
     print(f"host up on {bind}:{port} — profile {served.get('profile')}", file=out)
     print(f"  name      {hostenv.host_name()}", file=out)
-    print(f"  host id   {hostenv.host_id()}", file=out)
+    try:
+        print(f"  host id   {hostenv.host_id()}", file=out)
+    except hostenv.SecondIdentity as exc:
+        # The install itself worked — the agent is up and answering health. It
+        # is the *identity* that is contested, because an embedded host on this
+        # machine has already declared a different state dir. Reporting that in
+        # place of an id is the honest line; a traceback under "host up" would
+        # read as the install having failed, and it did not.
+        print(f"  host id   -- {exc}", file=out)
     print(f"  state     {state}", file=out)
     print(f"  agent     {path}", file=out)
     print(f"  token     {token}"

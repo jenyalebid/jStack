@@ -700,7 +700,15 @@ def _cmd_where(args) -> int:
     """
     _adopt(args)
     print(f"name         {hostenv.host_name()}")
-    print(f"host id      {hostenv.host_id()}")
+    # A refusal is the answer here, not a crash. `where` is the command someone
+    # pastes into a support question, and the one thing it must never do is
+    # invent — which is what it did before the refusal existed: minted an id
+    # into whatever dir it had resolved and printed it as this machine's. The
+    # message names both directories, so the paste carries its own diagnosis.
+    try:
+        print(f"host id      {hostenv.host_id()}")
+    except hostenv.SecondIdentity as exc:
+        print(f"host id      -- {exc}")
     print(f"profile      {hostenv.profile().name}")
     print(f"package      {hostenv.package_root()}")
     print(f"state        {hostenv.state_dir()}")
