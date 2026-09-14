@@ -25,9 +25,14 @@ Grammar:
 
     /takeover                     this workspace, no focus
     /takeover <focus...>          this workspace, scoped to <focus>
-    /takeover @agent              that agent's workspace
-    /takeover @agent/<seat>       that agent's named seat
-    /takeover @agent <focus...>   that agent's workspace, scoped
+    /takeover @agent              that agent's cockpit
+    /takeover @agent-<seat>       that agent's named seat
+    /takeover @agent <focus...>   that agent's cockpit, scoped
+
+The address is the one grammar mail and the scheduler share: an agent alone is
+its cockpit, hyphens walk down the seat tree (`@alice-social-threads`), and a
+seat holding its own `chat/` resolves there. A slash is refused with the
+hyphen spelling rather than guessed at.
 
 The source session is untouched and keeps running — a takeover is a second
 pair of eyes arriving, not a handover the source has to survive. Closing it, if
