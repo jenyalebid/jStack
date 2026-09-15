@@ -1780,3 +1780,22 @@ def test_codex_card_shows_transcript_facts_after_reattach(ws, monkeypatch, tmp_p
     assert row['last_reply'] == 'Checking the setup'
     assert (row['last_context'], row['tokens']) == (2500, 5000)
     assert row['model'] == 'gpt-6-astra' and row['turn'] == 'working'
+
+
+def test_codex_board_uses_native_title(ws, monkeypatch, tmp_path):
+    from jstack_host import managed, codex_transcript, messages
+    loc, _ = ws
+    sid = "bbbb0002-1111-2222-3333-444444444444"
+    rollout = tmp_path / "rollout-native.jsonl"
+    rollout.write_text('{}\n')
+    monkeypatch.setattr(managed, "open_registry", lambda: {
+        sid: {"agent": "nova", "engine": "codex", "transcript": str(rollout)}})
+    monkeypatch.setattr(managed, "attached_names", lambda: set())
+    monkeypatch.setattr(codex_transcript, "summary", lambda p: {"title": "Repair session titles"})
+    monkeypatch.setattr(messages, "parse_session", lambda sid: {"messages": [
+        {"role": "user", "text": "initial input"}]})
+    _windows(monkeypatch, attached=set())
+    _procs(monkeypatch, [_raw(22, loc) | {"tty": "/dev/ttys002", "engine": "codex"}])
+    row = next(r for r in board.active_sessions() if r["session_id"] == sid)
+    assert row["preview"] == "Repair session titles"
+    assert row["last_prompt"] == "initial input"

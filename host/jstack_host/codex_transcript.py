@@ -31,6 +31,36 @@ def root() -> Path:
     return Path.home() / ".codex" / "sessions"
 
 
+def session_titles() -> dict[str, str]:
+    """Native generated/renamed titles; the index changes apart from rollouts."""
+    index = root().parent / "session_index.jsonl"
+    try:
+        st = index.stat()
+        return dict(_session_titles(str(index), st.st_mtime_ns, st.st_size))
+    except OSError:
+        return {}
+
+
+@lru_cache(maxsize=4)
+def _session_titles(path: str, mtime_ns: int, size: int) -> dict[str, str]:
+    titles = {}
+    try:
+        with open(path) as fh:
+            for line in fh:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                sid, name = entry.get("id"), entry.get("thread_name")
+                if isinstance(sid, str) and isinstance(name, str):
+                    titles[sid] = name.strip()
+    except OSError:
+        pass
+    return titles
+
+
 def session_id(path: Path) -> str:
     meta = metadata(path)
     return str(meta.get("session_id") or meta.get("id") or "")
@@ -211,7 +241,9 @@ def summary(path: Path) -> dict:
     """Session-card facts from the provider's own events, cached per file write."""
     try:
         st = path.stat()
-        return dict(_summary(str(path), st.st_mtime_ns, st.st_size))
+        facts = dict(_summary(str(path), st.st_mtime_ns, st.st_size))
+        facts["title"] = session_titles().get(session_id(path), "")
+        return facts
     except OSError:
         return {}
 

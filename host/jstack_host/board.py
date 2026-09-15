@@ -1529,7 +1529,7 @@ def active_sessions() -> list[dict]:
             "agent_name": cfg.get("name") or base.capitalize(),
             "emoji": cfg.get("emoji", ""), "sub_mode": _CHAT_MODE,
             "window_name": info.get("name", ""),
-            "preview": first_user[:80], "last_activity": codex_activity,
+            "preview": facts.get("title") or first_user[:80], "last_activity": codex_activity,
             "spawned": codex_spawned,
             "last_prompt": last_user, "last_reply": last_reply,
             "tokens": facts.get("tokens", 0), "last_context": codex_load.get("context", 0),

@@ -581,8 +581,14 @@ class SessionStore:
         # Codex writes rollouts under a date tree rather than Claude's
         # project-dir tree. They feed the same index and therefore the same
         # History, search, Conversation and Events surfaces.
-        from .codex_transcript import root as codex_root
+        from .codex_transcript import root as codex_root, session_titles, metadata
+        from .hostenv import project_dir_to_agent
+        from .board import _display_sub_mode
         croot = codex_root()
+        titles = session_titles()
+        with self._conn() as db:
+            indexed_titles = {r["path"]: (r["ai_title"], r["sub_mode"]) for r in db.execute(
+                "SELECT path, ai_title, sub_mode FROM sessions WHERE project_dir LIKE 'codex:%'")}
         for f in croot.glob("**/rollout-*.jsonl") if croot.exists() else []:
             path = str(f)
             seen.add(path)
@@ -592,7 +598,13 @@ class SessionStore:
                 st = f.stat()
             except OSError:
                 continue
-            if self._known.get(path) == (st.st_mtime_ns, st.st_size):
+            meta = metadata(f)
+            native_sid = str(meta.get("session_id") or meta.get("id") or "")
+            parsed = project_dir_to_agent(str(meta.get("cwd") or "").replace("/", "-"))
+            old_title, old_mode = indexed_titles.get(path, ("", ""))
+            mode = _display_sub_mode(parsed[1]) if parsed else old_mode
+            if self._known.get(path) == (st.st_mtime_ns, st.st_size) \
+                    and (old_title, old_mode) == (titles.get(native_sid, "")[:_CAP_TITLE], mode):
                 continue
             if self._index_file(f, st):
                 changed += 1
@@ -625,6 +637,16 @@ class SessionStore:
                 and str(row["first_msg"]).startswith("# AGENTS.md instructions for "):
             state = self._fresh_state(f)
         if f.name.startswith("rollout-"):
+            # The registry workspace may already be the chat seat. Resolve the
+            # full cwd instead of losing its mode relative to that workspace.
+            from .codex_transcript import metadata
+            from .hostenv import project_dir_to_agent
+            from .board import _display_sub_mode
+            cwd = str(metadata(f).get("cwd") or "")
+            parsed = project_dir_to_agent(cwd.replace("/", "-")) if cwd else None
+            if parsed:
+                state["agent_id"] = parsed[0]
+                state["sub_mode"] = _display_sub_mode(parsed[1])
             try:
                 from .managed import open_registry
                 bound_sid = next((sid for sid, info in open_registry().items()
@@ -654,6 +676,9 @@ class SessionStore:
             lines = chunk[:end].split(b"\n")
             new_offset = offset + end + 1
         self._fold(state, lines)
+        if f.name.startswith("rollout-"):
+            from .codex_transcript import session_titles, session_id
+            state["ai_title"] = session_titles().get(session_id(f), "")[:_CAP_TITLE]
         state["byte_offset"] = new_offset
         state["file_size"] = st.st_size
         state["mtime_ns"] = st.st_mtime_ns
