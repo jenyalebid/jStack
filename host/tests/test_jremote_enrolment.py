@@ -624,27 +624,45 @@ def test_pair_open_does_not_wait_on_a_link_nothing_took(open_pair, store):
     assert time.monotonic() - started < 0.3
 
 
-def test_pair_json_puts_the_first_address_and_the_code_in_the_link(
-        store, monkeypatch, capsys):
-    """What the menu bar's QR is made of. A link carrying any address other
-    than the one the list says to try first — above all the mesh one a
-    still-pairing device cannot reach — scans cleanly and then times out,
-    which the person reads as the pairing failing."""
+def _pair_json(store, monkeypatch, capsys, inets):
+    """Run `pair --json` against a host holding `inets`, return the payload."""
     import json
     from types import SimpleNamespace
     from jstack_host import addresses, cli, devices
 
     monkeypatch.setattr(cli, "_adopt", lambda a: None)
     monkeypatch.setattr(devices, "provisioned", lambda: True)
-    monkeypatch.setattr(addresses, "_inet_addrs",
-                        lambda: ["10.66.0.1", "192.168.0.106"])
+    monkeypatch.setattr(addresses, "_inet_ifaces",
+                        lambda: {a: "en0" for a in inets})
     monkeypatch.setattr(addresses, "_hostname", lambda: "work-mac")
 
     args = SimpleNamespace(name="Friend phone", ttl=600, open=False,
                            json=True, state_dir=None, port=None)
     assert cli._cmd_pair(args) == 0
-    out = json.loads(capsys.readouterr().out)
+    return json.loads(capsys.readouterr().out)
+
+
+def test_pair_json_puts_the_mesh_address_in_the_link(store, monkeypatch,
+                                                     capsys):
+    """What the menu bar's QR is made of. The tunnel is always-on, so the
+    mesh address is the one a paired device reaches from any network — a QR
+    carrying the LAN address instead scans cleanly and then times out the
+    moment the phone is off this wifi, which the person reads as the pairing
+    failing. This test used to pin the LAN address into the link on exactly
+    that timeout argument, reversed: that was true of an on-demand tunnel
+    and became the bug when the tunnel went always-on."""
+    out = _pair_json(store, monkeypatch, capsys,
+                     ["10.66.0.1", "192.168.0.106"])
     assert [a["kind"] for a in out["addresses"]] == ["lan", "local", "mesh"]
     assert out["link"].startswith("jremote://pair?")
+    assert "url=http%3A%2F%2F10.66.0.1%3A9090" in out["link"]
+    assert out["code"] in out["link"]
+
+
+def test_pair_json_without_a_mesh_falls_back_to_the_first_address(
+        store, monkeypatch, capsys):
+    """A host running no tunnel has no roaming address to offer — the link
+    carries the first address the host names, exactly as before."""
+    out = _pair_json(store, monkeypatch, capsys, ["192.168.0.106"])
     assert "url=http%3A%2F%2F192.168.0.106%3A9090" in out["link"]
     assert out["code"] in out["link"]

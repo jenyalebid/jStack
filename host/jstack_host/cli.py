@@ -83,7 +83,16 @@ def _cmd_pair(args) -> int:
                    "expires_in": row["expires_in"], "port": port,
                    "addresses": found}
         if found:
-            query = {"code": row["code"], "url": found[0]["url"]}
+            # The QR carries the mesh address when this host runs one. The
+            # tunnel is always-on now, so a paired device reaches 10.66.0.x
+            # from any network — while the LAN address this link used to
+            # carry is dead the moment the scanning phone is off this wifi,
+            # and the redeem endpoint applies no locational rule anyway.
+            # A device with no tunnel yet can't be saved by either choice
+            # of QR address on cellular; for its one first contact the
+            # dialog prints the LAN address as the by-hand path.
+            mesh = next((a for a in found if a["kind"] == "mesh"), None)
+            query = {"code": row["code"], "url": (mesh or found[0])["url"]}
             if row["name"]:
                 query["name"] = row["name"]
             payload["link"] = "jremote://pair?" + urlencode(query)
