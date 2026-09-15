@@ -1,6 +1,6 @@
 # TAKEOVER — you are continuing another session's work
 
-You have been opened to take over a Claude Code session that is still running.
+You have been opened to take over an agent session that is still running.
 Its transcript is on disk and you were handed no summary of it, deliberately: a
 handoff doc is the outgoing session's account of itself, and an account written
 by the session that made the mistakes repeats them with its own confidence
@@ -51,6 +51,20 @@ Blank lines are dropped before `tail`, not after, or the tail is all blanks.
 
 `session-files --session {sid}` gives the same write list already filtered to
 what git still sees — the stage list, if this ends in a commit.
+
+For a Codex rollout (`session_meta` as its first record), use its native
+message records instead of the Claude queries above:
+
+```bash
+jq -r 'select(.type=="response_item" and .payload.type=="message")
+       | .payload | select(.role=="user" or .role=="assistant")
+       | .role + ": " + ([.content[]? | .text // empty] | join(" "))' "$T"
+```
+
+Codex stores steered user messages in the same message stream. Its
+`event_msg/user_message` records duplicate that stream; do not count both.
+`session-files` also understands native Codex `apply_patch` calls. Shell or
+script writes still need to be checked against the tree separately.
 
 ## Then — verify before you build on it
 

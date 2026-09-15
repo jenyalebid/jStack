@@ -325,6 +325,15 @@ async def pty_ws(ws: WebSocket, sid: str, cols: int = 80, rows: int = 24,
                 # Keystrokes are the driving fact — a handoff typed here
                 # must open its window on this instance.
                 attach.note_input(att)
+                if (managed.open_registry().get(sid) or {}).get("engine") == "codex":
+                    from .codex_commands import pending_command, translate_paste, workspace
+                    if data == b"\r":
+                        command = await asyncio.to_thread(pending_command, sid)
+                        if command is not None:
+                            await _write_all(master, command)
+                            await asyncio.sleep(0.3)
+                    cwd = await asyncio.to_thread(workspace, sid) if data.startswith(b"\x1b[200~/") else ""
+                    data = translate_paste(data, cwd)
                 await _write_all(master, data)
                 continue
             text = msg.get("text")

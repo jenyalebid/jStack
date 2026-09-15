@@ -776,7 +776,7 @@ def open_managed(sid: str, cwd: str, resume: bool = True, displace=None,
     boot = _write_boot(sid,
                        f"export PATH={_PATH}; export CLAUDE_CODE_NO_FLICKER=1; "
                        f"{pin}{_compose_exports(sid)}"
-                       f"unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION; {enter}", inner)
+                       f"unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID; {enter}", inner)
     subprocess.run(_t("send-keys", "-t", name, "-l", f"source {boot}"), check=True)
     subprocess.run(_t("send-keys", "-t", name, "Enter"), check=True)
     # Each engine has its own unanswerable-from-a-phone startup prompt, and
@@ -931,7 +931,9 @@ def _auto_skip_codex_update(name: str) -> None:
         f'    {_TMUX} -L {_SOCK} send-keys -t {name} Enter; break; '
         f'  fi; sleep 0.5; done'
     )
-    subprocess.Popen(["bash", "-c", script], start_new_session=True)
+    subprocess.Popen(["bash", "-c", script], start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL)
 
 
 def _trust_workspace(cwd: str) -> None:
@@ -1003,7 +1005,9 @@ def _auto_accept_bypass(name: str) -> None:
         f'    {_TMUX} -L {_SOCK} send-keys -t {name} Enter; break; '
         f'  fi; sleep 0.3; done'
     )
-    subprocess.Popen(["bash", "-c", script], start_new_session=True)
+    subprocess.Popen(["bash", "-c", script], start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL)
 
 
 # Per engine: (the line that proves the TUI is up and idle, the startup prompt
@@ -1043,16 +1047,24 @@ def _nudge_when_ready(name: str, text: str, engine: str = "claude") -> None:
         f'    {_TMUX} -L {_SOCK} send-keys -t {name} Enter; break; '
         f'  fi; sleep 0.5; done'
     )
-    subprocess.Popen(["bash", "-c", script], start_new_session=True)
+    subprocess.Popen(["bash", "-c", script], start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL)
 
 
 def send_input(sid: str, text: str) -> bool:
     """Type `text` + Enter into the managed session's stdin. False if not open."""
     if not is_open(sid):
         return False
+    engine = (open_registry().get(sid) or {}).get("engine", "claude")
+    if engine == "codex":
+        from .codex_commands import translate, workspace
+        text = translate(text, workspace(sid) if text.lstrip().startswith("/") else "")
     name = _name(sid)
     for argv in _type_argv(name, text):
         subprocess.run(argv, check=True)
+    if engine == "codex":
+        time.sleep(0.3)  # let Codex finish its paste burst before submitting
     subprocess.run(_t("send-keys", "-t", name, "Enter"), check=True)
     return True
 
@@ -1102,7 +1114,8 @@ def send_input_after_compact(sid: str, text: str, transcript: str,
     )
     subprocess.Popen([sys.executable, "-c", script, transcript,
                       json.dumps(argv), str(timeout)],
-                     start_new_session=True)
+                     start_new_session=True, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return True
 
 
@@ -1152,6 +1165,7 @@ def close_managed(sid: str, review: bool = True) -> bool:
         ["bash", "-c", "; ".join(steps)],
         cwd=str(hostenv.package_root()),   # so `-m jstack_host.…` resolves
         start_new_session=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     return True
 

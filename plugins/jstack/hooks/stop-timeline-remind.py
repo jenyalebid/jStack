@@ -34,6 +34,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from session_runtime import codex_user_engaged
 from _prompts import load as load_prompt  # noqa: E402 — sibling module
 
 PLUGIN_BIN = Path(__file__).resolve().parent.parent / "bin"
@@ -52,6 +54,8 @@ def allow():
 def is_user_engaged(jsonl_path: Path) -> bool:
     """Same discriminator as session-review-spawn: promptSource="typed" or TUI
     mode/permission-mode entries — only humans produce either."""
+    if codex_user_engaged(jsonl_path):
+        return True
     try:
         with jsonl_path.open() as f:
             for line in f:
@@ -60,6 +64,8 @@ def is_user_engaged(jsonl_path: Path) -> bool:
                 except json.JSONDecodeError:
                     continue
                 t = e.get("type")
+                if t == "session_meta" and (e.get("payload") or {}).get("source") == "cli":
+                    return True
                 if t in ("mode", "permission-mode"):
                     return True
                 if (t == "user" and not e.get("isMeta")

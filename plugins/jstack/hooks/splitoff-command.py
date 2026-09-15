@@ -32,6 +32,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from session_runtime import engine, metadata, CodexRPC
 from _answer import block  # noqa: E402 — sibling module, path set above
 
 #: Overridable so a test can stand fakes in their place — the alternative,
@@ -39,7 +41,8 @@ from _answer import block  # noqa: E402 — sibling module, path set above
 #: machine the fake for as long as the test runs.
 DUB = Path(os.environ.get("JSTACK_DUB_BIN")
            or Path(__file__).resolve().parent.parent / "bin" / "dub-session")
-TERMINAL = os.environ.get("JSTACK_TERMINAL_BIN") or "open-terminal-here"
+TERMINAL = (os.environ.get("JSTACK_TERMINAL_BIN") or shutil.which("open-terminal-here")
+            or str(Path(__file__).resolve().parent.parent / "bin/open-terminal-here"))
 
 #: The dub is a line-by-line rewrite of one jsonl and the open is an osascript
 #: round-trip. Both are seconds; the ceiling is here so a hang reads as a hang.
@@ -74,6 +77,29 @@ def main() -> None:
 
     words = " ".join((match.group(1) or "").split())
     suffix = f" - {words}" if words else " - copy"
+
+    provider = engine(payload)
+    if provider == "codex":
+        try:
+            with CodexRPC() as rpc:
+                fork = rpc.call("thread/fork", {"threadId": metadata(transcript)["id"],
+                                               "excludeTurns": True, "deferGoalContinuation": True})
+            new_id = fork["thread"]["id"]
+        except (OSError, RuntimeError, TimeoutError, KeyError) as exc:
+            block(f"/splitoff: native Codex fork failed: {exc}")
+        cmd = [TERMINAL, str(payload.get("cwd") or Path.cwd()), "--engine", "codex",
+               "--name", words or "copy", "--resume", new_id]
+        if payload.get("model"):
+            cmd += ["--model", payload["model"]]
+        try:
+            opened = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
+            if opened.returncode:
+                block(f"/splitoff: fork {new_id} created; window failed: {opened.stderr.strip()}\n"
+                      f"Resume with: codex resume {new_id}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            block(f"/splitoff: fork {new_id} created; window failed: {exc}\n"
+                  f"Resume with: codex resume {new_id}")
+        block(f"split → {words or 'copy'} · {new_id}\n  native Codex fork; source session unchanged")
 
     try:
         dub = subprocess.run([str(DUB), transcript, "", suffix],

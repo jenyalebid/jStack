@@ -12,6 +12,7 @@
 #     (file loudly without the marker), never a refusal.
 #   - --no-assign assigning anyway — it is the service-call kill switch.
 set -uo pipefail
+unset CODEX_THREAD_ID
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -27,6 +28,7 @@ bad() { echo "  FAIL $1 — $2"; fails=$((fails+1)); }
 # file-issue has to live beside a copy of it, not on PATH.
 STUB="$TMP/bin"; mkdir -p "$STUB"
 cp "$PLUGIN_ROOT/bin/task-create" "$PLUGIN_ROOT/bin/msg" "$STUB/"
+cp "$PLUGIN_ROOT/session_runtime.py" "$TMP/"
 
 export FI_CALLS="$TMP/file-issue.log" GH_CALLS="$TMP/gh.log"
 cat > "$STUB/file-issue" <<'STUBEOF'

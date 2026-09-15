@@ -73,6 +73,7 @@ PLUGIN_BIN = PLUGIN_ROOT / "bin"
 sys.path.insert(0, str(PLUGIN_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import repo_seat  # noqa: E402
+from session_runtime import engine, engagement_marker
 from _prompts import load as load_prompt  # noqa: E402 — sibling module
 
 try:
@@ -515,6 +516,16 @@ def main() -> int:
     # no injection to see it.
     if not _is_interactive():
         return 0
+
+    if engine(payload) == "codex" and payload.get("session_id"):
+        # A CLI can resume a thread born in `codex exec`; its original source
+        # field stays exec. Record the real interactive attach for review.
+        try:
+            marker = engagement_marker(payload["session_id"], cfg.get("state_dir"))
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+        except OSError:
+            pass
 
     seat = f"{agent}/{submode}"
     blocks = []

@@ -54,6 +54,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_BIN = PLUGIN_ROOT / "bin"
 sys.path.insert(0, str(PLUGIN_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from session_runtime import user_text
 from _prompts import load as load_prompt  # noqa: E402 — sibling module
 try:
     import root as _root
@@ -141,14 +142,8 @@ def first_prompt(jsonl_path: Path) -> str:
                     e = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if e.get("type") != "user" or e.get("isMeta"):
-                    continue
-                msg = e.get("message") or {}
-                content = msg.get("content")
-                if isinstance(content, list):
-                    content = " ".join(
-                        c.get("text", "") for c in content if isinstance(c, dict))
-                if isinstance(content, str) and content.strip():
+                content = user_text(e)
+                if content.strip():
                     return content
     except OSError:
         pass

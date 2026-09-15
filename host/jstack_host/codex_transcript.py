@@ -90,8 +90,13 @@ def bind_open_session(board_sid: str, started_at: float, cwd: str = "",
     def run() -> None:
         from . import managed
         for _ in range(attempts):
+            registry = managed.open_registry()
+            existing = (registry.get(board_sid) or {}).get("transcript")
+            if existing and Path(existing).is_file():
+                return  # a native resume/fork was bound explicitly by its id
             path = rollout_started_after(started_at, cwd)
-            if path:
+            claimed = {row.get("transcript") for sid, row in registry.items() if sid != board_sid}
+            if path and str(path) not in claimed:
                 managed.record_transcript(board_sid, str(path))
                 return
             time.sleep(.25)

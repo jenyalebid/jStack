@@ -33,7 +33,10 @@ import re
 import sys
 from pathlib import Path
 
-TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from session_runtime import patch_paths
+
+TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"}
 DEFAULT_RULES_DIR = Path.home() / ".claude" / "rules"
 DEFAULT_CACHE_ROOT = Path("/tmp/jstack-rule-cache")
 DEFAULT_REINJECT_BYTES = 400_000
@@ -64,7 +67,9 @@ def main() -> None:
 
     tool_input = payload.get("tool_input") or {}
     file_path = tool_input.get("file_path") or tool_input.get("notebook_path")
-    if not file_path or not isinstance(file_path, str):
+    file_paths = (patch_paths(tool_input.get("command", ""), payload.get("cwd") or os.getcwd())
+                  if tool_name == "apply_patch" else [file_path] if isinstance(file_path, str) else [])
+    if not file_paths:
         sys.exit(0)
 
     session_id = payload.get("session_id") or "_unknown"
@@ -85,7 +90,7 @@ def main() -> None:
             paths = _parse_paths_frontmatter(rule_path)
             if not paths:
                 continue
-            if any(_glob_match(g, file_path) for g in paths):
+            if any(_glob_match(g, candidate) for g in paths for candidate in file_paths):
                 matched.append(rule_path)
         except Exception:
             continue
@@ -129,7 +134,7 @@ def main() -> None:
         sys.exit(0)
 
     additional = (
-        f"Path-matched rules for `{file_path}`. Apply these conventions to "
+        f"Path-matched rules for {', '.join(file_paths)}. Apply these conventions to "
         "the edit you are about to make:\n\n" + "\n\n---\n\n".join(chunks)
     )
 

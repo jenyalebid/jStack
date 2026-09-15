@@ -87,6 +87,7 @@ from pathlib import Path
 # supported state, and the literal pre-root defaults at each use site keep it
 # answering exactly as it did before the derivation existed.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from session_runtime import transcripts
 try:
     import root as _root
 except ImportError:
@@ -219,7 +220,7 @@ def connect() -> sqlite3.Connection:
 
 def session_id() -> str:
     """The calling session, or '' when there is none."""
-    return os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+    return os.environ.get("CODEX_THREAD_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
 
 
 def agent_root() -> Path:
@@ -413,7 +414,7 @@ def _cwd_of_session(sid: str) -> "Path|None":
     if not sid:
         return None
     try:
-        hits = sorted((Path.home() / ".claude" / "projects").glob(f"*/{sid}.jsonl"))
+        hits = transcripts(sid)
     except OSError:
         return None
     for path in hits:
@@ -423,7 +424,9 @@ def _cwd_of_session(sid: str) -> "Path|None":
                     line = fh.readline()
                     if not line:
                         break
-                    cwd = (json.loads(line) or {}).get("cwd")
+                    row = json.loads(line) or {}
+                    cwd = row.get("cwd") or ((row.get("payload") or {}).get("cwd")
+                                             if row.get("type") == "session_meta" else None)
                     if cwd:
                         return Path(cwd)
         except (OSError, json.JSONDecodeError, ValueError, AttributeError):
@@ -433,7 +436,7 @@ def _cwd_of_session(sid: str) -> "Path|None":
 
 def _session_cwd() -> "Path|None":
     """The calling session's own workspace."""
-    return _cwd_of_session(os.environ.get("CLAUDE_CODE_SESSION_ID", ""))
+    return _cwd_of_session((os.environ.get("CODEX_THREAD_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID", "")))
 
 
 def sender_seat() -> "str|None":
@@ -974,7 +977,7 @@ def cmd_send(args) -> int:
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (now_iso(), frm, agent, seat, subject, body, json.dumps(atts),
          1 if args.wake else 0, reply_to, thread_id, state,
-         os.environ.get("CLAUDE_CODE_SESSION_ID") or None))
+         os.environ.get("CODEX_THREAD_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or None))
     mid = cur.lastrowid
     if not thread_id:
         con.execute("UPDATE messages SET thread_id = ? WHERE id = ?", (mid, mid))

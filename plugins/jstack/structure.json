@@ -53,6 +53,7 @@
     "skills": "the skills — one directory per skill carrying SKILL.md",
     "structure.json": "this manifest",
     "systems.json": "the plugin's systems registry — federated into host registries",
-    "tests": "the hermetic suite — every executable *.sh here runs on push (pre-push layer 2)"
+    "tests": "the hermetic suite — every executable *.sh here runs on push (pre-push layer 2)",
+    "session_runtime.py": "provider-neutral transcript facts and native Codex offline fork API"
   }
 }
