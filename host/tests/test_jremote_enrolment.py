@@ -676,20 +676,32 @@ def _pair_json(store, monkeypatch, capsys, inets):
     return json.loads(capsys.readouterr().out)
 
 
-def test_pair_json_puts_the_mesh_address_in_the_link(store, monkeypatch,
-                                                     capsys):
-    """What the menu bar's QR is made of. The tunnel is always-on, so the
-    mesh address is the one a paired device reaches from any network — a QR
-    carrying the LAN address instead scans cleanly and then times out the
-    moment the phone is off this wifi, which the person reads as the pairing
-    failing. This test used to pin the LAN address into the link on exactly
-    that timeout argument, reversed: that was true of an on-demand tunnel
-    and became the bug when the tunnel went always-on."""
+def test_pair_json_puts_the_reachable_address_in_the_link(store, monkeypatch,
+                                                          capsys):
+    """What the menu bar's QR is made of, and the one question it answers:
+    which address reaches this Mac *at the moment the code is spent*.
+
+    That is always the LAN one. Redeeming is what mints the device's
+    WireGuard peer and hands back its conf, so every device this link exists
+    for — a phone pairing for the first time, a phone re-pairing after a
+    revoke — has no tunnel yet, and the mesh address resolves only inside
+    the tunnel it does not have. A QR carrying 10.66.0.1 scans cleanly and
+    reaches nothing (proven on a physical phone against a live host: redeems
+    aimed at the LAN address return 200, the mesh address never arrives).
+
+    This test asserted the mesh address on the argument that a link carrying
+    the LAN address strands the phone once it leaves this wifi. That is a
+    true fact about the address the phone KEEPS and not about this one: the
+    app re-derives the address to keep from `/host` and pins the mesh one
+    itself (`PairAddress.pin`, always-on tunnel), so roaming no longer
+    depends on what the QR carried. Which leaves the link only its first job,
+    the one it was failing."""
     out = _pair_json(store, monkeypatch, capsys,
                      ["10.66.0.1", "192.168.0.106"])
     assert [a["kind"] for a in out["addresses"]] == ["lan", "local", "mesh"]
     assert out["link"].startswith("jremote://pair?")
-    assert "url=http%3A%2F%2F10.66.0.1%3A9090" in out["link"]
+    assert "url=http%3A%2F%2F192.168.0.106%3A9090" in out["link"]
+    assert "10.66.0.1" not in out["link"]
     assert out["code"] in out["link"]
 
 

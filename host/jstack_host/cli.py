@@ -83,16 +83,24 @@ def _cmd_pair(args) -> int:
                    "expires_in": row["expires_in"], "port": port,
                    "addresses": found}
         if found:
-            # The QR carries the mesh address when this host runs one. The
-            # tunnel is always-on now, so a paired device reaches 10.66.0.x
-            # from any network — while the LAN address this link used to
-            # carry is dead the moment the scanning phone is off this wifi,
-            # and the redeem endpoint applies no locational rule anyway.
-            # A device with no tunnel yet can't be saved by either choice
-            # of QR address on cellular; for its one first contact the
-            # dialog prints the LAN address as the by-hand path.
-            mesh = next((a for a in found if a["kind"] == "mesh"), None)
-            query = {"code": row["code"], "url": (mesh or found[0])["url"]}
+            # The link is spent once, at first contact, and a device making
+            # first contact has no tunnel — redeeming is what mints its peer
+            # and hands back the conf. So the mesh address, which resolves
+            # only inside that tunnel, is unreachable for every device this
+            # link is for: a phone pairing for the first time, and a phone
+            # re-pairing after its token was revoked. It carried the mesh
+            # address anyway, and a scanned QR went nowhere.
+            #
+            # Which address is KEPT is a separate question, and the app
+            # already owns it: it redeems over whatever this carries, asks
+            # `/host` for every address the Mac holds, and pins the mesh one
+            # (`PairAddress.pin`, always-on tunnel) so the phone still roams
+            # afterwards. The address that works now and the address kept for
+            # later are not the same address, and this is the one that has to
+            # work now — in front of the Mac, where a QR gets scanned.
+            direct = (next((a for a in found if a["kind"] == "lan"), None)
+                      or next((a for a in found if a["kind"] == "local"), None))
+            query = {"code": row["code"], "url": (direct or found[0])["url"]}
             if row["name"]:
                 query["name"] = row["name"]
             payload["link"] = "jremote://pair?" + urlencode(query)
