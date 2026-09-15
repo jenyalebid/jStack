@@ -107,6 +107,40 @@ def test_a_code_is_spent_exactly_once(store):
     assert len(store.list_devices()) == 1
 
 
+def test_re_pairing_the_same_install_lands_on_one_row_not_a_duplicate(store):
+    """The devices-list-grows-forever bug. An app carries a stable per-install
+    id (`AppInstance.id`); it must pair onto its EXISTING row rather than mint a
+    fresh one each time — otherwise one physical device shows up as N rows, the
+    pile of duplicate 'Dev Mac mini' rows this keying exists to prevent."""
+    first = enrolment.redeem(_mint(store, name="Dev Mac mini")[0],
+                             "198.51.100.4", identity="install-abc")
+    second = enrolment.redeem(_mint(store, name="Dev Mac mini")[0],
+                              "198.51.100.4", identity="install-abc")
+    assert first["device"]["id"] == second["device"]["id"]
+    assert len(store.list_devices()) == 1
+    # The new pairing rotates the secret: the old token must stop working.
+    assert devices.authenticate(second["token"]) == second["device"]["id"]
+    assert devices.authenticate(first["token"]) is None
+
+
+def test_without_an_identity_re_pairing_still_mints_a_fresh_row(store):
+    """Backward compatibility: an older app sends no identity, and each redeem
+    mints its own row exactly as before — the fix must not change that path."""
+    enrolment.redeem(_mint(store)[0], "198.51.100.4")
+    enrolment.redeem(_mint(store)[0], "198.51.100.4")
+    assert len(store.list_devices()) == 2
+
+
+def test_two_different_installs_sharing_a_name_stay_two_rows(store):
+    """Identity, not name, is what collapses rows. Two real machines both called
+    'Dev Mac mini' must remain two devices."""
+    enrolment.redeem(_mint(store, name="Dev Mac mini")[0], "198.51.100.4",
+                     identity="install-abc")
+    enrolment.redeem(_mint(store, name="Dev Mac mini")[0], "198.51.100.5",
+                     identity="install-xyz")
+    assert len(store.list_devices()) == 2
+
+
 def test_an_expired_code_is_refused_even_though_it_is_still_in_the_table(store):
     """Expiry is enforced at redemption, not by the sweep — a sweep that has
     not run yet must not become a window in which a stale code still works."""

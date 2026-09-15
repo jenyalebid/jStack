@@ -298,7 +298,7 @@ def _check_host_claim(host_key: str, port: int) -> int:
 
 def redeem(raw_code: str, client_ip: str, host_key: str = "",
            port: int = DEFAULT_PORT, device_token: str = "",
-           grant_token: str = "") -> dict:
+           grant_token: str = "", identity: str = "") -> dict:
     """Spend a code: a device token, and a peer config where one applies.
 
     `device_token` is the credential the redeemer already holds on this host,
@@ -359,7 +359,7 @@ def redeem(raw_code: str, client_ip: str, host_key: str = "",
     # rename. It is also the truer answer — the device redeeming is the device
     # it always was, whoever the code was minted for.
     rekeyed = devices.rekey(device_token) if device_token else None
-    device_row, token = rekeyed or devices.mint(row["name"])
+    device_row, token = rekeyed or devices.mint(row["name"], identity or None)
     device_row["revoked"] = False
     store.note_enrolment_device(code_hash, f"{device_row['id']} from {client_ip}")
 

@@ -702,6 +702,12 @@ class EnrolmentRedeemRequest(BaseModel):
     #: so this host can mint device tokens there for devices it already trusts
     #: (grants.py). Only meaningful alongside a host code; optional always.
     grant_token: str = ""
+    #: The redeeming app's stable per-install id (`AppInstance.id`). Sent so a
+    #: device that re-pairs without carrying its old token still lands on its
+    #: EXISTING row instead of minting a new one — the fix for a devices list
+    #: that grows a fresh duplicate on every reconnect. Empty from an older app,
+    #: which mints a fresh row exactly as before.
+    identity: str = ""
 
 
 class EnrolmentRevokeRequest(BaseModel):
@@ -769,7 +775,7 @@ def redeem_enrolment_code(body: EnrolmentRedeemRequest, request: Request):
     try:
         return enrolment.redeem(body.code, client_ip,
                                 body.host_key, body.port, body.device_token,
-                                body.grant_token)
+                                body.grant_token, body.identity)
     except enrolment.HostKeyRefused as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except enrolment.EnrolmentLockedOut as exc:
