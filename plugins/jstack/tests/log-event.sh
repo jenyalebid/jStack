@@ -22,11 +22,11 @@ trap 'rm -rf "$TMP"' EXIT
 export JSTACK_TIMELINE_DIR="$TMP"
 
 # Hermetic in the environment too, not just on disk. A write with no --session
-# now falls back to $CLAUDE_CODE_SESSION_ID, so running this suite from inside a
+# falls back to native or Claude session IDs, so running this suite from inside a
 # live session would silently stamp every "sessionless" row with the ambient id
 # and quietly retire the cases that depend on there being none. The fallback
 # gets its own test below, with the var set on purpose.
-unset CLAUDE_CODE_SESSION_ID
+unset CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID
 # Same trap, second var: origin resolves flag > $JSTACK_TIMELINE_ORIGIN > direct,
 # and cron/auto sessions export it as `indirect`. Inheriting it would flip the
 # default-origin cases — a suite that passes for a typed session and fails for a
@@ -577,6 +577,12 @@ CLAUDE_CODE_SESSION_ID=env-sess "$LOG_EVENT" mo/chat --at 06:00 --date "$DAY" "F
 CLAUDE_CODE_SESSION_ID=env-sess "$LOG_EVENT" mo/chat --at 06:05 --date "$DAY" --session flag-sess "Flag wins" >/dev/null
 [[ $(SQL "SELECT session_id FROM entries WHERE headline='Flag wins'") == "[('flag-sess',)]" ]] \
   && pass "explicit --session beats the env var" || fail "explicit session precedence"
+CODEX_THREAD_ID=native-env-sess CLAUDE_CODE_SESSION_ID=legacy-env-sess "$LOG_EVENT" mo/chat --at 06:10 --date "$DAY" "From the native env" >/dev/null
+[[ $(SQL "SELECT session_id FROM entries WHERE headline='From the native env'") == "[('native-env-sess',)]" ]] \
+  && pass "native session fallback beats the legacy env var" || fail "native env session fallback"
+CODEX_THREAD_ID=native-env-sess "$LOG_EVENT" mo/chat --at 06:15 --date "$DAY" --session native-flag-sess "Native flag wins" >/dev/null
+[[ $(SQL "SELECT session_id FROM entries WHERE headline='Native flag wins'") == "[('native-flag-sess',)]" ]] \
+  && pass "explicit --session beats the native env var" || fail "native explicit session precedence"
 
 out=$("$LOG_EVENT" show "$(SQL "SELECT id FROM entries WHERE headline='Kim on the remote'" | tr -dc '0-9')")
 [[ "$out" == *"tags: payments"* ]] && pass "show prints the session's tags" || fail "show tags line ($out)"
