@@ -56,11 +56,14 @@ def test_native_startup_preserves_local_overrides_nested_rules_and_memory(tmp_pa
     assert "Source weights" in full.stdout and "~tokens" in full.stdout
     assert "On demand only" in full.stdout and "On-demand rules" in full.stdout
     payload = {"cwd": str(seat), "session_id": "native", "tool_name": "apply_patch",
+               "transcript_path": "rollout-native.jsonl",
                "tool_input": {"command": "*** Begin Patch\n*** Update File: file.swift\n@@\n-let value = 1\n+let value = 2\n*** End Patch"}}
     result = subprocess.run([sys.executable, str(PLUGIN / "hooks/inject-path-rules.py")],
                             input=json.dumps(payload), capture_output=True, text=True, check=True,
                             env=dict(os.environ, JSTACK_CACHE_ROOT=str(tmp_path / "cache")))
-    assert "On demand only" in json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    output = json.loads(result.stdout)["hookSpecificOutput"]
+    assert "On demand only" in output["additionalContext"]
+    assert "permissionDecision" not in output
 
 
 @pytest.mark.parametrize("resume", [False, True])

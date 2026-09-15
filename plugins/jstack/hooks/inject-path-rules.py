@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from session_runtime import patch_paths
+from session_runtime import engine, patch_paths
 
 TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"}
 DEFAULT_RULES_DIR = Path.home() / ".claude" / "rules"
@@ -143,13 +143,13 @@ def main() -> None:
     )
 
     try:
-        sys.stdout.write(json.dumps({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-                "additionalContext": additional,
-            }
-        }))
+        output = {"hookEventName": "PreToolUse", "additionalContext": additional}
+        # Native Codex's explicit allow path drops additionalContext in code
+        # mode. Context-only output reaches the model without changing tool
+        # permissions; retain the existing Claude output contract.
+        if engine(payload) != "codex":
+            output["permissionDecision"] = "allow"
+        sys.stdout.write(json.dumps({"hookSpecificOutput": output}))
         sys.stdout.flush()
     except Exception:
         pass
