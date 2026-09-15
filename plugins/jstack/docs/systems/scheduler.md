@@ -82,7 +82,17 @@ A job's effective value for an inherited setting resolves **job → its category
 }
 ```
 
-Inherited keys: `model`, `timeout_seconds`, `stall_timeout_seconds`, `ttft_timeout_seconds`, `claude_bin`, `catch_up_grace_seconds`, `permission_mode`.
+Inherited keys: `engine`, `codex_model`, `codex_bin`, `model`,
+`timeout_seconds`, `stall_timeout_seconds`, `ttft_timeout_seconds`,
+`claude_bin`, `catch_up_grace_seconds`, `permission_mode`, `notify_on_failure`.
+
+`engine: "codex"` selects a native fresh run; `--engine codex` is accepted by
+both add commands. `codex_model` selects its model through the same inheritance
+chain; absent it, a GPT `model` value applies, otherwise Codex's configuration
+selects the model. A native resume source always selects Codex and is forked
+through its API. Fresh native threads are persisted through that API before
+the CLI resumes them. Neither path resumes the original source concurrently.
+`schedule-self` preserves Codex for fresh wakes as well as resume wakes.
 
 Categories are the point of leverage — set a model and a time limit once for a whole class of runs rather than remembering them at every call site. A per-job value outranks its category, so setting one "just to be explicit" silently overrides a class that was deliberately given more room.
 

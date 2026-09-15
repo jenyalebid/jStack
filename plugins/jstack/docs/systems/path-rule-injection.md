@@ -1,6 +1,6 @@
 # Path-Rule Injection — Architecture & Extension Guide
 
-PreToolUse hook that injects path-matched rule bodies into `Edit`/`Write`/`MultiEdit`/`NotebookEdit` tool calls — so cross-tree agents pick up the right conventions regardless of where the session was launched.
+PreToolUse hook that injects path-matched rule bodies into Claude file-edit tools and native Codex `apply_patch` calls — so cross-tree agents pick up the right conventions regardless of where the session was launched.
 
 This doc is the canonical reference for the hook system. Read it before extending, debugging, or changing the dedup behavior.
 
@@ -12,7 +12,7 @@ The hook closes that gap. PreToolUse fires *before every tool call*, with the ab
 
 ## What it intercepts
 
-`tool_name ∈ {Edit, Write, MultiEdit, NotebookEdit}` — every file-mutating tool. Everything else exits 0 immediately with no output.
+`tool_name ∈ {Edit, Write, MultiEdit, NotebookEdit, apply_patch}`. Native patch targets (add, update, delete and move) resolve against the payload cwd. Shell-based writes are outside this hook’s coverage. Everything else exits 0 immediately with no output.
 
 ## stdin contract
 
@@ -49,11 +49,11 @@ When a rule matches and the dedup state permits, the hook emits one line of JSON
 
 When nothing matches OR the dedup gate blocks re-injection → no output, exit 0. (Empty stdout is the "no-op" signal to Claude Code.)
 
-`permissionDecision: "allow"` is always emitted — the hook's only job is to enrich context, never to gate. Even if injection happens, the tool call proceeds.
+The example is the Claude output contract. Native Codex receives the same `hookEventName` and `additionalContext` without `permissionDecision`. In real code-mode probes, an explicit `allow` discarded the context; context-only output reached the next model request without blocking the edit. The hook never gates a tool. See the [native compatibility evidence](codex-compatibility.md).
 
 ## Rule frontmatter contract
 
-The hook scans `~/.claude/rules/*.md` for `paths:` arrays in YAML-ish frontmatter:
+The hook scans `~/.claude/rules/**/*.md` for `paths:` arrays in YAML-ish frontmatter:
 
 ```markdown
 ---
@@ -111,7 +111,7 @@ Re-injecting the same rule body on every edit would flood the context window. Th
     └── ...
 ```
 
-The marker content is the **transcript byte size at the moment of last injection**. On the next call:
+Root-level rules retain `<stem>.marker`. Nested rules add a hash of the relative path so equal stems in different directories do not share a marker. The marker content is the **transcript byte size at the moment of last injection**. On the next call:
 
 ```
 current_size = os.path.getsize(transcript_path)
