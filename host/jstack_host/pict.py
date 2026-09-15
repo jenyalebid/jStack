@@ -38,7 +38,7 @@ PICT = plugin_paths.jstack_bin("pict")
 TIMEOUT = 120
 
 
-def render(cwd: str, pad: Path, full: bool = False) -> tuple[Path, str]:
+def render(cwd: str, pad: Path, full: bool = False, engine: str = "claude") -> tuple[Path, str]:
     """Write the pict of `cwd` into `pad`. Returns (path, title).
 
     `full` swaps the reading copy for the annotated view — weights, mechanism
@@ -56,7 +56,10 @@ def render(cwd: str, pad: Path, full: bool = False) -> tuple[Path, str]:
     out = pad / f"pict-{name}.md"
     pad.mkdir(parents=True, exist_ok=True)
 
-    cmd = [str(PICT), cwd] + ([] if full else ["--bare"])
+    if engine not in ("claude", "codex"):
+        raise ValueError(f"unknown engine: {engine}")
+    cmd = [str(PICT), cwd] + (["--engine", "codex"] if engine == "codex" else [])
+    cmd += [] if full else ["--bare"]
     fd, tmp = tempfile.mkstemp(dir=str(pad), prefix=".pict-", suffix=".md")
     try:
         with os.fdopen(fd, "w") as sink:

@@ -96,6 +96,18 @@ def test_renders_the_session_directory_into_that_seats_pad(client, seat, rendere
     assert out.read_text().strip() == f"PICT {seat} --bare"
 
 
+def test_native_transcript_selects_codex_even_with_a_stale_registry(client, seat, renderer,
+                                                                  tmp_path, monkeypatch):
+    from jstack_host import managed, messages
+    source = tmp_path / "rollout.jsonl"
+    source.write_text('{"type":"session_meta","payload":{"id":"native"}}\n')
+    monkeypatch.setattr(messages, "_find_session_file", lambda sid: source)
+    monkeypatch.setattr(managed, "open_registry", lambda: {SID: {"engine": "claude"}})
+    result = client.post(f"/api/jremote/v1/sessions/{SID}/pict")
+    assert result.status_code == 200
+    assert Path(result.json()["path"]).read_text().strip() == f"PICT {seat} --engine codex --bare"
+
+
 def test_the_name_is_stable_so_a_second_ask_refreshes_one_document(client, seat,
                                                                    renderer):
     first = client.post(f"/api/jremote/v1/sessions/{SID}/pict").json()["path"]

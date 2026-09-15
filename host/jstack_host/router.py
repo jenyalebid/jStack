@@ -2466,7 +2466,12 @@ def pict_session(sid: str, full: bool = False):
                             detail="this session isn't running in an agent "
                                    "workspace — nowhere to put the render")
     try:
-        path, title = pict.render(cwd, pad, full=full)
+        from . import managed, messages
+        from .codex_transcript import metadata
+        source = messages._find_session_file(sid)
+        provider = "codex" if source and metadata(source) else (
+            (managed.open_registry().get(sid) or {}).get("engine", "claude"))
+        path, title = pict.render(cwd, pad, full=full, engine=provider)
     except FileNotFoundError:
         raise HTTPException(status_code=501, detail="pict isn't installed on this host")
     except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
