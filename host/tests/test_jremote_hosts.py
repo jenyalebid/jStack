@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from jstack_host.server import create_app
 
 app = create_app()
-from jstack_host import devices, enrolment, tunnel
+from jstack_host import devices, enrolment, grants, tunnel
 from jstack_host.router import SyncPush
 from jstack_host.store import SessionStore
 
@@ -192,6 +192,40 @@ def test_a_device_code_writes_no_host_row_however_it_is_redeemed(store, paired):
     out = enrolment.redeem(code, "198.51.100.4", host_key="host-key-aaaa")
     assert out["kind"] == "device" and out["host"] is None
     assert store.list_hosts(include_forgotten=True) == []
+
+
+def test_a_host_redeem_hands_back_this_hosts_grant_and_identity(
+        store, paired, monkeypatch):
+    """#62's parent half. Adopting a leaf establishes trust both ways: the leaf
+    hands this host a grant (the direction that already worked), and this host
+    hands the leaf one back — a credential to mint on THIS host — plus the id,
+    name and mesh address the leaf needs to show its own devices a tile for it.
+    Without both, a leaf's devices never reach the home they are a leaf of."""
+    monkeypatch.setenv("JREMOTE_HOST_ID", "parent-host-0001")
+    monkeypatch.setenv("JREMOTE_HOST_NAME", "Studio")
+    monkeypatch.setattr(enrolment, "_own_mesh_address", lambda: "10.66.0.1")
+
+    code, _ = _mint(name="Work Mac")
+    out = enrolment.redeem(code, "198.51.100.4", host_key="host-key-aaaa")
+
+    # A real grant, in the grant namespace, that this host now authenticates —
+    # not the device token, which lives in a different namespace entirely.
+    grant = out["leaf_grant"]
+    assert grant.startswith("jrg1.") and grants.authenticate(grant)
+    assert grant != out["token"]
+    # This host, named and addressed, so the leaf has something to point at.
+    assert out["parent_identity"] == {
+        "key": "parent-host-0001", "name": "Studio",
+        "address": "10.66.0.1", "port": 9090}
+
+
+def test_a_device_redeem_carries_no_parent_grant_or_identity(store, paired):
+    """A phone has no machine to mint back onto. The reverse-direction fields
+    are a host-code thing; a device code gets empty ones, never a stray grant
+    minted for a caller that has nowhere to spend it."""
+    code, _ = _mint(kind=enrolment.KIND_DEVICE)
+    out = enrolment.redeem(code, "198.51.100.4", host_key="host-key-aaaa")
+    assert out["leaf_grant"] == "" and out["parent_identity"] == {}
 
 
 def test_a_host_code_without_a_key_is_refused_and_stays_claimable(store):

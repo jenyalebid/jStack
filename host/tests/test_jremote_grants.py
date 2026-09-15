@@ -274,3 +274,97 @@ def test_the_grant_roster_never_carries_the_tokens():
     _adopted()
     for row in grants.holdings():
         assert "token" not in row
+
+
+# ── the leaf's OWN devices reaching the parent it is a leaf of (#62) ──
+#
+# The mirror of everything above. A hub lists the machines it adopted and mints
+# on them for a device; a LEAF wants the same reach to the one machine that
+# adopted IT. That machine is in no `hosts` table — the leaf did not adopt its
+# parent — so the router synthesises its tile from the attach record and the
+# grant the leaf holds, and only while the grant is live. These pin that the
+# synthesis is a real delegated row a device can spend, and that a machine with
+# no parent invents nothing.
+
+def _leaf_of(monkeypatch, key="parent-host-0001", address="10.66.0.1",
+             port=9090, held="jrg1.parentgrant.secret"):
+    """The state `attach` leaves on a leaf: a grant held for the parent, and a
+    parent record naming it. `parent_record` is patched rather than a real file
+    written, so the test never reads the developer machine's own parent.json."""
+    grants.remember(key, held, "http://home:9090")
+    monkeypatch.setattr(
+        "jstack_host.attach_parent.parent_record",
+        lambda: {"parent_key": key, "parent_name": "Home",
+                 "parent_address": address, "parent_port": port})
+
+
+def test_a_leaf_shows_its_parent_as_a_delegated_tile(client, paired, monkeypatch):
+    _leaf_of(monkeypatch)
+    _, device_token = paired
+    resp = client.get("/api/jremote/v1/hosts",
+                      headers={"Authorization": f"Bearer {device_token}"})
+    parent = next(h for h in resp.json()["hosts"] if h["key"] == "parent-host-0001")
+    # Ahead of any adopted machine, delegated because the grant backs it, and
+    # named/addressed from the record — a row a device can tile and then spend.
+    assert parent["delegated"] is True
+    assert parent["name"] == "Home" and parent["address"] == "10.66.0.1"
+    assert "token" not in parent
+
+
+def test_a_leafs_device_mints_on_its_parent_the_reverse_of_a_hub(
+        client, paired, monkeypatch):
+    """The #62 close. The same delegated mint a hub does for a leaf, a leaf does
+    for its parent: the caller proves a token here, and the leaf spends the
+    grant it holds against the parent's own `/delegate/mint`."""
+    _leaf_of(monkeypatch)
+    _, device_token = paired
+    sent = {}
+
+    def poster(url, payload, token):
+        sent.update(url=url, token=token, name=payload["name"])
+        return 200, {"device": {"id": "z", "name": payload["name"]},
+                     "token": "jr1.z.minted-at-home"}
+
+    import jstack_host.grants as g
+    g_orig = g._httpx_post
+    g._httpx_post = poster
+    try:
+        resp = client.post("/api/jremote/v1/hosts/parent-host-0001/grant",
+                           json={},
+                           headers={"Authorization": f"Bearer {device_token}"})
+    finally:
+        g._httpx_post = g_orig
+
+    assert resp.status_code == 200
+    assert resp.json()["token"] == "jr1.z.minted-at-home"
+    # The grant the leaf holds, spent against the parent's mesh address — the
+    # one in the record, never one the caller could name.
+    assert sent["token"] == "jrg1.parentgrant.secret"
+    assert sent["url"] == "http://10.66.0.1:9090/api/jremote/v1/delegate/mint"
+
+
+def test_a_parent_whose_grant_was_revoked_shows_no_tile(client, paired,
+                                                        monkeypatch):
+    """A parent record with a dead grant is not a machine to reach — the tile
+    exists only while the grant does, so a revoked one is silence, not a row
+    that 502s on the first tap."""
+    _leaf_of(monkeypatch)
+    grants.forget("parent-host-0001")
+    _, device_token = paired
+    resp = client.get("/api/jremote/v1/hosts",
+                      headers={"Authorization": f"Bearer {device_token}"})
+    assert resp.json()["hosts"] == []
+    grant = client.post("/api/jremote/v1/hosts/parent-host-0001/grant", json={},
+                        headers={"Authorization": f"Bearer {device_token}"})
+    assert grant.status_code == 404
+
+
+def test_a_machine_that_is_not_a_leaf_shows_no_parent_tile(client, paired,
+                                                           monkeypatch):
+    """A hub has no parent record; the synthesis must be silent there, never a
+    phantom row invented from an empty one."""
+    monkeypatch.setattr("jstack_host.attach_parent.parent_record", lambda: {})
+    _, device_token = paired
+    resp = client.get("/api/jremote/v1/hosts",
+                      headers={"Authorization": f"Bearer {device_token}"})
+    assert resp.json()["hosts"] == []

@@ -203,22 +203,57 @@ def _write_bundle(bundle: dict, dest: Path) -> Path:
 
 
 def _record_parent(state: Path, parent_url: str, result: dict) -> None:
-    """Persist the token the parent handed back, 0600, so it is not lost.
+    """Persist what this attach learned about the parent, so nothing in the
+    redeem response — the only place any of it appears — is lost.
 
-    The redeem response is the only place this token ever appears. Dropping it
-    would mean a re-attach mints a second device row on the parent every time —
-    the exact multiplication enrolment.py's re-pairing path exists to stop.
+    Three things, each a single copy:
+      · the device token, so a re-attach re-keys the parent's one row for this
+        machine instead of minting a second (enrolment.py's re-pairing rule);
+      · the parent's identity — its host id, name, mesh address and port — so
+        this leaf can show its own devices a tile for the parent and mint on it
+        in reverse, the direction #62 was missing;
+      · the grant the parent issued, kept in `host_grants` (grants.py) rather
+        than in this file, because it is a credential to spend and the grant
+        roster is where credentials already live. Without it `mint_on` has
+        nothing to present and the parent's `/delegate/mint` answers 401.
+
+    A parent on a build from before #62 sends neither identity nor grant; the
+    leaf simply records the token as it always did and never tiles a home,
+    which is the pre-#62 behaviour, not a failure.
     """
     device = result.get("device") or {}
+    identity = result.get("parent_identity") or {}
     rec = {
         "parent_url": parent_url,
         "device_id": device.get("id", ""),
         "token": result.get("token", ""),
+        "parent_key": identity.get("key", ""),
+        "parent_name": identity.get("name", ""),
+        "parent_address": identity.get("address", ""),
+        "parent_port": identity.get("port", DEFAULT_PORT),
     }
     state.mkdir(parents=True, exist_ok=True)
     path = state / PARENT_RECORD
     path.write_text(json.dumps(rec, indent=2))
     os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+
+    # Held, keyed by the parent's own host id, replacing any grant this leaf
+    # held for a parent of the same id. `list_hosts` surfaces it only while it
+    # is live, so a grant revoked at the parent takes the home tile with it.
+    from . import grants
+    key, leaf_grant = identity.get("key", ""), result.get("leaf_grant", "")
+    if key and leaf_grant:
+        grants.remember(key, leaf_grant, parent_url)
+
+
+def parent_record() -> dict:
+    """What this machine recorded about its parent at attach, or `{}` when it
+    has none. The router reads it to synthesise the parent's tile (#62); it
+    carries the parent's id, name, mesh address and port, never the grant."""
+    try:
+        return json.loads((hostenv.state_dir() / PARENT_RECORD).read_text())
+    except (OSError, ValueError):
+        return {}
 
 
 def _redeem(parent_url: str, payload: dict, poster) -> dict:

@@ -796,6 +796,31 @@ def _serve_host(row: dict, delegated: bool = False) -> dict:
     return {**row, "deleted": bool(row["deleted"]), "delegated": delegated}
 
 
+def _leaf_parent_row() -> dict | None:
+    """This leaf's parent, as a host row a device can tile — or None on a
+    machine that has no parent or holds no live grant for one.
+
+    The #62 direction. A hub lists the machines it adopted and hands its
+    devices access to them; a leaf's devices want the same reach the other
+    way — to the one machine that adopted THIS one. That machine is not in this
+    host's `hosts` table (it did not adopt the parent), so it is not synced to
+    devices and cannot mirror as a blind tile. It is synthesised here, from the
+    identity `attach` recorded and only while a grant actually backs it, so the
+    row a device sees is always one it can spend: `delegated` is true because
+    the row does not exist otherwise. A parent whose grant was revoked, or a
+    machine that was never attached, simply has no row — the same silence a
+    forgotten host gets, for the same reason.
+    """
+    from . import attach_parent, grants
+    rec = attach_parent.parent_record()
+    key = (rec.get("parent_key") or "").strip()
+    if not key or not grants.held(key):
+        return None
+    return {"key": key, "name": rec.get("parent_name") or "home",
+            "address": rec.get("parent_address") or "",
+            "port": int(rec.get("parent_port") or 9090), "deleted": 0}
+
+
 @router.get("/hosts")
 def list_hosts(device_id: str = Depends(current_device)):
     """The machines this host has enrolled. Forgotten ones are excluded — the
@@ -814,8 +839,13 @@ def list_hosts(device_id: str = Depends(current_device)):
     from . import grants
     from .store import get_store
     live = {h["host_key"] for h in grants.holdings() if h["revoked_at"] is None}
-    return {"hosts": [_serve_host(r, r["key"] in live)
-                      for r in get_store().list_hosts()]}
+    rows = [_serve_host(r, r["key"] in live) for r in get_store().list_hosts()]
+    # The parent this machine is a leaf of, if it is one, ahead of the machines
+    # it adopted — a device's own home, reached the same delegated way (#62).
+    parent = _leaf_parent_row()
+    if parent:
+        rows.insert(0, _serve_host(parent, delegated=True))
+    return {"hosts": rows}
 
 
 @router.post("/hosts/{key}/rename")
@@ -877,6 +907,12 @@ def grant_host_access(key: str, body: HostGrantRequest,
     from . import grants
     from .store import get_store
     row = get_store().host_row(key)
+    if row is None:
+        # Not a machine this host adopted — but it may be the parent this host
+        # is a leaf of, which lives in no table and answers only while its grant
+        # is live (#62). Same 404 as any unknown key when it is not.
+        parent = _leaf_parent_row()
+        row = parent if parent and parent["key"] == key else None
     if row is None or row["deleted"]:
         raise HTTPException(status_code=404, detail="unknown machine")
     name = _device_name(body.name) if body.name else ""

@@ -271,6 +271,28 @@ def mesh_address(peer: dict | None) -> str:
     return match.group(1) if match else ""
 
 
+def _own_mesh_address() -> str:
+    """This host's own address on the mesh — the one a leaf reaches it at from
+    inside the tunnel, and the address a leaf records so its devices can mint on
+    this host in reverse (grants.py, the #62 direction).
+
+    Read off the live interface rather than assumed: a hub owns the gateway, so
+    the answer is almost always `10.66.0.1`, but taking it from what is actually
+    configured keeps a non-gateway topology honest. The gateway is the fallback
+    for the window between owning a mesh and the interface being up — better a
+    stable guess than an empty address that mints nothing.
+    """
+    import ipaddress
+    from . import addresses
+    for raw in addresses._inet_addrs():
+        try:
+            if ipaddress.ip_address(raw) in addresses.MESH_SUBNET:
+                return raw
+        except ValueError:
+            continue
+    return str(next(addresses.MESH_SUBNET.hosts()))
+
+
 def _check_host_claim(host_key: str, port: int) -> int:
     """Validate what a machine says about itself, or refuse loudly.
 
@@ -420,6 +442,22 @@ def redeem(raw_code: str, client_ip: str, host_key: str = "",
                 "predates delegated minting, so devices will have to pair "
                 "with it by hand. Upgrade the host there and re-attach to "
                 "fix it")
+
+    # The direction #62 was missing: a grant THIS host issues, so the leaf can
+    # later hand its own devices access to THIS host the same way a hub hands
+    # its devices access to a leaf — `grants.mint_on` against `/delegate/mint`,
+    # just called from the other side. Symmetric with the block above (which
+    # stores the grant the LEAF issued) and unconditional for the same reason
+    # that one is: every build that knows to ask for it gets one, and a leaf
+    # that predates this simply never presents it to anyone.
+    leaf_grant = ""
+    parent_identity: dict = {}
+    if kind == KIND_HOST:
+        from . import grants
+        leaf_grant = grants.issue(row["name"] or host_key)
+        parent_identity = {"key": hostenv.host_id(), "name": hostenv.host_name(),
+                           "address": _own_mesh_address(), "port": DEFAULT_PORT}
+
     _announce(row, device_row, client_ip, kind, rekeyed is not None)
     return {"device": device_row, "token": token,
             "tunnel": peer, "tunnel_note": note,
@@ -433,6 +471,11 @@ def redeem(raw_code: str, client_ip: str, host_key: str = "",
             # it, because "you are on the mesh" and "your devices get in by
             # themselves" are two different outcomes and it just chose one.
             "delegated": bool(grant_token) and kind == KIND_HOST,
+            # This host's own grant, and this host's own identity — the leaf's
+            # half of delegated minting in reverse. Empty/absent for a device
+            # code, which has no machine to carry either one back to.
+            "leaf_grant": leaf_grant,
+            "parent_identity": parent_identity,
             # Which of the two happened, said out loud. The app can tell from
             # the id, but only if it kept one; a caller pairing by hand cannot
             # tell a fresh credential from a replaced one at all, and "your old

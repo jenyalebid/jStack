@@ -81,6 +81,11 @@ def _host_response(bundle=None) -> dict:
         "host": {"key": GOOD_KEY, "name": "studio", "address": "10.66.0.7",
                  "port": 9090, "deleted": False},
         "superseded": False,
+        # #62's reverse direction: the grant the parent issued this leaf, and
+        # the parent's own identity, so the leaf can tile and mint on it.
+        "leaf_grant": "jrg1.parentgrant.secret",
+        "parent_identity": {"key": "parent-host-0001", "name": "Studio",
+                            "address": "10.66.0.1", "port": 9090},
     }
 
 
@@ -153,6 +158,45 @@ def test_the_parent_token_is_recorded_0600_for_a_later_re_attach(tmp_path):
     assert rec["token"] == "TOKEN-FROM-PARENT"
     assert rec["parent_url"] == "http://studio.local:9090"
     assert rec["device_id"] == "dev_new"
+
+
+def test_attach_records_the_parent_identity_and_holds_its_grant(tmp_path):
+    """#62: the leaf keeps what it needs to show its own devices a tile for the
+    parent — the parent's id, name and mesh address in the record, and the
+    grant the parent issued held in the roster so `mint_on` has something to
+    spend. The grant is held, never written into the record beside the token: a
+    credential belongs in the grant store, not a plaintext file."""
+    attach_parent.attach(
+        "ABCD-1234", "http://studio.local:9090", host_key=GOOD_KEY,
+        dest_dir=tmp_path / "b", poster=_recording_poster(200, _host_response(), []),
+        runner=_ok_runner([]), sudo=False)
+
+    rec = attach_parent.parent_record()
+    assert rec["parent_key"] == "parent-host-0001"
+    assert rec["parent_name"] == "Studio"
+    assert rec["parent_address"] == "10.66.0.1"
+    assert rec["parent_port"] == 9090
+
+    assert grants.held("parent-host-0001") == "jrg1.parentgrant.secret"
+    body = (hostenv.state_dir() / attach_parent.PARENT_RECORD).read_text()
+    assert "parentgrant" not in body
+
+
+def test_a_parent_on_an_older_build_leaves_no_grant_or_identity(tmp_path):
+    """A parent from before #62 sends neither field. The leaf records the token
+    as it always did and holds no grant — the pre-#62 behaviour, a machine on
+    the mesh whose devices simply do not see home, not a crash on a missing
+    key."""
+    older = {k: v for k, v in _host_response().items()
+             if k not in ("leaf_grant", "parent_identity")}
+    attach_parent.attach(
+        "ABCD-1234", "http://studio.local:9090", host_key=GOOD_KEY,
+        dest_dir=tmp_path / "b", poster=_recording_poster(200, older, []),
+        runner=_ok_runner([]), sudo=False)
+
+    rec = attach_parent.parent_record()
+    assert rec["parent_key"] == "" and rec["token"] == "TOKEN-FROM-PARENT"
+    assert grants.held("parent-host-0001") == ""
 
 
 def test_a_re_attach_presents_the_prior_token_so_the_parent_re_keys(tmp_path):
