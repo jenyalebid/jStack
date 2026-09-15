@@ -1,30 +1,34 @@
 #!/usr/bin/env bash
-# Resolve a session id to its transcript and its seat.
-#
-# Prints two eval-able lines:  JSONL=<path>  SEAT=<agent>/<submode>
-# Exit 1 with empty values when no transcript exists for the id.
-#
-# The seat must match how the SessionStart injector reads entries back — the
-# first path segment under the agent directory, with the agent root itself
-# meaning "chat". A seat resolved any other way writes where nothing reads.
+# Resolve either provider's native session id to a safely quoted transcript/seat.
 set -u
-
 SID="${1:?usage: resolve-seat.sh <session-id> [session-cwd]}"
-BASE="${2:-$PWD}"
-
-AGENT_TITLE=$(basename "$(dirname "$BASE")")
-AGENT=$(echo "$AGENT_TITLE" | tr '[:upper:]' '[:lower:]')
-
-JSONL=$(find "$HOME/.claude/projects" -name "${SID}.jsonl" -print -quit 2>/dev/null)
-if [ -z "$JSONL" ]; then
-  echo "JSONL="
-  echo "SEAT="
-  exit 1
-fi
-
-CWD=$(jq -r 'select(.cwd) | .cwd' "$JSONL" | head -1)
-REL="${CWD#*/"$AGENT_TITLE"}"; REL="${REL#/}"
-SUBMODE="${REL%%/*}"; SUBMODE="${SUBMODE:-chat}"
-
-echo "JSONL=$JSONL"
-echo "SEAT=$AGENT/$SUBMODE"
+REVIEW_PLUGIN_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+python3 - "$SID" "$REVIEW_PLUGIN_DIR" <<'PYTHON'
+import json, os, shlex, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+from session_runtime import metadata, transcripts
+import root
+paths = transcripts(sys.argv[1])
+if len(paths) != 1:
+    print("JSONL=\nSEAT=")
+    raise SystemExit(1)
+p = paths[0]
+config = Path(os.environ.get("JSTACK_REVIEW_CONFIG", Path.home() / ".claude/jstack/review.json"))
+cfg = json.loads(config.read_text()) if config.is_file() else {}
+cwd = metadata(p).get("cwd")
+if not cwd:
+    for line in p.read_text().splitlines():
+        try:
+            cwd = json.loads(line).get("cwd")
+        except ValueError:
+            continue
+        if cwd:
+            break
+seat = root.enclosing_seat(cwd, cfg) if cwd else None
+if not seat:
+    print("JSONL=\nSEAT=")
+    raise SystemExit(1)
+print("JSONL=" + shlex.quote(str(p)))
+print("SEAT=" + shlex.quote(seat.timeline))
+PYTHON

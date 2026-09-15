@@ -238,6 +238,8 @@ DEFAULTS = {
     #   "off"       — do nothing on session end
     "session_end_action": "selfwrite",
     "selfwrite_model": "sonnet",
+    "codex_selfwrite_model": "gpt-5.6-luna",
+    "codex_review_model": "gpt-5.6-sol",
     "selfwrite_max_turns": 12,
     "selfwrite_timeout_secs": 300,
     "model": "opus",
@@ -962,6 +964,7 @@ def _selfwrite_env(origin: str = "direct") -> dict:
         + [env.get("PATH", "")]
     )
     env["SKIP_SESSION_HOOK"] = "1"           # the resume's own SessionEnd must not recurse
+    env["CLAUDE_PLUGIN_ROOT"] = str(PLUGIN_BIN.parent)
     env["JSTACK_TIMELINE_DIR"] = str(CFG["timeline_dir"])
     env["JSTACK_TIMELINE_ORIGIN"] = origin
     return env
@@ -970,7 +973,7 @@ def _selfwrite_env(origin: str = "direct") -> dict:
 def spawn_selfwrite(session_id: str, agent: str, agent_title: str,
                     submode: str, jsonl_path: Path,
                     origin: str = "direct", boundary: str | None = None,
-                    compacted: tuple[int, str | None] = (0, None)) -> None:
+                    compacted: tuple[int, str | None] = (0, None)) -> bool | None:
     """Resume a disposable DUPLICATE of the just-ended session for ONE turn so
     it writes the original's running memory — one seat-tagged timeline entry —
     instead of paying a fresh stranger to re-derive what the session already
@@ -1011,6 +1014,12 @@ def spawn_selfwrite(session_id: str, agent: str, agent_title: str,
         delta_note=SELFWRITE_DELTA_NOTE.format(boundary=boundary) if boundary else "",
         compact_note=compact_note,
     )
+    stamp = last_reviewed_boundary(jsonl_path, jsonl_path.stat().st_size)
+    if stamp:
+        date, at = stamp.split(" ")
+        prompt += (f"\nUse exactly --date {date} --at {at} for the timeline entry: "
+                   "this is the source transcript's last-message local timestamp. "
+                   "Do not substitute the current clock time.")
 
     # Dub the transcript — the write happens in this disposable duplicate so the
     # primary JSONL stays exactly as the user left it. The dub lives in the same
@@ -1127,15 +1136,18 @@ def spawn_selfwrite(session_id: str, agent: str, agent_title: str,
 
     if grew:
         _log(f"SELFWRITE_DONE {session_id[:8]} → {agent} ({len(out)} chars, +1 entry)")
+        return True
     elif claimed:
         _log(f"SELFWRITE_NOROW {session_id[:8]} → {agent}: claimed log_event but no "
              f"timeline row appeared (command never executed): {tail}")
     else:
         _log(f"SELFWRITE_NOENTRY {session_id[:8]} → {agent}: dub wrote no entry: {tail}")
+        return True
+    return False
 
 
 def spawn_review(session_id: str, agent: str, agent_title: str,
-                 origin: str = "direct", boundary: str | None = None) -> None:
+                 origin: str = "direct", boundary: str | None = None) -> bool | None:
     workspace = CFG["agent_root"] / agent_title
     if not workspace.exists():
         _log(f"SKIP {session_id[:8]}: workspace {workspace} not found")
@@ -1170,8 +1182,21 @@ def spawn_review(session_id: str, agent: str, agent_title: str,
             "--name", f"Review: {agent} ({session_id[:8]}){'/retry' if attempt > 1 else ''}",
             "-p", prompt,
         ]
+        jsonl_path, _ = find_session(session_id)
+        if jsonl_path and metadata(jsonl_path):
+            prompt = (
+                f"{prompt}\nRead and follow {PLUGIN_BIN.parent}/skills/"
+                f"post-session-review/SKILL.md. ARGUMENTS={session_id}. "
+                f"CLAUDE_PLUGIN_ROOT={PLUGIN_BIN.parent}. This is a fresh "
+                "review of the source transcript, not a resume of its thread."
+            )
+            cmd = ["codex", "exec", "--skip-git-repo-check",
+                   "--dangerously-bypass-approvals-and-sandbox",
+                   "--dangerously-bypass-hook-trust",
+                   "-c", "bypass_hook_trust=true",
+                   "-m", str(CFG["codex_review_model"]), prompt]
 
-        env = os.environ.copy()
+        env = _selfwrite_env(origin)
         extra = [str(PLUGIN_BIN)] + [str(Path(p).expanduser()) for p in CFG["extra_path"]]
         env["PATH"] = ":".join(
             extra
@@ -1232,7 +1257,7 @@ def spawn_review(session_id: str, agent: str, agent_title: str,
         )
         if ok:
             _log(f"DONE {session_id[:8]} → {agent} (attempt {attempt}, {len(result.stdout)} chars)")
-            return
+            return True
 
         last_failure = reason
         _log(f"INVALID {session_id[:8]} → {agent} (attempt {attempt}): {reason}")
@@ -1450,15 +1475,14 @@ def main():
     compacted = compact_scope(jsonl_path, prior)
 
     try:
-        try:
-            record_reviewed_offset(session_id, jsonl_path.stat().st_size)
-        except OSError:
-            pass
+        source_size = jsonl_path.stat().st_size
         if action == "review":
-            spawn_review(session_id, agent, agent_title, origin, boundary)
+            completed = spawn_review(session_id, agent, agent_title, origin, boundary)
         else:  # "selfwrite" (default) — a disposable dub writes the session's memory
-            spawn_selfwrite(session_id, agent, agent_title, submode, jsonl_path,
-                            origin, boundary, compacted)
+            completed = spawn_selfwrite(session_id, agent, agent_title, submode, jsonl_path,
+                                       origin, boundary, compacted)
+        if completed:
+            record_reviewed_offset(session_id, source_size)
     finally:
         slot.close()
 

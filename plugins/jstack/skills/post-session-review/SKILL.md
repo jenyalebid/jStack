@@ -22,9 +22,19 @@ Empty `$JSONL` → emit a single-line `## SUMMARY` saying no transcript was foun
 ## Phase A — thread extraction
 
 ```bash
-jq -r 'select(.type == "user") | .message.content
-  | if type == "string" then . else map(select(.type == "text") | .text) | join(" ") end
-  | gsub("\\s+"; " ")' "$JSONL" | head -200
+python3 - "$JSONL" <<'PY'
+import json, os, sys
+sys.path.insert(0, os.environ["CLAUDE_PLUGIN_ROOT"])
+from session_runtime import user_text
+for line in open(sys.argv[1]):
+    try:
+        row = json.loads(line)
+    except ValueError:
+        continue
+    text = user_text(row)
+    if text and not text.startswith(("<", "Caveat:", "# AGENTS.md instructions")):
+        print(row.get("timestamp", ""), " ".join(text.split()))
+PY
 ```
 
 Count only real user prose — skip `<system-reminder>`, `<command-message>`, `<command-name>`, tool-result blobs, bootstrap payloads.

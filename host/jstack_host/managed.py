@@ -1134,6 +1134,19 @@ def close_managed(sid: str, review: bool = True) -> bool:
         return False
     name = _name(sid)
     ttys = client_ttys(sid)
+    # Preserve the native transcript identity before record_close drops its
+    # board binding. Codex may still be exiting when the teardown kills tmux,
+    # so its SessionEnd hook is insufficient on this path.
+    review_cmd = []
+    if review:
+        from .messages import _find_session_file
+        from .codex_transcript import metadata
+        from . import plugin_paths
+        transcript = _find_session_file(sid)
+        spawn = plugin_paths.jstack_bin("session-review-spawn")
+        if transcript and spawn.is_file():
+            review_cmd = [str(spawn), metadata(transcript).get("id") or sid,
+                          str(transcript)]
     record_close(sid)
     if not review:
         # SIGKILL the pane's claude before tearing the session down —
@@ -1158,6 +1171,10 @@ def close_managed(sid: str, review: bool = True) -> bool:
     # immediately, one script so the window never closes ahead of the exit.
     steps = [f"sleep 2", f"{shlex.quote(_TMUX)} -L {shlex.quote(_SOCK)} "
              f"kill-session -t {shlex.quote(name)} 2>/dev/null"]
+    if review_cmd:
+        # The engine's atomic claim deduplicates this fallback with a native
+        # hook that did run. Dispatch only after the source process is gone.
+        steps.append(shlex.join(review_cmd))
     if ttys:
         steps.append(" ".join([shlex.quote(sys.executable), "-m", "jstack_host.iterm_window",
                                "--close", *(shlex.quote(t) for t in ttys)]))

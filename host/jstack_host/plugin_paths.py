@@ -30,6 +30,8 @@ inventory reaches in the way `shared/helpers.py` already reaches for
 from __future__ import annotations
 
 import json
+import os
+import re
 from pathlib import Path
 
 #: Resolved per call, never at import: the tests that move `Path.home()` are
@@ -89,19 +91,27 @@ def live_root(plugin_id: str, roots: dict[str, Path] | None = None) -> Path | No
     return None
 
 
-def newest_cached(plugin_id: str) -> Path | None:
+def newest_cached(plugin_id: str, cache: Path | None = None) -> Path | None:
     """The highest-versioned copy under `plugins/cache/`, or None.
 
     The fallback for anything not live: version dirs sort numerically, so
     `0.10.0` beats `0.9.0` — a lexical sort would pick the older one.
     """
     plugin, _, market = plugin_id.partition("@")
-    root = plugin_cache() / market / plugin
+    cache_root = cache if cache is not None else plugin_cache()
+    try:
+        # Preserve marketplace spelling on case-insensitive Macs as well:
+        # the legacy jStack catalog and current jstack catalog are distinct.
+        root = next((p / plugin for p in cache_root.iterdir()
+                     if p.name == market), None)
+    except OSError:
+        return None
+    if root is None:
+        return None
     if not root.is_dir():
         return None
     versions = sorted((p for p in root.iterdir() if p.is_dir()),
-                      key=lambda p: [int(x) if x.isdigit() else 0
-                                     for x in p.name.split(".")])
+                      key=lambda p: [int(x) for x in re.findall(r"\d+", p.name)])
     return versions[-1] if versions else None
 
 
@@ -119,7 +129,7 @@ def plugin_root(plugin_id: str, fallback: Path | None = None,
 
 #: The plugin this repo shells out to, and where it sits on the machine that
 #: maintains it — a checkout the marketplace registers as a `directory` source.
-JSTACK_ID = "jstack@jStack"
+JSTACK_ID = "jstack@jstack"
 
 
 def jstack_dev() -> Path:
@@ -139,7 +149,11 @@ def jstack_root() -> Path:
     tests the result itself and keeps its own answer for absence — "this host
     has no renderer" and "the render failed" are different answers.
     """
-    return plugin_root(JSTACK_ID, fallback=jstack_dev()) or jstack_dev()
+    native_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    return (plugin_root(JSTACK_ID, fallback=jstack_dev())
+            or plugin_root("jstack@jStack")
+            or newest_cached(JSTACK_ID, native_home / "plugins/cache")
+            or jstack_dev())
 
 
 def jstack_bin(name: str) -> Path:

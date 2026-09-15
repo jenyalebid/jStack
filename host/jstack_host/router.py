@@ -2642,19 +2642,8 @@ def _close_session(sid: str, review: bool, pristine: bool):
 
 def _review_spawn_bin() -> Path | None:
     """Resolve the jstack `session-review-spawn` engine from installed plugins."""
-    try:
-        data = json.loads((Path.home() / ".claude" / "plugins"
-                           / "installed_plugins.json").read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    for key, entries in data.get("plugins", {}).items():
-        if not key.startswith("jstack@"):
-            continue
-        for entry in entries:
-            ip = entry.get("installPath")
-            if ip and (Path(ip) / "bin" / "session-review-spawn").exists():
-                return Path(ip) / "bin" / "session-review-spawn"
-    return None
+    candidate = plugin_paths.jstack_bin("session-review-spawn")
+    return candidate if candidate.is_file() else None
 
 
 @router.post("/sessions/{sid}/review")
@@ -2663,21 +2652,16 @@ def review_session(sid: str):
     SessionEnd hook runs (reconcile follow-ups, timeline)."""
     _check_sid(sid)
     import subprocess
-    from .transcripts import _find_session_cwd
-    if not _find_session_cwd(sid):
-        raise HTTPException(status_code=404, detail="session not found")
-    transcript = None
-    for pd in (Path.home() / ".claude" / "projects").iterdir():
-        cand = pd / f"{sid}.jsonl"
-        if cand.exists():
-            transcript = str(cand)
-            break
+    from .messages import _find_session_file
+    from .codex_transcript import metadata
+    transcript = _find_session_file(sid)
     if not transcript:
         raise HTTPException(status_code=404, detail="session file not found")
     spawn = _review_spawn_bin()
     if not spawn:
         raise HTTPException(status_code=503, detail="review engine unavailable")
-    subprocess.Popen([str(spawn), sid, transcript],
+    native_id = metadata(transcript).get("id") or sid
+    subprocess.Popen([str(spawn), native_id, str(transcript)],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True)
     return {"ok": True, "review": "spawned"}
