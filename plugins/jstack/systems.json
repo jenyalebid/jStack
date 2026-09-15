@@ -842,6 +842,22 @@
         "path": "tests/version-bump.sh",
         "description": "Runs the gate itself against the real tree: exit 0 naming the bump commit when the version covers every shipped change (or when the bump is staged but not yet committed), exit 1 listing every shipped commit the current version does not cover, with the two manifests to bump."
       }
+    },
+    {
+      "id": "structure-manifest",
+      "kind": "system",
+      "name": "Structure manifest",
+      "status": "live",
+      "description": "The repo is a closed set at both of its roots — the repo top and the plugin top — declared entry-by-entry with reasons in structure.json, the same treatment a host's home root gets. New addition = manifest edit with a reason in the same commit; a tracked entry the manifest does not name blocks the push (the gate's layer 2 runs every tests/*.sh), and a manifest entry with nothing tracked behind it is a stale claim that blocks the same way. The listing is derived from git-tracked files — what a clone gets — never a raw directory read, because the checkout is shared and untracked work-in-progress is not the repo's shape. The manifest's _doc also carries the boundary law this structure exists to defend: the plugin is mechanisms that run on a stranger's machine, parameterized only by userConfig and JSTACK_* env; the repo above it is distribution and products (catalogs, installer, app, host package); anything host-specific lives in that host's own repo on top of the plugin, never inside it.",
+      "code": [],
+      "config": [
+        "structure.json"
+      ],
+      "test": {
+        "type": "script",
+        "path": "tests/structure.sh",
+        "description": "Against the real tree: derives both root listings from git ls-files, compares each to structure.json in both directions — unmanaged tracked entries fail naming each with the fix (declare with a reason, same commit), stale manifest entries fail naming what nothing tracks, and an unreadable manifest or unlistable tree is a failure, never a pass."
+      }
     }
   ]
 }
