@@ -1,4 +1,5 @@
 __pycache__/
+.DS_Store
 
 # Scheduler runtime data must never live in this public checkout —
 # scheduler/config.py refuses to resolve config/state/credential paths here
