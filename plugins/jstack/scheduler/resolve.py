@@ -24,6 +24,9 @@ middle layer and resolves job → defaults (fully backward-compatible).
 # Settings that follow the inheritance chain. Mirrors registry._INHERITED_KEYS;
 # kept here to avoid a circular import (registry imports nothing from resolve).
 INHERITED_KEYS = (
+    "engine",
+    "codex_model",
+    "codex_bin",
     "model",
     "timeout_seconds",
     "stall_timeout_seconds",

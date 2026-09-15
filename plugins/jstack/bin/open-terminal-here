@@ -55,9 +55,9 @@ done
 
 case "$ENGINE" in claude|codex) ;; *) echo "unknown engine: $ENGINE" >&2; exit 64 ;; esac
 
-# A command driven through jRemote must stay drivable there. The host owns
+# A command driven through a managed terminal must stay drivable there. The host owns
 # routing and board ids; the portable adapter only knows its public CLI.
-if [[ "${TMUX:-}" == */jremote,* ]] && command -v jstack-host >/dev/null 2>&1; then
+if [[ -n "${JREMOTE_SID:-}" ]] && command -v jstack-host >/dev/null 2>&1; then
   spawn_args=(spawn --cwd "$CWD" --engine "$ENGINE" --name "$NAME"
               --prompt-file "$PROMPT_FILE" --first-prompt "$FIRST_PROMPT" --model "$MODEL")
   if [ -n "$RESUME_ID" ]; then

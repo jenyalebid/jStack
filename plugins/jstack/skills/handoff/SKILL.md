@@ -6,7 +6,7 @@ argument-hint: "[@agent[-seat]] [focus]"
 
 # /jstack:handoff
 
-Opens a new Claude Code session in a fresh terminal, loaded with this session's actionable state. The CLAUDE.md walk-up at the target cwd does the identity switch; the doc carries the context across.
+Opens a fresh session in the current provider with this session's actionable state. Target instructions establish identity; the doc carries context. In Codex, use [the native launcher](codex.md) for step 3.
 
 Arguments, both optional. `@agent` retargets the workspace: `seat @alice-social` prints the directory to boot in, and `seat --list` every address there is. That is the one address grammar, shared with mail and the scheduler — `@agent` alone is the cockpit, hyphens walk down the seat tree (`@alice-social-threads`), a seat holding its own `chat/` resolves to that operator seat. A miss exits non-zero naming the seats that exist; stop there, never join a path blind. The seat is the user's to name and not yours to infer from the focus: a sub-mode chosen by reading the wording lands the same command in different seats on different phrasings, and path-scoped rules load from whichever tree it picked. No `@agent` → the current cwd. Everything after the agent token is a **focus** that scopes the doc; it is an explicit narrowing instruction, so drop unrelated tangents rather than balancing them.
 

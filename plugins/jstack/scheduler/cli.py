@@ -101,6 +101,10 @@ def cmd_add_once(args) -> None:
     job = _base_job(args.agent, name, args.message, args.timeout_seconds, args.workspace)
     if args.category:
         job["category"] = args.category
+    if getattr(args, "engine", None):
+        job["engine"] = args.engine
+    if getattr(args, "codex_model", None):
+        job["codex_model"] = args.codex_model
     if args.resume_session:
         job["payload"]["resume_session_id"] = args.resume_session
     job["schedule"] = {
@@ -133,6 +137,10 @@ def cmd_add_recurring(args) -> None:
     job = _base_job(args.agent, args.name, args.message, args.timeout_seconds, args.workspace)
     if args.category:
         job["category"] = args.category
+    if getattr(args, "engine", None):
+        job["engine"] = args.engine
+    if getattr(args, "codex_model", None):
+        job["codex_model"] = args.codex_model
     job["schedule"] = {
         "kind": "rrule",
         "dtstart": dtstart.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -357,6 +365,8 @@ def build_parser() -> argparse.ArgumentParser:
     ao.add_argument("--timeout-seconds", type=int)
     ao.add_argument("--delete-after-run", action="store_true")
     ao.add_argument("--category", help="run-category (schedule.json categories map) for model/timeout resolution")
+    ao.add_argument("--engine", choices=("claude", "codex"))
+    ao.add_argument("--codex-model", help="native model override; otherwise use the Codex configuration")
     ao.add_argument("--workspace", help="absolute workspace override (testing)")
     ao.add_argument("--resume-session", metavar="SESSION_ID",
                     help="fork-resume this session's conversation instead of starting fresh "
@@ -375,6 +385,8 @@ def build_parser() -> argparse.ArgumentParser:
     ar.add_argument("--name", required=True)
     ar.add_argument("--timeout-seconds", type=int)
     ar.add_argument("--category", help="run-category (schedule.json categories map) for model/timeout resolution")
+    ar.add_argument("--engine", choices=("claude", "codex"))
+    ar.add_argument("--codex-model", help="native model override; otherwise use the Codex configuration")
     ar.add_argument("--workspace", help="absolute workspace override (testing)")
     ar.add_argument("--json", action="store_true")
     ar.set_defaults(func=cmd_add_recurring)

@@ -27,7 +27,7 @@ Show the user the brief sections, not the protocol, so a wrong premise can be co
 
 ## 2. Dispatch
 
-Spawn one `general-purpose` agent via the Agent tool. A large diff gets several in parallel, split by area — correctness, blast radius, the Caution Flags — and their findings merged.
+Use Claude's Agent tool or Codex's `collaboration.spawn_agent` for one auditor. A large diff may be split among auditors by correctness, blast radius and Caution Flags. Respect the user's delegation constraints; if agents are prohibited, verify locally and label it self-verification.
 
 > Read `{TARGET_CWD}/audit-brief.md` in full and follow the Audit Protocol at its
 > head exactly. Return ONLY the findings list in the verdict format that protocol

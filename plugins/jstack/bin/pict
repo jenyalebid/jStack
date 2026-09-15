@@ -1456,6 +1456,7 @@ def render_codex(directory: Path, opts: dict, bare: bool) -> str:
     lines = [f"# Codex startup instruction preview · {directory}", "",
              "Native system instructions and tool schemas come from the harness; "
              "this preview shows configured instruction files and jStack context.", ""]
+    weights = []
     for folder in [native_home, *chain]:
         candidates = names if folder == native_home else names + cfg.get("project_doc_fallback_filenames", [])
         for name in candidates:
@@ -1466,32 +1467,68 @@ def render_codex(directory: Path, opts: dict, bare: bool) -> str:
             raw = body.encode()[:budget]
             budget -= len(raw)
             if raw:
+                weights.append(("native instructions", display(path), raw.decode(errors="ignore")))
                 lines += [f"# {display(path)}", "", *neutral(raw.decode(errors="ignore")), ""]
             break
     for path in opts["appends"]:
         body = read_or_none(path)
         if body is not None:
+            weights.append(("developer instructions", display(path), body))
             lines += [f"# Developer instructions · {display(path)}", "", *neutral(body), ""]
     payload = {"cwd": str(directory), "transcript_path": "rollout-pict-preview.jsonl"}
+    bridge_env = dict(os.environ)
+    if opts["no_memory"]:
+        bridge_env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     bridge = subprocess.run([sys.executable, str(PLUGIN_BIN.parent / "hooks/session-start-environment.py")],
-                            input=json.dumps(payload), capture_output=True, text=True, timeout=10)
+                            input=json.dumps(payload), capture_output=True, text=True, timeout=10,
+                            env=bridge_env)
     if bridge.returncode:
         raise ValueError("Codex instruction bridge failed: " + bridge.stderr.strip())
     if bridge.stdout.strip():
         body = json.loads(bridge.stdout)["hookSpecificOutput"]["additionalContext"]
+        for chunk in re.split(r"\n\n(?=Instructions from |Auto-memory from )", body):
+            label, _, content = chunk.partition("\n")
+            weights.append(("SessionStart bridge", label, content))
         lines += ["# jStack SessionStart instruction bridge", "", *neutral(body), ""]
     sources: list[Source] = []
     gather_timeline(directory, sources)
     for source in sources:
         if source.body:
+            weights.append(("SessionStart timeline", source.label, source.body))
             lines += [f"# {source.label}", "", *neutral(source.body), ""]
     if opts["prompt"]:
+        weights.append(("user prompt", "prompt", opts["prompt"]))
         lines += ["# User prompt", "", *neutral(opts["prompt"]), ""]
     for path in opts["serves"]:
         body = read_or_none(path)
         if body is not None:
+            weights.append(("tool result", display(path), body))
             lines += [f"# Tool result · {display(path)}", "", *neutral(body), ""]
     if not bare:
+        table = ["# Source weights", "", "Estimates use bytes/4; harness and tool bytes are outside this preview.", "",
+                 "| stage | source | ~tokens |", "|---|---|---|"]
+        table += [f"| {stage} | {label} | {tokens(body)} |" for stage, label, body in weights]
+        table += [f"| | **preview total** | **{sum(tokens(body) for _, _, body in weights)}** |", ""]
+        lines[4:4] = table
+        candidates = {}
+        for path in sorted(rules_dir().glob("**/*.md")):
+            body = read_or_none(path)
+            globs = parse_paths_frontmatter(body) if body else []
+            if globs:
+                candidates[str(path)] = (path, globs, strip_frontmatter(body))
+        hits = anchored_rules({key: value[1] for key, value in candidates.items()}, directory)
+        lines += ["# On-demand rules", "", "Not loaded at startup. The edit hook injects these when matching files are mutated.", ""]
+        for key in sorted(hits):
+            path, globs, body = candidates[key]
+            lines += [f"# on-demand · {display(path)}", "",
+                      f"Matches `{', '.join(globs)}` · ~{tokens(body)} tokens", "", *neutral(body), ""]
+        if not hits:
+            lines += ["*(no matching files here)*", ""]
+        elsewhere = [key for key in sorted(candidates) if key not in hits]
+        if elsewhere:
+            lines += ["# Path rules with no matching files here", ""]
+            lines += [f"- {display(candidates[key][0])} · `{', '.join(candidates[key][1])}`" for key in elsewhere]
+            lines.append("")
         lines += ["# Native hook inventory", ""]
         for path in [native_home / "hooks.json", PLUGIN_BIN.parent / "hooks/hooks.json"]:
             try:

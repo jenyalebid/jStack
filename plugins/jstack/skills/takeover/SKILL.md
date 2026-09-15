@@ -11,9 +11,8 @@ new session reads the user exchanges, checks prior claims against the tree,
 and continues. No outgoing summary travels; the fixed briefing template is
 `prompts/takeover-briefing.md`. The source stays open and unchanged.
 
-The hook normally executes without a model turn. jRemote translates `/takeover`
-for Codex; in a raw Codex terminal use `JSTACK_TAKEOVER_CMD` followed by the
-same arguments. If this skill was invoked instead, call the shared adapter:
+The prompt hook handles `$jstack:takeover` in Codex and `/jstack:takeover` in Claude
+without a model turn. If this skill was invoked instead, call the shared adapter:
 
 ```bash
 python3 "$CLAUDE_PLUGIN_ROOT/session_runtime.py" takeover "@agent-seat focus words"

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import threading
@@ -22,7 +23,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import config, journal, spawn as spawnlib
-from session_runtime import CodexRPC, metadata as native_metadata, transcripts
+from session_runtime import CodexRPC, metadata as native_metadata, transcripts, user_text
 
 _POLL_SECONDS = 1.0
 _KILL_GRACE_SECONDS = 10.0
@@ -204,7 +205,7 @@ def last_text_block(jsonl_path: Path) -> str:
             d = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if d.get("type") == "user" and _is_stop_hook_turn(d):
+        if user_text(d).startswith("Stop hook feedback:"):
             break
         if d.get("type") == "response_item":
             message = d.get("payload") or {}
@@ -380,21 +381,47 @@ class Run:
                                            or "bypassPermissions"))
         resume_id = self.job["payload"].get("resume_session_id")
         native_paths = [p for p in transcripts(resume_id) if native_metadata(p)] if resume_id else []
-        if len(native_paths) == 1:
+        provider = self.job.get("engine") or self.defaults.get("engine") or "claude"
+        if native_paths:
+            if len(native_paths) != 1:
+                raise ValueError(f"ambiguous native resume source: {resume_id}")
+            provider = "codex"
+        if provider not in ("claude", "codex"):
+            raise ValueError(f"unknown scheduler engine: {provider}")
+        if provider == "codex":
             # A reply/self-wake must return to the provider that holds its
             # history. Claude's --fork-session cannot load a Codex thread.
-            with CodexRPC() as rpc:
-                source = rpc.call("thread/read", {"threadId": resume_id, "includeTurns": False})["thread"]
-                params = {"threadId": resume_id, "excludeTurns": True, "deferGoalContinuation": True}
-                if source.get("model"):
-                    params["model"] = source["model"]
-                fork = rpc.call("thread/fork", params)
+            native_bin = self.job.get("codex_bin") or self.defaults.get("codex_bin") or "codex"
+            native_bin = shutil.which(native_bin, path=env["PATH"]) or native_bin
+            with CodexRPC(binary=native_bin, env=env) as rpc:
+                model = self.job.get("codex_model") or self.defaults.get("codex_model")
+                if not model and self.model.startswith("gpt-"):
+                    model = self.model
+                if resume_id:
+                    source = rpc.call("thread/read", {"threadId": resume_id, "includeTurns": False})["thread"]
+                    params = {"threadId": resume_id, "excludeTurns": True, "deferGoalContinuation": True}
+                    if model or source.get("model"):
+                        params["model"] = model or source["model"]
+                    fork = rpc.call("thread/fork", params)
+                else:
+                    params = {"cwd": str(self.workspace), "ephemeral": False}
+                    if model:
+                        params["model"] = model
+                    fork = rpc.call("thread/start", params)
+                    # New threads aren't durable until their first history
+                    # item. Persist through the native API before CLI resume.
+                    rpc.call("thread/inject_items", {"threadId": fork["thread"]["id"],
+                        "items": [{"type": "message", "role": "developer", "content": [
+                            {"type": "input_text", "text": f"This thread belongs to scheduled job {self.job_id}."}]}]})
             self.session_id = fork["thread"]["id"]
             self._jsonl = Path(fork["thread"]["path"])
             self.model = fork["model"]
-            argv = ["codex", "exec", "resume", self.session_id,
-                    "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust",
-                    "--skip-git-repo-check", "-m", self.model, message]
+            argv = [native_bin, "exec", "resume", self.session_id,
+                    "--dangerously-bypass-hook-trust", "--skip-git-repo-check", "-m", self.model]
+            if (self.job.get("permission_mode") or self.defaults.get("permission_mode")
+                    or "bypassPermissions") == "bypassPermissions":
+                argv.append("--dangerously-bypass-approvals-and-sandbox")
+            argv.append(message)
             env.pop("CODEX_THREAD_ID", None)
             env.pop("CLAUDE_CODE_SESSION_ID", None)
         # No SKIP_SESSION_HOOK: cron runs get post-session reviews (parity).

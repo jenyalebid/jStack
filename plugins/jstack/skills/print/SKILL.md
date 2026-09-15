@@ -6,8 +6,8 @@ argument-hint: ""
 
 # This session's transcript path
 
-The command hook answers without a model turn. jRemote translates `/print` to
-the hook sentinel for Codex; in a raw Codex terminal use `JSTACK_PRINT_CMD`.
+The prompt hook answers `$jstack:print` in Codex and `/jstack:print` in Claude
+without a model turn.
 If this skill was invoked instead, use the same deterministic adapter:
 
 ```bash

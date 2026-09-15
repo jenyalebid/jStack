@@ -80,11 +80,15 @@ def validate_registry(reg: dict) -> None:
     for cname, cval in cats.items():
         if not isinstance(cval, dict):
             raise ValueError(f"categories[{cname!r}] must be an object")
+        if cval.get("engine") not in (None, "claude", "codex"):
+            raise ValueError(f"categories[{cname!r}]: engine must be claude or codex")
         for key in _OPTIONAL_INT_KEYS:
             v = cval.get(key)
             if v is not None and (not isinstance(v, int) or v <= 0):
                 raise ValueError(f"categories[{cname!r}]: {key} must be a positive integer or null")
     jobs = reg.get("jobs")
+    if reg.get("defaults", {}).get("engine") not in (None, "claude", "codex"):
+        raise ValueError("defaults.engine must be claude or codex")
     if not isinstance(jobs, list):
         raise ValueError("registry.jobs must be a list")
     seen: set[str] = set()
@@ -92,6 +96,8 @@ def validate_registry(reg: dict) -> None:
         where = f"jobs[{i}]"
         if not isinstance(job, dict):
             raise ValueError(f"{where}: job must be an object")
+        if job.get("engine") not in (None, "claude", "codex"):
+            raise ValueError(f"{where}: engine must be claude or codex")
         for key in ("id", "name", "agent_id"):
             if not isinstance(job.get(key), str) or not job[key]:
                 raise ValueError(f"{where}: missing or empty {key!r}")

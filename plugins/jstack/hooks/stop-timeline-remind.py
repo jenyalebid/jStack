@@ -36,6 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from session_runtime import codex_user_engaged
+import root
 from _prompts import load as load_prompt  # noqa: E402 — sibling module
 
 PLUGIN_BIN = Path(__file__).resolve().parent.parent / "bin"
@@ -82,6 +83,17 @@ def agent_source(cwd: str) -> str:
     injector: the session dir's full path under the agent dir, "/"-joined —
     per-dir seats; at the agent root → chat)."""
     try:
+        config = Path(os.environ.get("JSTACK_REVIEW_CONFIG", str(
+            Path.home() / ".claude/jstack/review.json"))).expanduser()
+        try:
+            cfg = json.loads(config.read_text())
+        except (OSError, ValueError):
+            cfg = {}
+        agent, submode = root.seat_of(cwd, cfg)
+        if agent:
+            return f"{agent}/{submode}"
+        if cfg.get("agent_root") or os.environ.get("JSTACK_ROOT"):
+            return "auto"
         parts = Path(cwd).resolve().parts
         agents_root = Path.home() / "Agents"
         if parts[:len(agents_root.parts)] == agents_root.parts:

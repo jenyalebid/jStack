@@ -45,7 +45,7 @@ Drop repos with no commits. Every repo empty → skip to step 6.
 
 ## 4. Fan out, one auditor per repo
 
-Dispatch a `general-purpose` agent per repo via the Agent tool, all in parallel in one message. The kickoff prompt and its placeholders: `${CLAUDE_PLUGIN_ROOT}/skills/day-audit/auditor-prompt.md`.
+Dispatch one auditor per repo using Claude's Agent tool or Codex's `collaboration.spawn_agent`. Respect the user's delegation constraints; if agents are prohibited, verify locally and label it self-verification. The kickoff prompt: `${CLAUDE_PLUGIN_ROOT}/skills/day-audit/auditor-prompt.md`.
 
 ## 5. Synthesize
 

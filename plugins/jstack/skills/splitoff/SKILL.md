@@ -11,8 +11,8 @@ The fork gets its own native id; the source keeps running unchanged. Words
 following the command name the copy, not a narrower focus. Use handoff for a
 scoped restart with a brief.
 
-The command hook normally does this without a model turn. jRemote translates
-`/splitoff` for Codex; in a raw Codex terminal use `JSTACK_SPLITOFF_CMD name`.
+The prompt hook handles `$jstack:splitoff name` in Codex and `/jstack:splitoff name`
+in Claude without a model turn.
 If this skill was invoked instead, call the same adapter with the user's name:
 
 ```bash

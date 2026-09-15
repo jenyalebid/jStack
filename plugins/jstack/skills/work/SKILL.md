@@ -22,7 +22,7 @@ End this step knowing the exact repo directory. On an `@project` override, sniff
 
 ## 3. Load every relevant skill
 
-Match stack plus topic against the skill descriptions available this session and invoke each relevant one through the `Skill` tool. Load inclusively — everything that genuinely applies, not a curated minimum — and announce each as it loads.
+Match stack plus topic against the available skill descriptions. Use the `Skill` tool in Claude; in Codex, read each selected `SKILL.md` from its catalog path. Load every applicable skill and announce each as it loads.
 
 ## 4. Survey the area
 

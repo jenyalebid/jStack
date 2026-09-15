@@ -28,7 +28,8 @@ one line, then do it by hand.
 ## By hand
 
 ```bash
-pict <dir> --bare > <workspace>/pad/pict-<dir>.md
+PICT_ENGINE=claude; [ -n "${CODEX_THREAD_ID:-}" ] && PICT_ENGINE=codex
+pict <dir> --engine "$PICT_ENGINE" --bare > <workspace>/pad/pict-<dir>.md
 show-doc <file> --title "<dir> · pict"      # open-artifact where there is no show-doc
 ```
 

@@ -350,6 +350,8 @@ def main() -> int:
         argv += ["--timeout-seconds", str(timeout)]
     if args.category:
         argv += ["--category", args.category]
+    if os.environ.get("CODEX_THREAD_ID"):
+        argv += ["--engine", "codex"]
     if sid:
         argv += ["--resume-session", sid]
     try:

@@ -71,10 +71,13 @@ def user_text(row: dict) -> str:
     else:
         return ""
     content = message.get("content") or []
-    if isinstance(content, str):
-        return content
-    return "\n".join(b.get("text", "") for b in content if isinstance(b, dict)
-                     and b.get("type") in ("text", "input_text"))
+    text = content if isinstance(content, str) else "\n".join(
+        b.get("text", "") for b in content if isinstance(b, dict)
+        and b.get("type") in ("text", "input_text"))
+    if row.get("type") == "response_item" and text.lstrip().startswith((
+            "<environment_context>", "# AGENTS.md instructions for ", "<permissions instructions>")):
+        return ""
+    return text
 
 
 def engagement_marker(sid: str, state_dir=None) -> Path:
@@ -94,9 +97,15 @@ class CodexRPC:
     Never resume or compact a thread another CLI owns: it would create two
     writers. Close the child even when a request fails or times out.
     """
+    def __init__(self, binary="codex", env=None):
+        self.binary = binary
+        self.env = env
+
     def __enter__(self):
-        env = dict(os.environ, SKIP_SESSION_HOOK="1")
-        self.proc = subprocess.Popen(["codex", "app-server", "--stdio"],
+        env = dict(self.env if self.env is not None else os.environ, SKIP_SESSION_HOOK="1")
+        env.pop("CODEX_THREAD_ID", None)
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        self.proc = subprocess.Popen([self.binary, "app-server", "--stdio"],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, env=env)
         self.selector = selectors.DefaultSelector()
@@ -161,7 +170,8 @@ def command_main():
     result = subprocess.run([str(Path(__file__).parent / "hooks" / (args.command + "-command.py"))],
                             input=json.dumps(payload), capture_output=True, text=True)
     try:
-        print(json.loads(result.stdout)["reason"])
+        answer = json.loads(result.stdout)
+        print(answer.get("reason") or answer.get("stopReason") or answer.get("systemMessage") or result.stdout)
     except (ValueError, KeyError):
         print(result.stderr or result.stdout)
     return 0 if result.returncode in (0, 2) else result.returncode

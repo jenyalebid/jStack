@@ -28,6 +28,7 @@ fixture without touching real markers or shipped rules.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import sys
@@ -85,7 +86,7 @@ def main() -> None:
         sys.exit(0)
 
     matched: list[Path] = []
-    for rule_path in sorted(rules_dir.glob("*.md")):
+    for rule_path in sorted(rules_dir.glob("**/*.md")):
         try:
             paths = _parse_paths_frontmatter(rule_path)
             if not paths:
@@ -107,7 +108,10 @@ def main() -> None:
 
     to_inject: list[Path] = []
     for rule_path in matched:
-        marker = session_cache / f"{rule_path.stem}.marker"
+        key = rule_path.stem
+        if rule_path.parent != rules_dir:
+            key += "-" + hashlib.sha256(str(rule_path.relative_to(rules_dir)).encode()).hexdigest()[:16]
+        marker = session_cache / f"{key}.marker"
         last = _read_marker(marker)
         if last is None:
             to_inject.append(rule_path)

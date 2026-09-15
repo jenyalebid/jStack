@@ -29,6 +29,14 @@ import sys
 from pathlib import Path
 
 HOOK, TMP = sys.argv[1], Path(sys.argv[2])
+agents = TMP / "Agents"
+seat = agents / "Gamma/social"
+seat.mkdir(parents=True)
+(agents / "Gamma/CLAUDE.md").write_text("# Gamma")
+(seat / "CLAUDE.md").write_text("# Social")
+cfg = TMP / "review.json"
+cfg.write_text(json.dumps({"agent_root": str(agents)}))
+os.environ["JSTACK_REVIEW_CONFIG"] = str(cfg)
 os.environ["JSTACK_REVIEW_STATE"] = str(TMP / "state")
 os.environ.pop("SKIP_SESSION_HOOK", None)
 os.environ.pop("JSTACK_TIMELINE_REMIND_DISABLED", None)
@@ -50,7 +58,7 @@ def mk_transcript(name, entries, pad=15):
 def run_hook(session_id, transcript, stop_active=False, cwd=None, env_extra=None):
     payload = {"session_id": session_id, "transcript_path": str(transcript),
                "stop_hook_active": stop_active,
-               "cwd": cwd or str(Path.home() / "Agents" / "Gamma" / "social")}
+               "cwd": cwd or str(seat)}
     env = os.environ.copy()
     env.update(env_extra or {})
     r = subprocess.run([HOOK], input=json.dumps(payload), env=env,
