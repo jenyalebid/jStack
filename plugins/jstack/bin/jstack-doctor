@@ -45,9 +45,14 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_ROOT))
 
-import root  # noqa: E402
-from scheduler import config as sched_config  # noqa: E402
-from scheduler import spawn  # noqa: E402
+_BOOTSTRAP_ERROR = None
+try:
+    import root  # noqa: E402
+    from scheduler import config as sched_config  # noqa: E402
+    from scheduler import spawn  # noqa: E402
+except (ImportError, OSError, RuntimeError, ValueError) as error:
+    # Bad root/config must still produce the documented failed JSON report.
+    _BOOTSTRAP_ERROR = f"{type(error).__name__}: {error}"
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 _RANK = {OK: 0, WARN: 1, FAIL: 2}
@@ -122,9 +127,14 @@ def check_python() -> dict:
 
 def check_claude() -> dict:
     path = spawn.claude_resolvable()
+    native = shutil.which("codex", path=spawn.spawn_path())
+    if not path and native:
+        # Even --version initializes Codex's home/cache. Discovery alone
+        # preserves the doctor's read-only contract.
+        return _check("claude", OK, f"Codex-only install: {native}")
     if not path:
         return _check("claude", FAIL, "not on the spawn path",
-                      f"install Claude Code, or add its dir to `spawn_dirs` in "
+                      f"install Claude Code or Codex, or add its dir to `spawn_dirs` in "
                       f"{sched_config.INSTALL_FILE} — the search path is: "
                       f"{spawn.spawn_path()}")
     return _check("claude", OK,
@@ -413,6 +423,8 @@ CHECKS = (check_python, check_claude, check_git, check_dateutil, check_root,
 
 
 def checks() -> list:
+    if _BOOTSTRAP_ERROR:
+        return [_check("config", FAIL, f"bootstrap failed: {_BOOTSTRAP_ERROR}")]
     out = []
     for fn in CHECKS:
         name = fn.__name__[len("check_"):].replace("_", " ")
