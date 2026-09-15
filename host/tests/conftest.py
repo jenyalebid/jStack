@@ -136,3 +136,16 @@ def embedding_tree() -> object | None:
 needs_embedding_tree = pytest.mark.skipif(
     embedding_tree() is None,
     reason="no embedding tree on this machine — integration test, see conftest")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_codex_rollouts(tmp_path, monkeypatch):
+    from jstack_host import allowance, codex_transcript
+    monkeypatch.setattr(allowance, "CODEX_SESSIONS", tmp_path / "codex-sessions")
+    monkeypatch.setattr(codex_transcript, "root", lambda: tmp_path / "codex-sessions")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_turn_markers(tmp_path, monkeypatch):
+    from jstack_host import board
+    monkeypatch.setattr(board, "_TURN_DIR", tmp_path / "turn-markers")

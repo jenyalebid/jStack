@@ -22,7 +22,10 @@ Two tiers, and a host has the first one the moment Claude Code is installed:
    and a reset clock, stamped when fetched). Every interactive session
    refreshes it. Free, no auth, no hook to wire — the reason a fresh install
    shows bars without anyone configuring anything.
-2. **A recorded sample.** `record()` stores what a sampler saw — a status-line
+2. **Codex rollout events.** The CLI records account `rate_limits` alongside
+   token counts. Their own timestamps, percentages, and reset clocks feed the
+   Codex bars without another login or an API credential.
+3. **A recorded sample.** `record()` stores what a sampler saw — a status-line
    hook handed `rate_limits` on every render, a poll of the provider's usage
    endpoint. Whichever tier's sample is newest is the one served.
 
@@ -60,6 +63,7 @@ from . import hostenv
 STATE = hostenv.state_dir() / "allowance.json"
 LOCK = hostenv.state_dir() / ".allowance.lock"
 CLI_CONFIG = Path.home() / ".claude.json"
+CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 
 #: Providers we know how to render. A provider listed here but never sampled
 #: reads as None (not connected) — never as zero.
@@ -355,22 +359,21 @@ def _worst(bands: list) -> str | None:
 
 
 def _merged_providers() -> dict:
-    """Recorded slots, with the CLI's cache standing in for Claude wherever it
-    is the newer reading. A refusal recorded against Claude survives either
-    way — it is a different fact from the windows."""
+    """Newest provider sample from recorded data or the CLI's own files.
+
+    Recorded refusals survive either source; they are separate from usage.
+    """
     d = _read_raw()
     providers = dict(d["providers"])
-    cli = cli_cache_sample()
-    if cli is not None:
-        have = providers.get("claude") or {}
-        # A slot holding only a refusal has no windows to be newer than: its
-        # stamp is the outage's, not a reading's, and the cache is the only
-        # reading there is.
+    for pid, cli in (("claude", cli_cache_sample()), ("codex", codex_rollout_sample())):
+        if cli is None:
+            continue
+        have = providers.get(pid) or {}
         recorded = have.get("sampled_at") if have.get("windows") else None
         if float(cli["sampled_at"]) >= float(recorded or 0):
             merged = dict(have, **cli)
             merged["refusal"] = have.get("refusal")
-            providers["claude"] = merged
+            providers[pid] = merged
     return providers
 
 
@@ -419,7 +422,7 @@ def read() -> dict:
 def available() -> bool:
     """Can this host say anything at all — a sample on file, or a CLI cache
     to read. Nothing on either is the one case the screen is honest to hide."""
-    if cli_cache_sample() is not None:
+    if cli_cache_sample() is not None or codex_rollout_sample() is not None:
         return True
     return any(p and (p.get("windows") or p.get("refusal"))
                for p in _read_raw()["providers"].values())
@@ -474,3 +477,14 @@ def sync_from_scheduler(state_path: Path | None = None) -> bool:
         d["scheduler_watermark_ms"] = newest
         _write_raw(d)
     return True
+
+
+def codex_rollout_sample() -> dict | None:
+    """Newest account quota actually reported by Codex; no separate login."""
+    from .codex_transcript import summary
+    newest = None
+    for path in CODEX_SESSIONS.glob("**/rollout-*.jsonl"):
+        sample = summary(path).get("rate_sample")
+        if sample and (newest is None or sample["sampled_at"] > newest["sampled_at"]):
+            newest = sample
+    return newest

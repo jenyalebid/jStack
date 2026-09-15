@@ -145,3 +145,55 @@ def test_rollout_binding_uses_launch_time_and_cwd(tmp_path, monkeypatch):
     launched = datetime.fromisoformat("2026-08-26T21:00:09+00:00").timestamp()
     assert codex_transcript.rollout_started_after(
         launched, "/Users/x/Agents/Nova/chat") == current
+
+
+def test_reattach_keeps_rollout_link(tmp_path, monkeypatch):
+    from jstack_host import managed
+    monkeypatch.setattr(managed, '_REG', tmp_path / 'open.json')
+    managed.record_open(SID, 'nova', engine='codex', model='gpt-5.6-sol')
+    managed.record_transcript(SID, '/tmp/rollout-existing.jsonl')
+    managed.record_open(SID, 'nova')
+    assert managed._reg_load()[SID]['transcript'] == '/tmp/rollout-existing.jsonl'
+
+
+def test_delayed_rollout_recovers_without_stealing_a_sibling(tmp_path, monkeypatch):
+    from jstack_host import managed
+    from types import SimpleNamespace
+    monkeypatch.setattr(managed, '_REG', tmp_path / 'open.json')
+    sessions = tmp_path / 'sessions'
+    monkeypatch.setattr(codex_transcript, 'root', lambda: sessions)
+    older = 'aaaaaaaa-0000-0000-0000-000000000000'
+    current = 'bbbbbbbb-0000-0000-0000-000000000000'
+    cwd = '/Users/x/Agents/Nova/chat'
+    start = datetime.fromisoformat('2026-08-26T21:00:00+00:00').timestamp()
+    for sid in (older, current):
+        managed.record_open(sid, 'nova', engine='codex')
+    path = _rollout(sessions / f'rollout-new-{SID}.jsonl')
+    lines = path.read_text().splitlines()
+    first = json.loads(lines[0]); first['payload']['timestamp'] = '2026-08-26T21:02:00Z'
+    path.write_text(json.dumps(first) + '\n' + '\n'.join(lines[1:]) + '\n')
+    panes = f'jr-aaaaaaaa\t{start}\t{cwd}\njr-bbbbbbbb\t{start + 60}\t{cwd}\n'
+    monkeypatch.setattr(codex_transcript.subprocess, 'run', lambda *a, **k: SimpleNamespace(returncode=0, stdout=panes))
+    result = codex_transcript.recover_open_sessions(managed._reg_load())
+    assert 'transcript' not in result[older]
+    assert result[current]['transcript'] == str(path)
+    assert managed._reg_load()[current]['transcript'] == str(path)
+
+
+def test_card_metadata_tracks_model_usage_and_turn_events(tmp_path):
+    path = _rollout(tmp_path / f'rollout-new-{SID}.jsonl')
+    with path.open('a') as fh:
+        for event in [
+            {'type': 'turn_context', 'payload': {'model': 'gpt-6-astra'}},
+            {'type': 'event_msg', 'payload': {'type': 'task_started'}},
+            {'type': 'event_msg', 'payload': {'type': 'token_count', 'info': {
+                'last_token_usage': {'input_tokens': 123},
+                'total_token_usage': {'total_tokens': 567}}}},
+        ]:
+            fh.write(json.dumps(event) + '\n')
+    facts = codex_transcript.summary(path)
+    assert (facts['model'], facts['turn'], facts['context'], facts['tokens']) == ('gpt-6-astra', 'working', 123, 567)
+    with path.open('a') as fh:
+        fh.write(json.dumps({'type': 'event_msg', 'payload': {'type': 'turn_aborted'}}) + '\n')
+        fh.write('{"partial":')
+    assert codex_transcript.summary(path)['turn'] == 'idle'

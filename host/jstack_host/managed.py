@@ -384,6 +384,8 @@ def record_open(sid: str, agent: str, name: str = "",
     def _put(d: dict) -> None:
         prior = d.get(sid) or {}
         entry = {"agent": agent}
+        if prior.get("transcript"):
+            entry["transcript"] = prior["transcript"]
         if name:
             entry["name"] = name
         eng = engine if (engine and engine != "claude") else prior.get("engine", "")
