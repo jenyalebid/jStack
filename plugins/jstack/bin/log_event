@@ -1148,7 +1148,7 @@ def _cmd_show(rest: list[str]) -> int:
 
 
 def _env_session() -> str:
-    return os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    return (os.environ.get("CODEX_THREAD_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID", "")).strip()
 
 
 def _tag_usage() -> str:

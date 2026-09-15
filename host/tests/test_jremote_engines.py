@@ -44,7 +44,7 @@ def test_roster_ids_are_the_probed_set():
         # choice that resolved to the identical session.
         "claude": ["claude-opus-5", "claude-sonnet-5", "claude-fable-5",
                    "claude-haiku-4-5-20251001"],
-        "codex": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+        "codex": ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
                   "gpt-5.5", "gpt-5.4"],
     }
 

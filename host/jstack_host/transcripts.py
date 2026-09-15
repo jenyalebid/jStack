@@ -403,6 +403,13 @@ def _project_dir_to_cwd(dirname: str) -> str | None:
 
 def _find_session_cwd(session_id: str) -> str | None:
     """Find which project dir contains a session and return its cwd path."""
+    from .messages import _find_session_file
+    from .codex_transcript import metadata
+    path = _find_session_file(session_id)
+    if path:
+        cwd = metadata(path).get("cwd")
+        if cwd and Path(cwd).is_dir():
+            return cwd
     claude_projects = Path.home() / ".claude" / "projects"
     if not claude_projects.exists():
         return None

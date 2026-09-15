@@ -163,3 +163,49 @@ def test_a_cache_without_a_reading_is_absence(state):
     assert allowance.cli_cache_sample() is None
     (state / "claude.json").write_text("not json")
     assert allowance.cli_cache_sample() is None
+
+
+def _codex_sample(path, at, pct=27, minutes=10080, limit_id='codex'):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {'type': 'event_msg', 'timestamp': datetime.fromtimestamp(at, timezone.utc).isoformat(),
+           'payload': {'type': 'token_count', 'rate_limits': {
+               'limit_id': limit_id, 'primary': {'used_percent': pct,
+               'window_minutes': minutes, 'resets_at': at + 3600}, 'secondary': None}}}
+    path.write_text(json.dumps(row) + '\n')
+
+
+def test_codex_quota_appears_from_rollout_without_separate_connection(state, monkeypatch):
+    monkeypatch.setattr(allowance, 'CODEX_SESSIONS', state / 'sessions')
+    path = state / 'sessions' / 'rollout-new.jsonl'
+    at = time.time() - 30
+    _codex_sample(path, at, pct=0)
+    p = allowance.read()['providers']['codex']
+    assert p['source'] == 'rollout' and p['stale'] is False
+    assert [(w['label'], w['pct']) for w in p['windows']] == [('Week', 0)]
+    assert abs(p['sampled_at'] - at) < 0.00001
+    assert allowance.available()
+
+
+def test_codex_newest_sample_wins_and_uses_event_age(state, monkeypatch):
+    monkeypatch.setattr(allowance, 'CODEX_SESSIONS', state / 'sessions')
+    old = state / 'sessions' / 'rollout-old.jsonl'
+    new = state / 'sessions' / 'rollout-new.jsonl'
+    _codex_sample(old, time.time() - 7200, pct=90)
+    _codex_sample(new, time.time() - 3600, pct=20, minutes=300)
+    old.touch()  # file activity must not make an older sample look fresh
+    p = allowance.read()['providers']['codex']
+    assert p['stale'] and p['windows'][0]['pct'] == 20
+    assert p['windows'][0]['label'] == 'Session (5h)'
+    allowance.record('codex', [{'id': 'primary', 'label': 'Week', 'pct': 35}], source='poll')
+    assert allowance.read()['providers']['codex']['windows'][0]['pct'] == 35
+
+
+def test_codex_ignores_unrelated_quota_and_malformed_last_line(state, monkeypatch):
+    monkeypatch.setattr(allowance, 'CODEX_SESSIONS', state / 'sessions')
+    path = state / 'sessions' / 'rollout-new.jsonl'
+    _codex_sample(path, time.time(), limit_id='other-product')
+    assert allowance.read()['providers']['codex'] is None
+    _codex_sample(path, time.time(), pct=15)
+    with path.open('a') as fh:
+        fh.write('{"partial":')
+    assert allowance.read()['providers']['codex']['windows'][0]['pct'] == 15

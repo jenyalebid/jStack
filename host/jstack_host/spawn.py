@@ -38,6 +38,7 @@ then no session exists), so the adapter falls back to a raw window.
 """
 
 import argparse
+import json
 import os
 import shlex
 import subprocess
@@ -49,7 +50,7 @@ _DASHBOARD = "http://127.0.0.1:9090/api/jremote/v1"
 
 
 def build_shell_parts(name: str, prompt_file: str, claude_args: str,
-                      first_prompt: str = "") -> tuple[str, str]:
+                      first_prompt: str = "", engine: str = "claude") -> tuple[str, str]:
     """(prelude, extra) for `open_managed` — the read-brief idiom and the
     flags that reference it, quoted for the pane's shell.
 
@@ -62,9 +63,16 @@ def build_shell_parts(name: str, prompt_file: str, claude_args: str,
     prelude, extra = "", ""
     if prompt_file:
         q = shlex.quote(prompt_file)
-        prelude = f'__JR_SP="$(cat {q})" && rm -f {q} && '
-        extra = '--append-system-prompt "$__JR_SP"'
-    if name:
+        if engine == "codex":
+            # JSON strings are TOML strings too. Keep prose inert at both the
+            # config and shell layers, including newlines and command syntax.
+            brief = Path(prompt_file).read_text()
+            extra = "-c " + shlex.quote("developer_instructions=" + json.dumps(brief))
+            prelude = f"rm -f {q} && "
+        else:
+            prelude = f'__JR_SP="$(cat {q})" && rm -f {q} && '
+            extra = '--append-system-prompt "$__JR_SP"'
+    if name and engine != "codex":
         extra += (" " if extra else "") + f"--name {shlex.quote(name)}"
     if claude_args:
         extra += (" " if extra else "") + claude_args
@@ -150,10 +158,14 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cwd", required=True)
     ap.add_argument("--sid", default="")
+    ap.add_argument("--engine", choices=("claude", "codex"),
+                    default="codex" if os.environ.get("CODEX_THREAD_ID") else "claude")
+    ap.add_argument("--resume-id", default="")
     ap.add_argument("--resume", action="store_true",
                     help="resume an existing transcript (splitoff) instead of "
                          "starting fresh under --session-id")
     ap.add_argument("--name", default="")
+    ap.add_argument("--model", default="")
     ap.add_argument("--prompt-file", default="")
     ap.add_argument("--first-prompt", default="",
                     help="claude's positional prompt — the new session starts "
@@ -174,10 +186,20 @@ def main(argv=None) -> int:
         return 75
     sid = a.sid or str(uuid.uuid4())
     prelude, extra = build_shell_parts(a.name, a.prompt_file, a.claude_args,
-                                       a.first_prompt)
+                                       a.first_prompt, a.engine)
     # Registered-first; the board row is the spawn's visibility from here on.
-    managed.record_open(sid, agent_base_for(cwd), name=a.name)
-    managed.open_managed(sid, cwd, resume=a.resume, extra=extra, prelude=prelude)
+    managed.record_open(sid, agent_base_for(cwd), name=a.name, engine=a.engine, model=a.model)
+    if a.engine == "codex" and a.resume:
+        from . import codex_transcript
+        path = codex_transcript.path_for_id(a.resume_id or a.sid)
+        if path:
+            managed.record_transcript(sid, str(path))
+    options = dict(resume=a.resume, extra=extra, prelude=prelude)
+    if a.engine != "claude" or a.resume_id:
+        options.update(engine=a.engine, resume_id=a.resume_id)
+    if a.model:
+        options["model"] = a.model
+    managed.open_managed(sid, cwd, **options)
     # The window opens where the spawn was driven: a handoff typed on the
     # iPad gets its open frame down that device's own socket ("device"),
     # a device that can't be reached gets no window at all ("none" — the

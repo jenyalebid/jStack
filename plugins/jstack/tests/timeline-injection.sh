@@ -27,6 +27,7 @@
 # Exit 0 = all pass, 1 = any fail. Hermetic — never touches the real timeline.
 
 set -u
+unset CODEX_THREAD_ID
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK="$PLUGIN_ROOT/hooks/session-start-inject.py"

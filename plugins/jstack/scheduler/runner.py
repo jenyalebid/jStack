@@ -22,6 +22,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import config, journal, spawn as spawnlib
+from session_runtime import CodexRPC, metadata as native_metadata, transcripts
 
 _POLL_SECONDS = 1.0
 _KILL_GRACE_SECONDS = 10.0
@@ -151,7 +152,12 @@ def _slug(workspace: Path) -> str:
 
 
 def session_jsonl_path(workspace: Path, session_id: str) -> Path:
-    return Path.home() / ".claude" / "projects" / _slug(workspace) / f"{session_id}.jsonl"
+    path = Path.home() / ".claude" / "projects" / _slug(workspace) / f"{session_id}.jsonl"
+    if not path.exists():
+        native = [p for p in transcripts(session_id) if native_metadata(p)]
+        if len(native) == 1:
+            return native[0]
+    return path
 
 
 def fresh_session_id(workspace: Path) -> str:
@@ -200,6 +206,14 @@ def last_text_block(jsonl_path: Path) -> str:
             continue
         if d.get("type") == "user" and _is_stop_hook_turn(d):
             break
+        if d.get("type") == "response_item":
+            message = d.get("payload") or {}
+            if message.get("type") == "message" and message.get("role") == "assistant":
+                text = "\n".join(b.get("text", "") for b in message.get("content", [])
+                                 if b.get("type") == "output_text").strip()
+                if text:
+                    last_txt = text
+            continue
         if d.get("type") != "assistant":
             continue
         for block in d.get("message", {}).get("content", []):
@@ -228,6 +242,8 @@ def reached_stop_hook(jsonl_path: Path) -> bool:
         except json.JSONDecodeError:
             continue
         if d.get("type") == "user" and _is_stop_hook_turn(d):
+            return True
+        if d.get("type") == "event_msg" and (d.get("payload") or {}).get("type") in ("task_complete", "task_completed"):
             return True
     return False
 
@@ -362,6 +378,25 @@ class Run:
                           permission_mode=(self.job.get("permission_mode")
                                            or self.defaults.get("permission_mode")
                                            or "bypassPermissions"))
+        resume_id = self.job["payload"].get("resume_session_id")
+        native_paths = [p for p in transcripts(resume_id) if native_metadata(p)] if resume_id else []
+        if len(native_paths) == 1:
+            # A reply/self-wake must return to the provider that holds its
+            # history. Claude's --fork-session cannot load a Codex thread.
+            with CodexRPC() as rpc:
+                source = rpc.call("thread/read", {"threadId": resume_id, "includeTurns": False})["thread"]
+                params = {"threadId": resume_id, "excludeTurns": True, "deferGoalContinuation": True}
+                if source.get("model"):
+                    params["model"] = source["model"]
+                fork = rpc.call("thread/fork", params)
+            self.session_id = fork["thread"]["id"]
+            self._jsonl = Path(fork["thread"]["path"])
+            self.model = fork["model"]
+            argv = ["codex", "exec", "resume", self.session_id,
+                    "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust",
+                    "--skip-git-repo-check", "-m", self.model, message]
+            env.pop("CODEX_THREAD_ID", None)
+            env.pop("CLAUDE_CODE_SESSION_ID", None)
         # No SKIP_SESSION_HOOK: cron runs get post-session reviews (parity).
         config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
         self._log_path = config.LOGS_DIR / f"{self.run_id}.out"

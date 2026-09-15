@@ -661,6 +661,12 @@ link_stage() {
 link_stage "$PLUGIN/rules-stage"    "$HOME/.claude/rules"    "rules"
 link_stage "$PLUGIN/commands-stage" "$HOME/.claude/commands" "bare commands"
 
+if command -v codex >/dev/null 2>&1; then
+    step "Codex plugin and shared skills"
+    run python3 "$CHECKOUT/host/tools/codex_setup.py" --workspace "$AGENT_ROOT" \
+        || warn "Codex setup failed — see the error above"
+fi
+
 # ── 6. bin on PATH ──────────────────────────────────────────────────────────
 
 step "Adapters on PATH"

@@ -50,6 +50,7 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(PLUGIN_ROOT))
+from session_runtime import engine
 from _answer import block    # noqa: E402 — sibling modules, path set above
 from _prompts import load as load_prompt  # noqa: E402
 
@@ -60,7 +61,8 @@ except ImportError:      # an install predating root.py — @agent is unavailabl
 
 #: Overridable so the test can stand a fake in its place rather than opening
 #: windows on whatever desktop happens to be running the suite.
-TERMINAL = os.environ.get("JSTACK_TERMINAL_BIN") or "open-terminal-here"
+TERMINAL = (os.environ.get("JSTACK_TERMINAL_BIN") or shutil.which("open-terminal-here")
+            or str(PLUGIN_ROOT / "bin/open-terminal-here"))
 
 #: The adapter probe is a usage print and the open is an osascript round-trip
 #: or a managed-spawn CLI. Both are seconds; the ceiling makes a hang read as
@@ -270,6 +272,10 @@ def main() -> None:
               f"  cd {cwd} && claude --append-system-prompt \"$(cat {brief_path})\"")
 
     cmd = [TERMINAL, str(cwd), "--prompt-file", brief_path, "--name", title]
+    if engine(payload) == "codex":
+        cmd += ["--engine", "codex"]
+        if payload.get("model"):
+            cmd += ["--model", payload["model"]]
     autostart = adapter_supports_first_prompt()
     if autostart:
         cmd += ["--first-prompt", kick]

@@ -239,9 +239,9 @@ def _resume_pin(cwd: Path) -> "tuple[str, Path]":
     slug. Pin anything else and the fork boots fresh, certain it has context
     it does not have.
     """
-    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    sid = (os.environ.get("CODEX_THREAD_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID", "")).strip()
     if not sid:
-        _fail("--resume requires $CLAUDE_CODE_SESSION_ID, which is set only "
+        _fail("--resume requires $CODEX_THREAD_ID or $CLAUDE_CODE_SESSION_ID, which is set only "
               "inside a live session — there is no conversation here to "
               "resume, so nothing was booked. Drop --resume for a fresh wake.")
     projects = Path(os.environ.get(
@@ -250,6 +250,8 @@ def _resume_pin(cwd: Path) -> "tuple[str, Path]":
     started = None
     try:
         hits = sorted(projects.glob(f"*/{sid}.jsonl"))
+        from session_runtime import transcripts
+        hits = sorted(set(hits) | set(transcripts(sid)))
     except OSError:
         hits = []
     for path in hits:
@@ -259,7 +261,9 @@ def _resume_pin(cwd: Path) -> "tuple[str, Path]":
                     line = fh.readline()
                     if not line:
                         break
-                    c = (json.loads(line) or {}).get("cwd")
+                    row = json.loads(line) or {}
+                    c = row.get("cwd") or ((row.get("payload") or {}).get("cwd")
+                                           if row.get("type") == "session_meta" else None)
                     if c:
                         started = Path(c)
                         break

@@ -196,7 +196,7 @@ def _run_main(monkeypatch, tmp_path, app_exists=True, open_ok=True, argv=None,
                         else real_exists(self))
     monkeypatch.setattr(spawn, "agent_base_for", lambda cwd: "testy")
     monkeypatch.setattr(managed, "record_open",
-                        lambda sid, agent, name="": events.append(("record", sid)))
+                        lambda sid, agent, name="", **kw: events.append(("record", sid)))
     monkeypatch.setattr(managed, "open_managed",
                         lambda sid, cwd, resume=False, extra="", prelude="", **kw:
                         events.append(("open", sid, resume)))

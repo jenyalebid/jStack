@@ -30,6 +30,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from session_runtime import transcripts
 from _answer import block  # noqa: E402 — sibling module, path set above
 
 # `/print`, `/jstack:print`, or the stub's sentinel — then the rest of the line.
@@ -44,7 +46,7 @@ def by_glob(session: str) -> list[Path]:
     by hand gets symlinked paths wrong, and the id is unique across them.
     """
     root = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) / "projects"
-    return sorted(root.glob(f"*/{session}.jsonl"))
+    return sorted(set(root.glob(f"*/{session}.jsonl")) | set(transcripts(session)))
 
 
 def main() -> None:

@@ -91,6 +91,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from session_runtime import metadata, user_text, transcripts, CodexRPC, codex_user_engaged
 import repo_seat  # noqa: E402
 try:
     import root as _root  # noqa: E402
@@ -192,8 +193,9 @@ only the tail of the session.
 So for this write only, the no-re-read rule above is lifted for exactly ONE
 file: your own transcript. Before step 1, read the user's side of the whole
 session —
-    jq -r 'select(.type == "user") | .message.content
-      | if type == "string" then . else map(select(.type == "text") | .text) | join(" ") end
+    jq -r 'if .type == "response_item" and .payload.type == "message" and .payload.role == "user"
+      then .payload.content elif .type == "user" then .message.content else empty end
+      | if type == "string" then . else map(select(.type == "text" or .type == "input_text") | .text) | join(" ") end
       | gsub("\\s+"; " ")' {jsonl_path} | head -200
 Count only real user prose — skip <system-reminder>, <command-message>,
 <command-name> and tool-result blobs. Then write ONE entry for the WHOLE
@@ -395,7 +397,7 @@ def find_session(session_id: str, transcript_hint: str | None = None) -> tuple[P
     agents = reviewable_agents(CFG["agent_root"])
 
     def resolve(p: Path) -> tuple[Path, str | None]:
-        agent = resolve_agent(p.parent.name, CFG["agent_root"], agents,
+        agent = resolve_agent(_encode(Path(_session_cwd(p))) if metadata(p) and _session_cwd(p) else p.parent.name, CFG["agent_root"], agents,
                               CFG["project_dir_map"], CFG["default_agent"])
         if agent is None:
             agent = _repo_agent(_session_cwd(p), agents)
@@ -403,9 +405,12 @@ def find_session(session_id: str, transcript_hint: str | None = None) -> tuple[P
 
     if transcript_hint:
         p = Path(transcript_hint)
-        if p.exists() and p.name == f"{session_id}.jsonl":
+        if p.exists() and (p.name == f"{session_id}.jsonl" or metadata(p).get("id") == session_id):
             return resolve(p)
 
+    native = [p for p in transcripts(session_id) if metadata(p)]
+    if len(native) == 1:
+        return resolve(native[0])
     if not CLAUDE_PROJECTS.exists():
         return None, None
     for project_dir in CLAUDE_PROJECTS.iterdir():
@@ -456,7 +461,8 @@ def _session_cwd(jsonl_path: Path) -> str | None:
         with jsonl_path.open() as f:
             for line in f:
                 try:
-                    cwd = json.loads(line).get("cwd")
+                    row = json.loads(line)
+                    cwd = row.get("cwd") or ((row.get("payload") or {}).get("cwd") if row.get("type") in ("session_meta", "turn_context") else None)
                 except json.JSONDecodeError:
                     continue
                 if cwd:
@@ -574,15 +580,9 @@ def _iter_user_texts(jsonl_path: Path):
                 e = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if e.get("type") != "user":
-                continue
-            content = e.get("message", {}).get("content", "")
-            if isinstance(content, list):
-                parts = [b.get("text", "") for b in content
-                         if isinstance(b, dict) and b.get("type") == "text"]
-                yield "\n".join(parts)
-            else:
-                yield content or ""
+            text = user_text(e)
+            if text:
+                yield text
 
 
 def is_review_session(jsonl_path: Path) -> bool:
@@ -628,6 +628,8 @@ def is_user_engaged(jsonl_path: Path) -> bool:
         (they do write `last-prompt`, which is NOT a human signal).
     Telegram conversations carry neither marker — callers must keep
     is_telegram_session() as the user-driven exception."""
+    if codex_user_engaged(jsonl_path, CFG["state_dir"]):
+        return True
     try:
         with jsonl_path.open() as f:
             for line in f:
@@ -636,6 +638,8 @@ def is_user_engaged(jsonl_path: Path) -> bool:
                 except json.JSONDecodeError:
                     continue
                 t = e.get("type")
+                if t == "session_meta" and (e.get("payload") or {}).get("source") == "cli":
+                    return True
                 if t in ("mode", "permission-mode"):
                     return True
                 if (t == "user" and not e.get("isMeta")
@@ -655,7 +659,7 @@ def has_recent_activity(jsonl_path: Path) -> bool:
             for line in f:
                 try:
                     e = json.loads(line)
-                    if e.get("type") not in ("user", "assistant"):
+                    if e.get("type") not in ("user", "assistant") and not (e.get("type") == "response_item" and (e.get("payload") or {}).get("type") == "message"):
                         continue
                     ts = e.get("timestamp")
                     if ts and (newest_ts is None or ts > newest_ts):
@@ -737,7 +741,7 @@ def compact_scope(jsonl_path: Path, offset: int) -> tuple[int, str | None]:
                     e = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if e.get("type") != "system" or e.get("subtype") != "compact_boundary":
+                if not (e.get("type") == "compacted" or (e.get("type") == "system" and e.get("subtype") == "compact_boundary")):
                     continue
                 count += 1
                 ts = e.get("timestamp")
@@ -767,7 +771,7 @@ def last_reviewed_boundary(jsonl_path: Path, offset: int) -> str | None:
             e = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError):
             continue
-        if e.get("type") not in ("user", "assistant"):
+        if e.get("type") not in ("user", "assistant") and not (e.get("type") == "response_item" and (e.get("payload") or {}).get("type") == "message"):
             continue
         ts = e.get("timestamp")
         if ts and (newest is None or ts > newest):
@@ -805,10 +809,14 @@ def sweep_stale_dubs() -> None:
             continue  # can't tell — leave it
         try:
             if dub_path:
-                Path(dub_path).unlink(missing_ok=True)
+                if metadata(dub_path):
+                    with CodexRPC() as rpc:
+                        rpc.call("thread/delete", {"threadId": rec.name})
+                else:
+                    Path(dub_path).unlink(missing_ok=True)
             rec.unlink(missing_ok=True)
             _log(f"DUB_SWEPT {rec.name[:8]} (owner {pid_s} dead)")
-        except OSError:
+        except (OSError, RuntimeError, TimeoutError):
             pass
 
 
@@ -827,13 +835,7 @@ def has_new_user_prose(jsonl_path: Path, offset: int) -> bool:
                     e = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if e.get("type") != "user" or e.get("isMeta"):
-                    continue
-                content = e.get("message", {}).get("content", "")
-                if isinstance(content, list):
-                    content = "\n".join(b.get("text", "") for b in content
-                                         if isinstance(b, dict) and b.get("type") == "text")
-                text = (content or "").strip()
+                text = user_text(e).strip()
                 if text and not text.startswith(("<", "Caveat:")):
                     return True
     except OSError:
@@ -951,6 +953,8 @@ def _selfwrite_env(origin: str = "direct") -> dict:
     stamps who drove the session being written about: a human (direct) or
     an auto_review_submodes cron (indirect)."""
     env = os.environ.copy()
+    env.pop("CODEX_THREAD_ID", None)
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
     extra = [str(PLUGIN_BIN)] + [str(Path(p).expanduser()) for p in CFG["extra_path"]]
     env["PATH"] = ":".join(
         extra
@@ -1011,21 +1015,25 @@ def spawn_selfwrite(session_id: str, agent: str, agent_title: str,
     # Dub the transcript — the write happens in this disposable duplicate so the
     # primary JSONL stays exactly as the user left it. The dub lives in the same
     # project dir (that's where --resume finds it) under a scratch title.
+    native = bool(metadata(jsonl_path))
     dub_err = ""
     try:
-        r = subprocess.run(
-            [str(PLUGIN_BIN / "dub-session"), session_id, jsonl_path.parent.name,
-             " · selfwrite scratch"],
-            capture_output=True, text=True, timeout=60,
-        )
-        dub_id = (r.stdout or "").strip() if r.returncode == 0 else ""
-        dub_err = (r.stderr or "")[:200]
+        if native:
+            with CodexRPC() as rpc:
+                fork = rpc.call("thread/fork", {"threadId": session_id, "excludeTurns": True, "deferGoalContinuation": True})["thread"]
+            dub_id, dub_path = fork["id"], Path(fork["path"])
+        else:
+            r = subprocess.run(
+                [str(PLUGIN_BIN / "dub-session"), session_id, jsonl_path.parent.name,
+                 " · selfwrite scratch"], capture_output=True, text=True, timeout=60)
+            dub_id = (r.stdout or "").strip() if r.returncode == 0 else ""
+            dub_err = (r.stderr or "")[:200]
+            dub_path = jsonl_path.parent / f"{dub_id}.jsonl"
     except Exception as e:
         dub_id, dub_err = "", str(e)
     if not re.fullmatch(r"[0-9a-f-]{36}", dub_id or ""):
         _log(f"SELFWRITE_FAIL {session_id[:8]} → {agent}: dub failed: {dub_err}")
         return
-    dub_path = jsonl_path.parent / f"{dub_id}.jsonl"
     # Pid-stamped registry record: if this engine dies before the finally below
     # runs (SIGKILL/reboot), the next engine run's sweep_stale_dubs removes the
     # orphan instead of leaving a phantom duplicate in the resume picker.
@@ -1045,6 +1053,12 @@ def spawn_selfwrite(session_id: str, agent: str, agent_title: str,
         "--resume", dub_id,
         "-p", prompt,
     ]
+    if native:
+        cmd = ["codex", "exec", "resume", dub_id,
+               "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust",
+               "--skip-git-repo-check", "-c", "bypass_hook_trust=true",
+               "-m", str(CFG.get("codex_selfwrite_model", "gpt-5.6-luna")),
+               "-c", "model_reasoning_effort=low", prompt]
     # Resume from the session's own cwd so tools + Claude project resolution behave
     # natively; fall back to the sub-mode workspace, then the agent root.
     cwd = _session_cwd(jsonl_path) or str(CFG["agent_root"] / agent_title / submode)
@@ -1076,9 +1090,13 @@ def spawn_selfwrite(session_id: str, agent: str, agent_title: str,
         # The timeline row is the artifact; the dub is scratch. Remove it on
         # every exit path so nothing ever accumulates in the resume picker.
         try:
-            dub_path.unlink(missing_ok=True)
+            if native:
+                with CodexRPC() as rpc:
+                    rpc.call("thread/delete", {"threadId": dub_id})
+            else:
+                dub_path.unlink(missing_ok=True)
             dub_rec.unlink(missing_ok=True)
-        except OSError:
+        except (OSError, RuntimeError, TimeoutError):
             pass
 
     if result.returncode != 0:

@@ -14,6 +14,7 @@
 # package too, or it only ever gets tested where it was already fine.
 
 set -u
+unset CODEX_THREAD_ID
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SS="$PLUGIN_ROOT/bin/schedule-self"
 PY="${JSTACK_PYTHON:-python3}"

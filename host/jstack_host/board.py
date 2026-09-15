@@ -1250,6 +1250,8 @@ def active_sessions() -> list[dict]:
 
     procs, orphans = _proc_scan()
     reg = managed.open_registry()
+    from . import codex_transcript
+    reg = codex_transcript.recover_open_sessions(reg)
     attached = managed.attached_names()
     agents = active_agents()
     unread = notify.unread_sids()
@@ -1494,6 +1496,7 @@ def active_sessions() -> list[dict]:
         cfg = agents.get(base, {})
         codex_messages = []
         codex_path = info.get("transcript", "")
+        facts = codex_transcript.summary(Path(codex_path)) if codex_path else {}
         if codex_path:
             try:
                 from .messages import parse_session
@@ -1529,7 +1532,7 @@ def active_sessions() -> list[dict]:
             "preview": first_user[:80], "last_activity": codex_activity,
             "spawned": codex_spawned,
             "last_prompt": last_user, "last_reply": last_reply,
-            "tokens": 0, "last_context": codex_load.get("context", 0),
+            "tokens": facts.get("tokens", 0), "last_context": codex_load.get("context", 0),
             "turns": codex_load.get("turns", 0), "path": codex_path,
             # Codex has no `/color` and its rollouts record none — a Codex
             # thread is untinted by construction, not by omission.
@@ -1551,16 +1554,15 @@ def active_sessions() -> list[dict]:
             # transcript, so this registry row IS its board presence —
             # without the engine here the app has nothing to label it with.
             "engine": info.get("engine", "claude"),
-            "model": info.get("model", ""),
+            "model": facts.get("model") or info.get("model", ""),
             # The pin, same as the main builder — and it matters MORE here.
             # This is the Open section, the one place a session shows before it
             # has written anything, which is exactly the window in which a
             # freshly-pinned row has no preview to tell it apart by.
             "tag": info.get("tag", ""),
-            # Never read: a Codex pane writes no Claude transcript, so there
-            # is no turn clock here to read. "" says exactly that — asserting
-            # "idle" would hand the app a resting session that is mid-turn.
-            "turn": "",
+            # The native task lifecycle supplies the turn state. No event
+            # means unknown, including a pane that has not written yet.
+            "turn": facts.get("turn", ""),
             # No transcript yet, but a dialog can already be up — the
             # hook marker doesn't need a JSONL to exist.
             "attention": "waiting" if sid in dialogs else "",

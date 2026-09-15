@@ -1748,3 +1748,35 @@ def test_a_worker_row_shows_its_argv_title_with_no_registry(ws, monkeypatch):
     assert row["window_name"] == "nova - #6"
     assert row["model"] == "opus"
     assert row["hold"] == "headless", "the shape this had to work for"
+
+
+def test_codex_card_shows_transcript_facts_after_reattach(ws, monkeypatch, tmp_path):
+    import json
+    from jstack_host import managed
+    loc, _ = ws
+    sid = 'aaaa0001-1111-2222-3333-444444444444'
+    path = tmp_path / 'rollout-card.jsonl'
+    records = [
+        {'type': 'session_meta', 'payload': {'session_id': sid, 'cwd': loc}},
+        {'type': 'turn_context', 'payload': {'model': 'gpt-6-astra'}},
+        {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
+            'content': [{'type': 'input_text', 'text': 'Validate the local stack'}]}},
+        {'type': 'response_item', 'payload': {'type': 'message', 'role': 'assistant',
+            'content': [{'type': 'output_text', 'text': 'Checking the setup'}]}},
+        {'type': 'event_msg', 'payload': {'type': 'task_started'}},
+        {'type': 'event_msg', 'payload': {'type': 'token_count', 'info': {
+            'last_token_usage': {'input_tokens': 2500},
+            'total_token_usage': {'total_tokens': 5000}}}},
+    ]
+    path.write_text(''.join(json.dumps(r) + '\n' for r in records))
+    managed.record_open(sid, 'nova', engine='codex', model='gpt-5.6-sol')
+    managed.record_transcript(sid, str(path))
+    managed.record_open(sid, 'nova')
+    _windows(monkeypatch, attached=set())
+    _reg(monkeypatch, managed._reg_load())
+    _procs(monkeypatch, [_raw(33, loc) | {'tty': '/dev/ttys002', 'engine': 'codex'}])
+    row = next(r for r in board.active_sessions() if r['session_id'] == sid)
+    assert row['preview'] == 'Validate the local stack'
+    assert row['last_reply'] == 'Checking the setup'
+    assert (row['last_context'], row['tokens']) == (2500, 5000)
+    assert row['model'] == 'gpt-6-astra' and row['turn'] == 'working'

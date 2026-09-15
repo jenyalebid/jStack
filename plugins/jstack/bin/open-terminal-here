@@ -26,7 +26,7 @@
 set -euo pipefail
 
 if [ "$#" -lt 1 ]; then
-  echo "usage: open-terminal-here <cwd> [--prompt-file <path>] [--name <title>] [--first-prompt <text>] [claude-args...]" >&2
+  echo "usage: open-terminal-here <cwd> [--engine claude|codex] [--prompt-file <path>] [--name <title>] [--first-prompt <text>] [--resume <id>] [provider-args...]" >&2
   exit 64
 fi
 
@@ -36,9 +36,16 @@ CWD="$1"; shift
 # spaces stays one token here, unlike the flattened pass-through ARGS below).
 PROMPT_FILE=""
 NAME=""
+MODEL=""
 FIRST_PROMPT=""
+ENGINE="claude"
+[ -n "${CODEX_THREAD_ID:-}" ] && ENGINE="codex"
+RESUME_ID=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --engine)       ENGINE="$2"; shift 2 ;;
+    --model)        MODEL="$2"; shift 2 ;;
+    --resume)       RESUME_ID="$2"; shift 2 ;;
     --prompt-file)  PROMPT_FILE="$2"; shift 2 ;;
     --name)         NAME="$2"; shift 2 ;;
     --first-prompt) FIRST_PROMPT="$2"; shift 2 ;;
@@ -46,7 +53,30 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+case "$ENGINE" in claude|codex) ;; *) echo "unknown engine: $ENGINE" >&2; exit 64 ;; esac
+
+# A command driven through jRemote must stay drivable there. The host owns
+# routing and board ids; the portable adapter only knows its public CLI.
+if [[ "${TMUX:-}" == */jremote,* ]] && command -v jstack-host >/dev/null 2>&1; then
+  spawn_args=(spawn --cwd "$CWD" --engine "$ENGINE" --name "$NAME"
+              --prompt-file "$PROMPT_FILE" --first-prompt "$FIRST_PROMPT" --model "$MODEL")
+  if [ -n "$RESUME_ID" ]; then
+    if [ "$ENGINE" = codex ]; then
+      spawn_args+=(--resume --resume-id "$RESUME_ID")
+    else
+      spawn_args+=(--resume --sid "$RESUME_ID")
+    fi
+  fi
+  # Preserve each argument while crossing the host's legacy shell interface.
+  extra_args="$(python3 -c 'import shlex,sys; print(shlex.join(sys.argv[1:]))' "$@")"
+  rc=0
+  jstack-host "${spawn_args[@]}" --claude-args "$extra_args" || rc=$?
+  [ "$rc" = 75 ] || exit "$rc"
+fi
+
 ARGS="$*"  # remaining pass-through claude args (pre-tokenized by caller)
+[ -n "$MODEL" ] && ARGS="--model $MODEL $ARGS"
+[ -n "$RESUME_ID" ] && ARGS="--resume $RESUME_ID $ARGS"
 
 # --name <title> rebuilt as a single quoted token for the embedded shell command.
 name_arg=""
@@ -78,6 +108,26 @@ if [ -n "$PROMPT_FILE" ]; then
   claude_invoke="__JSTACK_SP=\"\$(cat \"$PROMPT_FILE\")\" && rm -f \"$PROMPT_FILE\" && claude $ARGS$name_arg --append-system-prompt \"\$__JSTACK_SP\"$first_arg"
 else
   claude_invoke="claude $ARGS$name_arg$first_arg"
+fi
+
+if [ "$ENGINE" = codex ]; then
+  claude_invoke="$(python3 - "$PROMPT_FILE" "$FIRST_PROMPT" "$RESUME_ID" "$MODEL" "$@" <<'PY'
+import json, pathlib, shlex, sys
+brief, prompt, resume, model, *extra = sys.argv[1:]
+cmd = ['codex'] + (['resume', resume] if resume else [])
+cmd += ['--dangerously-bypass-hook-trust', '-c', 'bypass_hook_trust=true']
+if model:
+    cmd += ['-m', model]
+prelude = ''
+if brief:
+    cmd += ['-c', 'developer_instructions=' + json.dumps(pathlib.Path(brief).read_text())]
+    prelude = 'rm -f ' + shlex.quote(brief) + ' && '
+cmd += extra
+if prompt:
+    cmd.append(prompt)
+print(prelude + shlex.join(cmd))
+PY
+)"
 fi
 
 # Build the full command the new shell runs (cd then launch). Quote CWD.

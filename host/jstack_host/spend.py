@@ -53,12 +53,12 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import hostenv
+from . import codex_transcript, hostenv
 
 PROJECTS = Path.home() / ".claude" / "projects"
 CONFIG = hostenv.spend_categories_path()
 CACHE = hostenv.state_dir() / "token_usage" / "cache.json"
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 
 USAGE_KEYS = (
     "input_tokens",
@@ -117,16 +117,22 @@ def _first_user_message(path: Path) -> str:
                     d = json.loads(line)
                 except ValueError:
                     continue
-                if d.get("type") != "user" or d.get("isSidechain"):
+                if d.get("type") == "response_item":
+                    message = d.get("payload") or {}
+                    if message.get("type") != "message" or message.get("role") != "user":
+                        continue
+                elif d.get("type") == "user" and not d.get("isSidechain"):
+                    message = d.get("message") or {}
+                else:
                     continue
-                content = (d.get("message") or {}).get("content")
+                content = message.get("content")
                 if isinstance(content, str):
                     text = content
                 else:
                     text = " ".join(
                         c.get("text", "")
                         for c in (content or [])
-                        if isinstance(c, dict) and c.get("type") == "text"
+                        if isinstance(c, dict) and c.get("type") in ("text", "input_text")
                     )
                 text = " ".join((text or "").split())
                 if text:
@@ -210,6 +216,40 @@ def _scan_file(path: Path) -> dict:
     return days
 
 
+def _scan_codex_file(path: Path, session_id: str) -> dict:
+    """Per-response native usage; cached tokens are included in input_tokens.
+
+    token_count repeats cumulative counters and is deliberately not summed.
+    Forks contain copied history but must never charge the source's responses.
+    """
+    days, seen = {}, set()
+    with path.open(errors="ignore") as stream:
+        for line in stream:
+            try:
+                row = json.loads(line)
+                if row.get("type") != "token_usage_record":
+                    continue
+                payload = row.get("payload") or {}
+                if payload.get("thread_id") != session_id:
+                    continue
+                response_id = payload.get("response_id")
+                if response_id and response_id in seen:
+                    continue
+                seen.add(response_id)
+                day = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00")).astimezone(hostenv.day_tz()).strftime("%Y-%m-%d")
+                usage = payload.get("usage") or {}
+                cache_read = int(usage.get("cached_input_tokens") or 0)
+                cache_write = int(usage.get("cache_write_input_tokens") or 0)
+                values = [max(0, int(usage.get("input_tokens") or 0) - cache_read - cache_write),
+                          cache_write, cache_read, int(usage.get("output_tokens") or 0), 1]
+                totals = days.setdefault(day, [0, 0, 0, 0, 0])
+                for i, value in enumerate(values):
+                    totals[i] += value
+            except (ValueError, KeyError, TypeError):
+                continue
+    return days
+
+
 def _cache_load() -> dict:
     try:
         data = json.loads(CACHE.read_text())
@@ -236,14 +276,25 @@ def scan(use_cache: bool = True, projects: Path | None = None) -> list[dict]:
     Returns one record per (session, day) — a session that crosses midnight
     contributes to both days, each with only the tokens it spent there.
     """
+    include_codex = projects is None
     projects = projects or PROJECTS
     rules = _load_rules()
     cache = _cache_load() if use_cache else {}
     fresh: dict = {}
     records: list[dict] = []
-    for main in sorted(projects.glob("*/*.jsonl")):
+    sources = [(path, False) for path in sorted(projects.glob("*/*.jsonl"))]
+    if include_codex:
+        sources.extend((path, True) for folder in (codex_transcript.root(), codex_transcript.root().parent / "archived_sessions")
+                       for path in sorted(folder.glob("**/*.jsonl")))
+    for main, native in sources:
         project_dir = main.parent.name
         session_id = main.stem
+        if native:
+            meta = codex_transcript.metadata(main)
+            if not meta.get("id") or not meta.get("cwd"):
+                continue
+            session_id = meta["id"]
+            project_dir = meta["cwd"].replace("/", "-").replace(".", "-")
         sub_dir = main.with_suffix("")
         subs = sorted(sub_dir.glob("subagents/*.jsonl")) if sub_dir.is_dir() else []
         try:
@@ -255,13 +306,13 @@ def scan(use_cache: bool = True, projects: Path | None = None) -> list[dict]:
                 sig.append([s.stat().st_size, int(s.stat().st_mtime)])
             except OSError:
                 pass
-        key = f"{project_dir}/{session_id}"
+        key = f"{'codex/' if native else ''}{project_dir}/{session_id}"
         hit = cache.get(key)
         if hit and hit.get("sig") == sig:
             entry = hit
         else:
             first = _first_user_message(main)
-            main_days = _scan_file(main)
+            main_days = _scan_codex_file(main, session_id) if native else _scan_file(main)
             sub_days: dict[str, list[int]] = {}
             for s in subs:
                 for day_key, row in _scan_file(s).items():

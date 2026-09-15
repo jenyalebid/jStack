@@ -77,12 +77,35 @@ def _build_cmd(session_id: str, text: str, resume: bool) -> list[str]:
 
 def _env() -> dict:
     env = os.environ.copy()
+    env.pop("CODEX_THREAD_ID", None)
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
     env["PATH"] = spawn_path(inherit=env.get("PATH", ""))
     # Don't spawn a post-session review for each jRemote turn.
     env["SKIP_SESSION_HOOK"] = "1"
     # Timeline injection needs no opt-in here — the jStack SessionStart hook
     # injects it regardless of SKIP_SESSION_HOOK (it fires on resume too).
     return env
+
+
+def _native_resume(session_id: str, text: str) -> tuple[str, list[str]] | None:
+    from . import codex_transcript, managed
+    from .messages import _find_session_file
+    path = _find_session_file(session_id)
+    meta = codex_transcript.metadata(path) if path else {}
+    native_id = meta.get("id") or meta.get("session_id")
+    if not native_id:
+        return None
+    if native_id in _live_session_ids() or any(
+        row.get("transcript") == str(path) and managed.is_open(sid)
+        for sid, row in managed.open_registry().items()
+    ):
+        raise TurnError("session is busy (running elsewhere)", 409)
+    cmd = ["codex", "exec", "resume", "--json",
+           "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"]
+    model = codex_transcript.summary(path).get("model")
+    if model:
+        cmd += ["--model", model]
+    return native_id, cmd + [native_id, text]
 
 
 async def stream_turn(session_id: str, text: str, *, resume: bool = True,
@@ -98,6 +121,9 @@ async def stream_turn(session_id: str, text: str, *, resume: bool = True,
     if not text:
         raise TurnError("empty message", 400)
 
+    native = _native_resume(session_id, text) if resume else None
+    lock_id = native[0] if native else session_id
+
     if resume:
         cwd = _find_session_cwd(session_id)
         if not cwd:
@@ -112,10 +138,10 @@ async def stream_turn(session_id: str, text: str, *, resume: bool = True,
 
     if session_id in _live_session_ids():
         raise TurnError("session is busy (running elsewhere)", 409)
-    if session_id in _in_flight:
+    if lock_id in _in_flight:
         raise TurnError("still working on the previous message — watch the reply or ESC it first", 409)
 
-    _in_flight.add(session_id)
+    _in_flight.add(lock_id)
     # Tell the phone the session id up front (esp. for a brand-new Direct
     # session) so it can persist openOnPhone immediately and re-attach after a
     # quit mid-turn — not only when the `done` event finally arrives.
@@ -123,7 +149,7 @@ async def stream_turn(session_id: str, text: str, *, resume: bool = True,
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
-            *_build_cmd(session_id, text, resume),
+            *(native[1] if native else _build_cmd(session_id, text, resume)),
             cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -135,6 +161,7 @@ async def stream_turn(session_id: str, text: str, *, resume: bool = True,
         loop = asyncio.get_event_loop()
         deadline = loop.time() + _TURN_TIMEOUT
         saw_result = False
+        native_text = []
         tool_blocks: dict = {}  # index → {name, input(json str)} for in-flight tool calls
 
         while True:
@@ -160,6 +187,27 @@ async def stream_turn(session_id: str, text: str, *, resume: bool = True,
                 continue
 
             t = o.get("type")
+            if native:
+                if t == "item.completed":
+                    item = o.get("item") or {}
+                    if item.get("type") == "agent_message":
+                        chunk = item.get("text", "")
+                        native_text.append(chunk)
+                        yield ("delta", {"text": chunk})
+                    elif item.get("type") in ("command_execution", "mcp_tool_call", "file_change"):
+                        yield ("tool", {"name": item["type"],
+                                        "summary": item.get("command") or item.get("tool") or "file changes"})
+                elif t == "turn.completed":
+                    saw_result = True
+                    usage = o.get("usage") or {}
+                    yield ("done", {"session_id": session_id, "result": "\n".join(native_text),
+                                    "tokens": usage.get("output_tokens", 0),
+                                    "input_tokens": usage.get("input_tokens", 0), "is_error": False})
+                elif t in ("error", "turn.failed"):
+                    saw_result = True
+                    error = o.get("error") or {}
+                    yield ("error", {"message": error.get("message") or o.get("message") or "Codex turn failed"})
+                continue
             if t == "stream_event":
                 ev = o.get("event", {})
                 et = ev.get("type")
@@ -210,11 +258,11 @@ async def stream_turn(session_id: str, text: str, *, resume: bool = True,
             # alive. The work MUST survive — it writes to the transcript and
             # the phone re-attaches via live-tail on relaunch. Hold the turn
             # lock until the process actually finishes, then release it.
-            async def _reap(p=proc, sid=session_id):
+            async def _reap(p=proc, sid=lock_id):
                 try:
                     await p.wait()
                 finally:
                     _in_flight.discard(sid)
             asyncio.get_event_loop().create_task(_reap())
         else:
-            _in_flight.discard(session_id)
+            _in_flight.discard(lock_id)

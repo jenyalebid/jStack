@@ -11,6 +11,7 @@
 #     never fall out of it for being hard to attribute.
 #   - subagent (sidechain) writes count as the session's own work.
 set -euo pipefail
+unset CODEX_THREAD_ID
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$PLUGIN_ROOT/bin/session-files"

@@ -1044,6 +1044,15 @@ def _doctor() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in ("spawn", "compact-delivery"):
+        install_host.adopt_installed_environment(install_host.plist_path())
+        if argv[0] == "compact-delivery":
+            from . import compact_delivery
+            compact_delivery.main()
+            return 0
+        from . import spawn
+        return spawn.main(argv[1:])
     args = build_parser().parse_args(argv)
     return args.fn(args) or 0
 

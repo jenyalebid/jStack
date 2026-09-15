@@ -73,6 +73,8 @@ ENGINES: list[dict] = [
         "name": "Codex",
         "default_model": "gpt-5.6-sol",
         "models": [
+            {"id": "gpt-6-astra", "name": "GPT-6 Astra",
+             "detail": "Complex reasoning and sustained coding work."},
             {"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol",
              "detail": "Quality-first flagship — reasoning and hard coding."},
             {"id": "gpt-5.6-terra", "name": "GPT-5.6 Terra",
