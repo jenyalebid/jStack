@@ -140,6 +140,32 @@ grep -q 'sort | uniq -c' "$BRIEF" \
 [[ "$BRIEF" != "$AGENTS"/* && "$BRIEF" != "$SEAT"/* ]] \
   && pass "the briefing is staged outside the agent tree" || fail "staged in a workspace ($BRIEF)"
 
+# 5b. The spawn lands on the SEAT, not on wherever the source shell wandered.
+#     A session's cwd moves — `cd` into the seat's pad, into a checkout parked
+#     there, into a build tree — and the harness reports the new one from then
+#     on. Opening the takeover there is what 95e01508 was: a fresh session in
+#     the seat's own pad, reading the CLAUDE.md of whatever repo was sitting in
+#     that pad, and invisible to every seat-addressed route on the host, which
+#     answered "unknown session" to its own live terminal.
+mkdir -p "$SEAT/pad/a-checkout"
+echo "# some checkout" > "$SEAT/pad/a-checkout/CLAUDE.md"
+run "/takeover" "$SRC" "$SEAT/pad/a-checkout"
+[[ $CODE == 2 && "$(opened_cwd)" == "$SEAT" ]] \
+  && pass "a wandered cwd opens on its seat, not where the shell stood" \
+  || fail "pad cwd ($(opened_cwd))"
+[[ "$(opt --name)" == "TO · alpha/chat" ]] \
+  && pass "and the source is named by its seat, not by the folder below it" \
+  || fail "pad title ($(opt --name))"
+grep -q "$SEAT\$" "$(opt --prompt-file)" \
+  && pass "the briefing names the seat as the workspace" || fail "brief workspace"
+
+# A cwd with no seat above it at all still opens where it is — normalising is
+# a walk UP to a seat, never a refusal to take over work outside the tree.
+run "/takeover" "$SRC" "$TMP"
+[[ $CODE == 2 && "$(opened_cwd)" == "$TMP" ]] \
+  && pass "a cwd outside the agent tree is left exactly where it is" \
+  || fail "offtree cwd ($(opened_cwd))"
+
 # 6. A focus scopes the work and names the window
 run "/takeover cellular not working"
 [[ $CODE == 2 && "$(opt --name)" == "TO · cellular not working" ]] \

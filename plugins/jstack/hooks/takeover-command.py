@@ -86,12 +86,50 @@ def payload_or_exit() -> dict:
 
 def seat_label(cwd: str) -> str:
     """`agent/submode` for a workspace dir, else the basename. Never blank —
-    the briefing names where the work came from, and "" names nowhere."""
+    the briefing names where the work came from, and "" names nowhere.
+
+    `enclosing_seat`, not `seat_of`: the two answer differently for exactly the
+    directories a session wanders into. See `source_home`.
+    """
+    if _root is not None and hasattr(_root, "enclosing_seat"):
+        seat = _root.enclosing_seat(cwd)
+        if seat is not None:
+            return seat.timeline
     if _root is not None:
         agent, submode = _root.seat_of(cwd)
         if agent:
             return f"{agent}/{submode}"
     return Path(cwd).name or cwd
+
+
+def source_home(cwd: str) -> Path:
+    """The seat directory a takeover of `cwd` should open in.
+
+    NOT `cwd` itself, and that was the bug. The payload reports where the
+    source session's shell is STANDING, which is not where the session
+    belongs: a `cd` into the seat's pad, a checkout parked in it, a build tree
+    — the harness carries that as the session's cwd from then on, and a
+    takeover typed an hour later inherited it. 95e01508 is what that produces.
+    Its source sat in the seat, ran `cd pad` an hour in, and the takeover
+    opened a fresh session in `<seat>/pad` — a directory that is
+    deliberately not a seat anywhere in this module (`_RESERVED_DIRS`), so the
+    new session had no seat to be addressed by: the host answered "unknown
+    session" to every pad-addressed route on it, and it read whatever CLAUDE.md
+    the checkout in that pad happened to carry instead of the seat's own.
+
+    `enclosing_seat` is the walk-up that already exists for this, and the
+    `@agent` path has always gone through its sibling `resolve_seat`. This is
+    the no-@ path finally asking the same question.
+
+    Outside the agent tree the cwd stands: a session working in a project
+    checkout has no seat to be normalised to, and refusing to take it over is
+    a worse answer than opening where it is.
+    """
+    if _root is not None and hasattr(_root, "enclosing_seat"):
+        seat = _root.enclosing_seat(cwd)
+        if seat is not None:
+            return seat.path
+    return Path(cwd)
 
 
 def target_cwd(token: str) -> "tuple[Path, str]":
@@ -182,7 +220,10 @@ def main() -> None:
     if not Path(transcript).is_file():
         block(f"/takeover: no transcript on disk yet — {transcript}")
 
-    source_cwd = str(payload.get("cwd") or Path.cwd())
+    # Where the source session BELONGS, which is not always where its shell is
+    # standing — `source_home`. Resolved once: the briefing names it and, on
+    # the no-@ path, the new window opens in it.
+    source_cwd = str(source_home(str(payload.get("cwd") or Path.cwd())))
     sid = (payload.get("session_id") or Path(transcript).stem).strip()
 
     rest = " ".join((match.group(1) or "").split())
