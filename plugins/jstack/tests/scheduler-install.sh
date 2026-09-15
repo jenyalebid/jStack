@@ -74,7 +74,9 @@ for svc in "$HOME/Library/LaunchAgents"/*.plist \
     name=$(basename "$svc"); name=${name%.plist}; name=${name%.service}
     [ "$name" = "$DEF_LABEL" ] && COLLIDES="$svc"
 done
-if [ -n "$DEF_LABEL" ] && [ -z "$COLLIDES" ]; then
+if [ -n "$COLLIDES" ] && grep -q 'written by jstack-scheduler' "$COLLIDES"; then
+    pass "default label '$DEF_LABEL' belongs to this installer, so reinstall is permitted"
+elif [ -n "$DEF_LABEL" ] && [ -z "$COLLIDES" ]; then
     pass "default label '$DEF_LABEL' does not collide with a service already installed here"
 else
     fail "default label '$DEF_LABEL' collides with an installed service: $COLLIDES"
@@ -167,7 +169,11 @@ else
 fi
 if [ "$(uname)" = "Darwin" ]; then
     if launchctl list "$DEF_LABEL" >/dev/null 2>&1; then
-        fail "a service named '$DEF_LABEL' is loaded — dry-run must load nothing (or the label is not free)"
+        if [ -n "$COLLIDES" ] && grep -q 'written by jstack-scheduler' "$COLLIDES"; then
+            pass "the already installed owned service remains loaded"
+        else
+            fail "an unowned service named '$DEF_LABEL' is loaded"
+        fi
     else
         pass "dry-run loaded no service"
     fi
@@ -175,7 +181,7 @@ fi
 
 # ── dateutil: warned about when missing, named as a package, never a refusal ─
 
-if "$PY" -c "import dateutil" >/dev/null 2>&1; then
+if HOME="$TMP/home" "$PY" -c "import dateutil" >/dev/null 2>&1; then
     if printf '%s' "$out" | grep -q "python-dateutil"; then
         fail "warned about python-dateutil though this interpreter has it"
     else
