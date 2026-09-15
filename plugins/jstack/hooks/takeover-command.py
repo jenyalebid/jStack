@@ -51,7 +51,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(PLUGIN_ROOT))
 from session_runtime import engine
-from _answer import block    # noqa: E402 — sibling modules, path set above
+from _answer import block, configure    # noqa: E402 — sibling modules, path set above
 from _prompts import load as load_prompt  # noqa: E402
 
 try:
@@ -70,7 +70,7 @@ TERMINAL = (os.environ.get("JSTACK_TERMINAL_BIN") or shutil.which("open-terminal
 TIMEOUT = 30
 
 # `/takeover`, `/jstack:takeover`, or the stub's sentinel — then the rest.
-TRIGGER = re.compile(r"^\s*(?:/(?:jstack:)?takeover|JSTACK_TAKEOVER_CMD)\b[ \t]*(.*)$",
+TRIGGER = re.compile(r"^\s*(?:/(?:jstack:)?takeover|\$jstack:takeover|JSTACK_TAKEOVER_CMD)(?=\s|$)[ \t]*(.*)$",
                      re.IGNORECASE | re.DOTALL)
 
 # The briefing template lives at prompts/takeover-briefing.md — fixed text
@@ -208,6 +208,7 @@ def title_for(agent: str, focus: str, source_seat: str) -> str:
 
 def main() -> None:
     payload = payload_or_exit()
+    configure(payload)
     match = TRIGGER.match(payload.get("prompt") or "")
     if not match:
         sys.exit(0)          # not ours — every other prompt passes untouched

@@ -22,6 +22,7 @@
 # Exit 0 = all pass, exit 1 = any fail.
 
 set -u
+unset CODEX_THREAD_ID
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK="$PLUGIN_ROOT/hooks/tag-command.py"
@@ -140,6 +141,12 @@ run "/jstack:tag deploys"
 run "JSTACK_TAG_CMD deploys"
 [[ "$OUT" == *"untagged"* ]] \
   && pass "the stub expansion is the same command" || fail "sentinel form ($OUT)"
+run '$jstack:tag deploys'
+[[ $CODE == 2 && "$OUT" == *"tagged"*"deploys"* ]] \
+  && pass "native skill spelling blocks and tags" || fail "native spelling ($OUT)"
+run '$jstack:tag deploys'
+[[ $CODE == 2 && "$OUT" == *"untagged"* ]] \
+  && pass "native spelling toggles the same tag" || fail "native toggle ($OUT)"
 
 # 10. Case and a leading # normalize the way the CLI normalizes them
 run "/tag #DEPLOYS"

@@ -32,10 +32,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from session_runtime import transcripts
-from _answer import block  # noqa: E402 — sibling module, path set above
+from _answer import block, configure  # noqa: E402 — sibling module, path set above
 
 # `/print`, `/jstack:print`, or the stub's sentinel — then the rest of the line.
-TRIGGER = re.compile(r"^\s*(?:/(?:jstack:)?print|JSTACK_PRINT_CMD)\b[ \t]*(.*)$",
+TRIGGER = re.compile(r"^\s*(?:/(?:jstack:)?print|\$jstack:print|JSTACK_PRINT_CMD)(?=\s|$)[ \t]*(.*)$",
                      re.IGNORECASE | re.DOTALL)
 
 
@@ -55,6 +55,7 @@ def main() -> None:
     except Exception:
         sys.exit(0)
 
+    configure(payload)
     if not TRIGGER.match(payload.get("prompt") or ""):
         sys.exit(0)          # not ours — every other prompt passes untouched
 

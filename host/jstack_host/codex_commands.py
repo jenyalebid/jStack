@@ -8,7 +8,7 @@ ZERO_TURN = {name: f"JSTACK_{name.upper()}_CMD"
 
 
 def translate(text: str, cwd: str = "") -> str:
-    match = re.fullmatch(r"\s*/(?:(jstack):)?([a-zA-Z0-9_-]+)([^\S\n].*)?", text, re.S)
+    match = re.fullmatch(r"\s*(?:/|\$(?=jstack:))(?:(jstack):)?([a-zA-Z0-9_-]+)([^\S\n].*)?", text, re.S)
     if not match:
         return text
     namespace, name, rest = match.groups()

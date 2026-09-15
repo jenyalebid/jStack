@@ -43,12 +43,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _answer import block  # noqa: E402 — sibling module, path set above
+from _answer import block, configure  # noqa: E402 — sibling module, path set above
 
 LOG_EVENT = Path(__file__).resolve().parent.parent / "bin" / "log_event"
 
 # `/tag`, `/jstack:tag`, or the stub's sentinel — then the rest of the line.
-TRIGGER = re.compile(r"^\s*(?:/(?:jstack:)?tag|JSTACK_TAG_CMD)\b[ \t]*(.*)$",
+TRIGGER = re.compile(r"^\s*(?:/(?:jstack:)?tag|\$jstack:tag|JSTACK_TAG_CMD)(?=\s|$)[ \t]*(.*)$",
                      re.IGNORECASE | re.DOTALL)
 
 
@@ -79,6 +79,7 @@ def main() -> None:
     except Exception:
         sys.exit(0)
 
+    configure(payload)
     match = TRIGGER.match(payload.get("prompt") or "")
     if not match:
         sys.exit(0)          # not ours — every other prompt passes untouched

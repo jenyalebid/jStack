@@ -27,6 +27,7 @@
 # Exit 0 = all pass, exit 1 = any fail.
 
 set -u
+unset CODEX_THREAD_ID
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK="$PLUGIN_ROOT/hooks/takeover-command.py"
@@ -234,7 +235,7 @@ run "/takeover"
 terminal 0 1
 
 # 12. All three spellings are one command — raw, namespaced, and the stub's
-for spelling in "/jstack:takeover" "JSTACK_TAKEOVER_CMD"; do
+for spelling in "/jstack:takeover" '$jstack:takeover' "JSTACK_TAKEOVER_CMD"; do
   run "$spelling"
   [[ $CODE == 2 && -f "$TMP/opened" ]] \
     && pass "$spelling is the same command" || fail "$spelling (code=$CODE out=$OUT)"

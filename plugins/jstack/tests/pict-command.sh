@@ -22,6 +22,7 @@
 # Exit 0 = all pass, exit 1 = any fail.
 
 set -u
+unset CODEX_THREAD_ID
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK="$PLUGIN_ROOT/hooks/pict-command.py"
@@ -151,6 +152,9 @@ run "/jstack:pict"
 run "JSTACK_PICT_CMD"
 [[ $CODE == 2 && "$OUT" == *"seat · pict"* ]] \
   && pass "the stub expansion is the same command" || fail "sentinel ($OUT)"
+run '$jstack:pict'
+[[ $CODE == 2 && "$OUT" == *"seat · pict"* ]] \
+  && pass "native skill spelling blocks and renders" || fail "native spelling ($OUT)"
 
 # 12. Malformed stdin is the harness's problem, not the user's — stay out of it
 OUT=$(printf 'not json' | "$HOOK" 2>&1); CODE=$?

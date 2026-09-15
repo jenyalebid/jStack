@@ -19,6 +19,7 @@
 # Exit 0 = all pass, exit 1 = any fail.
 
 set -u
+unset CODEX_THREAD_ID
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK="$PLUGIN_ROOT/hooks/print-command.py"
@@ -97,7 +98,7 @@ run "/print please" "{\"transcript_path\":\"$LIVE\"}"
   && pass "trailing words are ignored" || fail "args ($OUT)"
 
 # 9. All three spellings are one command — raw, namespaced, and the stub's
-for spelling in "/jstack:print" "JSTACK_PRINT_CMD"; do
+for spelling in "/jstack:print" '$jstack:print' "JSTACK_PRINT_CMD"; do
   run "$spelling" "{\"transcript_path\":\"$LIVE\"}"
   [[ $CODE == 2 && "$OUT" == "$LIVE" ]] \
     && pass "$spelling is the same command" || fail "$spelling ($OUT)"

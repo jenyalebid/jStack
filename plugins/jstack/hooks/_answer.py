@@ -27,17 +27,27 @@ both counts, since the whole point is to spend no context.
 
 import json
 import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from session_runtime import engine
 
 #: The event these hooks answer on. Claude Code rejects a `hookSpecificOutput`
 #: whose `hookEventName` disagrees with the event actually firing, so this is
 #: pinned here rather than passed in — there is one right value.
 EVENT = "UserPromptSubmit"
+_native = False
+
+
+def configure(payload: dict) -> None:
+    """Select the harness output protocol from the actual hook transcript."""
+    global _native
+    _native = engine(payload) == "codex"
 
 
 def block(message: str) -> "None":
     """Say `message` to the user and stop the prompt. Never returns."""
     text = message.rstrip()
-    print(json.dumps({
+    output = {
         "decision": "block",
         "reason": text,
         # Our stdout is machinery, not a message — the answer is `reason`.
@@ -46,6 +56,15 @@ def block(message: str) -> "None":
             "hookEventName": EVENT,
             "suppressOriginalPrompt": True,
         },
-    }))
+    }
+    if _native:
+        # The native TUI renders the common stopped-hook result. Its prompt
+        # rejection path can discard decision/reason and the UI warning.
+        output = {"continue": False, "stopReason": text, "systemMessage": text}
+    print(json.dumps(output))
+    if _native:
+        # Codex parses structured stdout on exit 0. Exit 2 blocks as well,
+        # but drops systemMessage and can leave a silent completed command.
+        sys.exit(0)
     print(text, file=sys.stderr)
     sys.exit(2)

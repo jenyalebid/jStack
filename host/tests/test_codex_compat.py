@@ -47,6 +47,7 @@ def test_codex_briefing_preserves_prose_without_shell_execution(tmp_path):
 def test_remote_commands_reach_hooks_without_model():
     for command in codex_commands.ZERO_TURN:
         assert codex_commands.translate(f"/jstack:{command} a b") == f"JSTACK_{command.upper()}_CMD a b"
+        assert codex_commands.translate(f"$jstack:{command} a b") == f"JSTACK_{command.upper()}_CMD a b"
         assert codex_commands.translate(f"/{command}") == f"JSTACK_{command.upper()}_CMD"
     assert codex_commands.translate("/jstack:audit the changes") == "$jstack:audit the changes"
     assert codex_commands.translate("/elevator") == "$jstack:elevator"

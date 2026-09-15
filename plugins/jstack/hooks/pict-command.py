@@ -45,7 +45,8 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _answer import block  # noqa: E402 — sibling module, path set above
+from _answer import block, configure  # noqa: E402 — sibling module, path set above
+from session_runtime import engine
 
 #: The renderer, a sibling of this hook. Overridable so a test can stand a fake
 #: in its place — the alternative, swapping the real binary aside, is a window
@@ -65,7 +66,7 @@ FALLBACK = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) \
 TIMEOUT = 110
 
 # `/pict`, `/jstack:pict`, or the stub's sentinel — then the rest of the line.
-TRIGGER = re.compile(r"^\s*(?:/(?:jstack:)?pict|JSTACK_PICT_CMD)\b[ \t]*(.*)$",
+TRIGGER = re.compile(r"^\s*(?:/(?:jstack:)?pict|\$jstack:pict|JSTACK_PICT_CMD)(?=\s|$)[ \t]*(.*)$",
                      re.IGNORECASE | re.DOTALL)
 
 
@@ -117,6 +118,7 @@ def main() -> None:
     except Exception:
         sys.exit(0)
 
+    configure(payload)
     match = TRIGGER.match(payload.get("prompt") or "")
     if not match:
         sys.exit(0)          # not ours — every other prompt passes untouched
@@ -130,6 +132,8 @@ def main() -> None:
 
     # `--full` is ours: it drops the bare default rather than adding a flag.
     view = [] if "--full" in rest else ["--bare"]
+    if engine(payload) == "codex":
+        view = ["--engine", "codex", *view]
     flags = [w for w in rest if w not in ("--full", "--bare")]
 
     where = out_dir(cwd)

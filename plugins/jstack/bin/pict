@@ -12,6 +12,10 @@ Contract:  pict [dir] [options]          (default dir: cwd; markdown on stdout)
 
 Options:
 
+  --engine codex    preview native AGENTS instructions, the jStack instruction
+                    bridge and timeline; --full also lists native hook sources.
+                    Default: claude. The command hook selects its own provider.
+
   --bare            the injection and nothing else — every loaded body in
                     wire order, each under its path. No weight table, no
                     mechanism notes, no on-demand layer, no hook inventory.
@@ -541,6 +545,9 @@ def exec_session_hooks(directory: Path, hooks: list[Hook],
             continue
         cmd = h.command
         env = dict(os.environ)
+        # This function emulates Claude. A Codex caller's parent identity
+        # must not activate the native instruction bridge in that preview.
+        env.pop("CODEX_THREAD_ID", None)
         if h.plugin_root is not None:
             cmd = cmd.replace("${CLAUDE_PLUGIN_ROOT}", str(h.plugin_root))
             env["CLAUDE_PLUGIN_ROOT"] = str(h.plugin_root)
@@ -1432,6 +1439,72 @@ def render(directory: Path, opts: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_codex(directory: Path, opts: dict, bare: bool) -> str:
+    """Preview native instruction discovery and our actual read-only bridge."""
+    native_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    try:
+        import tomllib
+        cfg = tomllib.loads((native_home / "config.toml").read_text())
+    except (ImportError, OSError, ValueError):
+        cfg = {}
+    ancestors = [directory, *directory.parents]
+    markers = cfg.get("project_root_markers", [".git"])
+    project = next((p for p in ancestors if any((p / m).exists() for m in markers)), directory)
+    chain = list(reversed(ancestors[:ancestors.index(project) + 1]))
+    names = ["AGENTS.override.md", "AGENTS.md"]
+    budget = int(cfg.get("project_doc_max_bytes", 32768))
+    lines = [f"# Codex startup instruction preview · {directory}", "",
+             "Native system instructions and tool schemas come from the harness; "
+             "this preview shows configured instruction files and jStack context.", ""]
+    for folder in [native_home, *chain]:
+        candidates = names if folder == native_home else names + cfg.get("project_doc_fallback_filenames", [])
+        for name in candidates:
+            path = folder / name
+            body = read_or_none(path)
+            if not body or not body.strip():
+                continue
+            raw = body.encode()[:budget]
+            budget -= len(raw)
+            if raw:
+                lines += [f"# {display(path)}", "", *neutral(raw.decode(errors="ignore")), ""]
+            break
+    for path in opts["appends"]:
+        body = read_or_none(path)
+        if body is not None:
+            lines += [f"# Developer instructions · {display(path)}", "", *neutral(body), ""]
+    payload = {"cwd": str(directory), "transcript_path": "rollout-pict-preview.jsonl"}
+    bridge = subprocess.run([sys.executable, str(PLUGIN_BIN.parent / "hooks/session-start-environment.py")],
+                            input=json.dumps(payload), capture_output=True, text=True, timeout=10)
+    if bridge.returncode:
+        raise ValueError("Codex instruction bridge failed: " + bridge.stderr.strip())
+    if bridge.stdout.strip():
+        body = json.loads(bridge.stdout)["hookSpecificOutput"]["additionalContext"]
+        lines += ["# jStack SessionStart instruction bridge", "", *neutral(body), ""]
+    sources: list[Source] = []
+    gather_timeline(directory, sources)
+    for source in sources:
+        if source.body:
+            lines += [f"# {source.label}", "", *neutral(source.body), ""]
+    if opts["prompt"]:
+        lines += ["# User prompt", "", *neutral(opts["prompt"]), ""]
+    for path in opts["serves"]:
+        body = read_or_none(path)
+        if body is not None:
+            lines += [f"# Tool result · {display(path)}", "", *neutral(body), ""]
+    if not bare:
+        lines += ["# Native hook inventory", ""]
+        for path in [native_home / "hooks.json", PLUGIN_BIN.parent / "hooks/hooks.json"]:
+            try:
+                hooks = json.loads(path.read_text()).get("hooks", {})
+            except (OSError, ValueError):
+                continue
+            for event, groups in hooks.items():
+                for group in groups:
+                    for hook in group.get("hooks", []):
+                        lines.append(f"- {event} · {display(path)} · {hook.get('command', '')}")
+    return "\n".join(lines) + "\n"
+
+
 def main(argv: list[str]) -> int:
     if any(a in ("-h", "--help") for a in argv[1:]):
         sys.stdout.write(__doc__.strip() + "\n")
@@ -1439,6 +1512,7 @@ def main(argv: list[str]) -> int:
     opts = {"no_memory": False, "exec_hooks": False, "appends": [],
             "serves": [], "prompt": "", "sources": []}
     bare = False
+    provider = "claude"
     request: Path | None = None
     positional: list[str] = []
     args = argv[1:]
@@ -1453,13 +1527,18 @@ def main(argv: list[str]) -> int:
             opts["exec_hooks"] = True
         elif a == "--bare":
             bare = True
-        elif a in ("--append", "--serve", "--prompt", "--request", "--sources"):
+        elif a in ("--append", "--serve", "--prompt", "--request", "--sources", "--engine"):
             if i + 1 >= len(args):
                 sys.stderr.write(f"pict: {a} needs a value\n")
                 return 64
             val = args[i + 1]
             i += 1
-            if a == "--append":
+            if a == "--engine":
+                if val not in ("claude", "codex"):
+                    sys.stderr.write(f"pict: unknown engine {val}\n")
+                    return 64
+                provider = val
+            elif a == "--append":
                 opts["appends"].append(Path(val).expanduser())
             elif a == "--serve":
                 opts["serves"].append(Path(val).expanduser())
@@ -1493,6 +1572,9 @@ def main(argv: list[str]) -> int:
         except (json.JSONDecodeError, ValueError) as e:
             sys.stderr.write(f"pict: {request} is not request JSON: {e}\n")
             return 64
+        return 0
+    if provider == "codex":
+        sys.stdout.write(render_codex(directory, opts, bare))
         return 0
     sys.stdout.write(render_bare(directory, opts) if bare
                      else render(directory, opts))

@@ -22,6 +22,7 @@
 # Exit 0 = all pass, exit 1 = any fail.
 
 set -u
+unset CODEX_THREAD_ID
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK="$PLUGIN_ROOT/hooks/splitoff-command.py"
@@ -150,7 +151,7 @@ rm -f "$COPY"
 terminal 0
 
 # 9. All three spellings are one command — raw, namespaced, and the stub's
-for spelling in "/jstack:splitoff" "JSTACK_SPLITOFF_CMD"; do
+for spelling in "/jstack:splitoff" '$jstack:splitoff' "JSTACK_SPLITOFF_CMD"; do
   run "$spelling"
   [[ $CODE == 2 && -n "$(copies)" ]] \
     && pass "$spelling is the same command" || fail "$spelling (code=$CODE out=$OUT)"

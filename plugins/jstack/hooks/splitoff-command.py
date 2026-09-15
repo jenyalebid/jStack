@@ -34,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from session_runtime import engine, metadata, CodexRPC
-from _answer import block  # noqa: E402 — sibling module, path set above
+from _answer import block, configure  # noqa: E402 — sibling module, path set above
 
 #: Overridable so a test can stand fakes in their place — the alternative,
 #: swapping the real adapters aside, hands every other session on this shared
@@ -49,7 +49,7 @@ TERMINAL = (os.environ.get("JSTACK_TERMINAL_BIN") or shutil.which("open-terminal
 TIMEOUT = 25
 
 # `/splitoff`, `/jstack:splitoff`, or the stub's sentinel — then the rest.
-TRIGGER = re.compile(r"^\s*(?:/(?:jstack:)?splitoff|JSTACK_SPLITOFF_CMD)\b[ \t]*(.*)$",
+TRIGGER = re.compile(r"^\s*(?:/(?:jstack:)?splitoff|\$jstack:splitoff|JSTACK_SPLITOFF_CMD)(?=\s|$)[ \t]*(.*)$",
                      re.IGNORECASE | re.DOTALL)
 
 
@@ -59,6 +59,7 @@ def main() -> None:
     except Exception:
         sys.exit(0)
 
+    configure(payload)
     match = TRIGGER.match(payload.get("prompt") or "")
     if not match:
         sys.exit(0)          # not ours — every other prompt passes untouched

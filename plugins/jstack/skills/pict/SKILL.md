@@ -10,6 +10,11 @@ argument-hint: "[dir] [--full] [pict flags]"
 globals, the CLAUDE.md walk-up, auto-memory, timeline injection, anchored path rules,
 hook injectors — as one ordered document.
 
+The Codex hook selects `--engine codex`: native AGENTS instruction discovery,
+the actual jStack instruction bridge and timeline. Its header marks this as a
+startup source preview; it does not claim to capture native harness/tool bytes.
+Use that flag for a manual Codex preview too.
+
 **When the user types `/pict`, this skill is not what runs.** `hooks/pict-command.py`
 intercepts it at UserPromptSubmit, renders, places and opens the document, then blocks
 the prompt. Three fixed steps, no judgement in any of them — and a session asked to
