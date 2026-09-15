@@ -37,6 +37,11 @@ SIBLING = "bbbbbbbb-1111-2222-3333-444444444444"
 FRESH = "dddddddd-1111-2222-3333-444444444444"
 #: Live too, but running somewhere that is not a seat — no pad exists for it.
 OFFSEAT = "eeeeeeee-1111-2222-3333-444444444444"
+#: Booted in the seat's own pad, so the harness named its project dir for the
+#: pad and not for the seat. `/takeover` did exactly this on 2026-09-15.
+WANDERED = "ffffffff-1111-2222-3333-444444444444"
+#: Live, and standing in a checkout parked inside the pad — deeper still.
+INPAD = "99999999-1111-2222-3333-444444444444"
 SLUG = "-Users-test-Agents-Testa-chat"
 AGENT = "testa-chat"
 
@@ -62,8 +67,11 @@ def pad(monkeypatch, tmp_path):
     (projects / SLUG).mkdir(parents=True)
     for sid in (SID, SIBLING):
         (projects / SLUG / f"{sid}.jsonl").write_text("")
+    (projects / f"{SLUG}-pad").mkdir()
+    (projects / f"{SLUG}-pad" / f"{WANDERED}.jsonl").write_text("")
 
-    panes = {FRESH: str(seat), OFFSEAT: str(elsewhere)}
+    panes = {FRESH: str(seat), OFFSEAT: str(elsewhere),
+             INPAD: str(seat / scratchpad.PAD / "a-checkout")}
 
     def _pane_cwd(sid):
         if sid not in panes:
@@ -118,6 +126,39 @@ def test_a_session_with_no_transcript_yet_still_reaches_its_pad(pad):
     answered "unknown session" while its terminal sat there live.
     """
     assert scratchpad.session_pad(FRESH) == pad
+
+
+def test_a_session_working_below_its_seat_still_reaches_the_pad(pad):
+    """A session's cwd is not a fixed point, and both ways in used to demand
+    it match a seat exactly.
+
+    `cd` into the seat's pad — or into a checkout parked there, or a worktree
+    — and the harness carries that directory for the rest of the session: it
+    names the project dir, and it is what the live pane reports. None of them
+    is a seat, deliberately (a checkout in a pad carries its own CLAUDE.md and
+    must never be addressable as one), so an equality test placed the session
+    nowhere at all and every pad route on it answered "unknown session" while
+    its terminal sat there live. 95e01508 spent a morning like that: its
+    `/takeover` opened it in the seat's own pad and the host lost it.
+
+    Containment is the question, not identity — one reading for both routes.
+    """
+    assert scratchpad.session_pad(WANDERED) == pad   # placed by its project dir
+    assert scratchpad.session_pad(INPAD) == pad      # placed by its live pane
+
+
+def test_the_deepest_containing_seat_wins(monkeypatch, tmp_path):
+    """Seats nest, so containment alone is not an answer — `Ada/social` holds
+    every session under `Ada/social/threads` too. The session belongs to the
+    seat whose CLAUDE.md it is actually running under, which is the deeper."""
+    outer = tmp_path / "Agents" / "Ada" / "social"
+    inner = outer / "threads"
+    (inner / scratchpad.PAD).mkdir(parents=True)
+    monkeypatch.setattr(scratchpad, "_projects_dir", lambda: tmp_path / "none")
+    monkeypatch.setattr(scratchpad, "_seat_dirs", lambda: [outer, inner])
+    monkeypatch.setattr(open_path, "pane_cwd",
+                        lambda sid: str(inner / scratchpad.PAD / "checkout"))
+    assert scratchpad.session_pad(SID) == inner / scratchpad.PAD
 
 
 def test_the_transcript_still_wins_when_there_is_one(pad, monkeypatch):

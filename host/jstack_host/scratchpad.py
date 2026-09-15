@@ -94,6 +94,37 @@ def agent_pad(agent_id: str) -> Path:
     return workspace(agent_id) / PAD
 
 
+def _path_holds(seat: Path, where: Path) -> bool:
+    """Is `where` the seat itself, or somewhere inside it? Both resolved."""
+    return where == seat or seat in where.parents
+
+
+def _slug_holds(seat_slug: str, dirname: str) -> bool:
+    """The same question asked of two harness project-dir names.
+
+    A project dir is `_cwd_slug(cwd)`, and the slug is not reversible — `/`
+    and `.` both become `-`, so `…-chat-pad` could spell a `pad` inside the
+    `chat` seat or a seat literally named `chat-pad`. Prefix is therefore an
+    answer, not the answer; `_deepest` is what makes it safe, because a real
+    `chat-pad` seat produces the longer slug and wins outright.
+    """
+    return dirname == seat_slug or dirname.startswith(seat_slug + "-")
+
+
+def _deepest(seats: "list[Path]", holds) -> "Path|None":
+    """The longest-pathed seat `holds` says contains the session, or None.
+
+    Longest, because seats nest: `Ada/social/threads` and `Ada/social` both
+    contain a session working under threads, and the one whose CLAUDE.md that
+    session is actually running under is the deeper of the two.
+    """
+    winner = None
+    for ws in seats:
+        if holds(ws) and (winner is None or len(str(ws)) > len(str(winner))):
+            winner = ws
+    return winner
+
+
 def session_pad(sid: str) -> Path:
     """The same pad, reached from a session id.
 
@@ -110,6 +141,19 @@ def session_pad(sid: str) -> Path:
     answer, earlier. (`pty.py` fixed this same transcript-existence assumption
     on the close path; this was the other half of it.)
 
+    BOTH WAYS IN ASK WHICH SEAT CONTAINS THE SESSION, NOT WHICH SEAT IT IS.
+    They used to demand an exact match, and a session's working directory is
+    not a fixed point: `cd` into the seat's own pad, into a checkout parked
+    there, into a worktree, and the harness carries that as the cwd for the
+    rest of the session — it names the project dir, and it is what the live
+    pane reports. None of those directories is a seat (`_NOT_A_SEAT` prunes
+    the pad from the walk on purpose), so an equality test placed the session
+    nowhere and every pad route on it answered "unknown session" while its
+    terminal sat there live. 95e01508 spent a morning like that. Containment
+    is the same question the rest of the tree already asks — `root
+    .enclosing_seat` for addresses, `agent_of` for the compaction switch —
+    and the deepest containing seat wins, because seats nest.
+
     Raises KeyError for a session neither can place — the caller maps that to
     a 404, which now means "no such session" rather than "not yet".
     """
@@ -118,17 +162,15 @@ def session_pad(sid: str) -> Path:
     if projects.exists():
         for d in projects.iterdir():
             if d.is_dir() and (d / f"{sid}.jsonl").exists():
-                for ws in seats:
-                    if _cwd_slug(str(ws)) == d.name:
-                        return ws / PAD
+                if ws := _deepest(seats, lambda w: _slug_holds(_cwd_slug(str(w)), d.name)):
+                    return ws / PAD
     from . import open_path     # local: open_path imports managed
     try:
         live = Path(open_path.pane_cwd(sid)).resolve()
     except (KeyError, OSError):
         raise KeyError(sid) from None
-    for ws in seats:
-        if ws.resolve() == live:
-            return ws / PAD
+    if ws := _deepest(seats, lambda w: _path_holds(w.resolve(), live)):
+        return ws / PAD
     raise KeyError(sid)
 
 
