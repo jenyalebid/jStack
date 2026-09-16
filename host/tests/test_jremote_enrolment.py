@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from jstack_host.server import create_app
 
 app = create_app()
-from jstack_host import auth, devices, enrolment, tunnel
+from jstack_host import auth, devices, enrolment, router, tunnel
 from jstack_host.store import SessionStore
 
 
@@ -505,9 +505,19 @@ def client(store):
     return c
 
 
-def test_redeeming_needs_no_bearer_token_at_all(client, store):
-    """The entire point of P3: the caller is a machine that has no token yet,
-    and getting one is what it is here for."""
+@pytest.fixture
+def on_console(client, monkeypatch):
+    """Exercise the console gate with a real loopback caller on a hub."""
+    from jstack_host import managed_access, mode
+    client._transport.client = ("127.0.0.1", 1234)
+    monkeypatch.setattr(mode, "is_hub", lambda: True)
+    monkeypatch.setattr(managed_access, "is_leaf", lambda: False)
+
+
+def test_redeeming_needs_no_bearer_token_at_all(client, store, on_console):
+    """The code is minted at the hub menu bar; the new Mac then redeems it with
+    no token of its own — that unauthenticated redeem is the whole trip, and it
+    is untouched by the console gate on minting."""
     r = client.post("/api/jremote/v1/enrolment/codes", json={"name": "work-mac"})
     assert r.status_code == 200
     code = r.json()["code"]
@@ -519,7 +529,7 @@ def test_redeeming_needs_no_bearer_token_at_all(client, store):
     assert devices.authenticate(r.json()["token"]) == r.json()["device"]["id"]
 
 
-def test_the_api_carries_the_prior_token_through_to_the_re_key(client, store):
+def test_the_api_carries_the_prior_token_through_to_the_re_key(client, store, on_console):
     """The one wire field the app fills in. Without it the host cannot tell a
     device pairing again from a device it has never seen — it cannot read one
     out of a code, and the token is the only thing in the request that proves
@@ -543,21 +553,25 @@ def test_the_api_carries_the_prior_token_through_to_the_re_key(client, store):
     assert devices.authenticate(first["token"]) is None
 
 
-def test_minting_a_code_needs_a_token_but_not_the_lan(client, store):
-    """TestClient's address is not a LAN address — which refuses `POST
-    /devices` — and minting a code must still work, or the person minting it
-    has to be standing at the Mac, which is the trip P3 removes."""
-    assert client.post("/api/jremote/v1/devices",
-                       json={"name": "x"}).status_code == 403
-    r = client.post("/api/jremote/v1/enrolment/codes", json={"name": "work-mac"})
-    assert r.status_code == 200
+def test_minting_a_code_is_a_hub_console_action(client, store, monkeypatch):
+    """Adopting a Mac and adding a device are hub-console actions.
+    Minting a code off the console is refused. A remote (not
+    loopback) gets 403; a caller with no token at all gets 401, since auth is
+    decided before the console gate; the hub's own menu bar gets the code."""
+    monkeypatch.setattr(router, "_hub_console", lambda request: False)
+    assert client.post("/api/jremote/v1/enrolment/codes",
+                       json={"name": "work-mac"}).status_code == 403
 
     anon = TestClient(app)
     assert anon.post("/api/jremote/v1/enrolment/codes",
                      json={"name": "x"}).status_code == 401
 
+    monkeypatch.setattr(router, "_hub_console", lambda request: True)
+    assert client.post("/api/jremote/v1/enrolment/codes",
+                       json={"name": "work-mac"}).status_code == 200
 
-def test_the_minting_device_is_recorded_on_the_code(client, store):
+
+def test_the_minting_device_is_recorded_on_the_code(client, store, on_console):
     caller = client.get("/api/jremote/v1/devices").json()["devices"][0]["id"]
     client.post("/api/jremote/v1/enrolment/codes", json={"name": "work-mac"})
     rows = client.get("/api/jremote/v1/enrolment/codes").json()["codes"]
@@ -572,13 +586,23 @@ def test_a_bad_code_is_a_401_that_says_nothing(client, store):
     assert r.json()["detail"] == enrolment.REFUSED
 
 
-def test_revoking_over_the_api(client, store):
+def test_revoking_over_the_api(client, store, on_console):
     code = client.post("/api/jremote/v1/enrolment/codes",
                        json={"name": "work-mac"}).json()["code"]
     r = client.post("/api/jremote/v1/enrolment/codes/revoke", json={"code": code})
     assert r.status_code == 200
     assert client.post("/api/jremote/v1/enrolment/codes/revoke",
                        json={"code": code}).status_code == 404
+
+
+def test_the_codes_surface_is_refused_off_the_hub_console(client, store, monkeypatch):
+    """The whole authenticated /enrolment/codes surface — mint, list, revoke — is
+    the hub's: a remote is a device, not an administrator of the estate's pending
+    pairings, and must not enumerate or cancel them either."""
+    monkeypatch.setattr(router, "_hub_console", lambda request: False)
+    assert client.get("/api/jremote/v1/enrolment/codes").status_code == 403
+    assert client.post("/api/jremote/v1/enrolment/codes/revoke",
+                       json={"code": "22222222"}).status_code == 403
 
 
 # ── what `pair --open` is allowed to claim ───────────────────────────────────
