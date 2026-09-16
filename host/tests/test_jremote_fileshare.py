@@ -97,7 +97,7 @@ def test_status_ready_means_every_security_property_was_observed(tmp_path, monke
 
 def test_setup_plan_is_allowlist_and_dry_run(tmp_path, monkeypatch):
     root = _machine(tmp_path, monkeypatch, actual={
-        "jarvis": _share(tmp_path / "stack", guest=1, sealed=0),
+        "home": _share(tmp_path / "stack", guest=1, sealed=0),
         "Public": _share(tmp_path / "stack" / "Public", guest=1, sealed=0),
     }, guest=True)
 
@@ -109,7 +109,7 @@ def test_setup_plan_is_allowlist_and_dry_run(tmp_path, monkeypatch):
     assert any("pwpolicy -u jstackshare -sethashtypes SMB-NT on" in c
                for c in commands)
     assert any("dscl . -passwd /Users/jstackshare" in c for c in commands)
-    assert any("sharing -r jarvis" in c for c in commands)
+    assert any("sharing -r home" in c for c in commands)
     assert any("sharing -r Public" in c for c in commands)
     for name in fileshare.SHARE_NAMES:
         assert any(f"sharing -a {root / name}" in c and "-g 000" in c and
