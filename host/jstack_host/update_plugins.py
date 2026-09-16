@@ -1,0 +1,141 @@
+"""Move future agent sessions to a release, retaining old plugin caches.
+
+Provider CLIs own cache installation. Only jStack source references move;
+other plugins, auth, models, permissions and active sessions are untouched.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+from .release_manifest import ReleaseError
+
+
+def run(argv: list[str]) -> str:
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    if result.returncode:
+        raise ReleaseError(f"plugin installation failed: {result.stderr[-1000:]}")
+    return result.stdout
+
+
+def discover() -> list[dict]:
+    import tomllib
+    home = Path.home()
+    result = []
+    claude_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", home / ".claude"))
+    marketplace_file = claude_dir / "plugins/known_marketplaces.json"
+    if marketplace_file.exists():
+        entry = json.loads(marketplace_file.read_text()).get("jStack")
+        if entry:
+            if entry.get("source", {}).get("source") != "directory":
+                raise ReleaseError("convert the jStack marketplace to a local source before managed updates")
+            binary = shutil.which("claude") or str(home / ".local/bin/claude")
+            result.append({"kind": "claude", "binary": binary, "root": entry["source"]["path"],
+                           "config": str(claude_dir / "settings.json"), "marketplace": str(marketplace_file),
+                           "ledger": str(claude_dir / "plugins/installed_plugins.json")})
+    codex_dir = Path(os.environ.get("CODEX_HOME", home / ".codex"))
+    native_config = codex_dir / "config.toml"
+    if native_config.exists():
+        entry = tomllib.loads(native_config.read_text()).get("marketplaces", {}).get("jstack")
+        if entry:
+            if entry.get("source_type") != "local":
+                raise ReleaseError("convert the native jStack marketplace to a local source before managed updates")
+            binary = shutil.which("codex") or str(home / ".local/bin/codex")
+            result.append({"kind": "codex", "binary": binary, "root": entry["source"],
+                           "config": str(native_config), "hooks": str(codex_dir / "hooks.json")})
+    return result
+
+
+def replace_references(path: Path, old: str, new: str):
+    if not path.exists():
+        return
+    from .update_macos import atomic_bytes
+    text = path.read_text()
+    # Both source-root values and paths into it, in JSON/TOML strings. No
+    # provider-wide rewriting, and no removal of the original cached version.
+    changed = text.replace(old + "/", new + "/").replace('"' + old + '"', '"' + new + '"')
+    if changed != text:
+        atomic_bytes(path, changed.encode())
+
+
+def install(providers: list[dict], stack: Path):
+    for provider in providers:
+        for field in ("config", "hooks", "marketplace"):
+            if provider.get(field):
+                replace_references(Path(provider[field]), provider["root"], str(stack))
+        move_shell_references(provider["root"], str(stack))
+        binary = provider["binary"]
+        if provider["kind"] == "claude":
+            run([binary, "plugin", "update", "jstack@jStack", "--scope", "user"])
+        else:
+            run([binary, "plugin", "marketplace", "add", str(stack)])
+            run([binary, "plugin", "add", "jstack@jstack", "--json"])
+
+
+def observed(providers: list[dict]) -> dict:
+    result = {}
+    for provider in providers:
+        kind = provider["kind"]
+        if kind == "claude":
+            rows = json.loads(Path(provider["ledger"]).read_text()).get("plugins", {}).get("jstack@jStack", [])
+            row = next((r for r in rows if r.get("scope") == "user"), {})
+            result[kind] = {"version": row.get("version"), "path": row.get("installPath")}
+        else:
+            data = json.loads(run([provider["binary"], "plugin", "list", "--marketplace", "jstack", "--json"]))
+            rows = data if isinstance(data, list) else data.get("installed", [])
+            row = next((r for r in rows if r.get("name") == "jstack"), {})
+            result[kind] = {"version": row.get("version"), "path": row.get("source", {}).get("path")}
+    return result
+
+
+def rollback(providers: list[dict], stack: Path):
+    for provider in providers:
+        for field in ("config", "hooks", "marketplace"):
+            if provider.get(field):
+                replace_references(Path(provider[field]), str(stack), provider["root"])
+        move_shell_references(str(stack), provider["root"])
+        if provider["kind"] == "claude":
+            # Reinstalling an older version through update is not supported.
+            # Restore only our entry, merging any concurrent unrelated plugin
+            # changes. The original immutable cache was never removed.
+            path = Path(provider["ledger"])
+            data = json.loads(path.read_text())
+            data["plugins"]["jstack@jStack"] = provider["previous_entries"]
+            from .update_supervisor import atomic_json
+            atomic_json(path, data)
+        else:
+            run([provider["binary"], "plugin", "marketplace", "add", provider["root"]])
+            run([provider["binary"], "plugin", "add", "jstack@jstack", "--json"])
+
+
+def prepare() -> list[dict]:
+    result = discover()
+    for provider in result:
+        if not Path(provider["binary"]).is_file():
+            raise ReleaseError(f"{provider['kind']} CLI is missing")
+        if provider["kind"] == "claude":
+            provider["previous_entries"] = json.loads(Path(provider["ledger"]).read_text())["plugins"]["jstack@jStack"]
+    return result
+
+
+def move_shell_references(old: str, new: str):
+    """Only jStack's paths move; existing shells keep their loaded environment."""
+    home = Path.home()
+    for file in (home / ".zshrc", home / ".bash_profile", home / ".profile"):
+        replace_references(file, old, new)
+    for directory in (home / ".claude/rules", home / ".claude/commands"):
+        if not directory.exists():
+            continue
+        for link in directory.iterdir():
+            if not link.is_symlink():
+                continue
+            target = str(link.resolve())
+            if not target.startswith(old + "/"):
+                continue
+            import uuid
+            replacement = link.with_name(link.name + ".update-link-" + uuid.uuid4().hex)
+            replacement.symlink_to(new + target[len(old):])
+            os.replace(replacement, link)

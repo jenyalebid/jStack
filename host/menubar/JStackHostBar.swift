@@ -489,6 +489,52 @@ struct AdoptedHost: Decodable {
 
 struct AdoptedHostList: Decodable { var hosts: [AdoptedHost] }
 
+struct UpdateJobStatus: Decodable {
+    var id: String?
+    var state: String?
+    var detail: String?
+}
+
+struct UpdateMachine: Decodable {
+    var machine: String
+    var name: String
+    var desired: String?
+    var state: String
+    var lastContact: Double?
+    var supervisor: Bool
+    var job: UpdateJobStatus?
+    var observed: UpdateObservation?
+
+    var canUpdate: Bool {
+        desired != nil && !["downloading", "applying", "verifying", "current", "pending",
+                            "pending/offline"].contains(state)
+    }
+    var summary: String {
+        let status = state.replacingOccurrences(of: "_", with: " ")
+        return supervisor ? status : "\(status) — updater not yet observed"
+    }
+}
+
+struct UpdateComponent: Decodable {
+    var installed: String?
+    var runningPids: [Int]?
+}
+
+struct UpdateSource: Decodable {
+    var sha: String?
+    var dirty: Bool?
+}
+
+struct UpdateObservation: Decodable {
+    var components: [String: UpdateComponent]?
+    var hostSource: UpdateSource?
+}
+
+struct UpdateInventory: Decodable {
+    var release: String?
+    var machines: [UpdateMachine]
+}
+
 /// One snapshot of the machine, as the menu will render it.
 struct HostState {
     var installed = false
@@ -716,6 +762,41 @@ final class HostProbe {
         let d = JSONDecoder()
         d.keyDecodingStrategy = .convertFromSnakeCase
         return d
+    }
+
+    func updates(_ done: @escaping (UpdateInventory?, String?) -> Void) {
+        guard let token = HostAgent.token() else {
+            done(nil, "Local updater credential unavailable")
+            return
+        }
+        get("http://127.0.0.1:\(HostAgent.port())\(Self.apiPrefix)/updates/inventory", token: token) { data, status in
+            let inventory = data.flatMap { try? Self.decoder.decode(UpdateInventory.self, from: $0) }
+            let error = status == 404 ? "Host update required to enable managed updates"
+                : "Update status unavailable (\(status))"
+            DispatchQueue.main.async { done(inventory, inventory == nil ? error : nil) }
+        }
+    }
+
+    func update(target: String, requestID: String,
+                _ done: @escaping (Bool, String) -> Void) {
+        guard let token = HostAgent.token(),
+              let url = URL(string: "http://127.0.0.1:\(HostAgent.port())\(Self.apiPrefix)/updates/queue")
+        else { return done(false, "Local updater credential unavailable") }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONEncoder().encode(["target": target, "request_id": requestID])
+        session.dataTask(with: request) { data, response, error in
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? error?.localizedDescription ?? "No response"
+            // Update All may be partially accepted. Do not hide refused rows
+            // behind the HTTP 200 returned for the successfully queued ones.
+            let body = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            let partial = !(body?["errors"] as? [Any] ?? []).isEmpty
+            DispatchQueue.main.async { done(status == 200 && !partial, text) }
+        }.resume()
     }
 
     /// Kill a session, through the host's own close route so the teardown is
@@ -1303,6 +1384,9 @@ final class StatusController: NSObject {
     private var timer: Timer?
     private var state = HostState()
     private var removedDevices: Set<String> = []
+    private var updateInventory: UpdateInventory?
+    private var updateError: String?
+    private var updateRequestInFlight = false
 
     override init() {
         super.init()
@@ -1327,6 +1411,12 @@ final class StatusController: NSObject {
     }
 
     func refresh() {
+        probe.updates { [weak self] inventory, error in
+            guard let self else { return }
+            self.updateInventory = inventory
+            self.updateError = error
+            if self.item.menu?.highlightedItem == nil { self.build() }
+        }
         probe.poll { [weak self] state in
             guard let self else { return }
             self.state = state
@@ -1398,6 +1488,7 @@ final class StatusController: NSObject {
         // about this hub that shows its devices but not its machines is a menu
         // that stops just short of what the hub actually is.
         if let machines = machinesItem() { menu.addItem(machines) }
+        menu.addItem(updatesItem())
 
         // ── The app ─────────────────────────────────────────────────────────
         menu.addItem(.separator())
@@ -1434,6 +1525,91 @@ final class StatusController: NSObject {
 
         menu.delegate = self
         item.menu = menu
+    }
+
+    private func updatesItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Software Updates", action: nil, keyEquivalent: "")
+        item.setAccessibilityIdentifier("updates_menu")
+        item.image = Self.glyph("arrow.down.circle", size: 16)
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        item.submenu = submenu
+        if let error = updateError {
+            submenu.addItem(Self.caption(error))
+            // The supervisor's journal remains readable through a host restart.
+            let path = HostAgent.stateDir().appendingPathComponent("updates/observed.json")
+            if let data = try? Data(contentsOf: path),
+               let report = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let job = report["job"] as? [String: Any], let state = job["state"] as? String {
+                submenu.addItem(Self.caption("Last local report: \(state)"))
+                if let detail = job["detail"] as? String, !detail.isEmpty {
+                    submenu.addItem(Self.caption(detail))
+                }
+            }
+            return item
+        }
+        guard let inventory = updateInventory else {
+            submenu.addItem(Self.caption("Checking…"))
+            return item
+        }
+        submenu.addItem(Self.caption(inventory.release.map { "Available release: \($0)" }
+                                       ?? "No complete release offered by the hub"))
+        for machine in inventory.machines {
+            submenu.addItem(.separator())
+            submenu.addItem(Self.caption("\(machine.name) — \(machine.summary)"))
+            if let source = machine.observed?.hostSource, let sha = source.sha, !sha.isEmpty {
+                submenu.addItem(Self.caption("Running stack: \(sha.prefix(12))\(source.dirty == true ? " + local changes" : "")"))
+            }
+            for kind in ["menubar", "client"] {
+                if let component = machine.observed?.components?[kind], let installed = component.installed {
+                    let state = (component.runningPids ?? []).isEmpty ? "not running" : "running"
+                    submenu.addItem(Self.caption("\(kind): \(installed) installed · \(state)"))
+                }
+            }
+            if let contact = machine.lastContact {
+                submenu.addItem(Self.caption("Last contact: \(Date(timeIntervalSince1970: contact).formatted())"))
+            }
+            if let detail = machine.job?.detail, !detail.isEmpty {
+                submenu.addItem(Self.caption(detail))
+            }
+            if machine.canUpdate {
+                let update = Self.action("Update \(machine.name)", #selector(doUpdate), self)
+                update.setAccessibilityIdentifier("updates_tap_" + machine.machine)
+                update.representedObject = machine.machine
+                update.isEnabled = !updateRequestInFlight
+                submenu.addItem(update)
+            }
+        }
+        if inventory.machines.count > 1 && inventory.release != nil {
+            submenu.addItem(.separator())
+            let all = Self.action("Update All Macs", #selector(doUpdate), self)
+            all.setAccessibilityIdentifier("updates_tap_all")
+            all.representedObject = "all"
+            all.isEnabled = !updateRequestInFlight
+            submenu.addItem(all)
+        }
+        return item
+    }
+
+    @objc private func doUpdate(_ sender: NSMenuItem) {
+        guard !updateRequestInFlight, let target = sender.representedObject as? String else { return }
+        updateRequestInFlight = true
+        probe.update(target: target, requestID: UUID().uuidString) { [weak self] ok, detail in
+            guard let self else { return }
+            self.updateRequestInFlight = false
+            if !ok {
+                let alert = NSAlert()
+                alert.messageText = "Update request needs attention"
+                alert.informativeText = detail
+                alert.runModal()
+            }
+            self.refresh()
+        }
+    }
+
+    func showUpdates() {
+        refresh()
+        item.button?.performClick(nil)
     }
 
     /// The Active section. Rows are informational — a menu bar is where you
@@ -2655,6 +2831,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the build directory behaves the same as the installed bundle.
         NSApp.setActivationPolicy(.accessory)
         controller = StatusController()
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        if urls.contains(where: { $0.scheme == "jstack" && $0.host == "updates" }) {
+            controller?.showUpdates()
+        }
     }
 }
 

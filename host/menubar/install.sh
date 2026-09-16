@@ -184,6 +184,10 @@ cat > "$STAGE/Contents/Info.plist" <<EOF
     <key>CFBundleVersion</key><string>1</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
+    <key>CFBundleURLTypes</key><array><dict>
+        <key>CFBundleURLName</key><string>jStack updates</string>
+        <key>CFBundleURLSchemes</key><array><string>jstack</string></array>
+    </dict></array>
 </dict>
 </plist>
 EOF

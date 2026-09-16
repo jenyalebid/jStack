@@ -1,0 +1,191 @@
+"""Durable hub update jobs and observed inventory, not installation code.
+
+SQLite serializes requests across the API and the independent supervisor.
+Offline machines keep queued intent. A report alone cannot complete a job:
+the hub must independently observe the running host after reconnection.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+import uuid
+from contextlib import contextmanager
+from pathlib import Path
+
+from . import hostenv, release_manifest as releases
+
+ACTIVE = {"pending", "downloading", "applying", "verifying"}
+TERMINAL = {"current", "failed", "rolled_back", "cancelled"}
+TRANSITIONS = {
+    "pending": {"downloading", "failed", "cancelled"},
+    "downloading": {"applying", "failed", "cancelled"},
+    "applying": {"verifying", "failed", "rolled_back"},
+    "verifying": {"current", "failed", "rolled_back"},
+}
+STALE_SECONDS = 90
+
+
+def root() -> Path:
+    return hostenv.state_dir() / "updates"
+
+
+def config() -> dict:
+    path = root() / "config.json"
+    if not path.exists():
+        return {}
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict):
+        raise releases.ReleaseError("invalid updater configuration")
+    return value
+
+
+def feed_dir() -> Path:
+    from . import releases as app_releases
+    return app_releases.RELEASE_DIR.parent / "fleet"
+
+
+def offer() -> dict | None:
+    path = feed_dir() / "latest.json"
+    if not path.exists():
+        return None
+    envelope = json.loads(path.read_text())
+    settings = config()
+    manifest = releases.verify(envelope, settings.get("public_key", ""),
+                               promoted=not settings.get("candidate_test", False))
+    for item in manifest["components"].values():
+        artifact = feed_dir() / manifest["release"] / item["file"]
+        if not artifact.is_file() or artifact.stat().st_size != item["bytes"]:
+            raise releases.ReleaseError("published release has missing or partial artifacts")
+    return envelope
+
+
+class FleetStore:
+    def __init__(self, path: Path | None = None):
+        self.path = path or root() / "fleet.sqlite"
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with self.connection() as db:
+            db.executescript("""
+              CREATE TABLE IF NOT EXISTS reports (
+                machine TEXT PRIMARY KEY, seen REAL NOT NULL, report TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY, request TEXT NOT NULL, machine TEXT NOT NULL,
+                authority TEXT NOT NULL, release TEXT NOT NULL, envelope TEXT NOT NULL,
+                state TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
+                created REAL NOT NULL, updated REAL NOT NULL,
+                UNIQUE(request, machine));
+            """)
+
+    @contextmanager
+    def connection(self):
+        db = sqlite3.connect(self.path, timeout=15)
+        db.row_factory = sqlite3.Row
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
+
+    def queue(self, machine: str, authority: str, envelope: dict, request: str) -> dict:
+        releases.identifier(request)
+        release = envelope["manifest"]["release"]
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            old = db.execute("SELECT * FROM jobs WHERE request=? AND machine=?",
+                             (request, machine)).fetchone()
+            if old:
+                if old["release"] != release or old["authority"] != authority:
+                    raise releases.ReleaseError("request ID already names a different update")
+                return dict(old)
+            current = db.execute("SELECT * FROM jobs WHERE machine=? AND authority=? AND release=? "
+                                 "AND state='current' ORDER BY created DESC LIMIT 1",
+                                 (machine, authority, release)).fetchone()
+            report = db.execute("SELECT * FROM reports WHERE machine=?", (machine,)).fetchone()
+            if current and report and time.time() - report["seen"] < STALE_SECONDS:
+                observation = json.loads(report["report"])
+                if observation.get("verified") is True and observation.get("release") == release:
+                    return dict(current)
+            busy = db.execute("SELECT * FROM jobs WHERE machine=? AND state IN "
+                              "('pending','downloading','applying','verifying')", (machine,)).fetchone()
+            if busy:
+                if busy["release"] == release and busy["authority"] == authority:
+                    return dict(busy)
+                raise releases.ReleaseError("machine already has an active update")
+            now = time.time()
+            job = {"id": uuid.uuid4().hex, "request": request, "machine": machine,
+                   "authority": authority, "release": release,
+                   "envelope": json.dumps(envelope), "state": "pending", "detail": "",
+                   "created": now, "updated": now}
+            db.execute("INSERT INTO jobs VALUES (:id,:request,:machine,:authority,:release,"
+                       ":envelope,:state,:detail,:created,:updated)", job)
+            return job
+
+    def latest(self, machine: str) -> dict | None:
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM jobs WHERE machine=? ORDER BY created DESC LIMIT 1",
+                             (machine,)).fetchone()
+            return dict(row) if row else None
+
+    def transition(self, job_id: str, machine: str, state: str, detail: str = "", *,
+                   verified: bool = False) -> dict:
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND machine=?", (job_id, machine)).fetchone()
+            if row is None:
+                raise releases.ReleaseError("unknown update job")
+            if state == "current" and not verified:
+                raise releases.ReleaseError("hub verification required")
+            if state != row["state"] and state not in TRANSITIONS.get(row["state"], set()):
+                raise releases.ReleaseError(f"invalid update transition: {row['state']} to {state}")
+            db.execute("UPDATE jobs SET state=?,detail=?,updated=? WHERE id=?",
+                       (state, detail[:2000], time.time(), job_id))
+            return dict(db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+
+    def report(self, machine: str, observation: dict) -> None:
+        encoded = json.dumps(observation, allow_nan=False)
+        if len(encoded) > 32768:
+            raise releases.ReleaseError("inventory report too large")
+        with self.connection() as db:
+            db.execute("INSERT OR REPLACE INTO reports VALUES (?,?,?)",
+                       (machine, time.time(), encoded))
+
+    def inventory(self, machine: str, name: str, desired: str | None) -> dict:
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM reports WHERE machine=?", (machine,)).fetchone()
+        report = json.loads(row["report"]) if row else {}
+        job = self.latest(machine)
+        if job and job["authority"] != "local" and job["state"] in {"pending", "downloading"}:
+            from . import devices, managed_access
+            authority = devices.row(job["authority"])
+            leaf = managed_access.leaf_for_device(job["authority"])
+            if (authority is None or authority.get("revoked_at") is not None or
+                    leaf is None or leaf["deleted"] or leaf["key"] != machine):
+                job = self.transition(job["id"], machine, "cancelled", "adoption authority revoked")
+        fresh = bool(row and time.time() - row["seen"] < STALE_SECONDS)
+        state = "unknown"
+        if job:
+            state = job["state"]
+        elif report.get("job", {}).get("state"):
+            state = report["job"]["state"]
+        elif fresh and desired:
+            state = "available"
+        if not fresh and state not in {"cancelled", "failed", "rolled_back"}:
+            state = "pending/offline" if job and job["state"] in ACTIVE else "unknown/offline"
+        elif state == "current" and (report.get("release") != desired or
+                                     report.get("verified") is not True):
+            state = "available" if desired else "unknown"
+        return {"machine": machine, "name": name, "desired": desired, "state": state,
+                "last_contact": row["seen"] if row else None, "observed": report,
+                "job": public_job(job), "supervisor": report.get("supervisor") == 1}
+
+
+def public_job(job: dict | None) -> dict | None:
+    return {k: v for k, v in job.items() if k not in {"envelope", "authority"}} if job else None
+
+
+def local_observation() -> dict:
+    from . import sourcestamp
+    path = root() / "observed.json"
+    result = json.loads(path.read_text()) if path.exists() else {}
+    # Served source is observed by the host process, never supplied by a client.
+    return {**result, "host_source": sourcestamp.capture()}

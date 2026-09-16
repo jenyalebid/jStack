@@ -182,13 +182,14 @@ def get_host(request: Request):
     screen in turn learns the same thing four round trips later, and has to
     render four spinners to find out one of them was never coming.
     """
-    from . import addresses, mode
+    from . import addresses, mode, sourcestamp
     # The port the caller actually reached, not a constant: a host moved off
     # 9090 would otherwise hand out an address list that is wrong in the one
     # detail nobody checks, on the screen whose whole job is that address.
     port = request.url.port or addresses.DEFAULT_PORT
     return {
         "host_id": hostenv.host_id(),
+        "source": sourcestamp.capture(),
         "name": hostenv.host_name(),
         "profile": hostenv.profile().name,
         # Where a SECOND machine should try. Never loopback — see addresses.py.
@@ -2814,3 +2815,8 @@ def review_session(sid: str):
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True)
     return {"ok": True, "review": "spawned"}
+
+
+# Same bearer and managed-access gate as every other product route.
+from .update_routes import router as update_router
+router.include_router(update_router)

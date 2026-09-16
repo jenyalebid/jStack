@@ -21,6 +21,7 @@ dependencies = [
     "psutil>=6.0",
     "pydantic>=2.8",
     "PyJWT>=2.9",
+    "cryptography>=43",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +29,11 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 jstack-host = "jstack_host.cli:main"
+jstack-update-bootstrap = "jstack_host.install_updater:main"
+jstack-release = "jstack_host.publish_release:main"
+
+[tool.setuptools.package-data]
+jstack_host = ["release-trust.json"]
 
 [tool.setuptools.packages.find]
 include = ["jstack_host*"]

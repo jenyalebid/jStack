@@ -948,6 +948,17 @@ fi
 
 # ── 11. the verdict ─────────────────────────────────────────────────────────
 
+if [ "$HOST_INSTALLED" = "1" ] && [ "$APP_INSTALLED" = "1" ] && [ "$WANT_MENUBAR" = "1" ]; then
+    step "Managed updater"
+    if [ "$DRY_RUN" = "1" ]; then
+        would "bootstrap the restart-independent updater with the shipped release trust key"
+    elif "$CHECKOUT/host/.venv/bin/python3" -m jstack_host.install_updater; then
+        ok "managed updater installed; the menu bar owns stack and app updates"
+    else
+        die "updater bootstrap failed — the existing host and app remain installed"
+    fi
+fi
+
 step "Verifying"
 
 if [ "$DRY_RUN" = "1" ]; then

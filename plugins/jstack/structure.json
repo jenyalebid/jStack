@@ -34,6 +34,7 @@
     "docs": "repo-level docs and specs",
     "host": "the host-side python package (jstack_host) — machine-local pieces a portable plugin cannot ship",
     "install.sh": "the installer — directory-source marketplace, so git pull is the update",
+    "release.sh": "coordinated release build and evidence-gated promotion entry point",
     "plugins": "the catalog's contents; today one plugin, jstack",
     "product.md": "what jStack is as a product"
   },

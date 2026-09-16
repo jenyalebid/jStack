@@ -22,11 +22,20 @@ does not have, and its identity is the package version instead.
 from __future__ import annotations
 
 import subprocess
+import json
+import hashlib
 from pathlib import Path
 
 _PKG = Path(__file__).resolve().parent
 
 _stamp: dict | None = None
+
+
+def fingerprint(package: Path) -> str:
+    value = hashlib.sha256()
+    for path in sorted(package.rglob("*.py")):
+        value.update(str(path.relative_to(package)).encode() + b"\0" + path.read_bytes())
+    return value.hexdigest()
 
 
 def _git(*args: str) -> str:
@@ -53,6 +62,13 @@ def capture() -> dict:
             "dirty": bool(sha) and bool(_git("status", "--porcelain", "--", str(_PKG))),
             "root": _git("rev-parse", "--show-toplevel") if sha else "",
         }
+        # An immutable release archive has no .git. Its identity is packaged
+        # into the signed stack artifact, not copied from desired fleet state.
+        identity = _PKG.parent / "release-identity.json"
+        if identity.is_file():
+            data = json.loads(identity.read_text())
+            _stamp.update(sha=data["sha"], release=data["release"],
+                          dirty=data.get("package_sha256") != fingerprint(_PKG))
     return dict(_stamp)
 
 
