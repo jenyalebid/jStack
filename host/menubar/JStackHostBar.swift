@@ -1387,6 +1387,7 @@ final class StatusController: NSObject {
     private var updateInventory: UpdateInventory?
     private var updateError: String?
     private var updateRequestInFlight = false
+    private var menuIsOpen = false
 
     override init() {
         super.init()
@@ -1415,7 +1416,7 @@ final class StatusController: NSObject {
             guard let self else { return }
             self.updateInventory = inventory
             self.updateError = error
-            if self.item.menu?.highlightedItem == nil { self.build() }
+            if !self.menuIsOpen { self.build() }
         }
         probe.poll { [weak self] state in
             guard let self else { return }
@@ -1423,7 +1424,7 @@ final class StatusController: NSObject {
             // A poll started before a successful removal cannot resurrect it.
             self.state.devices = DeviceMenu.active(state.devices, removed: self.removedDevices)
             self.draw()
-            if self.item.menu?.highlightedItem == nil { self.build() }
+            if !self.menuIsOpen { self.build() }
         }
     }
 
@@ -2816,8 +2817,14 @@ extension StatusController: NSMenuDelegate {
     /// icon; a menu being opened is someone asking right now, and showing them
     /// a board up to ten seconds stale is the thing that makes an indicator
     /// stop being believed.
-    func menuWillOpen(_ menu: NSMenu) { refresh() }
-    func menuDidClose(_ menu: NSMenu) { build() }
+    func menuWillOpen(_ menu: NSMenu) {
+        menuIsOpen = true
+        refresh()
+    }
+    func menuDidClose(_ menu: NSMenu) {
+        menuIsOpen = false
+        build()
+    }
 }
 
 // MARK: - The app
