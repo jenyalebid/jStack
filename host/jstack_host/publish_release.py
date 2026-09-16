@@ -17,7 +17,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import release_manifest as releases
+from . import acceptance, release_manifest as releases
 from .update_macos import command, safe_tar
 from .update_supervisor import atomic_json
 
@@ -168,18 +168,45 @@ def seal(work: Path, config: dict, notes: str) -> Path:
     return output
 
 
-def promote(candidate: Path, receipts_dir: Path, feed: Path, private_key: bytes) -> dict:
+def candidate_manifest(candidate: Path, private_key: bytes) -> dict:
+    """The signed candidate's own manifest — never a manifest handed to us."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     key = Ed25519PrivateKey.from_private_bytes(private_key)
     public = base64.b64encode(key.public_key().public_bytes_raw()).decode()
     envelope = json.loads((candidate / "candidate.json").read_text())
-    manifest = copy.deepcopy(releases.verify(envelope, public, promoted=False))
-    for name in releases.RECEIPTS:
-        receipt = json.loads((receipts_dir / (name + ".json")).read_text())
-        evidence = receipts_dir / (name + ".log")
-        if releases.digest(evidence) != receipt.get("evidence_sha256"):
-            raise releases.ReleaseError(f"acceptance evidence missing or changed: {name}")
-        manifest["receipts"][name] = receipt
+    return copy.deepcopy(releases.verify(envelope, public, promoted=False))
+
+
+def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -> dict:
+    """Run the configured acceptance runner over this candidate, then read it.
+
+    The runner's exit status is a hint; the receipts it wrote are the evidence.
+    A runner that dies half way leaves the journeys it never reached missing,
+    and missing is what keeps promotion closed.
+    """
+    runner = config.get("acceptance")
+    if not runner:
+        raise releases.ReleaseError(
+            "configure 'acceptance' with the acceptance runner's command line")
+    manifest = candidate_manifest(candidate, private_key)
+    receipts.mkdir(parents=True, exist_ok=True)
+    argv = [*runner, "--candidate", str(candidate), "--receipts", str(receipts)]
+    print("Running acceptance: " + " ".join(argv), flush=True)
+    finished = subprocess.run(argv, timeout=config.get("acceptance_timeout", 6 * 3600))
+    state = acceptance.inspect(receipts, manifest)
+    for name, entry in state.items():
+        print(f"  {name}: {entry['state']}" + (f" — {entry['detail']}" if entry["detail"] else ""),
+              flush=True)
+    if finished.returncode:
+        print(f"acceptance runner exited {finished.returncode}", flush=True)
+    return state
+
+
+def promote(candidate: Path, receipts_dir: Path, feed: Path, private_key: bytes) -> dict:
+    manifest = candidate_manifest(candidate, private_key)
+    # One door. Every journey is a genuine pass over these exact artifacts, or
+    # this raises and names the ones that are not.
+    manifest["receipts"] = acceptance.gate(receipts_dir, manifest)
     envelope = releases.sign(manifest, private_key)
     for item in manifest["components"].values():
         releases.check_artifact(candidate / item["file"], item)
@@ -201,6 +228,74 @@ def promote(candidate: Path, receipts_dir: Path, feed: Path, private_key: bytes)
     return envelope
 
 
+def deploy(release: str, *, port: int = 9090, timeout: int = 2700, poll: int = 15) -> dict:
+    """Update this hub and its eligible leaves to a promoted release, and watch.
+
+    Eligibility is the hub's own answer — a machine it has heard from recently
+    that reports an update supervisor. A machine that is offline, or too old to
+    have one, is reported unreached; it is never counted as deployed because
+    nothing was asked of it. Reaching `current` is the hub's independent
+    confirmation of the running release, not the leaf's own claim.
+    """
+    import httpx
+    from . import devices
+    base = f"http://127.0.0.1:{port}/api/jremote/v1/updates"
+    headers = {"Authorization": "Bearer " + devices.internal_token()}
+    with httpx.Client(timeout=30, trust_env=False) as client:
+        def inventory() -> dict:
+            answer = client.get(base + "/inventory", headers=headers)
+            answer.raise_for_status()
+            return answer.json()
+
+        before = inventory()
+        if before.get("release") != release:
+            raise releases.ReleaseError(
+                f"this hub offers {before.get('release')}, not the promoted {release}")
+        eligible = sorted(row["machine"] for row in before["machines"] if row.get("supervisor"))
+        unmanaged = sorted(row["machine"] for row in before["machines"] if not row.get("supervisor"))
+        if not eligible:
+            raise releases.ReleaseError("no machine on this hub can accept a managed update")
+        queued = client.post(base + "/queue", headers=headers,
+                             json={"target": "all", "request_id": "release-" + release})
+        queued.raise_for_status()
+        deadline = time.monotonic() + timeout
+        states: dict[str, str] = {}
+        while True:
+            rows = {row["machine"]: row for row in inventory()["machines"]}
+            states = {machine: rows.get(machine, {}).get("state", "unknown")
+                      for machine in eligible}
+            settled = all(state in ("current", "failed", "rolled_back", "cancelled")
+                          for state in states.values())
+            if settled or time.monotonic() > deadline:
+                break
+            time.sleep(poll)
+    result = {"release": release, "eligible": eligible, "states": states,
+              "unreached": sorted(m for m, s in states.items() if s != "current"),
+              "no_supervisor": unmanaged, "jobs": queued.json()}
+    if result["unreached"]:
+        raise releases.ReleaseError(
+            "promoted, but these machines did not reach the release: "
+            + ", ".join(f"{m} ({states[m]})" for m in result["unreached"]))
+    return result
+
+
+def ship(config: dict, candidate: Path, receipts: Path, private_key: bytes,
+         *, deploy_after: bool) -> dict:
+    """The one release action: qualify the exact candidate, promote, deploy.
+
+    Nothing is published on a green unit suite. `qualify` produces receipts and
+    `promote` re-reads them through the same gate every installing machine
+    trusts, so an interrupted or partial acceptance run stops here.
+    """
+    qualify(config, candidate, receipts, private_key)
+    envelope = promote(candidate, receipts, Path(config["feed_dir"]), private_key)
+    release = envelope["manifest"]["release"]
+    result = {"promoted": release}
+    if deploy_after:
+        result["deployed"] = deploy(release, port=config.get("hub_port", 9090))
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=os.environ.get("JSTACK_RELEASE_CONFIG"))
@@ -217,6 +312,17 @@ def main():
     publish = commands.add_parser("promote")
     publish.add_argument("candidate", type=Path)
     publish.add_argument("--receipts", type=Path, required=True)
+    prove = commands.add_parser("qualify", help="run the acceptance runner over a candidate")
+    prove.add_argument("candidate", type=Path)
+    prove.add_argument("--receipts", type=Path, required=True)
+    state = commands.add_parser("acceptance", help="what this candidate's receipts prove today")
+    state.add_argument("candidate", type=Path)
+    state.add_argument("--receipts", type=Path, required=True)
+    whole = commands.add_parser("ship", help="qualify, promote and deploy one candidate")
+    whole.add_argument("candidate", type=Path)
+    whole.add_argument("--receipts", type=Path, required=True)
+    whole.add_argument("--deploy", action="store_true",
+                       help="after promotion, update this hub and its eligible leaves")
     args = parser.parse_args()
     if args.action == "init-key":
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -231,10 +337,22 @@ def main():
     config = json.loads(args.config.read_text())
     if args.action == "build":
         print(build(config, args.notes, args.reuse_client))
-    elif args.action == "seal":
+        return
+    if args.action == "seal":
         print(seal(args.work, config, args.notes))
+        return
+    private = base64.b64decode(Path(config["private_key"]).read_text().strip(), validate=True)
+    if args.action == "qualify":
+        state = qualify(config, args.candidate, args.receipts, private)
+        print(json.dumps({name: entry["state"] for name, entry in state.items()}, indent=2))
+    elif args.action == "acceptance":
+        state = acceptance.inspect(args.receipts, candidate_manifest(args.candidate, private))
+        print(json.dumps({name: {"state": entry["state"], "detail": entry["detail"]}
+                          for name, entry in state.items()}, indent=2))
+    elif args.action == "ship":
+        print(json.dumps(ship(config, args.candidate, args.receipts, private,
+                              deploy_after=args.deploy), indent=2))
     else:
-        private = base64.b64decode(Path(config["private_key"]).read_text().strip(), validate=True)
         result = promote(args.candidate, args.receipts, Path(config["feed_dir"]), private)
         print(json.dumps({"promoted": result["manifest"]["release"]}))
 

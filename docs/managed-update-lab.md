@@ -58,6 +58,25 @@ release, run `revoke MACHINE_ID`, then restart the updater. Record cancellation,
 the rejected requests and unchanged installed release. Revocation is not undone;
 any later adoption must mint a new credential, never resurrect the old one.
 
+## The unattended run
+
+`host/tools/managed_update_accept.py` drives every journey in one command and
+writes the nine receipts. It refuses a plan that is not marked `disposable`.
+
+```sh
+PYTHONPATH=host python host/tools/managed_update_accept.py \
+  --candidate /path/to/signed/candidate --receipts /path/to/receipts \
+  --plan /path/to/plan.json [--only upgrade rollback]
+```
+
+The plan names the guests and the fixture-specific commands the journeys need:
+`vm_tool`, `hub`, `leaves`, `fresh` (a pristine guest), `prior_candidate`, and
+the guest command lines for `stage_prior_command`, `adopt_command`,
+`tamper_command` and `restore_command`. A journey this plan cannot support —
+fewer than two leaves, no pristine guest, no wired test phone — is recorded as
+skipped with that reason, which keeps promotion closed exactly like a failure.
+`--only` is the same: everything unselected is recorded unrun, not assumed.
+
 ## Evidence boundaries
 
 - A menu test clicks the actual Update action, not just `/updates/queue`.

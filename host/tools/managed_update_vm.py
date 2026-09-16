@@ -14,7 +14,8 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["hub", "offer", "queue", "inventory", "enrol", "adopt", "grant", "spawn"])
+    parser.add_argument("action", choices=["hub", "offer", "queue", "inventory", "enrol",
+                                           "adopt", "grant", "spawn", "probe", "call", "revoke"])
     parser.add_argument("--candidate", type=Path)
     parser.add_argument("--request", default="fixture-self-update")
     parser.add_argument("--target", default="self")
@@ -24,14 +25,22 @@ def main():
     parser.add_argument("--parent-address")
     parser.add_argument("--parent-port", type=int)
     parser.add_argument("--agent")
+    parser.add_argument("--path", help="local API path for call, e.g. /updates/queue")
+    parser.add_argument("--body", help="JSON body; its absence makes call a GET")
+    parser.add_argument("--timeout", type=int, default=60)
     args = parser.parse_args()
     state = Path.home() / ".local/state/jremote"
     root = state / "updates"
     config = json.loads((root / "config.json").read_text())
     account = pwd.getpwuid(os.getuid())
     if (account.pw_name != "admin" or Path.home() != Path(account.pw_dir)
-            or not config.get("candidate_test")
-            or not (Path.home() / "update-lab-adoption.json").is_file()):
+            or not config.get("candidate_test")):
+        raise RuntimeError("operation requires the disposable candidate-test VM fixture")
+    # Every action that changes a fixture also needs the adoption record that
+    # proves this guest was provisioned as one. `probe` only reads, and a guest
+    # that was just installed from a candidate has no adoption record yet —
+    # which is exactly the machine a fresh-install journey has to observe.
+    if args.action != "probe" and not (Path.home() / "update-lab-adoption.json").is_file():
         raise RuntimeError("operation requires the disposable candidate-test VM fixture")
     for path in reversed(config["runtime_imports"]):
         if not Path(path).resolve().is_relative_to(root):
@@ -76,6 +85,20 @@ def main():
             grants.remember(record["machine"], record["grant"])
         print(json.dumps({"fixture_action": args.action, "record": str(args.record)}))
         return
+    if args.action == "probe":
+        # The product's own observation code, run on the guest: installed and
+        # running component versions, the host's live source answer, plugin
+        # versions and this updater's loaded source. A file on disk is not an
+        # observation of what is running, and neither is a checkout's HEAD.
+        from jstack_host.update_macos import MacBackend
+        journal = root / "job.json"
+        job = json.loads(journal.read_text()) if journal.exists() else {}
+        print(json.dumps({"host_id": hostenv.host_id(),
+                          "observed": MacBackend(root, config).observe(job),
+                          "job": {key: job.get(key) for key in ("id", "state", "detail", "release")},
+                          "adopted": (state / "parent.json").exists(),
+                          "managed": bool(config.get("managed"))}, indent=2))
+        return
     if args.action in {"hub", "offer"}:
         if args.candidate is None:
             parser.error("hub requires --candidate")
@@ -102,6 +125,26 @@ def main():
         return
     headers = {"Authorization": "Bearer " + Path(config["token_path"]).read_text().strip()}
     base = config["local_url"] + "/api/jremote/v1/updates"
+    if args.action == "call":
+        # One authenticated local request, answered with its status instead of
+        # an exception: a refusal is an observation the caller needs to see.
+        if not args.path or not args.path.startswith("/"):
+            parser.error("call requires a local API path")
+        body = json.loads(args.body) if args.body else None
+        answer = httpx.request("POST" if body is not None else "GET",
+                               config["local_url"] + "/api/jremote/v1" + args.path,
+                               headers=headers, json=body, timeout=args.timeout)
+        print(json.dumps({"status": answer.status_code, "body": answer.text[:4000]}))
+        return
+    if args.action == "revoke":
+        row = get_store().host_row(args.machine or "")
+        if row is None or not str(row["name"]).startswith("Update lab"):
+            raise RuntimeError("only a machine this fixture enrolled may be revoked")
+        result = httpx.post(config["local_url"] + "/api/jremote/v1/devices/"
+                            + row["device_id"] + "/revoke", headers=headers, timeout=args.timeout)
+        result.raise_for_status()
+        print(json.dumps({"revoked": row["device_id"], "machine": args.machine}))
+        return
     if args.action == "spawn":
         if not args.agent or not args.agent.startswith("update-proof"):
             parser.error("spawn is limited to the update-proof fixture agent")

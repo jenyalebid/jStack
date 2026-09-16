@@ -27,6 +27,14 @@ acceptance target; implemented code and observed proof are separate facts.
   launchd removal races, stale menu replacement, wrong administrative token
   selection and updater self-advancement. These observations do not substitute
   for a complete acceptance run on the final artifact set.
+- `acceptance.py` writes each journey's receipt from what the run observed.
+  A journey names the facts it must record; anything it did not observe leaves
+  the receipt incomplete, and `gate` refuses promotion naming every journey
+  that is not a genuine pass over this candidate's exact artifact set.
+- `host/tools/managed_update_accept.py` is the unattended runner: one command
+  drives the journeys over disposable Macs and writes those receipts. Its
+  journey logic is under test; it has not yet completed a live qualification,
+  so no candidate has passed the gate.
 - Production promotion rejects absent/skipped/stale receipts. No production
   acceptance receipt has been issued by the disposable fixture tools.
 
@@ -40,8 +48,20 @@ From either repository:
 bash release.sh build --notes 'Release description'
 # Reuse only when client source and shared-package inputs have not changed:
 bash release.sh build --reuse-client /path/to/prior/candidate --notes '...'
+bash release.sh qualify /path/to/candidate --receipts /path/to/receipts
+bash release.sh acceptance /path/to/candidate --receipts /path/to/receipts
 bash release.sh promote /path/to/candidate --receipts /path/to/exact-artifact-receipts
+# Qualify, promote and then update this hub and its eligible leaves:
+bash release.sh ship /path/to/candidate --receipts /path/to/receipts --deploy
 ```
+
+`qualify` runs the acceptance runner named by the release configuration's
+`acceptance` command line. Its exit status is a hint; the receipts it wrote are
+the evidence, and `acceptance` prints what they prove today. `ship` is the one
+release action: it qualifies, promotes through the same gate, and — with
+`--deploy` — asks this hub to update itself and every leaf it can reach, then
+waits for the hub's own confirmation of each. A machine that is offline or has
+no update supervisor is reported unreached, never counted as deployed.
 
 Build never installs locally or publishes. Promotion is an explicit second
 step; it validates all nine receipts and atomically changes the fleet feed.
@@ -55,15 +75,15 @@ cannot be updated remotely until bootstrap has run on that leaf.
 
 ### Remaining acceptance/integration work
 
-- Complete and retain all nine final-artifact receipts: fresh_install,
-  upgrade, fleet, offline_catchup, session_survival, interruption, rollback,
-  revocation, cellular. Unit passes are not these receipts.
+- Run the acceptance runner to completion against the fixtures and retain all
+  nine final-artifact receipts: fresh_install, upgrade, fleet, offline_catchup,
+  session_survival, interruption, rollback, revocation, cellular. Unit passes
+  are not these receipts, and the runner existing is not a run.
 - Complete the two-leaf fleet case and exact fresh-install path (not a
   baseline install followed by upgrade). Self-update and the actual Update All
   menu action have passed with one disposable hub and one disposable leaf.
-- Automate the complete acceptance run and connect it to one release action.
-  The present tools build/promote and provide lab fixtures; they do not yet
-  supply an unattended end-to-end acceptance pipeline.
+- The cellular journey is not automated: it needs the designated test phone
+  wired and unlocked, and the runner records it skipped until then.
 - Mobile distribution and release notification in the phone UI remain open.
   Discovery currently reconciles by polling, not a release stream event.
 - Staged Python dependencies are resolved by pip, not yet a locked, bundled
