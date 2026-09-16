@@ -3,6 +3,7 @@
 #
 #   ./install.sh                 # newest release
 #   ./install.sh --dry-run       # print the plan, touch nothing
+#   ./install.sh --force         # reinstall even when that build is present
 #   ./install.sh --uninstall     # remove the app (your data stays)
 #
 # The app itself is closed source. This script is not, and that is the point:
@@ -48,6 +49,7 @@ TAG=""
 DRY_RUN=0
 DO_UNINSTALL=0
 ASSUME_YES=0
+FORCE=0
 
 usage() {
     cat <<'EOF'
@@ -55,6 +57,7 @@ usage: install.sh [options]
 
   --dry-run        print what would happen and change nothing
   --yes, -y        don't ask; accept every default
+  --force          reinstall even when the selected build is already installed
   --uninstall      remove the app (its settings and paired hosts stay)
   --tag TAG        install a specific release instead of the newest
   --repo OWNER/NAME  where to download from (default: this checkout's origin)
@@ -71,6 +74,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run)    DRY_RUN=1 ;;
         --yes|-y)     ASSUME_YES=1 ;;
+        --force)      FORCE=1 ;;
         --uninstall)  DO_UNINSTALL=1 ;;
         --tag)        TAG="${2:-}"; shift ;;
         --repo)       REPO="${2:-}"; shift ;;
@@ -193,10 +197,9 @@ note "build $BUILD (version ${VERSION:-?})"
 if [ -d "$APP_PATH" ]; then
     HAVE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Contents/Info.plist" 2>/dev/null || echo '?')"
     note "installed now: build $HAVE"
-    if [ "$HAVE" = "$BUILD" ] && [ "$ASSUME_YES" != "1" ] && [ "$DRY_RUN" != "1" ]; then
-        printf 'Build %s is already installed. Reinstall? [y/N] ' "$BUILD"
-        read -r reply </dev/tty || reply=""
-        case "$reply" in [yY]*) ;; *) note "nothing to do"; exit 0 ;; esac
+    if [ "$HAVE" = "$BUILD" ] && [ "$FORCE" != "1" ] && [ "$DRY_RUN" != "1" ]; then
+        note "build $BUILD is already installed — nothing to do"
+        exit 0
     fi
 fi
 
