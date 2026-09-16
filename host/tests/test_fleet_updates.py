@@ -393,3 +393,35 @@ def test_promote_checks_evidence_bytes_and_preserves_prior_feed(tmp_path, releas
     with pytest.raises(releases.ReleaseError, match="evidence"):
         promote(candidate, evidence, feed, key.private_bytes_raw())
     assert json.loads((feed / "latest.json").read_text()) == {"prior": "untouched"}
+
+
+@pytest.mark.parametrize("state,verified,changes", [("verifying", True, False),
+                                                 ("current", False, False), ("current", True, True)])
+def test_updater_runtime_moves_only_after_confirmed_transaction(tmp_path, state, verified, changes):
+    from jstack_host.update_macos import MacBackend
+    stack = tmp_path / "release/stack"
+    (stack / "host/jstack_host").mkdir(parents=True)
+    (stack / "host/jstack_host/update_dispatcher.py").write_text("# test fixture")
+    configuration = {"dispatcher": str(tmp_path / "stable-dispatcher"), "runtime_imports": ["old"]}
+    atomic_json(tmp_path / "config.json", configuration)
+    backend = MacBackend(tmp_path, configuration)
+    job = {"state": state, "verified": verified,
+           "transaction": {"stack": str(stack), "stage": str(tmp_path / "release")}}
+    assert backend.activate_runtime(job) is changes
+    updated = json.loads((tmp_path / "config.json").read_text())
+    assert updated["dispatcher"] == configuration["dispatcher"]
+    assert (updated["runtime_imports"] != ["old"]) is changes
+
+
+def test_launchd_replacement_waits_for_service_removal(tmp_path, monkeypatch):
+    import subprocess
+    from jstack_host import update_macos
+    calls = []
+    remaining = iter([0, 0, 113])
+    def run(argv, **kwargs):
+        calls.append(argv[1])
+        return subprocess.CompletedProcess(argv, next(remaining) if argv[1] == "print" else 0)
+    monkeypatch.setattr(update_macos.subprocess, "run", run)
+    monkeypatch.setattr(update_macos.time, "sleep", lambda _: None)
+    update_macos.MacBackend(tmp_path, {"host_label": "lab-host"})._unload("host")
+    assert calls == ["bootout", "print", "print", "print"]

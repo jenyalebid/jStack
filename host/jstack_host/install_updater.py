@@ -78,10 +78,12 @@ def bootstrap(public_key: str, *, state_dir: Path | None = None, load=True,
     bootstrap_dir = root / "bootstrap" / stamp
     if not bootstrap_dir.exists():
         shutil.copytree(package, bootstrap_dir / "jstack_host", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    configuration["runtime_imports"] = [str(bootstrap_dir)]
+    configuration["dispatcher"] = str(bootstrap_dir / "jstack_host/update_dispatcher.py")
     atomic_json(root / "config.json", configuration)
     logs = root / "logs"
     logs.mkdir(exist_ok=True)
-    job = {"Label": LABEL, "ProgramArguments": [sys.executable, "-m", "jstack_host.update_supervisor",
+    job = {"Label": LABEL, "ProgramArguments": [sys.executable, configuration["dispatcher"],
                                                "--state-dir", str(state)],
            "WorkingDirectory": str(bootstrap_dir),
            "EnvironmentVariables": {"PATH": hostenv.spawn_path()},

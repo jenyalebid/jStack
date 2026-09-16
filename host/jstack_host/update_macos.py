@@ -115,6 +115,22 @@ class MacBackend:
     def __init__(self, root: Path, config: dict):
         self.root, self.config = root, config
 
+    def activate_runtime(self, job: dict) -> bool:
+        """Move the next updater process only after the hub confirms this job."""
+        if job.get("state") != "current" or not job.get("verified") or not self.config.get("dispatcher"):
+            return False
+        transaction = job.get("transaction", {})
+        stack = Path(transaction["stack"])
+        if not (stack / "host/jstack_host/update_dispatcher.py").is_file():
+            return False  # compatibility with candidates predating the dispatcher
+        imports = [str(stack / "host"), str(Path(transaction["stage"]) / "dependencies")]
+        if Path(__file__).resolve().parent.parent == Path(imports[0]).resolve():
+            return False
+        configuration = json.loads((self.root / "config.json").read_text())
+        configuration["runtime_imports"] = imports
+        atomic_json(self.root / "config.json", configuration)
+        return True
+
     def compatible(self, manifest: dict):
         compatibility = manifest["compatibility"]
         if platform.system() != "Darwin":

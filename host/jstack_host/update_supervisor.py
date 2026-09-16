@@ -205,6 +205,16 @@ class Supervisor:
             while True:
                 try:
                     self.tick()
+                    activate = getattr(self.backend, "activate_runtime", None)
+                    if not once and activate and activate(self.current):
+                        import sys
+                        # The dispatcher is stable; its chosen runtime moves
+                        # only after the successful transaction is durable.
+                        # flock would survive exec, so release before replacing
+                        # this process and let the new copy take the same lock.
+                        fcntl.flock(lock, fcntl.LOCK_UN)
+                        os.execv(sys.executable, [sys.executable, self.config["dispatcher"],
+                                                 "--state-dir", str(self.root.parent)])
                     self.last_error = ""
                     delay = 5
                 except Exception as exc:
