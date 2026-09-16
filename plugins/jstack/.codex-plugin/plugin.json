@@ -1,6 +1,6 @@
 {
   "name": "jstack",
-  "version": "0.66.1+codex.20260915213319",
+  "version": "0.67.0+codex.20260916064610",
   "description": "Cross-machine agent workflow skills, timeline, inbox, rules, audits, handoffs, and delivery tools.",
   "author": {
     "name": "jenyalebid",
