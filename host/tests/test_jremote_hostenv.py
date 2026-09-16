@@ -100,6 +100,7 @@ def test_explicit_external_raises_when_the_module_cannot_load(monkeypatch):
     was asked for surfaces much later, in a board nobody can explain.
     """
     monkeypatch.setenv("JREMOTE_HOST_PROFILE", "external")
+    monkeypatch.setenv("JREMOTE_PROFILE_MODULE", "absent_test_host_profile")
     _block_lib(monkeypatch)
     with pytest.raises(ImportError):
         hostenv.profile()
