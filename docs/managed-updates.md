@@ -1,27 +1,73 @@
 # Managed releases and updates
 
-Status: product direction agreed on 2026-09-16; implementation design proposed.
-The product documents describe the intended contract. This document separates
-that contract from the implementation and evidence available today.
+Status: implemented candidate under real-Mac acceptance (2026-09-16).
+Not promoted to the production feed. The product contract below remains the
+acceptance target; implemented code and observed proof are separate facts.
 
 ## What exists today
 
-- `5cd12c4` adds the running host's source stamp and doctor comparisons for
-  checkout, plugin cache, running host and installed app. These are local
-  observations, not a fleet inventory or an updater.
-- `host/jstack_host/releases.py` serves the authenticated Mac client feed.
-  The client repository's `release-mac.sh` builds, signs, notarizes and
-  publishes the app. Its managed-access gate does not cover a complete
-  installation or cellular journey.
-- The client's `MacUpdater.swift` checks registered hosts at launch and every
-  six hours, stages a verified app, and offers a relaunch. Its helper checks
-  the archive again before replacement. Update ownership currently lives in
-  the client app, not the menu bar.
-- `install.sh` updates the stack and installs the client. The menu bar is
-  compiled locally by `host/menubar/install.sh`; it is not yet a separately
-  published, signed update artifact.
-- Managed enrollment supplies parent identity and credentials. It provides
-  a connection to extend, not authorization for arbitrary remote commands.
+- `release.sh` in either repository invokes the same publisher. It snapshots
+  committed stack, client and shared-package revisions, builds a signed and
+  notarized menu bar and client, and signs the complete artifact manifest.
+  `--reuse-client` accepts an unchanged client's already signed artifact only
+  after checking its source inputs and bytes. `seal` resumes completed builds.
+- `fleet_updates.py` and `update_routes.py` extend the existing authenticated
+  host feed with durable jobs, desired/observed inventory and parent-scoped
+  update authority. Local admin requires loopback plus the internal credential;
+  ordinary paired device tokens cannot queue fleet work.
+- `update_supervisor.py`, `update_macos.py` and `update_plugins.py` stage,
+  verify, replace and recover the host, both Mac apps and installed Claude/
+  native Codex plugins. The separate launchd updater survives host replacement.
+  A stable dispatcher advances its own runtime only after hub confirmation.
+- The menu bar offers local Update, per-leaf Update and Update All, with
+  component versions, progress and errors. The client hands updates to it;
+  older installations without the menu handler retain their legacy updater.
+- Two disposable GUI Macs have performed signed candidate upgrades with the
+  real supervisor. Testing exposed and fixed signature requirement syntax,
+  launchd removal races, stale menu replacement, wrong administrative token
+  selection and updater self-advancement. These observations do not substitute
+  for a complete acceptance run on the final artifact set.
+- Production promotion rejects absent/skipped/stale receipts. No production
+  acceptance receipt has been issued by the disposable fixture tools.
+
+## Operator commands
+
+Configure the publishing machine once with `JSTACK_RELEASE_CONFIG` pointing
+to its private release configuration. Signing keys stay outside the repository.
+From either repository:
+
+```sh
+bash release.sh build --notes 'Release description'
+# Reuse only when client source and shared-package inputs have not changed:
+bash release.sh build --reuse-client /path/to/prior/candidate --notes '...'
+bash release.sh promote /path/to/candidate --receipts /path/to/exact-artifact-receipts
+```
+
+Build never installs locally or publishes. Promotion is an explicit second
+step; it validates all nine receipts and atomically changes the fleet feed.
+The candidate includes `mobile.status=not_distributed`: an iOS upload or silent
+phone update is **not** implemented by this command.
+
+Existing installations need `jstack-update-bootstrap` once, using their
+existing host/app/menu paths and the packaged public trust key. The installer
+calls this when those components exist. An old leaf without that supervisor
+cannot be updated remotely until bootstrap has run on that leaf.
+
+### Remaining acceptance/integration work
+
+- Complete and retain all nine final-artifact receipts: fresh_install,
+  upgrade, fleet, offline_catchup, session_survival, interruption, rollback,
+  revocation, cellular. Unit passes are not these receipts.
+- Exercise Update All including a genuinely self-updating disposable hub,
+  and the exact fresh-install path (not a baseline install followed by upgrade).
+- Automate the complete acceptance run and connect it to one release action.
+  The present tools build/promote and provide lab fixtures; they do not yet
+  supply an unattended end-to-end acceptance pipeline.
+- Mobile distribution and release notification in the phone UI remain open.
+  Discovery currently reconciles by polling, not a release stream event.
+- Staged Python dependencies are resolved by pip, not yet a locked, bundled
+  offline dependency set. The source archive and Mac apps are exact artifacts;
+  do not claim fully hermetic installation.
 
 ## Product decisions
 
@@ -37,7 +83,7 @@ that contract from the implementation and evidence available today.
 - General SSH administration remains a possible later capability. Updating
   does not depend on adding an unrestricted remote shell first.
 
-## Proposed workflow
+## Release contract
 
 One release action, reachable from either repository, submits exact committed
 source revisions to the build/publishing machine. That machine produces one
@@ -157,4 +203,6 @@ human decision. Escalation names the exhausted recovery and missing capability.
 4. One release workflow from either repository, platform distribution and
    candidate promotion enforced by the product acceptance receipts above.
 
-This is a design, not an assertion that these four steps have shipped.
+Implementation exists for the Mac update path. The complete acceptance and
+platform-distribution contract above is not yet shipped; production promotion
+must remain closed until its required evidence exists.
