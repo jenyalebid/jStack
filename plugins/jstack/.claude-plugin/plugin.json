@@ -1,7 +1,7 @@
 {
   "name": "jstack",
   "description": "Agent workflow skills: get battle-ready on a topic, hand off or split off a session, audit this session's work trust-nothing, reverify a whole day's shipped commits across every repo, show a result in its real viewer, commit and push session work, close out a task so every finding lands as a commit or a filed issue, deliver that close-out spoken aloud in a few short blocks instead, recall what a seat did, file a session under a timeline subject. Ships the mechanisms those skills run on \u2014 a session-tagged timeline injected at session start, an agent inbox that cannot be walked past, edit-time path-matched rule injection, a session-end self-write, zero-turn /tag, /pict, /print, /splitoff and /takeover commands answered in hooks, one seat-address grammar every command shares (an agent alone is its cockpit, hyphens walk down the seat tree) reachable from a shell as `seat`, and a scheduler daemon that starts sessions on RRULE schedules. Portable across machines via userConfig \u2014 no hardcoded paths.",
-  "version": "0.67.0",
+  "version": "0.67.0+codex.20260916064610",
   "author": {
     "name": "jenyalebid"
   },
