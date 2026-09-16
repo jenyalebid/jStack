@@ -135,6 +135,11 @@ class Supervisor:
             self.save(state="rolled_back", detail="verification deadline expired")
         reply = self.heartbeat()
         job = reply.get("job")
+        if (job and job.get("id") == self.current.get("id") and job.get("state") == "current"
+                and self.current.get("state") == "verifying" and self.backend.verify(self.current)):
+            # The hub may have committed confirmation just before this process
+            # died. Adopt that durable answer instead of timing out a success.
+            self.save(state="current", verified=True)
         if not job or job.get("state") not in fleet.ACTIVE:
             return
         if self.current.get("id") != job["id"]:

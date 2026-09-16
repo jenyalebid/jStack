@@ -291,6 +291,31 @@ def test_verification_timeout_recovers_without_network(tmp_path, release):
     assert daemon.current["state"] == "rolled_back"
 
 
+def test_restart_adopts_hub_confirmation_before_local_commit(tmp_path, release):
+    daemon, job = supervisor(tmp_path, release)
+    daemon.tick()
+    daemon.save(verified=True)
+    restarted = Supervisor(daemon.root, daemon.config, daemon.backend, daemon.client)
+    restarted.tick()
+    assert restarted.current["state"] == "current"
+    assert restarted.backend.events.count("apply") == 1
+
+
+def test_completed_job_accepts_repeated_current_heartbeats(rig):
+    _, console, remote = rig
+    job = console.post("/api/jremote/v1/updates/queue",
+                       json={"target": "self", "request_id": "click"}).json()["jobs"][0]
+    store = fleet.FleetStore()
+    for state in ("downloading", "applying", "verifying"):
+        store.transition(job["id"], "hub-main", state)
+    store.transition(job["id"], "hub-main", "current", verified=True)
+    for _ in range(2):
+        result = console.post("/api/jremote/v1/updates/heartbeat",
+                              json={"job_id": job["id"], "state": "current"})
+        assert result.status_code == 200, result.text
+        assert result.json()["job"]["state"] == "current"
+
+
 def test_revocation_cancels_pending_inventory_job(rig):
     store, console, remote = rig
     row, token = devices.mint("Office")

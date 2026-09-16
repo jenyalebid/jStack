@@ -180,7 +180,7 @@ def heartbeat(machine: str, authority: str, body: Heartbeat) -> dict:
         if job and body.job_id == job["id"]:
             state = ("verifying" if body.state == "current" and job["state"] != "current"
                      else body.state)
-            if state:
+            if state and state != job["state"]:
                 job = store.transition(job["id"], machine, state, body.detail)
             if job["state"] == "verifying" and _confirm(machine, body.observation, job):
                 job = store.transition(job["id"], machine, "current", verified=True)
