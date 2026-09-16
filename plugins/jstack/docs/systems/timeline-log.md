@@ -40,6 +40,7 @@ log_event tail <agent[/submode]> [-n N] [--json]     # seat history, oldest→ne
 log_event tail --tag <name> [-n N] [--json]          # SEATLESS: one subject across every seat, each line naming who worked it
 log_event grep "<substring>" [--seat <seat>] [--since YYYY-MM-DD] [--json]   # keyword recall: case-insensitive over headline+details+context; exit 1 = no match
 log_event recall <YYYY-MM-DD[..YYYY-MM-DD]> [<seat>|all] [--full] [--json]   # date recall: a day or range replayed, optionally one seat; --full rides context blobs
+log_event tail <seat> --json                         # structured: ids, session ids, origins, verdicts, context, tags
 log_event show <id>                                  # everything one entry holds, incl. context (id from grep / recall / tail --json)
 log_event verdict <agent[/submode]> shipped|drift|blocked|empty --note "..."
 log_event tag list [--session <id>]                   # the vocabulary; inside a session, `●` marks the tags that session already carries
@@ -92,6 +93,8 @@ Two properties make the pin hold rather than decay:
 - **An unknown tag falls back and says so.** Injection refuses a name outside the vocabulary and prints a visible note under the seat's own history, rather than booting a session blind on a subject that does not exist — the same refusal `tag set` and the `--tag` reads make, for the same reason.
 
 Any spawner can set the variable; nothing else is required of it. A board UI that pins a (tag, seat) pair and exports it into the pane it opens is one caller of a contract that is just an env var.
+
+An env var is also the pin's one weakness as a *readable* fact: it lives in the session's shell and nowhere else, so nothing outside that shell can tell which window a running session got. Two reads close that. `tail --json` carries each entry's `tags` — its session's subjects — so a window can be asked what its rows are filed under, not just what they say; a sitting filed under two subjects sits in both windows, and until the tags ride the read there is nothing to see that by. And `pict --session <id>` reads the injected block off the session's own transcript, where the harness records SessionStart hook output verbatim: the pin stops being inferred from ambient env and becomes the bytes the session actually received. Between them, "which window am I in, and why is that row here" is answerable from outside the session.
 
 ## The store
 
