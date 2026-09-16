@@ -214,7 +214,10 @@ CREATE TABLE IF NOT EXISTS hosts (
   enrolled_at INTEGER NOT NULL DEFAULT 0,
   deleted INTEGER NOT NULL DEFAULT 0,
   updated_at REAL NOT NULL DEFAULT 0,
-  seq INTEGER NOT NULL DEFAULT 0
+  seq INTEGER NOT NULL DEFAULT 0,
+  device_id TEXT NOT NULL DEFAULT '',
+  sees_home INTEGER NOT NULL DEFAULT 1,
+  sees_leaves INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS hosts_seq ON hosts(seq);
 -- Device identities for the API — the host's own table, and it NEVER rides
@@ -245,7 +248,9 @@ CREATE TABLE IF NOT EXISTS devices (
   -- header on any authenticated request. NULL until a build that sends it
   -- checks in. Exists so "did the fix reach the phone" is a row on the host
   -- instead of another TestFlight build cut to find out.
-  client_build TEXT
+  client_build TEXT,
+  authority_grant TEXT NOT NULL DEFAULT '',
+  authority_device TEXT NOT NULL DEFAULT ''
 );
 -- One-time enrolment codes (docs/multi-host-access.md, P3). Host-only, and it
 -- never syncs for the same reason `devices` never does — a code is a
@@ -1297,6 +1302,49 @@ class SessionStore:
         with self._conn() as db:
             row = db.execute("SELECT * FROM hosts WHERE key=?", (key,)).fetchone()
         return dict(row) if row else None
+
+    def bind_host_device(self, key: str, device_id: str) -> None:
+        """Bind an adoption to the credential issued in that same redemption."""
+        with self._write_lock, self._conn() as db:
+            db.execute("UPDATE hosts SET device_id=? WHERE key=?", (device_id, key))
+
+    def host_for_device(self, device_id: str) -> dict | None:
+        with self._conn() as db:
+            row = db.execute("SELECT * FROM hosts WHERE device_id=? AND device_id<>''",
+                             (device_id,)).fetchone()
+            if row is not None:
+                return dict(row)
+            # Upgrade existing adoptions from their actual redemption record,
+            # not from a device's editable display name. Ambiguity fails closed
+            # at the caller; never guess which machine an old token belongs to.
+            rows = db.execute(
+                "SELECT DISTINCT h.* FROM hosts h JOIN enrolment_codes e ON e.name=h.name "
+                "WHERE h.device_id='' AND e.kind='host' AND e.used_by LIKE ?",
+                (device_id + " from %",)).fetchall()
+        return dict(rows[0]) if len(rows) == 1 else None
+
+    def set_host_visibility(self, key: str, *, sees_home: bool,
+                            sees_leaves: bool) -> bool:
+        with self._write_lock, self._conn() as db:
+            seq = self._bump_seq(db)
+            cur = db.execute(
+                "UPDATE hosts SET sees_home=?, sees_leaves=?, updated_at=?, seq=? "
+                "WHERE key=? AND deleted=0",
+                (int(sees_home), int(sees_leaves), time.time(), seq, key))
+            return cur.rowcount > 0
+
+    def is_host_credential(self, device_id: str) -> bool:
+        """Recognize old adoption tokens even when their machine was renamed."""
+        with self._conn() as db:
+            return db.execute(
+                "SELECT 1 FROM enrolment_codes WHERE kind='host' "
+                "AND used_by LIKE ? LIMIT 1", (device_id + " from %",)).fetchone() is not None
+
+    def bind_device_authority(self, device_id: str, grant_hash: str,
+                              owner_id: str) -> None:
+        with self._write_lock, self._conn() as db:
+            db.execute("UPDATE devices SET authority_grant=?, authority_device=? WHERE id=?",
+                       (grant_hash, owner_id, device_id))
 
     def list_hosts(self, include_forgotten: bool = False) -> list[dict]:
         """The machines this one knows about. Tombstones stay in the table for

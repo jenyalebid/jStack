@@ -50,23 +50,44 @@ def _redeem_host_code(name="work-mac"):
     return enrolment.redeem(row["code"], "198.51.100.4", host_key="k-" + name)
 
 
-def test_a_host_code_redeemed_with_reachback_off_hands_back_a_dead_token():
+def test_per_leaf_home_off_preserves_the_managed_control_connection():
     """The point of the switch, asserted through the real redeem.
 
     The row is still written — it is the record that the machine enrolled at
     all, and a leaf with no row is a leaf no surface can show. What it must not
     be is usable.
     """
-    from jstack_host import devices
+    from jstack_host import devices, managed_access, hostenv
+    from jstack_host.store import get_store
 
-    hub_prefs.set("leaf_reachback", False)
+    store = get_store()
+    store.upsert_host("k-work-mac", "work-mac", "10.66.0.9")
+    store.set_host_visibility("k-work-mac", sees_home=False, sees_leaves=True)
     out = _redeem_host_code()
 
     assert out["reachback"] is False, "the redeemer was not told"
-    assert devices.is_revoked(out["device"]["id"]), \
-        "the credential handed back is live — the switch did nothing"
-    assert devices.authenticate(out["token"]) is None, \
-        "the token still authenticates against this hub"
+    assert not devices.is_revoked(out["device"]["id"])
+    assert devices.authenticate(out["token"]) == out["device"]["id"]
+    assert not managed_access.may_reach(out["device"]["id"], hostenv.host_id())
+
+
+def test_new_leaf_defaults_are_on_even_if_a_legacy_global_flag_was_off():
+    hub_prefs.set("leaf_reachback", False)
+    out = _redeem_host_code("fresh-leaf")
+    assert out["reachback"] is True
+    from jstack_host.store import get_store
+    row = get_store().host_row("k-fresh-leaf")
+    assert row["sees_home"] and row["sees_leaves"]
+
+
+def test_legacy_reachback_command_cannot_revoke_managed_control(monkeypatch):
+    from types import SimpleNamespace
+    from jstack_host import cli
+    def forbidden(*_):
+        raise AssertionError("legacy control mutation")
+    monkeypatch.setattr(hub_prefs, "set", forbidden)
+    monkeypatch.setattr(hub_prefs, "revoke_existing_reachback", forbidden)
+    assert cli._cmd_reachback(SimpleNamespace(state="off", existing=True)) == 2
 
 
 def test_a_host_code_redeemed_with_reachback_on_hands_back_a_live_token():

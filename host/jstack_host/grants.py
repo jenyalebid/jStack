@@ -1,64 +1,17 @@
-"""Delegated minting — a device trusted by the hub gets into a leaf without
-being paired to it.
+"""Delegation is an adoption capability, not independent device membership.
 
-This is the half of managed mode that made the promise untrue. `attach_parent`
-puts a machine on the parent's mesh and writes it into the parent's `hosts`
-table, so every device already paired to the parent can *reach* it and can *see*
-that it exists. Then it hits a wall that has nothing to do with the network:
-every host runs the identical package, owns its own `devices` table and mints
-its own tokens, and a credential for the hub proves nothing on the leaf. The
-user, who joined a machine to a hub precisely so they would not have to go and
-set it up, is asked to go and set it up.
+A leaf issues one grant to its parent when it attaches. The hub holds that
+secret and uses /delegate/access to obtain stable projections of its devices
+on the leaf. Devices never receive the grant, only their own projected token.
 
-`POST /devices` cannot be the answer and should not become it: minting is
-LAN/loopback-only and explicitly refuses the mesh subnet (`devices.
-mint_allowed_from`), because a caller inside the tunnel turning one credential
-into an unbounded supply of them is the exact thing that gate exists to stop.
-So the hub gets a narrower key, and one door it opens.
+The leaf checks the parent\'s policy on every authenticated request and while
+streams are open. Hub revocation, withdrawal and the two per-leaf visibility
+settings therefore apply to credentials already cached by clients. Revoking
+an issued grant also invalidates every projection derived from it.
 
-## The shape
-
-Attach is where the trust is established, in both directions at once:
-
-  · the leaf redeems a host code and receives a device token **for the hub** —
-    that half already existed;
-  · the leaf mints a **grant** on itself and hands it to the hub in the same
-    request. The hub keeps it (`host_grants`, in the clear, because presenting
-    it is the job). The leaf keeps its digest (`parent_grants`).
-
-Afterwards a device asks the hub — `POST /hosts/{key}/grant` — for access to a
-machine the hub adopted. The hub presents its grant to that machine's
-`POST /delegate/mint`, the machine mints an ordinary device row of its own and
-returns the token, and the hub hands it back to the device. The device stores a
-credential minted BY the leaf, revocable AT the leaf, and nobody typed anything.
-
-## What a grant can do, and the reason it is not a device row
-
-Exactly one route. A grant is not in `devices`, so it authenticates nothing that
-takes `require_token`: it cannot drive an agent, read a session, list devices or
-pair a phone. It mints, and the thing it mints is an ordinary device row that
-shows up in the roster under a name the user reads, and dies when they revoke it.
-
-That narrowness is structural on purpose. A `devices` row with an `is_parent`
-flag would have been fewer lines and would have put the whole API behind a
-credential whose only intended power is minting — protected by every future
-route remembering to check a flag. A separate gate cannot be forgotten into.
-
-## The trade, stated
-
-A hub holding grants means **compromising the hub is minting rights on every
-machine attached to it**. That was ruled yes on 2026-09-02 (decision 1 in
-docs/multi-host-access.md) with the trade named: the hub is the machine that
-already holds every credential on it, so this widens the blast radius on paper
-and not in fact. The fallback if that ever stops being true is in the same
-document — a per-device code typed once per machine — and it needs no new
-mechanism, only for the hub to stop being asked.
-
-Revocation exists at both ends and they mean different things. The leaf revoking
-(`parent_grants`) is authority actually ending, because the leaf is what
-verifies. The hub revoking (`host_grants`) is the hub choosing to stop
-delegating — useful, and NOT a security control: a hub that still holds the
-plaintext could put it back. Anything meant as a lockout happens on the leaf.
+The separate jrg1 namespace authenticates only the delegation endpoint. A
+hub credential is still required for ordinary APIs; managed_access.py applies
+the shared authority policy beneath HTTP, WebSocket, SSE and discovery.
 """
 
 from __future__ import annotations
@@ -78,7 +31,9 @@ GRANT_PREFIX = "jrg1"
 
 #: The route a grant authenticates. One constant, named here, so the module that
 #: *holds* a grant and the module that *verifies* one cannot drift apart on it.
-MINT_PATH = "/api/jremote/v1/delegate/mint"
+# A new endpoint prevents an older leaf from silently ignoring owner_id and
+# issuing independent credentials. It must be upgraded before access resumes.
+MINT_PATH = "/api/jremote/v1/delegate/access"
 
 
 class GrantError(Exception):
@@ -196,7 +151,7 @@ def _httpx_post(url: str, payload: dict, token: str) -> tuple[int, dict]:
     return resp.status_code, body if isinstance(body, dict) else {}
 
 
-def mint_on(host_row: dict, name: str, poster=None) -> dict:
+def mint_on(host_row: dict, name: str, poster=None, *, owner_id: str = "") -> dict:
     """Spend this host's grant on `host_row`'s machine and return what it minted.
 
     The address comes off the registry row — the mesh address the machine was
@@ -223,7 +178,10 @@ def mint_on(host_row: dict, name: str, poster=None) -> dict:
     port = int(host_row.get("port") or 9090)
     url = f"http://{address}:{port}{MINT_PATH}"
 
-    status, body = poster(url, {"name": name}, token)
+    payload = {"name": name}
+    if owner_id:
+        payload["owner_id"] = owner_id
+    status, body = poster(url, payload, token)
     if status == 200:
         _store().note_host_grant_used(key)
         return {"host": key, "name": body.get("device", {}).get("name", name),

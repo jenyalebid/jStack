@@ -61,11 +61,17 @@ def _cmd_pair(args) -> int:
     """
     _adopt(args)
     from . import devices, enrolment
+    from . import managed_access
+    if managed_access.is_leaf() and not getattr(args, "open", False):
+        print("This Mac is managed. Pair devices from the parent hub menu bar.",
+              file=sys.stderr)
+        return 1
     if not devices.provisioned():
         print("this host has no token yet — run `jstack-host install` first.",
               file=sys.stderr)
         return 1
-    row = enrolment.mint_code(args.name, created_by="", ttl=args.ttl)
+    kind = enrolment.KIND_LOCAL if getattr(args, "open", False) else enrolment.KIND_DEVICE
+    row = enrolment.mint_code(args.name, created_by="", ttl=args.ttl, kind=kind)
     if getattr(args, "open", False):
         return _hand_to_app(row)
 
@@ -226,10 +232,14 @@ def _hand_to_app(row: dict) -> int:
     Launch Services is free to prefer it — a pairing that lands in a build
     nobody is looking at, reported here as success.
     """
-    from . import desk, install_host
+    from . import desk, enrolment, install_host
 
     port = install_host.installed_port() or install_host.DEFAULT_PORT
     link = pair_link(row["code"], port, hostenv.host_name())
+    if row.get("kind") == enrolment.KIND_LOCAL:
+        from urllib.parse import urlencode
+        link = "jremote://pair?" + urlencode({"code": row["code"],
+            "url": f"http://127.0.0.1:{port}", "name": hostenv.host_name()})
     if desk.open_url(link) and _pairing_landed(row["code"]):
         print(f"paired the app on this Mac as {row['name']} — this machine is "
               "in its grid now")
@@ -351,22 +361,21 @@ def _cmd_attach(args) -> int:
     print(f"\nmode  {m['mode']}{'' if m['live'] else '  (not live)'}")
     print(f"      {m['note']}")
     if not result.get("reachback", True):
-        # Not an error and not hidden. The attach did everything it was asked
-        # to; the parent simply does not let machines it adopts reach back
-        # into it. Unsaid, this becomes an authentication failure discovered
-        # days later against a parent that looks perfectly healthy.
-        print("\n  That hub does not let the machines it adopts reach back "
-              "into it, so the\n  credential this Mac just received is "
-              "already revoked. Nothing is wrong:\n  that hub administers "
-              "this Mac, and devices paired there reach it. This Mac\n  just "
-              "cannot drive that hub. Its owner can change it with "
-              "`jstack-host\n  reachback on` and a fresh attach.")
+        print("\n  Home visibility is off for this Mac. The parent hub's menu "
+              "bar controls it; no fresh attach is needed to change it.")
     if m["mode"] != "managed":
         # The installer returned success but the machine does not read as
         # managed — say so instead of letting the mode line be the only tell.
         print("\n  The leaf installed but this machine is not reading as a "
               "managed hub yet — check `jstack-host doctor` and the leaf "
               "daemon logs.", file=sys.stderr)
+        return 1
+    # Adoption introduces the local app as this host, with no independent
+    # leaf device and no second setup flow.
+    from . import enrolment
+    local_code = enrolment.mint_code(hostenv.host_name(), "", kind=enrolment.KIND_LOCAL)
+    if _hand_to_app(local_code) != 0:
+        return 1
     return 0
 
 
@@ -487,7 +496,9 @@ def _cmd_adopt(args) -> int:
               "Otherwise run `install_hub.sh` to make this Mac a hub.",
               file=sys.stderr)
         return 1
-    ttl = args.ttl if args.ttl is not None else ADOPT_TTL
+    # A carried file may need to install dependencies on a fresh Mac first.
+    # Give that normal path an hour; explicit shorter TTLs are still honored.
+    ttl = args.ttl if args.ttl is not None else (3600 if getattr(args, "offline", False) else ADOPT_TTL)
     row = enrolment.mint_code(args.name, created_by="", ttl=ttl,
                               kind=enrolment.KIND_HOST)
     port = getattr(args, "port", None) or addresses.DEFAULT_PORT
@@ -560,62 +571,10 @@ def _cmd_adopt(args) -> int:
 
 
 def _cmd_reachback(args) -> int:
-    """Read or set whether an adopted machine holds a credential back to here.
-
-    Adopting establishes trust in both directions in one request, and only one
-    of them is ever the thing somebody meant. The grant this hub receives is
-    the point — it is what lets a phone paired here reach the office Mac. The
-    token that machine receives is the side effect, and on hardware whose disk
-    this hub's owner cannot vouch for it is the half worth refusing.
-
-    Turning it off does not touch machines already adopted unless asked:
-    `--existing` is a separate word because it ends access that is live right
-    now, and a flag that quietly cut a running machine off would be the same
-    class of surprise this setting exists to prevent.
-    """
-    _adopt(args)
-    from . import hub_prefs
-
-    if args.state is None:
-        on = hub_prefs.get("leaf_reachback")
-        print(f"reachback: {'on' if on else 'off'}")
-        print("\nMachines this hub adopts " + (
-            "hold a credential back to this hub — they can drive it as an "
-            "ordinary device." if on else
-            "get no working credential back to this hub. Adoption still works "
-            "in the direction\nyou asked for: this hub administers them, and "
-            "devices paired here reach them."))
-        return 0
-
-    want = args.state == "on"
-    hub_prefs.set("leaf_reachback", want)
-    print(f"reachback: {'on' if want else 'off'}")
-
-    if want:
-        print("\nMachines adopted from now on will hold a credential back to "
-              "this hub.\nMachines whose credential was already revoked do "
-              "NOT get it back — their row is\ndead, and only attaching again "
-              "mints a live one.")
-        return 0
-
-    print("\nMachines adopted from now on get no working credential back here.")
-    if not args.existing:
-        print("Machines already adopted keep theirs — re-run with `--existing` "
-              "to revoke those\ntoo, which ends access they are using right "
-              "now.")
-        return 0
-
-    revoked = hub_prefs.revoke_existing_reachback()
-    if revoked:
-        print(f"\nRevoked what {len(revoked)} already-adopted machine"
-              f"{'' if len(revoked) == 1 else 's'} held back to this hub:")
-        for name in revoked:
-            print(f"    {name}")
-        print("\nEach can still be administered from here. To give one its "
-              "credential back it\nhas to attach again.")
-    else:
-        print("\nNo already-adopted machine held a live credential back here.")
-    return 0
+    """Keep old automation from silently revoking the managed control channel."""
+    print("The global reachback switch has been replaced. Use the two per-leaf "
+          "visibility settings in the parent hub's menu bar.", file=sys.stderr)
+    return 2
 
 
 def _cmd_detach(args) -> int:
@@ -836,6 +795,7 @@ CAPABILITIES = (
     # `attach` sends a grant back, so the hub it joins can mint devices onto
     # this Mac without anybody typing a second code (grants.py, attach_parent).
     "delegated-minting",
+    "managed-access-v1",
 )
 
 
@@ -857,6 +817,16 @@ def _cmd_capabilities(args) -> int:
     """
     for name in CAPABILITIES:
         print(name)
+    # The joiner must upgrade an old app even when the host is already new.
+    import plistlib
+    from pathlib import Path
+    from . import desk
+    try:
+        with (Path(desk.APP) / "Contents" / "Info.plist").open("rb") as info:
+            if plistlib.load(info).get("JRManagedAccess") is True:
+                print("managed-app-v1")
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        pass
     return 0
 
 

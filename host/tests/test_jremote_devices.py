@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from jstack_host.server import create_app
 
 app = create_app()
-from jstack_host import auth, devices
+from jstack_host import auth, devices, router
 from jstack_host.store import SessionStore
 
 
@@ -26,6 +26,19 @@ def store(tmp_path, monkeypatch):
     s = SessionStore(db_path=tmp_path / "devices.sqlite")
     monkeypatch.setattr(devices, "_store", lambda: s)
     return s
+
+
+@pytest.fixture
+def on_console(monkeypatch):
+    """Stand the caller up AS the hub's own menu bar — loopback on a hub.
+
+    Device management is a hub-console action, and TestClient's
+    address is neither loopback nor a hub, so every mint/rename/revoke-of-another
+    is refused by default — which is the point. A test that means to act as the
+    console says so by taking this fixture; the gate itself (`_is_loopback` AND
+    `mode.is_hub`) is pinned separately below."""
+    monkeypatch.setattr(router, "_hub_console", lambda request: True)
+    monkeypatch.setattr("jstack_host.managed_access.console", lambda request: True)
 
 
 @pytest.fixture
@@ -619,18 +632,41 @@ def test_the_device_list_marks_the_caller(client, store):
     rows = r.json()["devices"]
     assert [d["name"] for d in rows] == ["test-device"]
     assert rows[0]["current"] is True
-    assert "token_hash" in rows[0]  # digest only — nothing usable
+    assert "token_hash" not in rows[0]
 
 
-def test_minting_is_refused_off_the_lan(client, monkeypatch):
-    """TestClient's address is not a LAN address, which is exactly the deny
-    branch: an in-tunnel or unknown caller must not mint credentials."""
+def test_a_remote_sees_only_its_own_device(client, store):
+    """A remote must not see other devices. The caller is
+    off-console (TestClient is not loopback-on-a-hub), so the roster comes back
+    as its one row even with others in the table — the host refuses to enumerate
+    them, not the app."""
+    devices.mint("someone-elses-phone")
+    devices.mint("the-hub-mac")
+    rows = client.get("/api/jremote/v1/devices").json()["devices"]
+    assert [d["name"] for d in rows] == ["test-device"]
+    assert rows[0]["current"] is True
+
+
+def test_the_hub_console_sees_every_device(client, store, on_console):
+    """The audit surface is intact for the one caller entitled to it: the hub's
+    own menu bar sees the whole table, revoked rows included."""
+    devices.mint("someone-elses-phone")
+    revoked, _ = devices.mint("an-old-laptop")
+    devices.revoke(revoked["id"])
+    rows = client.get("/api/jremote/v1/devices").json()["devices"]
+    names = {d["name"] for d in rows}
+    assert {"test-device", "someone-elses-phone", "an-old-laptop"} <= names
+    assert any(d["current"] for d in rows)
+
+
+def test_minting_is_refused_off_the_hub_console(client):
+    """Adding a device is a hub menu-bar action. TestClient is not the hub
+    console, so the mint is refused."""
     r = client.post("/api/jremote/v1/devices", json={"name": "intruder"})
     assert r.status_code == 403
 
 
-def test_minting_on_the_lan_hands_the_token_out_exactly_once(client, store, monkeypatch):
-    monkeypatch.setattr(devices, "mint_allowed_from", lambda ip: True)
+def test_minting_on_the_console_hands_the_token_out_exactly_once(client, store, on_console):
     r = client.post("/api/jremote/v1/devices", json={"name": "my-ipad"})
     assert r.status_code == 200
     token = r.json()["token"]
@@ -638,10 +674,9 @@ def test_minting_on_the_lan_hands_the_token_out_exactly_once(client, store, monk
     assert token not in str(store.list_devices())
 
 
-def test_re_pairing_over_the_route_reuses_one_row(client, store, monkeypatch):
+def test_re_pairing_over_the_route_reuses_one_row(client, store, on_console):
     """The route carries the identity through to the mint: the same device
     pairing again gets its one row rotated, not a duplicate."""
-    monkeypatch.setattr(devices, "mint_allowed_from", lambda ip: True)
     base = "/api/jremote/v1/devices"
     first = client.post(base, json={"name": "My Laptop", "identity": "uuid-x"}).json()
     second = client.post(base, json={"name": "my-laptop", "identity": "uuid-x"}).json()
@@ -651,11 +686,10 @@ def test_re_pairing_over_the_route_reuses_one_row(client, store, monkeypatch):
     assert devices.authenticate(second["token"]) == first["device"]["id"]
 
 
-def test_a_malformed_identity_is_refused_by_the_route(client, monkeypatch):
+def test_a_malformed_identity_is_refused_by_the_route(client, on_console):
     """Identity is a Keychain UUID, never human-typed — a value too long or
     carrying characters outside the machine alphabet is a mangled paste or a
     probe, and it is refused before it reaches the column that keys the table."""
-    monkeypatch.setattr(devices, "mint_allowed_from", lambda ip: True)
     base = "/api/jremote/v1/devices"
     assert client.post(base, json={"name": "x", "identity": "has space"}).status_code == 400
     assert client.post(base, json={"name": "x", "identity": "a;b"}).status_code == 400
@@ -693,7 +727,28 @@ def test_mint_gate_fallback_still_refuses_the_mesh(monkeypatch):
     assert not devices.mint_allowed_from("testclient")
 
 
-def test_revoking_over_the_api_kills_the_token(client, store):
+def test_a_device_can_always_revoke_itself(store):
+    """The remote's one device action, from anywhere: disconnect this device."""
+    row, token = devices.mint("my-phone")
+    c = TestClient(app)
+    c.headers.update({"Authorization": f"Bearer {token}"})
+    r = c.post(f"/api/jremote/v1/devices/{row['id']}/revoke")
+    assert r.status_code == 200 and r.json()["self"] is True
+    assert devices.authenticate(token) is None
+
+
+def test_a_remote_cannot_revoke_another_device(client, store):
+    """A remote must not revoke another device. Off the hub console
+    a revoke of anything but the caller itself is refused, and the target's
+    token keeps working."""
+    row, token = devices.mint("my-old-phone")
+    r = client.post(f"/api/jremote/v1/devices/{row['id']}/revoke")
+    assert r.status_code == 403
+    assert devices.authenticate(token) == row["id"]     # still alive
+
+
+def test_the_hub_console_can_revoke_another_device(client, store, on_console):
+    """The kill that a remote may not do is the hub console's to do."""
     row, token = devices.mint("my-old-phone")
     r = client.post(f"/api/jremote/v1/devices/{row['id']}/revoke")
     assert r.status_code == 200 and r.json()["self"] is False
@@ -710,7 +765,25 @@ def test_a_revoked_device_cannot_use_the_registry(client, store):
     assert c.get("/api/jremote/v1/devices").status_code == 401
 
 
-def test_rename_endpoint(client, store):
+def test_a_device_cannot_administer_even_its_own_label(store):
+    row, token = devices.mint("phone")
+    c = TestClient(app)
+    c.headers.update({"Authorization": f"Bearer {token}"})
+    r = c.post(f"/api/jremote/v1/devices/{row['id']}/rename",
+               json={"name": "My iPhone 17"})
+    assert r.status_code == 403
+    assert store.device(row["id"])["name"] == "phone"
+
+
+def test_a_remote_cannot_rename_another_device(client, store):
+    row, _ = devices.mint("phone")
+    r = client.post(f"/api/jremote/v1/devices/{row['id']}/rename",
+                    json={"name": "hijacked"})
+    assert r.status_code == 403
+    assert store.device(row["id"])["name"] == "phone"
+
+
+def test_the_hub_console_renames_and_404s_the_unknown(client, store, on_console):
     row, _ = devices.mint("phone")
     r = client.post(f"/api/jremote/v1/devices/{row['id']}/rename",
                     json={"name": "My iPhone 17"})

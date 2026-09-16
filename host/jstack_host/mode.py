@@ -212,6 +212,25 @@ def classify(*, leaf_installed: bool, on_mesh: bool,
     }
 
 
+def is_hub() -> bool:
+    """Mesh ownership, independent of which UI asks the question.
+
+    A legacy installation may own the gateway without its peer administration
+    being visible to this process. Neither a private IP nor a leaf's loopback
+    proves that ownership. The request-level gate also refuses attached leaves.
+    """
+    inets = addresses._inet_addrs()
+    return tunnel.can_pair() or _owns_mesh_gateway(inets)
+
+
+def is_managed() -> bool:
+    """The authority boundary without running an off-network reachability probe."""
+    if tunnel.can_pair():
+        return False
+    inets = addresses._inet_addrs()
+    return not _owns_mesh_gateway(inets) and (_leaf_installed() or _on_mesh(inets))
+
+
 def current() -> dict:
     """This machine's mode, read off its own interfaces and tunnel state.
 

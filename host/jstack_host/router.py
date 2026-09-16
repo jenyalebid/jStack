@@ -5,6 +5,7 @@ dashboard FastAPI app; see dashboard/app.py.
 """
 
 import asyncio
+import ipaddress
 import json
 import re
 import subprocess
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 
 from .auth import current_device, require_token
 from . import board, devices, docfence, hostenv, plugin_paths
+from . import managed_access
 from .turns import stream_turn, TurnError
 from .messages import _blocks_to_segments, _flatten, _is_noise
 
@@ -78,6 +80,26 @@ def _unavailable(feature: str, **shape) -> dict:
     """The honest payload: the screen's own keys, empty, plus why."""
     return {"available": False,
             "reason": f"{feature} is not available on this host", **shape}
+
+
+def _is_loopback(ip: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip).is_loopback
+    except ValueError:
+        return False
+
+
+def _hub_console(request: Request) -> bool:
+    """The caller is the hub's own menu bar — on loopback, on a machine that is
+    the hub. This is the authority for device management, and nothing else is.
+
+    Adding, removing and listing devices belongs to the hub menu bar
+    alone. A remote (mesh or LAN) is not it and sees only its own row; a leaf's
+    own loopback is not it either, because a leaf is not a hub and has no devices
+    of its own. `mode.is_hub()` is the same predicate `/host` publishes as
+    `device_management`, so the gate on the routes and the flag the app draws
+    from cannot disagree."""
+    return managed_access.console(request)
 
 
 #: The optional screens, and the module each one needs. One place, so the
@@ -175,8 +197,16 @@ def get_host(request: Request):
         # hoisted here so the menu bar draws the mode from the one call it
         # already makes rather than a route of its own.
         "mode": mode.current(),
+        # `device_management` is caller-aware, not host-level like the rest:
+        # true only for the hub's own menu bar (loopback on the hub), so the
+        # menu bar draws its administrative controls. Client apps never own
+        # device management, even when they happen to run on this Mac.
         "features": {**{k: _optional(m) is not None for k, m in _FEATURES.items()},
-                     **{k: _probe(k) for k in _PROBED_FEATURES}},
+                     **{k: _probe(k) for k in _PROBED_FEATURES},
+                     "device_management": _hub_console(request),
+                     "managed_host": managed_access.is_leaf(),
+                     "self_disconnect": managed_access.can_disconnect(
+                         getattr(request.state, "authorized_device", ""))},
     }
 
 
@@ -587,29 +617,40 @@ def _device_identity(raw: str | None) -> str | None:
 
 
 @router.get("/devices")
-def list_devices(device_id: str = Depends(current_device)):
-    """Every device this host has minted, revoked ones included — the registry
-    is the audit surface, so nothing in it is hidden. `current` marks the
-    caller's own row, so the app can label "this device" and warn before a
-    self-revoke."""
+def list_devices(request: Request, device_id: str = Depends(current_device)):
+    """The device registry. To the hub console it is the audit surface — every
+    device, revoked ones included, nothing hidden. `current` marks the caller's
+    own row so the app can label "this device".
+
+    Off the hub console a caller sees ONLY its own row. A remote is a device, not
+    an administrator of them, and must not enumerate the others. Enforced here, not in the
+    app: the app hiding the screen is polish, the host refusing the roster is the
+    boundary."""
     rows = devices.list_all()
+    if managed_access.is_leaf():
+        return {"devices": []}
+    if not _hub_console(request):
+        rows = [r for r in rows if r["id"] == device_id]
     for r in rows:
         r["current"] = r["id"] == device_id
-    return {"devices": rows}
+    return {"devices": [{k: v for k, v in row.items()
+                         if k not in ("token_hash", "authority_grant", "authority_device")}
+                        for row in rows]}
 
 
 @router.post("/devices")
 def mint_device(body: DeviceMintRequest, request: Request):
-    """Mint a new device token. LAN/loopback-only, the tunnel-pairing law:
-    a caller already inside the tunnel must not turn one credential into an
-    unbounded supply of them. The token appears in this response and nowhere
+    """Mint a new device token — a HUB MENU BAR action only.
+
+    Adding a device is the hub's alone, so the gate is the hub's
+    own console (loopback on the hub), not merely the LAN it used to be. A remote
+    or a leaf is refused: a leaf has no devices of its own, and a remote is a
+    device, not a minter of them. The token appears in this response and nowhere
     else, ever — the table keeps only its hash."""
-    client_ip = request.client.host if request.client else ""
-    if not devices.mint_allowed_from(client_ip):
+    if not _hub_console(request):
         raise HTTPException(
             status_code=403,
-            detail="minting device tokens is only available on the host's own "
-                   "network — connect to the same Wi-Fi as the Mac and try again")
+            detail="adding a device is a hub menu-bar action — do it on the hub Mac")
     row, token = devices.mint(_device_name(body.name),
                               _device_identity(body.identity))
     row["revoked"] = False
@@ -617,18 +658,33 @@ def mint_device(body: DeviceMintRequest, request: Request):
 
 
 @router.post("/devices/{device_id}/rename")
-def rename_device(device_id: str, body: DeviceRenameRequest):
+def rename_device(device_id: str, body: DeviceRenameRequest, request: Request,
+                  caller: str = Depends(current_device)):
+    """Device labels, like membership, are managed at the hub console."""
+    managed_access.require_console(request)
     if not devices.rename(device_id, _device_name(body.name)):
         raise HTTPException(status_code=404, detail="unknown device")
     return {"renamed": device_id}
 
 
 @router.post("/devices/{device_id}/revoke")
-def revoke_device(device_id: str, caller: str = Depends(current_device)):
+def revoke_device(device_id: str, request: Request,
+                  caller: str = Depends(current_device)):
     """Revoke a device — from this moment its token opens nothing, and its
     live connections (PTY terminal, SSE streams) are cut, not left to drain.
     Idempotent-safe: revoking an already-revoked device answers 404 and
-    changes nothing. Self-revoke is allowed (wiping the device in hand)."""
+    changes nothing.
+
+    A caller may revoke ITSELF from anywhere — that is the remote's one device
+    action, "disconnect this device". Revoking ANOTHER device is
+    a hub menu-bar action: a remote must not reach across and cut a device that
+    is not it ("It should NOT ... kill other DEVICES"). Enforced here so the
+    refusal holds whatever the app shows."""
+    if not _hub_console(request) and (
+            device_id != caller or not managed_access.can_disconnect(caller)):
+        raise HTTPException(
+            status_code=403,
+            detail="a device can disconnect only itself; removing another device is a hub menu-bar action")
     if not devices.revoke(device_id):
         raise HTTPException(status_code=404, detail="unknown or already revoked device")
     return {"revoked": device_id, "self": device_id == caller}
@@ -719,18 +775,18 @@ class HostRenameRequest(BaseModel):
 
 
 @router.post("/enrolment/codes")
-def mint_enrolment_code(body: EnrolmentCodeRequest,
+def mint_enrolment_code(body: EnrolmentCodeRequest, request: Request,
                         device_id: str = Depends(current_device)):
-    """Mint a one-time code for a device that cannot reach this host's LAN.
+    """Issue an invitation from the authenticated hub console only.
 
-    Authenticated but deliberately NOT LAN-gated — a code that could only be
-    minted from the LAN would need the person minting it to be at the Mac,
-    which is the trip P3 exists to remove. The minting device is recorded, and
-    revoking it kills the codes it left outstanding.
-
-    The code appears in this response and nowhere else, ever.
+    The joining device spends the one-time code from any network. Only the
+    host decides membership; a remote client cannot create invitations.
     """
     from . import enrolment
+    if not _hub_console(request):
+        raise HTTPException(
+            status_code=403,
+            detail="adding or adopting a machine is a hub menu-bar action — do it on the hub Mac")
     if body.kind not in enrolment.KINDS:
         raise HTTPException(
             status_code=400,
@@ -741,18 +797,34 @@ def mint_enrolment_code(body: EnrolmentCodeRequest,
 
 
 @router.get("/enrolment/codes")
-def list_enrolment_codes(device_id: str = Depends(current_device)):
+def list_enrolment_codes(request: Request,
+                         device_id: str = Depends(current_device)):
     """Outstanding and spent codes — who minted each, and what redeemed it.
-    Never the code or its digest."""
+    Never the code or its digest.
+
+    A HUB MENU BAR view: the outstanding-codes list is the roster of pending
+    device additions, and enumerating them is the same authority as minting one
+    — the hub's. A remote is a device, not an administrator of the estate's
+    pairings, and gets nothing here."""
     from . import enrolment
+    if not _hub_console(request):
+        raise HTTPException(
+            status_code=403,
+            detail="listing enrolment codes is a hub menu-bar action — do it on the hub Mac")
     return {"codes": enrolment.list_codes()}
 
 
 @router.post("/enrolment/codes/revoke")
-def revoke_enrolment_code(body: EnrolmentRevokeRequest,
+def revoke_enrolment_code(body: EnrolmentRevokeRequest, request: Request,
                           device_id: str = Depends(current_device)):
-    """Withdraw an unused code, named by the code itself."""
+    """Withdraw an unused code, named by the code itself — a HUB MENU BAR action.
+    Cancelling a pending device addition is the hub's authority, the same as
+    minting it; a remote cannot reach into the estate's outstanding pairings."""
     from . import enrolment
+    if not _hub_console(request):
+        raise HTTPException(
+            status_code=403,
+            detail="revoking an enrolment code is a hub menu-bar action — do it on the hub Mac")
     if not enrolment.revoke(body.code):
         raise HTTPException(status_code=404,
                             detail="no unused code matches that")
@@ -771,11 +843,14 @@ def redeem_enrolment_code(body: EnrolmentRedeemRequest, request: Request):
     the request alone, before this host has looked the code up at all.
     """
     from . import enrolment
+    if managed_access.is_leaf() and not _is_loopback(request.client.host if request.client else ""):
+        raise HTTPException(403, "pair devices at the parent hub")
     client_ip = request.client.host if request.client else ""
     try:
         return enrolment.redeem(body.code, client_ip,
                                 body.host_key, body.port, body.device_token,
-                                body.grant_token, body.identity)
+                                body.grant_token, body.identity,
+                                parent_port=request.url.port or enrolment.DEFAULT_PORT)
     except enrolment.HostKeyRefused as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except enrolment.EnrolmentLockedOut as exc:
@@ -792,8 +867,14 @@ def redeem_enrolment_code(body: EnrolmentRedeemRequest, request: Request):
 # change to it comes through a route that proved a bearer token first. A device
 # that could push a host row could invent a machine.
 
-def _serve_host(row: dict, delegated: bool = False) -> dict:
-    return {**row, "deleted": bool(row["deleted"]), "delegated": delegated}
+def _serve_host(row: dict, delegated: bool = False, *, policy: bool = False) -> dict:
+    public = {k: v for k, v in row.items()
+              if k not in ("device_id", "sees_home", "sees_leaves")}
+    if policy:
+        public.update(sees_home=bool(row.get("sees_home", True)),
+                      sees_leaves=bool(row.get("sees_leaves", True)))
+    return {**public, "deleted": bool(row["deleted"]), "delegated": delegated,
+            "managed_access": True}
 
 
 def _leaf_parent_row() -> dict | None:
@@ -822,7 +903,7 @@ def _leaf_parent_row() -> dict | None:
 
 
 @router.get("/hosts")
-def list_hosts(device_id: str = Depends(current_device)):
+def list_hosts(request: Request, device_id: str = Depends(current_device)):
     """The machines this host has enrolled. Forgotten ones are excluded — the
     tombstone exists for the mirror, not for the reader.
 
@@ -838,19 +919,21 @@ def list_hosts(device_id: str = Depends(current_device)):
     """
     from . import grants
     from .store import get_store
+    if managed_access.is_leaf():
+        if not _is_loopback(request.client.host if request.client else ""):
+            return {"hosts": []}
+        return managed_access.visible_hosts()
     live = {h["host_key"] for h in grants.holdings() if h["revoked_at"] is None}
-    rows = [_serve_host(r, r["key"] in live) for r in get_store().list_hosts()]
-    # The parent this machine is a leaf of, if it is one, ahead of the machines
-    # it adopted — a device's own home, reached the same delegated way (#62).
-    parent = _leaf_parent_row()
-    if parent:
-        rows.insert(0, _serve_host(parent, delegated=True))
+    rows = [_serve_host(r, r["key"] in live, policy=_hub_console(request))
+            for r in get_store().list_hosts()
+            if managed_access.may_reach(device_id, r["key"])]
     return {"hosts": rows}
 
 
 @router.post("/hosts/{key}/rename")
-def rename_host(key: str, body: HostRenameRequest,
+def rename_host(key: str, body: HostRenameRequest, request: Request,
                 device_id: str = Depends(current_device)):
+    managed_access.require_console(request)
     from .store import get_store
     if not get_store().rename_host(key, _device_name(body.name)):
         raise HTTPException(status_code=404, detail="unknown host")
@@ -858,23 +941,15 @@ def rename_host(key: str, body: HostRenameRequest,
 
 
 @router.post("/hosts/{key}/forget")
-def forget_host(key: str, device_id: str = Depends(current_device)):
-    """Drop a machine from the grid on every device.
+def forget_host(key: str, request: Request, device_id: str = Depends(current_device)):
+    """Withdraw a machine and its delegation from the hub.
 
-    Forgetting is not revoking. It removes the tile that says the machine
-    exists; the credentials that machine holds on this host are `devices` rows
-    and stay live until they are revoked there. Two separate acts, because a
-    machine you no longer want listed is not always one you want locked out.
-
-    The **grant** is the one thing that does go with the tile, and it goes
-    because of what forgetting means: a machine nobody can see is a machine
-    nobody will ask for access to, and a stored credential that no surface can
-    reach is a secret kept for no reason. It is also local — the leaf's own row
-    stays live until the leaf revokes it (grants.py), so this is this host
-    declining to delegate, not a lockout it cannot actually perform.
+    The tombstone hides it from clients and rejects its control credential,
+    so cached projected credentials on the withdrawn leaf also stop working.
     """
     from . import grants
     from .store import get_store
+    managed_access.require_console(request)
     if not get_store().forget_host(key):
         raise HTTPException(status_code=404,
                             detail="unknown or already forgotten host")
@@ -889,32 +964,24 @@ class HostGrantRequest(BaseModel):
 
 
 @router.post("/hosts/{key}/grant")
-def grant_host_access(key: str, body: HostGrantRequest,
+def grant_host_access(key: str, body: HostGrantRequest, request: Request,
                       device_id: str = Depends(current_device)):
-    """Get this caller a credential for a machine THIS host adopted.
+    """Return this caller\'s hub-owned credential for an adopted machine.
 
-    The whole point of a managed hub, and the route that makes "every device
-    paired to the parent reaches this machine with no per-device setup" true
-    instead of aspirational. The caller proved a token here; it never sees the
-    grant, never names an address, and gets back a token minted on the other
-    machine and revocable there.
-
-    404 for a machine not in the registry — including a forgotten one, which is
-    the same answer `list_hosts` gives, so a device cannot learn about a tile it
-    was not shown. 502 when the machine is reachable-in-principle but did not
-    mint: that is a fact about the other end, not a bad request from this one.
+    Clients never receive the delegation grant. Managed Macs ask through
+    their local host, which proxies the parent\'s policy-filtered answer.
     """
     from . import grants
     from .store import get_store
+    if managed_access.is_leaf():
+        if not _is_loopback(request.client.host if request.client else ""):
+            raise HTTPException(403, "request access from the parent hub")
+        return managed_access.parent_grant(key)
     row = get_store().host_row(key)
-    if row is None:
-        # Not a machine this host adopted — but it may be the parent this host
-        # is a leaf of, which lives in no table and answers only while its grant
-        # is live (#62). Same 404 as any unknown key when it is not.
-        parent = _leaf_parent_row()
-        row = parent if parent and parent["key"] == key else None
     if row is None or row["deleted"]:
         raise HTTPException(status_code=404, detail="unknown machine")
+    if not managed_access.may_reach(device_id, key):
+        raise HTTPException(404, "unknown machine")
     name = _device_name(body.name) if body.name else ""
     if not name:
         # The row the leaf will show is named after the device that asked, so
@@ -924,12 +991,94 @@ def grant_host_access(key: str, body: HostGrantRequest,
         asker = devices.row(device_id) or {}
         name = _device_name(asker.get("name") or "a device")
     try:
-        return grants.mint_on(dict(row), name)
+        return grants.mint_on(dict(row), name, owner_id=device_id)
     except grants.GrantError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
 
 # ── the grant gate: one route, its own credential ──
+
+class LeafVisibilityRequest(BaseModel):
+    sees_home: bool
+    sees_leaves: bool
+
+
+@router.post("/hosts/{key}/visibility")
+def set_leaf_visibility(key: str, body: LeafVisibilityRequest, request: Request):
+    managed_access.require_console(request)
+    from .store import get_store
+    if not get_store().set_host_visibility(key, sees_home=body.sees_home,
+                                           sees_leaves=body.sees_leaves):
+        raise HTTPException(404, "unknown machine")
+    return {"key": key, **body.model_dump()}
+
+
+def _managed_leaf(device_id: str) -> dict:
+    leaf = managed_access.leaf_for_device(device_id)
+    if managed_access.is_leaf() or leaf is None or leaf["deleted"]:
+        raise HTTPException(403, "this credential does not belong to an adopted machine")
+    return leaf
+
+
+@router.post("/managed/hosts")
+def managed_hosts(request: Request, device_id: str = Depends(current_device)):
+    from . import grants, enrolment
+    from .store import get_store
+    leaf = _managed_leaf(device_id)
+    rows = []
+    if leaf["sees_home"]:
+        rows.append({"key": hostenv.host_id(), "name": hostenv.host_name(),
+                     "address": enrolment._own_mesh_address(), "port": request.url.port or 9090,
+                     "deleted": False, "delegated": True, "managed_access": True})
+    if leaf["sees_leaves"]:
+        rows.extend(_serve_host(row, bool(grants.held(row["key"])))
+                    for row in get_store().list_hosts() if row["key"] != leaf["key"])
+    return {"hosts": rows}
+
+
+class ManagedGrantRequest(BaseModel):
+    key: str
+
+
+@router.post("/managed/grant")
+def managed_grant(body: ManagedGrantRequest, request: Request,
+                  device_id: str = Depends(current_device)):
+    from . import grants, enrolment
+    from .store import get_store
+    _managed_leaf(device_id)
+    if not managed_access.may_reach(device_id, body.key):
+        raise HTTPException(404, "unknown machine")
+    if body.key == hostenv.host_id():
+        return {"host": body.key, "address": enrolment._own_mesh_address(),
+                "port": request.url.port or 9090, "token": request.headers["authorization"][7:]}
+    row = get_store().host_row(body.key)
+    if row is None or row["deleted"]:
+        raise HTTPException(404, "unknown machine")
+    try:
+        return grants.mint_on(row, (devices.row(device_id) or {}).get("name", "a device"),
+                              owner_id=device_id)
+    except grants.GrantError as exc:
+        raise HTTPException(502, str(exc))
+
+
+class ManagedAuthorizeRequest(BaseModel):
+    device_id: str
+
+
+@router.post("/managed/authorize")
+def managed_authorize(body: ManagedAuthorizeRequest,
+                      device_id: str = Depends(current_device)):
+    leaf = _managed_leaf(device_id)
+    return {"allowed": managed_access.may_reach(body.device_id, leaf["key"])}
+
+
+@router.post("/device/disconnect")
+def disconnect_self(device_id: str = Depends(current_device)):
+    if not managed_access.can_disconnect(device_id):
+        raise HTTPException(403, "the host's own credential cannot disconnect itself")
+    devices.revoke(device_id)
+    return {"disconnected": True}
+
 #
 # `grant_router` is the third router in this package and the second one outside
 # the bearer gate, and like `unauthenticated_router` it carries exactly one
@@ -946,30 +1095,16 @@ grant_router = APIRouter(prefix="/api/jremote/v1")
 
 class DelegateMintRequest(BaseModel):
     name: str = ""
+    owner_id: str = ""
 
 
+@grant_router.post("/delegate/access")
 @grant_router.post("/delegate/mint")
 def delegate_mint(body: DelegateMintRequest, request: Request):
-    """Mint a device token for a parent hub that holds a grant on this machine.
+    """Project one hub device onto this leaf, gated by its adoption grant.
 
-    This is the leaf end of delegated minting. What comes back is an ORDINARY
-    device row — it appears in this host's roster under the name the parent
-    sent, it is revoked here like any other, and it carries no mark of how it
-    was created. That is deliberate: the user revoking access to a phone should
-    not have to know or care whether the phone was paired at the machine or
-    delegated from a hub.
-
-    The gate is the grant and only the grant. A device token presented here
-    fails, because `grants.authenticate` will not parse it (`jr1.` is not
-    `jrg1.`) — two credential formats, two namespaces, no overlap to be confused
-    across.
-
-    Unlike `POST /devices` this is deliberately NOT LAN-gated, and the reason is
-    the point of the whole mechanism: the parent reaches this machine over the
-    mesh, which is exactly the source `mint_allowed_from` refuses. The gate that
-    replaces locality here is possession of a credential this machine issued, by
-    hand, to one named parent, revocable here alone. That is a stronger claim
-    than "arrived from a private address", which is all the LAN rule ever meant.
+    The projection is stable across retries, cannot administer devices, and
+    rechecks the parent on every use. The grant itself opens no ordinary API.
     """
     from . import grants
     header = request.headers.get("authorization", "")
@@ -981,17 +1116,20 @@ def delegate_mint(body: DelegateMintRequest, request: Request):
               "no live grant matches that credential", flush=True)
         raise HTTPException(status_code=401,
                             detail="invalid or missing grant")
-    row, token = devices.mint(_device_name(body.name or parent))
+    if not managed_access.is_leaf():
+        raise HTTPException(403, "only a managed machine accepts delegated devices")
+    if not body.owner_id:
+        raise HTTPException(400, "a hub device identity is required")
+    if managed_access._post_parent("authorize", {"device_id": body.owner_id}).get("allowed") is not True:
+        raise HTTPException(403, "the hub refused this device")
+    row, token = managed_access.mint_projection(
+        presented, _device_name(body.name or parent), body.owner_id)
     grants.note_used(presented)
     print(f"jremote grant: minted {row['id']} ({row['name']}) for {parent}",
           flush=True)
-    # `token_hash` is dropped, and only here. On `/devices` it travels to the
-    # user's own app on the machine that owns the table — the registry is the
-    # audit surface and nothing in it is hidden from its owner. This response
-    # crosses the mesh to a DIFFERENT machine, which has no use for the digest
-    # of a secret it is being handed in full one field over. Giving it away is
-    # free and getting it back is not.
-    served = {k: v for k, v in row.items() if k != "token_hash"}
+    # Authorization metadata remains private on every device-list surface.
+    served = {k: v for k, v in row.items()
+              if k not in ("token_hash", "authority_grant", "authority_device")}
     return {"device": {**served, "revoked": False}, "token": token}
 
 
@@ -1040,12 +1178,18 @@ class SyncPush(BaseModel):
 
 
 @router.get("/sync")
-def sync_pull(since: int = 0):
+def sync_pull(since: int = 0, device_id: str = Depends(current_device)):
     """User-meta mirror: every marks/filings/settings row changed past the
     device's cursor, plus the cursor to store next. Tiny by construction —
     sessions never ride this, they're queried on demand."""
     from .store import get_store
-    return get_store().changes_since(since)
+    result = get_store().changes_since(since)
+    result["hosts"] = [{k: v for k, v in row.items()
+                        if k not in ("device_id", "sees_home", "sees_leaves")}
+                       for row in result.get("hosts", [])
+                       if not managed_access.is_leaf()
+                       and managed_access.may_reach(device_id, row["key"])]
+    return result
 
 
 @router.post("/sync")
@@ -1090,7 +1234,7 @@ async def stream_active_sessions(request: Request,
                 # Revocation must cut this stream, not just the next request.
                 # devices.revoke() pokes the watcher, so a revoked device's
                 # check runs now, not at the next board change.
-                if devices.is_revoked(device_id):
+                if not await asyncio.to_thread(managed_access.stream_allowed, device_id):
                     return
                 try:
                     rows = await asyncio.wait_for(sub.get(), timeout=15.0)
@@ -1099,7 +1243,7 @@ async def stream_active_sessions(request: Request,
                     continue
                 if await request.is_disconnected():
                     return
-                if devices.is_revoked(device_id):
+                if not await asyncio.to_thread(managed_access.stream_allowed, device_id):
                     return
                 yield _sse("board", {"sessions": rows})
 
@@ -1173,7 +1317,7 @@ async def stream_feed(request: Request, date: str = "", limit: int = 1500,
         async def absent():
             yield _sse("feed", _feed_day(day, limit))
             while not await request.is_disconnected():
-                if devices.is_revoked(device_id):
+                if not await asyncio.to_thread(managed_access.stream_allowed, device_id):
                     return
                 yield ": ping\n\n"
                 await asyncio.sleep(16.0)
@@ -1185,7 +1329,7 @@ async def stream_feed(request: Request, date: str = "", limit: int = 1500,
         while True:
             if await request.is_disconnected():
                 return
-            if devices.is_revoked(device_id):
+            if not await asyncio.to_thread(managed_access.stream_allowed, device_id):
                 return
             try:
                 sig = await asyncio.to_thread(orgfeed.signature, day)

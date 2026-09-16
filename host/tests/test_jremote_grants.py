@@ -10,7 +10,7 @@ being anything more than a mint button.
 import pytest
 from fastapi.testclient import TestClient
 
-from jstack_host import devices, grants, store
+from jstack_host import devices, grants, store, managed_access
 
 
 @pytest.fixture
@@ -66,9 +66,11 @@ def test_a_host_that_never_attached_authenticates_nobody():
 
 # ── the route the grant opens, and the ones it does not ──
 
-def test_the_mint_route_mints_an_ordinary_device_row(client):
+def test_the_mint_route_mints_a_hub_owned_projection(client, monkeypatch):
+    monkeypatch.setattr(managed_access, "is_leaf", lambda: True)
+    monkeypatch.setattr(managed_access, "_post_parent", lambda *_: {"allowed": True})
     grant = grants.issue("http://studio.local:9090")
-    resp = client.post("/api/jremote/v1/delegate/mint", json={"name": "a-phone"},
+    resp = client.post(grants.MINT_PATH, json={"name": "a-phone", "owner_id": "phone-1"},
                        headers={"Authorization": f"Bearer {grant}"})
     assert resp.status_code == 200
     body = resp.json()
@@ -80,6 +82,7 @@ def test_the_mint_route_mints_an_ordinary_device_row(client):
     # …but the digest does not cross to the parent. It is in the roster this
     # machine shows its own owner; it has no business on another machine.
     assert "token_hash" not in body["device"]
+    assert devices.row(body["device"]["id"])["authority_device"] == "phone-1"
 
 
 def test_the_mint_route_refuses_a_device_token(client, paired):
@@ -110,10 +113,12 @@ def test_a_grant_opens_that_route_and_nothing_else(client):
         assert client.get(path, headers=auth).status_code == 401, path
 
 
-def test_minting_stamps_the_grant_so_an_abused_one_is_visible(client):
+def test_minting_stamps_the_grant_so_an_abused_one_is_visible(client, monkeypatch):
+    monkeypatch.setattr(managed_access, "is_leaf", lambda: True)
+    monkeypatch.setattr(managed_access, "_post_parent", lambda *_: {"allowed": True})
     grant = grants.issue("parent")
     for _ in range(3):
-        client.post("/api/jremote/v1/delegate/mint", json={"name": "d"},
+        client.post(grants.MINT_PATH, json={"name": "d", "owner_id": "phone-1"},
                     headers={"Authorization": f"Bearer {grant}"})
     row = grants.issued()[0]
     assert row["minted"] == 3
@@ -158,7 +163,8 @@ def test_a_device_asks_the_hub_and_gets_a_token_minted_on_the_leaf(client, paire
     # The hub presented its grant, to the address in ITS registry — never one
     # the caller supplied.
     assert sent["token"] == "jrg1.deadbeef.secret"
-    assert sent["url"] == "http://10.66.0.7:9090/api/jremote/v1/delegate/mint"
+    assert sent["url"] == "http://10.66.0.7:9090" + grants.MINT_PATH
+    assert sent["payload"]["owner_id"] == paired[0]["id"]
     # The row on the leaf is named after the device that asked, so revoking it
     # there is legible.
     assert sent["payload"]["name"] == "a-phone"
@@ -229,7 +235,8 @@ def test_a_leaf_that_revoked_the_grant_is_reported_as_that_not_as_broken(
     assert "revoked" in resp.json()["detail"].lower()
 
 
-def test_forgetting_a_machine_drops_the_grant_with_the_tile(client, paired):
+def test_forgetting_a_machine_drops_the_grant_with_the_tile(client, paired, monkeypatch):
+    monkeypatch.setattr(managed_access, "console", lambda _: True)
     _adopted()
     _, device_token = paired
     resp = client.post("/api/jremote/v1/hosts/leaf-mac-01/forget", json={},
@@ -300,9 +307,12 @@ def _leaf_of(monkeypatch, key="parent-host-0001", address="10.66.0.1",
 
 def test_a_leaf_shows_its_parent_as_a_delegated_tile(client, paired, monkeypatch):
     _leaf_of(monkeypatch)
-    _, device_token = paired
+    monkeypatch.setattr(managed_access, "_post_parent", lambda route, body: {
+        "hosts": [{"key": "parent-host-0001", "name": "Home", "address": "10.66.0.1",
+                   "port": 9090, "delegated": True, "deleted": False}]})
+    client = TestClient(client.app, client=("127.0.0.1", 4000))
     resp = client.get("/api/jremote/v1/hosts",
-                      headers={"Authorization": f"Bearer {device_token}"})
+                      headers={"Authorization": "Bearer " + devices.internal_token()})
     parent = next(h for h in resp.json()["hosts"] if h["key"] == "parent-host-0001")
     # Ahead of any adopted machine, delegated because the grant backs it, and
     # named/addressed from the record — a row a device can tile and then spend.
@@ -317,33 +327,25 @@ def test_a_leafs_device_mints_on_its_parent_the_reverse_of_a_hub(
     for its parent: the caller proves a token here, and the leaf spends the
     grant it holds against the parent's own `/delegate/mint`."""
     _leaf_of(monkeypatch)
-    _, device_token = paired
+    device_token = devices.internal_token()
+    client = TestClient(client.app, client=("127.0.0.1", 4000))
     sent = {}
 
-    def poster(url, payload, token):
-        sent.update(url=url, token=token, name=payload["name"])
-        return 200, {"device": {"id": "z", "name": payload["name"]},
-                     "token": "jr1.z.minted-at-home"}
-
-    import jstack_host.grants as g
-    g_orig = g._httpx_post
-    g._httpx_post = poster
-    try:
-        resp = client.post("/api/jremote/v1/hosts/parent-host-0001/grant",
-                           json={},
-                           headers={"Authorization": f"Bearer {device_token}"})
-    finally:
-        g._httpx_post = g_orig
+    def parent(route, payload):
+        sent.update(route=route, payload=payload)
+        return {"host": payload["key"], "token": "jr1.z.minted-at-home"}
+    monkeypatch.setattr(managed_access, "_post_parent", parent)
+    resp = client.post("/api/jremote/v1/hosts/parent-host-0001/grant",
+                       json={}, headers={"Authorization": f"Bearer {device_token}"})
 
     assert resp.status_code == 200
     assert resp.json()["token"] == "jr1.z.minted-at-home"
     # The grant the leaf holds, spent against the parent's mesh address — the
     # one in the record, never one the caller could name.
-    assert sent["token"] == "jrg1.parentgrant.secret"
-    assert sent["url"] == "http://10.66.0.1:9090/api/jremote/v1/delegate/mint"
+    assert sent == {"route": "grant", "payload": {"key": "parent-host-0001"}}
 
 
-def test_a_parent_whose_grant_was_revoked_shows_no_tile(client, paired,
+def test_a_leaf_never_gives_independent_devices_parent_access(client, paired,
                                                         monkeypatch):
     """A parent record with a dead grant is not a machine to reach — the tile
     exists only while the grant does, so a revoked one is silence, not a row
@@ -353,10 +355,10 @@ def test_a_parent_whose_grant_was_revoked_shows_no_tile(client, paired,
     _, device_token = paired
     resp = client.get("/api/jremote/v1/hosts",
                       headers={"Authorization": f"Bearer {device_token}"})
-    assert resp.json()["hosts"] == []
+    assert resp.status_code == 403
     grant = client.post("/api/jremote/v1/hosts/parent-host-0001/grant", json={},
                         headers={"Authorization": f"Bearer {device_token}"})
-    assert grant.status_code == 404
+    assert grant.status_code == 403
 
 
 def test_a_machine_that_is_not_a_leaf_shows_no_parent_tile(client, paired,

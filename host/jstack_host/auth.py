@@ -335,6 +335,10 @@ async def require_token(request: Request,
                         authorization: str = Header(default="")) -> None:
     """FastAPI dependency. Raises 401 unless a live device's token is present."""
     device_id = _gate(_client_ip(request), authorization)
+    import asyncio
+    from . import managed_access
+    await asyncio.to_thread(managed_access.authorize, device_id, request)
+    request.state.authorized_device = device_id
     _note_build(device_id, request.headers.get(BUILD_HEADER, ""))
 
 
@@ -342,7 +346,11 @@ async def current_device(request: Request,
                          authorization: str = Header(default="")) -> str:
     """The authenticated caller's device id — for routes that need to know
     *which* device this is (the device list, the streams' revocation checks)."""
-    device_id = _gate(_client_ip(request), authorization)
+    cached = getattr(request.state, "authorized_device", None)
+    if cached:
+        return cached
+    await require_token(request, authorization)
+    device_id = request.state.authorized_device
     _note_build(device_id, request.headers.get(BUILD_HEADER, ""))
     return device_id
 
@@ -361,6 +369,11 @@ def authenticate_ws(ws) -> str:
     if device_id is None:
         _deny_log(client_ip, presented)
         _note_denial(client_ip, scope, presented)
+        return ""
+    from . import managed_access
+    try:
+        managed_access.authorize(device_id, ws)
+    except HTTPException:
         return ""
     _note_build(device_id, ws.headers.get(BUILD_HEADER, ""))
     return device_id

@@ -864,7 +864,9 @@ elif [ "$WANT_APP" = "0" ]; then
 elif [ "$DRY_RUN" = "1" ]; then
     would "$APP_INSTALLER"
 else
-    run_long "downloading and verifying the app" bash "$APP_INSTALLER"
+    app_args=()
+    [ "$ASSUME_YES" = "1" ] && app_args+=(--yes)
+    run_long "downloading and verifying the app" bash "$APP_INSTALLER" "${app_args[@]}"
     case $? in
         0) ok "app installed in ${LAST_ELAPSED}s"; APP_INSTALLED=1 ;;
         # 3 is "no release published yet". This used to be a note, on the

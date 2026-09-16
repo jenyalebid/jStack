@@ -15,6 +15,14 @@ import pytest
 from jstack_host import adopt_offline
 
 
+@pytest.fixture(autouse=True)
+def no_real_installer(tmp_path, monkeypatch):
+    # A newly added bootstrap path must fail locally unless a test explicitly
+    # supplies its own installer. An incomplete command mock must never reach
+    # the public installer or mutate the developer machine's packages.
+    monkeypatch.setenv("JSTACK_INSTALL_URL", (tmp_path / "no-installer").as_uri())
+
+
 @pytest.fixture
 def bundle(tmp_path, monkeypatch):
     """A leaf bundle folder as `tunnel.issue(leaf=True)` leaves it."""
@@ -54,9 +62,10 @@ def _run_join(bundle, tmp_path, capable=True):
         ("jstack-host",
          'echo "jstack-host:$1" >> "$CALLS"\n'
          'if [ "$1" = capabilities ]; then\n'
-         f'  {"echo delegated-minting" if capable else "exit 2"}\n'
+         f'  {"printf \'managed-access-v1\\nmanaged-app-v1\\n\'" if capable else "exit 2"}\n'
          'fi'),
         ("ping", 'echo "ping" >> "$CALLS"'),
+        ("curl", 'echo "download" >> "$CALLS"; exit 9'),
         # Present only so the prereq gate passes; never invoked.
         ("wireguard-go", "true"),
         ("wg", "true"),
@@ -191,7 +200,7 @@ def test_the_packed_file_is_one_executable_that_carries_everything(bundle, tmp_p
         # A current build — this test is about the payload, not the gate.
         ("jstack-host",
          'echo "jstack-host:$1" >> "$CALLS"\n'
-         'if [ "$1" = capabilities ]; then echo delegated-minting; fi'),
+         'if [ "$1" = capabilities ]; then printf "managed-access-v1\\nmanaged-app-v1\\n"; fi'),
         ("ping", 'echo "ping" >> "$CALLS"'),
         ("wireguard-go", "true"),
         ("wg", "true"),
@@ -222,10 +231,11 @@ def test_the_packed_file_leaves_nothing_unpacked_behind(bundle, tmp_path):
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    for name in ("sudo", "jstack-host", "ping", "wireguard-go", "wg"):
+    for name in ("sudo", "jstack-host", "ping", "wireguard-go", "wg", "curl", "brew"):
         p = fake_bin / name
         # `sudo` echoes where it was told to run from, which is the temp dir.
-        p.write_text('#!/bin/bash\necho "RAN:$1"\nexit 0\n')
+        body = ('printf "managed-access-v1\\nmanaged-app-v1\\n"' if name == "jstack-host" else 'echo "RAN:$1"')
+        p.write_text(f'#!/bin/bash\n{body}\nexit 0\n')
         p.chmod(0o755)
 
     scratch = tmp_path / "scratch"

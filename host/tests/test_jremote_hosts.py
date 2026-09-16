@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from jstack_host.server import create_app
 
 app = create_app()
-from jstack_host import devices, enrolment, grants, tunnel
+from jstack_host import devices, enrolment, grants, router, tunnel
 from jstack_host.router import SyncPush
 from jstack_host.store import SessionStore
 
@@ -78,7 +78,7 @@ def test_a_host_row_carries_no_column_a_credential_could_sit_in(store):
     store.upsert_host("host-key-aaaa", "Laptop", "10.66.0.7", 9090)
     columns = set(store.list_hosts()[0])
     assert columns == {"key", "name", "address", "port", "enrolled_at",
-                       "deleted", "updated_at", "seq"}
+                       "deleted", "updated_at", "seq", "device_id", "sees_home", "sees_leaves"}
     assert not any(c in columns for c in ("token", "token_hash", "secret",
                                           "password", "key_hash"))
 
@@ -315,7 +315,17 @@ def client(store):
     return c
 
 
-def test_the_whole_trip_over_http(client, store, paired):
+@pytest.fixture
+def on_console(monkeypatch):
+    """Act as the hub's own menu bar. Minting an enrolment code (adopting a Mac /
+    adding a device) is hub-console-only now; TestClient's address is not
+    loopback, so without this the mint answers 403. The /hosts registry routes
+    are not gated — those are the leaf tiles, not device management."""
+    monkeypatch.setattr(router, "_hub_console", lambda request: True)
+    monkeypatch.setattr("jstack_host.managed_access.console", lambda request: True)
+
+
+def test_the_whole_trip_over_http(client, store, paired, on_console):
     minted = client.post("/api/jremote/v1/enrolment/codes",
                          json={"name": "Laptop", "kind": "host"})
     assert minted.status_code == 200 and minted.json()["kind"] == "host"
@@ -348,19 +358,19 @@ def test_the_host_registry_is_behind_the_token(client, store):
                      json={"name": "y"}).status_code == 401
 
 
-def test_managing_a_host_that_is_not_there_is_a_404(client, store):
+def test_managing_a_host_that_is_not_there_is_a_404(client, store, on_console):
     assert client.post("/api/jremote/v1/hosts/ghost/rename",
                        json={"name": "y"}).status_code == 404
     assert client.post("/api/jremote/v1/hosts/ghost/forget").status_code == 404
 
 
-def test_an_unknown_kind_is_refused_at_mint(client, store):
+def test_an_unknown_kind_is_refused_at_mint(client, store, on_console):
     r = client.post("/api/jremote/v1/enrolment/codes",
                     json={"name": "x", "kind": "superuser"})
     assert r.status_code == 400
 
 
-def test_a_malformed_key_over_http_is_a_400_not_a_401(client, store):
+def test_a_malformed_key_over_http_is_a_400_not_a_401(client, store, on_console):
     """400 is the one specific answer this endpoint gives, and it is safe
     because it is decided before the code is looked up."""
     code = client.post("/api/jremote/v1/enrolment/codes",

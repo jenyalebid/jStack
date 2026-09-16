@@ -95,6 +95,9 @@ REFUSED = "that enrolment code is not valid — ask for a new one"
 # which machines to trust.
 KIND_DEVICE = "device"
 KIND_HOST = "host"
+# Only the local installer issues this kind. It introduces the host's own
+# app without inventing a separately managed leaf device.
+KIND_LOCAL = "local"
 KINDS = (KIND_DEVICE, KIND_HOST)
 
 # A host key is the redeeming machine's own `/host` id — minted there, never
@@ -169,7 +172,7 @@ def mint_code(name: str, created_by: str, ttl: int = DEFAULT_TTL,
     in the very registry they read to decide what to revoke. `kind` travels for
     the same reason, and a harder one — see the constants above.
     """
-    if kind not in KINDS:
+    if kind not in (*KINDS, KIND_LOCAL):
         raise EnrolmentError(f"unknown enrolment kind {kind!r}")
     try:
         ttl = int(ttl)
@@ -320,7 +323,8 @@ def _check_host_claim(host_key: str, port: int) -> int:
 
 def redeem(raw_code: str, client_ip: str, host_key: str = "",
            port: int = DEFAULT_PORT, device_token: str = "",
-           grant_token: str = "", identity: str = "") -> dict:
+           grant_token: str = "", identity: str = "", *,
+           parent_port: int = DEFAULT_PORT) -> dict:
     """Spend a code: a device token, and a peer config where one applies.
 
     `device_token` is the credential the redeemer already holds on this host,
@@ -365,6 +369,14 @@ def redeem(raw_code: str, client_ip: str, host_key: str = "",
         auth.note_failure(client_ip, scope)
         raise EnrolmentError(REFUSED)
     kind = row.get("kind") or KIND_DEVICE
+    from . import managed_access
+    import ipaddress
+    try:
+        local = ipaddress.ip_address(client_ip).is_loopback
+    except ValueError:
+        local = False
+    if (kind == KIND_LOCAL and not local) or (managed_access.is_leaf() and kind != KIND_LOCAL):
+        raise EnrolmentError(REFUSED)
     if kind == KIND_HOST and not host_key:
         # The same blank refusal as an unknown code, deliberately: naming this
         # cause would tell a guesser their code was real. Unconsumed, so the
@@ -380,29 +392,24 @@ def redeem(raw_code: str, client_ip: str, host_key: str = "",
     # name the user may have chosen in the registry, and a re-pairing is not a
     # rename. It is also the truer answer — the device redeeming is the device
     # it always was, whoever the code was minted for.
-    rekeyed = devices.rekey(device_token) if device_token else None
-    device_row, token = rekeyed or devices.mint(row["name"], identity or None)
+    rekeyed = devices.rekey(device_token) if device_token and kind != KIND_LOCAL else None
+    if kind == KIND_LOCAL:
+        token = devices.internal_token()
+        device_row = devices.row(devices.authenticate(token))
+    else:
+        device_row, token = rekeyed or devices.mint(row["name"], identity or None)
     device_row["revoked"] = False
     store.note_enrolment_device(code_hash, f"{device_row['id']} from {client_ip}")
 
-    # The direction nobody asked for, gated. Attach establishes trust both
-    # ways at once: the grant below is what the adopter wanted, and this token
-    # is the machine's credential back to THIS hub, which it gets as a side
-    # effect. On a Mac whose disk this hub's owner cannot vouch for — a work
-    # laptop, a box somebody else administers — that is the half worth
-    # refusing, and refusing it costs the adoption nothing.
-    #
-    # Revoked rather than never minted: the row is the record that the machine
-    # enrolled at all, and a leaf with no row is a leaf no surface can show.
+    # Keep the control connection independently of Home visibility. Revoking
+    # it to hide Home would also prevent sibling discovery and hub policy
+    # checks. Ordinary API access is checked against the two per-leaf flags.
     reachback = True
     if kind == KIND_HOST:
-        from . import hub_prefs
-        reachback = hub_prefs.get("leaf_reachback")
-        if not reachback:
-            devices.revoke(device_row["id"])
-            device_row["revoked"] = True
+        previous = store.host_row(host_key)
+        reachback = bool(previous["sees_home"]) if previous else True
 
-    peer, note = _tunnel_for(row["name"], leaf=kind == KIND_HOST)
+    peer, note = (None, "") if kind == KIND_LOCAL else _tunnel_for(row["name"], leaf=kind == KIND_HOST)
     host_row = None
     if kind == KIND_HOST:
         # After the token, and never conditional on the tunnel: a machine with
@@ -411,6 +418,12 @@ def redeem(raw_code: str, client_ip: str, host_key: str = "",
         # record of an enrolment whose code is already spent.
         host_row = _register_host(row["name"], host_key,
                                   mesh_address(peer), port)
+        store.bind_host_device(host_key, device_row["id"])
+        # Policy changes do not destroy the machine's control credential.
+        # It remains usable only for managed discovery/authorization when
+        # home visibility is off; the ordinary API enforces the restriction.
+        if previous is None:
+            store.set_host_visibility(host_key, sees_home=reachback, sees_leaves=True)
         # After the row, because the grant is keyed by the machine and a grant
         # held for a machine that is not in the registry is a credential no
         # surface can ever reach. Degrades like everything else past the
@@ -454,9 +467,9 @@ def redeem(raw_code: str, client_ip: str, host_key: str = "",
     parent_identity: dict = {}
     if kind == KIND_HOST:
         from . import grants
-        leaf_grant = grants.issue(row["name"] or host_key)
+        leaf_grant = grants.issue(host_key)
         parent_identity = {"key": hostenv.host_id(), "name": hostenv.host_name(),
-                           "address": _own_mesh_address(), "port": DEFAULT_PORT}
+                           "address": _own_mesh_address(), "port": parent_port}
 
     _announce(row, device_row, client_ip, kind, rekeyed is not None)
     return {"device": device_row, "token": token,

@@ -264,7 +264,7 @@ async def pty_ws(ws: WebSocket, sid: str, cols: int = 80, rows: int = 24,
     # not a parameter here: undeclared params are ignored, and there is no
     # longer a second behaviour for it to select.
     await ws.accept()
-    device_id = _authorized(ws)
+    device_id = await asyncio.to_thread(_authorized, ws)
     if not device_id:
         await ws.close(code=4401, reason="invalid or missing bearer token")
         return

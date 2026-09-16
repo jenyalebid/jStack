@@ -507,7 +507,17 @@ async def wait_revoked(device_id: str) -> None:
     try:
         if is_revoked(device_id):
             return
-        await event.wait()
+        # An active stream must obey the same hub policy as a fresh request.
+        # Network authorization runs off the event loop. Ordinary local
+        # credentials keep the existing event-driven revocation path.
+        from . import managed_access
+        while True:
+            try:
+                await asyncio.wait_for(event.wait(), timeout=2.0)
+                return
+            except asyncio.TimeoutError:
+                if not await asyncio.to_thread(managed_access.stream_allowed, device_id):
+                    return
     finally:
         with _watch_lock:
             waiting = _watchers.get(device_id)

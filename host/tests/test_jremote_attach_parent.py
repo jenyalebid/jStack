@@ -340,7 +340,8 @@ def test_the_bundle_we_write_installs_with_the_real_install_leaf_script(tmp_path
 
 # ── the CLI wires the command to the module ─────────────────────────────────
 
-def test_the_cli_passes_this_machines_id_and_reads_the_mode_back(monkeypatch):
+@pytest.mark.parametrize("app_status", [0, 1])
+def test_the_cli_passes_this_machines_id_and_reads_the_mode_back(monkeypatch, app_status):
     from jstack_host import cli, mode
 
     monkeypatch.setattr(cli, "_adopt", lambda a: None)
@@ -355,10 +356,15 @@ def test_the_cli_passes_this_machines_id_and_reads_the_mode_back(monkeypatch):
                 "parent_url": parent, "bundle_dir": "/x"}
 
     monkeypatch.setattr(attach_parent, "attach", fake_attach)
+    introductions = []
+    monkeypatch.setattr(cli, "_hand_to_app",
+                        lambda row: introductions.append(row) or app_status)
 
     args = cli.build_parser().parse_args(
         ["attach", "ABCD-1234", "--parent", "http://studio.local:9090"])
-    assert args.fn(args) == 0
+    assert args.fn(args) == app_status
+    assert len(introductions) == 1
+    assert introductions[0]["kind"] == "local"
     assert seen["code"] == "ABCD-1234"
     assert seen["parent"] == "http://studio.local:9090"
     assert seen["host_key"] == hostenv.host_id()   # the machine's own id
@@ -366,6 +372,20 @@ def test_the_cli_passes_this_machines_id_and_reads_the_mode_back(monkeypatch):
 
 
 # --- a parent only the tunnel can reach ------------------------------------
+
+@pytest.mark.parametrize("current", [False, True])
+def test_capabilities_requires_the_installed_app_to_support_managed_mode(tmp_path, monkeypatch, capsys, current):
+    import plistlib
+    from types import SimpleNamespace
+    from jstack_host import cli, desk
+    app = tmp_path / "app" / "Contents"
+    app.mkdir(parents=True)
+    (app / "Info.plist").write_bytes(plistlib.dumps({"JRManagedAccess": current}))
+    monkeypatch.setattr(desk, "APP", str(app.parent))
+    assert cli._cmd_capabilities(SimpleNamespace()) == 0
+    caps = capsys.readouterr().out.splitlines()
+    assert "managed-access-v1" in caps
+    assert ("managed-app-v1" in caps) is current
 
 def test_attach_refuses_a_mesh_parent_when_this_machine_is_not_a_peer(monkeypatch):
     """The reported bug: `--parent http://10.66.0.1:9090` from a Mac that is not

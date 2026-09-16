@@ -245,12 +245,14 @@ def create_app() -> FastAPI:
         It says what kind of host this is and nothing about what is on it: no
         agent names, no session ids, no paths. The board is behind the token.
         """
+        from . import managed_access
         return {
             "ok": True,
             "service": "jremote-host",
             "standalone": True,
             "profile": hostenv.profile().name,
             "provisioned": _provisioned(),
+            "managed": managed_access.is_leaf(),
         }
 
     return app

@@ -46,6 +46,24 @@ HUB_MESH_IP = "10.66.0.1"
 JOIN_SCRIPT = "join.sh"
 
 
+def _installer_url() -> str:
+    """Use this distribution's origin, never a private host's repository."""
+    import os
+    import re
+    import subprocess
+    if value := os.environ.get("JSTACK_INSTALL_URL"):
+        return value
+    from . import hostenv
+    checkout = hostenv.package_root()
+    result = subprocess.run(["git", "-C", str(checkout), "remote", "get-url", "origin"],
+                            capture_output=True, text=True, timeout=5)
+    match = re.fullmatch(r"(?:https://github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?",
+                         result.stdout.strip())
+    if not match:
+        raise ValueError("set JSTACK_INSTALL_URL to this distribution's installer URL")
+    return f"https://raw.githubusercontent.com/{match[1]}/main/install.sh"
+
+
 def _join_script(name: str, code: str, port: int, hub: str) -> str:
     """The folder form — `join.sh` sitting beside the files it installs."""
     return (f'#!/bin/bash\n'
@@ -64,10 +82,14 @@ def _join_body(name: str, code: str, port: int, hub: str) -> str:
     of them.
     """
     parent = f"http://{hub}:{port}"
+    import shlex
+    installer = shlex.quote(_installer_url())
     return f'''
 CODE="{code}"
 PARENT="{parent}"
 HUB="{hub}"
+INSTALLER={installer}
+export PATH="$PATH:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin"
 
 say() {{ printf '\\n== %s\\n' "$1"; }}
 die() {{ printf '\\n!! %s\\n' "$1" >&2; exit 1; }}
@@ -89,9 +111,14 @@ for b in wireguard-go wg; do
     }}
 done
 if [ -n "$missing" ]; then
-    die "missing:$missing
-   Install them first, then re-run this:
-       brew install wireguard-go wireguard-tools"
+    say "Installing the tunnel dependencies"
+    if ! command -v brew >/dev/null 2>&1; then
+        curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh \\
+            -o "$SRC/homebrew-install.sh" || die "could not download Homebrew"
+        /bin/bash "$SRC/homebrew-install.sh" || die "Homebrew did not install"
+    fi
+    HOMEBREW_NO_ANALYTICS=1 brew install wireguard-go wireguard-tools \\
+        || die "the tunnel dependencies did not install"
 fi
 
 # ------------------------------------------------------------- 1. tunnel
@@ -116,17 +143,25 @@ fi
 echo "   $HUB is reachable — this Mac is on the mesh."
 
 # ------------------------------------------------------------- 3. the host
-if ! command -v jstack-host >/dev/null 2>&1; then
-    say "jstack-host is not installed on this Mac"
-    cat <<'NEEDHOST'
-   The tunnel is up and permanent — the hard part is done and this Mac
-   will rejoin it by itself from now on.
-
-   Install the host, then run the attach line printed below:
-       curl -fsSL <your jStack install.sh> | bash
-NEEDHOST
-    echo "       jstack-host attach $CODE --parent $PARENT"
-    exit 1
+managed_ready() {{
+    local caps
+    caps="$(jstack-host capabilities 2>/dev/null)" || return 1
+    printf '%s\\n' "$caps" | grep -qx managed-access-v1 &&
+        printf '%s\\n' "$caps" | grep -qx managed-app-v1
+}}
+if ! managed_ready; then
+    say "Installing or updating jStack and jRemote"
+    curl -fsSL "$INSTALLER" -o "$SRC/jstack-install.sh" \\
+        || die "could not download the jStack installer"
+    if ! command -v brew >/dev/null 2>&1; then
+        curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh \\
+            -o "$SRC/homebrew-install.sh" || die "could not download Homebrew"
+        /bin/bash "$SRC/homebrew-install.sh" || die "Homebrew did not install"
+    fi
+    HOMEBREW_NO_ANALYTICS=1 brew install python3 tmux \\
+        || die "the host dependencies did not install"
+    /bin/bash "$SRC/jstack-install.sh" --yes || die "jStack did not finish installing"
+    hash -r
 fi
 
 # ----------------------------------------------- 3b. can it finish the job?
@@ -136,20 +171,7 @@ fi
 # the hub can never mint onto again, with every step reporting success. A
 # build too old to delegate is too old to have this subcommand, so it fails
 # the probe by exiting non-zero and needs no cooperation to be caught.
-if ! jstack-host capabilities 2>/dev/null | grep -qx delegated-minting; then
-    say "the jstack-host on this Mac is too old to finish adoption"
-    cat <<'TOOOLD'
-   The tunnel is up and permanent — that half is done and it survives this.
-
-   But this Mac's host cannot hand a grant back to the hub, so attaching now
-   would produce a machine your devices can never reach without someone
-   typing a second code on it. Upgrade the host here first:
-
-       curl -fsSL <your jStack install.sh> | bash
-TOOOLD
-    echo "   then run:  jstack-host attach $CODE --parent $PARENT"
-    exit 1
-fi
+managed_ready || die "the installed host and app do not both support managed adoption yet"
 
 # -------------------------------------------------------------- 4. attach
 say "Attaching to the hub as \\"{name}\\""
@@ -163,7 +185,7 @@ fi
 # standing means that second trip is never needed again.
 cat <<ENDFAIL
 
-!! The tunnel is UP, but the enrolment code did not redeem.
+!! The tunnel is UP, but managed setup did not finish. See the error above.
 
    Codes expire; tunnels do not. This Mac is on the mesh permanently now,
    so the hub is reachable from here and you do not need to carry anything
@@ -171,7 +193,7 @@ cat <<ENDFAIL
 
        jstack-host adopt {name}
 
-   then run it here:
+   If the error was a rejected code, run the new attach line here:
 
        jstack-host attach <NEW-CODE> --parent $PARENT
 ENDFAIL
@@ -227,8 +249,8 @@ def pack(name: str, code: str, port: int, hub: str = HUB_MESH_IP,
 #     ./{_packed_name(name)}
 #
 # Self-contained: the tunnel keys, the bringup scripts and a one-time
-# enrolment code are all inside this file. Nothing is downloaded and nothing
-# is typed. You are asked for your password once, by the tunnel installer.
+# enrolment code are all inside this file. Missing dependencies, jStack and
+# jRemote are downloaded automatically. Installation may ask for a password.
 #
 # This file IS a credential. Delete it once the join succeeds.
 set -uo pipefail
@@ -269,11 +291,8 @@ folder installs.
     ./{JOIN_SCRIPT}
 
 Once. It asks for your password (the tunnel installs as root), brings the
-tunnel up, waits for the hub to answer, and redeems the enrolment code.
-
-Prereq, if you do not have it:
-
-    brew install wireguard-go wireguard-tools
+tunnel up, installs or updates jStack and jRemote, waits for the hub to answer,
+redeems the enrolment code, and connects the local app automatically.
 
 ## What it does
 
@@ -281,7 +300,10 @@ Prereq, if you do not have it:
    endpoint — nothing listens here, no port is forwarded, no inbound path is
    opened. It works from any network with internet.
 2. Waits for `{hub}` to answer, which it can only do once step 1 is up.
-3. Redeems `{code}` against `http://{hub}:{port}`.
+3. Installs any missing dependencies and updates both host and app to support
+   managed access. An old app cannot silently pass the readiness check.
+4. Redeems `{code}` against `http://{hub}:{port}` and introduces the local app.
+   Only the parent hub manages devices and the two leaf visibility settings.
 
 ## If the code has expired
 

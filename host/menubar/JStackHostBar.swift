@@ -405,6 +405,9 @@ struct HostIdentity: Decodable {
     /// host did not say, which is not the same as leaf and must not be drawn
     /// as one. Superseded by `mode` on a current host; kept for the fallback.
     var isHub: Bool? { features?["tunnel_pairing"] }
+    var canManageDevices: Bool {
+        features?["device_management"] == true && mode?.isManaged != true
+    }
 }
 
 /// The `mode` block `/host` carries: the word, the one-line explanation, and
@@ -448,6 +451,8 @@ struct AdoptedHost: Decodable {
     var port: Int?
     var enrolledAt: Int?
     var delegated: Bool?
+    var seesHome: Bool?
+    var seesLeaves: Bool?
 
     /// What to call it: the name given at adoption, else the key, which is the
     /// machine's own host id and always there.
@@ -619,6 +624,7 @@ final class HostProbe {
                     // and a token the sessions call already found unauthorized
                     // has recorded that above — so this leg only adds, and its
                     // own 401 would land the same way rather than undo anything.
+                    guard state.identity?.canManageDevices == true else { return finish() }
                     self.get("\(base)\(Self.apiPrefix)/devices", token: token) { data, _ in
                         if let data,
                            let list = try? Self.decoder.decode(DeviceList.self, from: data) {
@@ -735,6 +741,12 @@ final class HostProbe {
         post("/hosts/\(escaped(hostKey))/forget", token: token, timeout: 10, done)
     }
 
+    func visibility(hostKey: String, seesHome: Bool, seesLeaves: Bool, token: String,
+                    _ done: @escaping (Bool, String) -> Void) {
+        post("/hosts/\(escaped(hostKey))/visibility", token: token, timeout: 10,
+             body: ["sees_home": seesHome, "sees_leaves": seesLeaves], done)
+    }
+
     private func escaped(_ component: String) -> String {
         component.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
             ?? component
@@ -746,6 +758,7 @@ final class HostProbe {
     /// "could not remove" and nothing else is a menu that sends its user to the
     /// logs, so whatever the host actually answered is carried up verbatim.
     private func post(_ path: String, token: String, timeout: TimeInterval,
+                      body: [String: Bool]? = nil,
                       _ done: @escaping (Bool, String) -> Void) {
         let port = HostAgent.port()
         guard let url = URL(string: "http://127.0.0.1:\(port)\(Self.apiPrefix)\(path)")
@@ -753,6 +766,10 @@ final class HostProbe {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if let body {
+            req.httpBody = try? JSONEncoder().encode(body)
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
         req.timeoutInterval = timeout
         session.dataTask(with: req) { data, response, error in
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -1426,7 +1443,7 @@ final class StatusController: NSObject {
                                         symbol: "power"))
             }
         }
-        if state.isUp, HostControl.hostBinary != nil {
+        if state.isUp, state.identity?.canManageDevices == true, HostControl.hostBinary != nil {
             sub.addItem(Self.action("Pair a Device…", #selector(doPair), self,
                                     symbol: "plus.circle"))
             // Adopt and Detach are the two directions of the same relationship,
@@ -1631,7 +1648,8 @@ final class StatusController: NSObject {
     /// only ever say "nobody" is furniture, and pairing a first one already
     /// lives on the machine's controls.
     private func devicesItem() -> NSMenuItem? {
-        guard state.isUp, state.isProvisioned, !state.unauthorized else { return nil }
+        guard state.isUp, state.isProvisioned, !state.unauthorized,
+              state.identity?.canManageDevices == true else { return nil }
         let roster = state.devices.filter { $0.id != Self.internalDeviceID }
         let active = roster.filter { !$0.revoked }.sorted { $0.name < $1.name }
         let revoked = roster.filter { $0.revoked }.sorted { $0.name < $1.name }
@@ -1701,7 +1719,8 @@ final class StatusController: NSObject {
     /// and refuses the moment a device asks — so the row says which it is,
     /// out loud, and the fix is one item away.
     private func machinesItem() -> NSMenuItem? {
-        guard state.isUp, state.isProvisioned, !state.unauthorized else { return nil }
+        guard state.isUp, state.isProvisioned, !state.unauthorized,
+              state.identity?.canManageDevices == true else { return nil }
         let machines = state.leaves.sorted { $0.title < $1.title }
         guard !machines.isEmpty else { return nil }
 
@@ -1721,6 +1740,19 @@ final class StatusController: NSObject {
 
             let actions = NSMenu()
             actions.autoenablesItems = false
+            let home = Self.check("Sees Home Instance", on: machine.seesHome ?? true,
+                                  #selector(doToggleLeafVisibility), self)
+            home.tag = 0
+            home.setAccessibilityIdentifier("leaf_toggle_home_\(machine.key)")
+            home.representedObject = machine
+            actions.addItem(home)
+            let siblings = Self.check("Sees Other Leaf Instances", on: machine.seesLeaves ?? true,
+                                      #selector(doToggleLeafVisibility), self)
+            siblings.tag = 1
+            siblings.setAccessibilityIdentifier("leaf_toggle_siblings_\(machine.key)")
+            siblings.representedObject = machine
+            actions.addItem(siblings)
+            actions.addItem(.separator())
             let forget = Self.action("Forget", #selector(doForgetMachine), self,
                                      symbol: "minus.circle")
             forget.representedObject = machine
@@ -1966,7 +1998,8 @@ final class StatusController: NSObject {
     /// confirmation Kill gets applies here. The warning sharpens for the row
     /// this menu is signed in as: removing it cuts this Mac's own access.
     @objc private func doRemoveDevice(_ sender: NSMenuItem) {
-        guard let device = sender.representedObject as? Device,
+        guard state.identity?.canManageDevices == true,
+              let device = sender.representedObject as? Device,
               !device.id.isEmpty, let token = HostAgent.token() else { return }
 
         let alert = NSAlert()
@@ -1990,6 +2023,25 @@ final class StatusController: NSObject {
                 failed.messageText = "Could not remove \(device.name)"
                 failed.informativeText = detail
                 failed.runModal()
+            }
+            self?.refresh()
+        }
+    }
+
+    @objc private func doToggleLeafVisibility(_ sender: NSMenuItem) {
+        guard state.identity?.canManageDevices == true,
+              let machine = sender.representedObject as? AdoptedHost,
+              let token = HostAgent.token() else { return }
+        let home = machine.seesHome ?? true
+        let siblings = machine.seesLeaves ?? true
+        probe.visibility(hostKey: machine.key, seesHome: sender.tag == 0 ? !home : home,
+                         seesLeaves: sender.tag == 1 ? !siblings : siblings, token: token) {
+            [weak self] ok, detail in
+            if !ok {
+                let alert = NSAlert()
+                alert.messageText = "Could Not Update Leaf Visibility"
+                alert.informativeText = detail
+                alert.runModal()
             }
             self?.refresh()
         }
