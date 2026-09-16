@@ -76,7 +76,7 @@ def sign_menu(stack: Path, output: Path, version: str, config: dict) -> Path:
     return final
 
 
-def build(config: dict, notes: str) -> Path:
+def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
     candidates = Path(config["candidates_dir"])
     candidates.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="build-", suffix=".noindex", dir=candidates))
@@ -107,6 +107,20 @@ def build(config: dict, notes: str) -> Path:
     print("Building, signing and notarizing menu bar", flush=True)
     menu = sign_menu(stack, output, version, config)
     app_output = work / "client-output"
+    if reuse_client is not None:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        private = base64.b64decode(Path(config["private_key"]).read_text().strip(), validate=True)
+        public = base64.b64encode(Ed25519PrivateKey.from_private_bytes(private).public_key().public_bytes_raw()).decode()
+        prior = releases.verify(json.loads((reuse_client / "candidate.json").read_text()), public, promoted=False)
+        if prior["sources"]["client"] != client_sha or prior.get("client_packages", {}) != dependencies:
+            raise releases.ReleaseError("client reuse requires identical committed client and shared-package sources")
+        item = prior["components"]["client"]
+        releases.check_artifact(reuse_client / item["file"], item)
+        app_output.mkdir()
+        shutil.copy2(reuse_client / item["file"], app_output / item["file"])
+        atomic_json(app_output / "latest.json", {**item, "build": item["version"]})
+        print("Reusing the signed client artifact from identical committed sources", flush=True)
+        return seal(work, config, notes)
     app_script = client / "jRemote-Code/jRemote/release-mac.sh"
     print("Building, signing and notarizing client candidate", flush=True)
     log_path = work / "client-build.log"
@@ -116,12 +130,32 @@ def build(config: dict, notes: str) -> Path:
                                  env={**os.environ, "JSTACK_CHECKOUT": str(stack)})
     if process.returncode:
         raise releases.ReleaseError(f"client build failed; see {log_path}\n{log_path.read_text()[-4000:]}")
+    return seal(work, config, notes)
+
+
+def seal(work: Path, config: dict, notes: str) -> Path:
+    """Resume after completed signing without building different bytes."""
+    stack, client = work / "stack", work / "Projects/client"
+    identity = json.loads((stack / "host/release-identity.json").read_text())
+    release_id, stack_sha = identity["release"], identity["sha"]
+    release_id = releases.identifier(release_id)
+    output, app_output = work / release_id, work / "client-output"
+    for repository in (stack, client, *sorted((work / "Packages").glob("*"))):
+        command(["git", "-C", str(repository), "diff", "--quiet", "HEAD", "--"])
+    client_sha = command(["git", "-C", str(client), "rev-parse", "HEAD"]).strip()
+    dependencies = {path.name: command(["git", "-C", str(path), "rev-parse", "HEAD"]).strip()
+                    for path in sorted((work / "Packages").glob("*"))}
+    version = json.loads((stack / "plugins/jstack/.claude-plugin/plugin.json").read_text())["version"]
+    archive, menu = output / "stack.tar.gz", output / "menubar-notarized.zip"
     app_manifest = json.loads((app_output / "latest.json").read_text())
+    releases.identifier(app_manifest["file"])
     app = app_output / app_manifest["file"]
+    releases.check_artifact(app, app_manifest)
     destination = output / app.name
     shutil.copy2(app, destination)
     manifest = {"schema": 1, "release": release_id, "notes": notes,
-                "sources": {"stack": stack_sha, "client": client_sha, "client_packages": dependencies},
+                "sources": {"stack": stack_sha, "client": client_sha},
+                "client_packages": dependencies,
                 "components": {"stack": component(archive, version),
                                "menubar": component(menu, version),
                                "client": component(destination, str(app_manifest["build"]))},
@@ -175,6 +209,11 @@ def main():
     initialize.add_argument("--private-key", type=Path, required=True)
     create = commands.add_parser("build")
     create.add_argument("--notes", required=True)
+    create.add_argument("--reuse-client", type=Path,
+                        help="reuse an exact signed client candidate only when its source inputs are unchanged")
+    finish = commands.add_parser("seal", help="resume a fully built candidate without rebuilding")
+    finish.add_argument("work", type=Path)
+    finish.add_argument("--notes", required=True)
     publish = commands.add_parser("promote")
     publish.add_argument("candidate", type=Path)
     publish.add_argument("--receipts", type=Path, required=True)
@@ -191,7 +230,9 @@ def main():
         parser.error("set JSTACK_RELEASE_CONFIG to the publishing machine's release configuration")
     config = json.loads(args.config.read_text())
     if args.action == "build":
-        print(build(config, args.notes))
+        print(build(config, args.notes, args.reuse_client))
+    elif args.action == "seal":
+        print(seal(args.work, config, args.notes))
     else:
         private = base64.b64decode(Path(config["private_key"]).read_text().strip(), validate=True)
         result = promote(args.candidate, args.receipts, Path(config["feed_dir"]), private)
