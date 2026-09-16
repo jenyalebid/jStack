@@ -5,8 +5,10 @@ WebSocket onto its session (pty.py). That connection is the only live fact
 tying a session to the *instance* showing it, so it answers two questions
 nothing else can:
 
-* **Who drove this session last?** A handoff typed on the iPad must open its
-  window on the iPad, never the Mac. Keystrokes are the driving fact: every
+* **Who drove this session last, and from which machine?** A handoff typed on
+  the iPad must open its window on the iPad; one typed in the app on a second
+  Mac must open there and not on the host's own desk. Keystrokes are the
+  driving fact and the socket's address is the machine: every
   binary input frame stamps its attachment, and `driver_for` returns the
   most recent stamp inside DRIVER_WINDOW. A driver whose socket died mid-turn
   (iOS drops sockets in background) is still remembered — `recent_driver` —
@@ -40,22 +42,29 @@ class Attachment:
     `send_text` enqueues a JSON control frame onto the connection's outbound
     pump; `order_close` tells the pump to finish with a specific close code.
     Both are called from async routes on the same loop the pump runs on.
+
+    `desk` is whether the instance runs on the machine this host runs on —
+    the one place a "Mac window" and "the screen the user is at" are the same
+    thing. Read off the connection (pty.py), never asserted by the client.
+    Unknown reads as True, which is the behavior every caller had before the
+    fact existed.
     """
 
     def __init__(self, sid: str, instance: str, platform: str,
-                 send_text, order_close):
+                 send_text, order_close, desk: bool = True):
         self.sid = sid
         self.instance = instance
         self.platform = platform
+        self.desk = desk
         self.send_text = send_text
         self.order_close = order_close
         self.last_input = 0.0
 
 
 _live: list[Attachment] = []
-#: sid -> (instance, platform, ts) — the last driver seen, surviving its
+#: sid -> (instance, platform, desk, ts) — the last driver seen, surviving its
 #: socket. Only consulted when no live attachment drives the sid.
-_recent: dict[str, tuple[str, str, float]] = {}
+_recent: dict[str, tuple[str, str, bool, float]] = {}
 
 
 def reset() -> None:
@@ -89,7 +98,7 @@ def note_input(att: Attachment, now: float | None = None) -> None:
     """A binary frame arrived — this instance is typing into the session."""
     ts = time.time() if now is None else now
     att.last_input = ts
-    _recent[att.sid] = (att.instance, att.platform, ts)
+    _recent[att.sid] = (att.instance, att.platform, att.desk, ts)
 
 
 def driver_for(sid: str, now: float | None = None) -> Attachment | None:
@@ -106,33 +115,52 @@ def driver_for(sid: str, now: float | None = None) -> Attachment | None:
     return best
 
 
-def recent_driver(sid: str, now: float | None = None) -> tuple[str, str] | None:
-    """(instance, platform) that last drove sid, socket alive or not."""
+def recent_driver(sid: str, now: float | None = None) -> tuple[str, str, bool] | None:
+    """(instance, platform, desk) that last drove sid, socket alive or not."""
     ts = time.time() if now is None else now
     rec = _recent.get(sid)
-    if not rec or ts - rec[2] > DRIVER_WINDOW:
+    if not rec or ts - rec[3] > DRIVER_WINDOW:
         return None
-    return rec[0], rec[1]
+    return rec[0], rec[1], rec[2]
 
 
-#: Platforms whose driver claims a spawn's window. Anything else — "mac",
-#: or the empty tag of a stale app build — keeps today's Mac window.
+#: Platforms that never run a host of their own, so their driver always claims
+#: the spawn's window. A Mac is not on this list because a Mac *can* be the
+#: desk — `claims_window` asks which one it is.
 DEVICE_PLATFORMS = {"pad", "phone"}
+
+
+def claims_window(platform: str, desk: bool) -> bool:
+    """Does this driver own the spawn's window, rather than the host's desk?
+
+    Two ways to be the wrong screen for a desk window, and only one of them
+    used to be asked. A phone or an iPad is obvious. The other is a **Mac that
+    is not this Mac**: the work machine driving a session on the hub over the
+    mesh is tagged `platform=mac`, and reading that as "the driver is the desk"
+    opened the takeover's window on the hub's screen — a machine the person who
+    typed it was not sitting at.
+
+    A stale build with no platform tag and no readable address still reads as
+    the desk: unknown keeps today's behavior, which is a window somewhere over
+    a window nowhere.
+    """
+    return platform in DEVICE_PLATFORMS or not desk
 
 
 def spawn_route(sid: str, now: float | None = None) -> tuple[str, "Attachment | None"]:
     """Where a spawn driven from inside `sid` should open its window.
 
-    ("device", driver) — a device typed it; the open frame goes down that
-    socket. ("mac", …) — desk-driven, unknown, or nobody: today's behavior.
-    ("none", None) — a device drove it but its socket is gone: create
-    quietly, the board row is the visibility."""
+    ("device", driver) — another machine typed it; the open frame goes down
+    that socket and the instance there decides window-or-nothing. ("mac", …)
+    — driven from the host's own desk, unknown, or nobody: today's behavior.
+    ("none", None) — an off-desk instance drove it but its socket is gone:
+    create quietly, the board row is the visibility."""
     driver = driver_for(sid, now=now)
     if driver:
-        route = "device" if driver.platform in DEVICE_PLATFORMS else "mac"
+        route = "device" if claims_window(driver.platform, driver.desk) else "mac"
         return route, driver
     recent = recent_driver(sid, now=now)
-    if recent and recent[1] in DEVICE_PLATFORMS:
+    if recent and claims_window(recent[1], recent[2]):
         return "none", None
     return "mac", None
 

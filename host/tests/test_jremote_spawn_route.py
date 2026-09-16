@@ -1,11 +1,13 @@
 """Where a desk-side spawn's window opens — and closing a thread elsewhere.
 
-A handoff typed on the iPad must not open a Mac window: the host resolves
-the *driver* of the origin session (attach.py) and routes the new session's
-window there — "mac" (desk-driven or unknown: today's behavior), "device"
-(an open frame goes down the driver's own socket; the app decides window or
-nothing), or "none" (a device drove it but its socket is gone — create
-quietly, the board row is the visibility).
+A handoff typed on the iPad must not open a Mac window, and one typed in the
+app on a second Mac must not open on the host's: the host resolves the
+*driver* of the origin session (attach.py) — platform and the machine it
+drove from — and routes the new session's window there. "mac" (driven from
+the host's own desk, or unknown: today's behavior), "device" (an open frame
+goes down the driver's own socket; the app decides window or nothing), or
+"none" (an off-desk driver whose socket is gone — create quietly, the board
+row is the visibility).
 
 `dismiss-elsewhere` is the app's "Close on Other Instances": every other
 attachment of the sid is ordered shut with 4412; the session keeps running.
@@ -38,10 +40,10 @@ def client(monkeypatch):
     return c
 
 
-def _att(sid=ORIGIN, instance="i-pad", platform="pad"):
+def _att(sid=ORIGIN, instance="i-pad", platform="pad", desk=False):
     sent, closed = [], []
     a = attach.Attachment(
-        sid=sid, instance=instance, platform=platform,
+        sid=sid, instance=instance, platform=platform, desk=desk,
         send_text=lambda payload: sent.append(payload),
         order_close=lambda code, reason: closed.append((code, reason)),
     )
@@ -58,16 +60,36 @@ def test_device_driver_routes_to_device():
     assert attach.spawn_route(ORIGIN, now=110.0) == ("device", a)
 
 
-def test_mac_app_driver_routes_to_mac():
-    a = _att(instance="i-mac", platform="mac")
+def test_desk_mac_driver_routes_to_mac():
+    # The app on the host's own machine: a desk window IS the driver's screen.
+    a = _att(instance="i-mac", platform="mac", desk=True)
     attach.register(a)
     attach.note_input(a, now=100.0)
     assert attach.spawn_route(ORIGIN, now=110.0) == ("mac", a)
 
 
-def test_unknown_platform_driver_keeps_todays_behavior():
+def test_second_mac_driver_routes_to_that_mac():
+    # The work machine driving a hub session over the mesh. `platform=mac`
+    # used to settle this and put the takeover's window on the hub's screen.
+    a = _att(instance="i-work", platform="mac", desk=False)
+    attach.register(a)
+    attach.note_input(a, now=100.0)
+    assert attach.spawn_route(ORIGIN, now=110.0) == ("device", a)
+
+
+def test_second_mac_whose_socket_died_routes_to_none():
+    # Same rule as a phone's: the board row is the visibility. A desk window
+    # would land on a machine nobody is sitting at.
+    a = _att(instance="i-work", platform="mac", desk=False)
+    attach.register(a)
+    attach.note_input(a, now=100.0)
+    attach.unregister(a)
+    assert attach.spawn_route(ORIGIN, now=110.0) == ("none", None)
+
+
+def test_unknown_platform_on_the_desk_keeps_todays_behavior():
     # A stale app build attaches with no platform tag — never mis-route it.
-    a = _att(platform="")
+    a = _att(platform="", desk=True)
     attach.register(a)
     attach.note_input(a, now=100.0)
     assert attach.spawn_route(ORIGIN, now=110.0) == ("mac", a)
@@ -99,8 +121,20 @@ def test_route_spawn_sends_open_frame_to_the_driving_device(client):
         {"type": "open", "url": "jremote://session/new-sid-1"}]
 
 
-def test_route_spawn_mac_sends_nothing(client):
-    a = _att(instance="i-mac", platform="mac")
+def test_route_spawn_sends_open_frame_to_a_second_mac(client):
+    a = _att(instance="i-work", platform="mac", desk=False)
+    attach.register(a)
+    attach.note_input(a)
+    r = client.post(f"/api/jremote/v1/sessions/{ORIGIN}/route-spawn",
+                    json={"new_sid": "new-sid-1", "cwd": ""})
+    assert r.status_code == 200
+    assert r.json()["route"] == "device"
+    assert a.test_sent == [
+        {"type": "open", "url": "jremote://session/new-sid-1"}]
+
+
+def test_route_spawn_desk_mac_sends_nothing(client):
+    a = _att(instance="i-mac", platform="mac", desk=True)
     attach.register(a)
     attach.note_input(a)
     r = client.post(f"/api/jremote/v1/sessions/{ORIGIN}/route-spawn",

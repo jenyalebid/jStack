@@ -28,7 +28,8 @@ Protocol:
 
 `?instance=<id>&platform=mac|pad|phone` names the app install behind the
 connection (attach.py): who is showing each thread, and — stamped by every
-binary input frame — who drove it last.
+binary input frame — who drove it last. *Which machine* it drove from is not
+asked of the client: the socket's own address answers it (`_on_desk`).
 
 Disconnect kills only the tmux *client* (a detach) — the session keeps
 running; its life is its claude process (the board invariant — see
@@ -84,6 +85,34 @@ from .router import _SID_RE
 ws_router = APIRouter()
 
 _READ_CHUNK = 65536
+
+
+#: Addresses that mean "this very machine". The app on the host's own desk
+#: talks to it over loopback (its stored base URL is `127.0.0.1` — the app
+#: calls that hub "local"); everything else — a phone on the LAN, a second Mac
+#: on the mesh, a device through the tunnel — arrives on an address of its own.
+_LOOPBACK = {"127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"}
+
+
+def _on_desk(ws: WebSocket) -> bool:
+    """Is the instance behind this socket running on the host's own machine?
+
+    Read from the connection, never asserted by the client — the same rule
+    tunnel pairing's LAN-only check runs on, and for the same reason: an app
+    that could claim to be the desk could claim a window on a screen it is not
+    sitting at.
+
+    `platform=mac` does not answer this and never did. It says which window
+    vocabulary the install lives in, and it was the whole test for "the driver
+    is the desk" back when the only Mac app was the one on the host. A second
+    Mac — the work machine driving a hub session over the mesh — is tagged the
+    same way, so its takeover opened on the hub's screen.
+
+    No peer address (a test client, a transport that hides it) reads as the
+    desk: unknown keeps today's behavior.
+    """
+    client = (ws.client.host if ws.client else "") or ""
+    return not client or client in _LOOPBACK
 
 
 def _authorized(ws: WebSocket) -> str:
@@ -295,7 +324,7 @@ async def pty_ws(ws: WebSocket, sid: str, cols: int = 80, rows: int = 24,
     # opens where it was typed). Hooks feed the outbound pump; both are
     # called from async routes on this same loop.
     att = attach.Attachment(
-        sid=sid, instance=instance, platform=platform,
+        sid=sid, instance=instance, platform=platform, desk=_on_desk(ws),
         send_text=lambda payload: out_q.put_nowait(
             ("text", json.dumps(payload))),
         order_close=lambda code, reason: out_q.put_nowait(

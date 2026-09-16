@@ -177,3 +177,30 @@ def test_client_features_precede_the_attach_command():
     option to the command and the client never comes up at all."""
     argv = jpty._attach_argv("abc12345")
     assert argv.index("-T") < argv.index("attach")
+
+
+# ── which machine is behind the socket ─────────────────────────────────────
+
+class _Peer:
+    def __init__(self, host):
+        self.client = type("C", (), {"host": host})() if host is not None else None
+
+
+@pytest.mark.parametrize("addr", ["127.0.0.1", "::1", "::ffff:127.0.0.1"])
+def test_loopback_client_is_the_desk(addr):
+    """The app on the host's own machine talks to it over loopback."""
+    assert jpty._on_desk(_Peer(addr)) is True
+
+
+@pytest.mark.parametrize("addr", ["10.66.0.9", "192.168.0.190", "10.66.0.12"])
+def test_any_other_address_is_not_the_desk(addr):
+    """The work Mac over the mesh, a phone on the LAN. `platform=mac` cannot
+    tell the first of those from the desk — the address can, and a spawn it
+    drives belongs on its screen, not on the host's."""
+    assert jpty._on_desk(_Peer(addr)) is False
+
+
+def test_no_peer_address_reads_as_the_desk():
+    """Unknown keeps today's behavior: a window somewhere beats none."""
+    assert jpty._on_desk(_Peer(None)) is True
+    assert jpty._on_desk(_Peer("")) is True

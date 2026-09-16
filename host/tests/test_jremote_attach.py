@@ -25,10 +25,10 @@ def clean_registry():
     attach.reset()
 
 
-def _att(sid="s1", instance="i-pad", platform="pad"):
+def _att(sid="s1", instance="i-pad", platform="pad", desk=False):
     sent, closed = [], []
     a = attach.Attachment(
-        sid=sid, instance=instance, platform=platform,
+        sid=sid, instance=instance, platform=platform, desk=desk,
         send_text=lambda payload: sent.append(payload),
         order_close=lambda code, reason: closed.append((code, reason)),
     )
@@ -82,7 +82,7 @@ def test_disconnected_driver_is_remembered_as_recent():
     attach.unregister(a)
     assert attach.driver_for("s1", now=110.0) is None
     recent = attach.recent_driver("s1", now=110.0)
-    assert recent == ("i-pad", "pad")
+    assert recent == ("i-pad", "pad", False)
 
 
 def test_recent_driver_expires_with_the_window():
