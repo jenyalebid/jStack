@@ -86,10 +86,13 @@ def bundle_info(path: Path) -> dict:
 def running(path: Path) -> list[int]:
     executable = str(path / "Contents/MacOS" / bundle_info(path)["CFBundleExecutable"])
     result = []
-    for process in psutil.process_iter(["pid", "exe"]):
+    for pid in psutil.pids():
         try:
-            if process.info["exe"] == executable:
-                result.append(process.pid)
+            # launchd first starts xpcproxy, then execs the bundle in that PID.
+            # process_iter caches Process.exe forever, so polling its cached
+            # objects can miss an app that has already launched successfully.
+            if psutil.Process(pid).exe() == executable:
+                result.append(pid)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     return result

@@ -449,3 +449,36 @@ def test_inventory_observes_updater_source_and_requires_live_menubar(tmp_path, m
     assert backend.observe(job)["updater_source"] == {"sha": "actual-updater"}
     monkeypatch.setattr(update_macos, "running", lambda _: [])
     assert backend.observe(job)["verified"] is False
+
+
+def test_running_observes_exec_after_cached_process_scan(tmp_path):
+    """A launchd-style same-PID exec must not stay cached as its launcher."""
+    import plistlib
+    import subprocess
+    import time
+    import psutil
+    from jstack_host.update_macos import running
+
+    app = tmp_path / "Fixture.app"
+    # Keep Apple's platform binary in place; copying it would test signature
+    # enforcement instead of the process exec transition.
+    executable = Path("/bin/sleep")
+    (app / "Contents").mkdir(parents=True)
+    (app / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable": str(executable)}))
+    process = subprocess.Popen(["/bin/sh", "-c", 'read ready; exec "$1" 30',
+                                "fixture-launcher", str(executable)], stdin=subprocess.PIPE)
+    try:
+        # Seed the precise stale cache that launch-time process scanning makes.
+        assert process.pid in [p.pid for p in psutil.process_iter(["pid", "exe"])]
+        assert process.pid not in running(app)
+        process.stdin.write(b"go\n")
+        process.stdin.flush()
+        deadline = time.monotonic() + 5
+        while psutil.Process(process.pid).exe() != str(executable):
+            assert time.monotonic() < deadline, "fixture did not exec"
+            time.sleep(0.01)
+        assert process.pid in running(app)
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+        process.stdin.close()
