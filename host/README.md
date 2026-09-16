@@ -42,6 +42,9 @@ jstack-host install          install as a user LaunchAgent
 jstack-host pair "iPhone"    a code to type into the app
 jstack-host status           installed? loaded? answering?
 jstack-host doctor           grade every dependency, with the fix beside each gap
+jstack-host files status     selected-folder SMB state, observed without sudo
+jstack-host files setup      print the root commands; add --apply to execute
+jstack-host files off        print the removal plan; add --apply to execute
 jstack-host serve            run in this terminal instead
 jstack-host where            every path this host resolves
 jstack-host uninstall        remove the LaunchAgent (state and token stay)
@@ -63,6 +66,33 @@ checkout you own; nothing downloads code at runtime.
 
 Markdown reads are fenced to `~/.claude`, the agent root and `~/Systems`, and
 the fence is checked after symlinks resolve.
+
+### Files.app access
+
+`jstack-host files` declares exactly three independent macOS SMB share points:
+`Agents`, `Systems`, and `Projects`, when those directories exist beside the
+configured Agents root. It never shares the account home, Public, Operations,
+or any undeclared path. Setup is a dry run by default:
+
+```bash
+jstack-host files status
+jstack-host files setup
+sudo jstack-host files setup --apply
+```
+
+The applied path creates a hidden, non-admin, non-login `jstackshare` account.
+It prompts twice for the same password: once to create the local account and
+once after enabling the SMB password hash. The password never appears in the
+command line. Each share disables guest access, requires SMB3 encryption, and
+inherits read/write ACLs for both `jstackshare` and the root's owner, so a file
+created from a phone remains editable on the Mac.
+
+After setup, turn on **System Settings → General → Sharing → File Sharing**.
+That UI action is deliberate: it is macOS's supported privacy-authorized path
+for enabling the service. Connect from Files as a Registered User. `doctor`,
+`GET /api/jremote/v1/files/share`, and the host's continuous audit all read the
+same declared-versus-observed status; any undeclared, guest-enabled, or
+unencrypted share is reported rather than silently accepted.
 
 ## Paths
 

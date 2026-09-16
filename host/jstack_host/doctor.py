@@ -365,10 +365,36 @@ def check_app() -> dict:
                   "binary is exactly the unaccounted-for copy")
 
 
+def check_file_sharing() -> dict:
+    """An optional surface is quiet when absent and loud when unsafe."""
+    from . import fileshare
+    observed = fileshare.status()
+    if not observed["available"]:
+        return _check("files", OK, observed.get("reason", "not available"))
+    unexpected = observed["unexpected"]
+    if unexpected:
+        names = ", ".join(row["name"] for row in unexpected)
+        grade = FAIL if observed.get("service_enabled") else WARN
+        return _check("files", grade, f"undeclared SMB share point(s): {names}",
+                      "run `jstack-host files status`, then "
+                      "`sudo jstack-host files setup --apply`")
+    if not observed["configured"]:
+        return _check("files", OK, "selected-folder sharing not configured")
+    if observed["ready"]:
+        names = ", ".join(row["name"] for row in observed["shares"])
+        return _check("files", OK, f"ready: {names}")
+    if observed.get("secure") and not observed.get("service_enabled"):
+        return _check("files", WARN, "selected shares are secure but File Sharing is off",
+                      "enable File Sharing in System Settings")
+    return _check("files", WARN, "selected shares are configured but drifted",
+                  "run `jstack-host files status`, then "
+                  "`sudo jstack-host files setup --apply`")
+
+
 CHECKS = (check_python, check_claude, check_tmux, check_websocket, check_fd_limit,
           check_token, check_profile, check_agents, check_registry, check_timeline,
           check_transcripts, check_scheduler, check_allowance, check_repos,
-          check_service, check_source, check_app)
+          check_service, check_source, check_app, check_file_sharing)
 
 
 def checks() -> list[dict]:
