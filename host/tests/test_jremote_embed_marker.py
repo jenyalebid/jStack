@@ -43,6 +43,18 @@ def test_a_hand_started_server_offers_no_agent_rather_than_a_placeholder(
     assert _declare(monkeypatch, tmp_path, "")["agent_label"] == ""
 
 
+def test_the_marker_records_the_source_the_server_loaded(tmp_path, monkeypatch):
+    """declare() runs in the serving process at its startup — the one moment
+    the loaded bytes and the tree are still the same thing. An embedded host
+    has no /api/health of its own, so this field is the only place a doctor
+    can learn which source is actually answering requests."""
+    from jstack_host import sourcestamp
+    monkeypatch.setattr(sourcestamp, "_stamp",
+                        {"sha": "c" * 40, "dirty": True, "root": "/repo"})
+    record = _declare(monkeypatch, tmp_path, "com.acme.dashboard")
+    assert record["source"] == {"sha": "c" * 40, "dirty": True, "root": "/repo"}
+
+
 def test_the_menubar_installer_backfills_only_keys_the_marker_carries(
         tmp_path, monkeypatch):
     """The two halves of one seam, checked against each other.

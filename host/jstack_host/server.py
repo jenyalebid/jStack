@@ -141,6 +141,10 @@ async def lifespan(app: FastAPI):
     hostenv.ensure_state_dir()
     _log(f"profile={hostenv.profile().name} state={hostenv.state_dir()}")
     _log(f"open-file limit {_raise_fd_limit()}")
+    # Captured HERE, not at first probe: the stamp must name the tree as of
+    # the moment this process loaded its bytes, and startup is that moment.
+    from . import sourcestamp
+    _log(f"serving source {sourcestamp.describe()}")
     if not _provisioned():
         # Loud, and still serving. The API fails closed on every request, so
         # this is not a security hole — it is a host that will answer 401 to
@@ -244,8 +248,12 @@ def create_app() -> FastAPI:
 
         It says what kind of host this is and nothing about what is on it: no
         agent names, no session ids, no paths. The board is behind the token.
+        The source stamp keeps that promise — sha and dirty flag only, never
+        the checkout path — and is what lets the doctor compare the bytes
+        this process serves against the tree they came from.
         """
-        from . import managed_access
+        from . import managed_access, sourcestamp
+        stamp = sourcestamp.capture()
         return {
             "ok": True,
             "service": "jremote-host",
@@ -253,6 +261,7 @@ def create_app() -> FastAPI:
             "profile": hostenv.profile().name,
             "provisioned": _provisioned(),
             "managed": managed_access.is_leaf(),
+            "source": {"sha": stamp["sha"], "dirty": stamp["dirty"]},
         }
 
     return app

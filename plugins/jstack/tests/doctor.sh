@@ -134,6 +134,66 @@ g=$(grade_of "$TMP/badcfg.json" config)
 [ "$g" = "fail" ] || fail "unparseable scheduler.json should grade fail, got '$g'"
 [ "$g" = "fail" ] && pass "a config file that silently falls back to defaults is a failure"
 
+# ── versions: cache-vs-checkout drift is named, in step is ok ───────────────
+# A throwaway checkout holding a copy of the plugin, and a ledger in the
+# sandbox HOME pinning first the same commit (in step), then a stale one —
+# which must warn AND call out that both trees answer to one version label,
+# because that label being decoration is the trap this check exists for.
+
+if command -v git >/dev/null 2>&1; then
+    VREPO="$TMP/vrepo"
+    mkdir -p "$VREPO/plugins"
+    cp -R "$PLUGIN_ROOT" "$VREPO/plugins/jstack"
+    rm -rf "$VREPO/plugins/jstack/__pycache__" "$VREPO/plugins/jstack"/*/__pycache__
+    # The real checkout ignores bytecode; without this the copied tool's own
+    # import caches read as uncommitted files and the in-step case warns.
+    printf '__pycache__/\n' > "$VREPO/.gitignore"
+    git -C "$VREPO" init -q
+    git -C "$VREPO" -c user.email=t@t -c user.name=t add -A
+    git -C "$VREPO" -c user.email=t@t -c user.name=t commit -qm one
+    SHA1=$(git -C "$VREPO" rev-parse HEAD)
+    LABEL=$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
+            "$VREPO/plugins/jstack/.claude-plugin/plugin.json")
+    mkdir -p "$TMP/home/.claude/plugins"
+    ledger() {
+        printf '{"version":2,"plugins":{"jstack@jStack":[{"installPath":"%s","version":"%s","gitCommitSha":"%s"}]}}' \
+            "$TMP/cache" "$LABEL" "$1" > "$TMP/home/.claude/plugins/installed_plugins.json"
+    }
+    run_vdoctor() {
+        HOME="$TMP/home" JSTACK_ROOT="$TMP/root" \
+        SCHEDULER_INSTALL_FILE="$TMP/root/absent-scheduler.json" \
+        SCHEDULER_API_PORT=59992 \
+        "$PY" "$VREPO/plugins/jstack/bin/jstack-doctor" --json
+    }
+
+    ledger "$SHA1"
+    run_vdoctor > "$TMP/vsync.json" 2>/dev/null
+    g=$(grade_of "$TMP/vsync.json" versions)
+    [ "$g" = "ok" ] || fail "cache pinned at HEAD should grade ok, got '$g'"
+    [ "$g" = "ok" ] && pass "a cache in step with its checkout is ok"
+
+    echo "drift" >> "$VREPO/plugins/jstack/README-drift.md" 2>/dev/null || \
+        echo "drift" > "$VREPO/plugins/jstack/README-drift.md"
+    git -C "$VREPO" -c user.email=t@t -c user.name=t add -A
+    git -C "$VREPO" -c user.email=t@t -c user.name=t commit -qm two
+    run_vdoctor > "$TMP/vdrift.json" 2>/dev/null
+    g=$(grade_of "$TMP/vdrift.json" versions)
+    [ "$g" = "warn" ] || fail "a stale cache pin should grade warn, got '$g'"
+    [ "$g" = "warn" ] && pass "a cache behind the checkout is a warning"
+    if grep -q "behind the checkout" "$TMP/vdrift.json"; then
+        pass "the drift is counted, not just detected"
+    else
+        fail "a stale pin did not say how far behind it is"
+    fi
+    if grep -q "label distinguishes nothing" "$TMP/vdrift.json"; then
+        pass "two trees under one version label get called out"
+    else
+        fail "same-label drift not named — the version string would still read as identity"
+    fi
+else
+    echo "skip: no git — versions drift cases not run"
+fi
+
 # ── the exit status is the worst grade, and JSON agrees with it ─────────────
 
 run_doctor --json > "$TMP/agree.json" 2>/dev/null

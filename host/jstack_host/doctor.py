@@ -241,10 +241,134 @@ def check_service() -> dict:
                   f"profile {served.get('profile')}")
 
 
+def _behind(root: str, old: str, new: str) -> str:
+    """How many commits `new` is ahead of `old` in the checkout at `root`,
+    as a string — or '' when git cannot relate them (a sha the checkout has
+    never seen relates to nothing, and guessing a number would be worse)."""
+    try:
+        r = subprocess.run(["git", "-C", root, "rev-list", "--count",
+                            f"{old}..{new}"],
+                           capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def check_source() -> dict:
+    """Does the running host serve the bytes the tree holds?
+
+    The host is an editable install: what a process serves is the tree as of
+    its own startup, and the tree moves on underneath it with the version
+    label never changing. This machine holds four copies of jStack — checkout,
+    plugin cache, running host, app build — and the running host was the one
+    whose identity could only be guessed. The serving side comes from the
+    stamp the process recorded as it started (the embed marker for an
+    embedded host, `/api/health` for a standalone one); the tree side is
+    computed fresh right here. Every mismatch is a thing to go and do, so
+    every mismatch is a WARN with the action in the hint.
+    """
+    from . import embed, install_host, sourcestamp
+    tree = sourcestamp.capture()
+    if not tree["sha"]:
+        return _check("source", OK, "not served from a git checkout — a real "
+                      "install cannot drift from a tree it does not have")
+    now = sourcestamp.describe(tree)
+    embedded = embed.server()
+    if embedded:
+        serving, where = embed.read().get("source"), f"embedded in {embedded}"
+    elif install_host.plist_path().exists():
+        port = install_host.installed_port() or install_host.DEFAULT_PORT
+        served = install_host.health(port)
+        if served is None:
+            return _check("source", WARN, f"tree at {now}; the installed host "
+                          f"answers nothing on {port}, so what it serves is "
+                          "unknowable",
+                          "the service check owns the outage — restarting it "
+                          "deploys the tree as a side effect")
+        serving, where = served.get("source"), f"answering on {port}"
+    else:
+        return _check("source", OK, f"tree at {now} — no host on this machine, "
+                      "nothing serving to drift")
+    if not isinstance(serving, dict) or not serving.get("sha"):
+        return _check("source", WARN, f"tree at {now}; the serving process "
+                      "predates the source stamp",
+                      "restart the host — its next startup records what it serves")
+    sha, dirty = str(serving["sha"]), bool(serving.get("dirty"))
+    if dirty:
+        return _check("source", WARN, f"serving {sha[:12]}+dirty ({where}) — "
+                      "the running code is UNCOMMITTED bytes, not any commit",
+                      "commit what is meant to run and restart on a clean tree; "
+                      "code that answers requests must be reproducible from git")
+    if sha != tree["sha"]:
+        n = _behind(tree["root"], sha, tree["sha"])
+        gap = (f"{n} commit(s) not deployed" if n else
+               "a sha this checkout does not contain")
+        detail = f"serving {sha[:12]}, tree at {now} — {gap}"
+        hint = "restart the host to deploy the tree"
+        if tree["dirty"]:
+            hint += " — but it is dirty right now, and a restart ships those " \
+                    "uncommitted bytes too; commit first"
+        return _check("source", WARN, detail, hint)
+    if tree["dirty"]:
+        return _check("source", WARN, f"serving {sha[:12]} clean ({where}), but "
+                      "the served package has uncommitted edits — the next "
+                      "restart ships them",
+                      "commit or drop them; what runs must be a commit")
+    return _check("source", OK, f"serving {sha[:12]}, in step with the tree "
+                  f"({where})")
+
+
+def check_app() -> dict:
+    """The fourth copy — the Mac app build, against the feed this hub publishes.
+
+    Only a publishing hub can grade this locally; any other Mac gets its app
+    build reported as a fact and no verdict, because comparing against a feed
+    that lives on another machine would mean guessing.
+    """
+    import plistlib
+    from . import desk, releases
+    info_plist = Path(desk.APP) / "Contents" / "Info.plist"
+    if not info_plist.exists():
+        return _check("app", OK, f"no app at {desk.APP} — not an app Mac")
+    try:
+        with open(info_plist, "rb") as fh:
+            info = plistlib.load(fh)
+        build = int(info.get("CFBundleVersion") or 0)
+        version = str(info.get("CFBundleShortVersionString") or "?")
+    except (OSError, ValueError, plistlib.InvalidFileException) as e:
+        return _check("app", WARN, f"cannot read {info_plist}: {e}",
+                      "reinstall the app — an unreadable bundle is not a version")
+    if not releases.publishes():
+        return _check("app", OK, f"build {build} ({version}) installed — this "
+                      "machine does not publish the feed, no local truth to "
+                      "compare against")
+    try:
+        latest = releases.latest()
+    except releases.ReleaseError as e:
+        return _check("app", WARN, f"build {build} installed; release feed "
+                      f"broken: {e}",
+                      "republish — every app on the fleet updates from this feed")
+    if latest is None:
+        return _check("app", OK, f"build {build} ({version}) installed; feed "
+                      "empty — nothing published yet")
+    if latest["build"] == build:
+        return _check("app", OK, f"build {build} ({version}) — matches the "
+                      "published release")
+    if latest["build"] > build:
+        return _check("app", WARN, f"installed build {build}, feed publishes "
+                      f"{latest['build']} — the app is behind its own feed",
+                      "the app self-updates on launch; if it stays behind, "
+                      "the updater is the bug")
+    return _check("app", WARN, f"installed build {build} is AHEAD of the "
+                  f"published {latest['build']} — a local build nobody published",
+                  "publish it or reinstall the released app; an unpublished "
+                  "binary is exactly the unaccounted-for copy")
+
+
 CHECKS = (check_python, check_claude, check_tmux, check_websocket, check_fd_limit,
           check_token, check_profile, check_agents, check_registry, check_timeline,
           check_transcripts, check_scheduler, check_allowance, check_repos,
-          check_service)
+          check_service, check_source, check_app)
 
 
 def checks() -> list[dict]:

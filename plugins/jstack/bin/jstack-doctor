@@ -417,9 +417,140 @@ def check_scheduler() -> dict:
     return _check("scheduler", OK, summary)
 
 
+def _git(cwd, *args: str) -> str:
+    try:
+        r = subprocess.run(["git", "-C", str(cwd), *args],
+                           capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _installed_jstack() -> "tuple[str, dict]":
+    """(marketplace name, install record) for this plugin, or ('', {}).
+
+    Read from Claude Code's own ledger rather than guessed from paths: the
+    record is what the CLI will actually load next session, which is the only
+    sense of "installed version" that matters.
+    """
+    ledger = USER_CLAUDE / "plugins" / "installed_plugins.json"
+    try:
+        plugins = json.loads(ledger.read_text()).get("plugins") or {}
+    except (OSError, json.JSONDecodeError):
+        return "", {}
+    for key, records in plugins.items():
+        if key.split("@")[0] == "jstack" and isinstance(records, list) and records:
+            return key.split("@", 1)[1], dict(records[0])
+    return "", {}
+
+
+def _marketplace_checkout(marketplace: str) -> "Path|None":
+    """The local checkout a directory-sourced marketplace serves from."""
+    try:
+        known = json.loads(
+            (USER_CLAUDE / "plugins" / "known_marketplaces.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    source = (known.get(marketplace) or {}).get("source") or {}
+    if source.get("source") == "directory" and source.get("path"):
+        return Path(source["path"])
+    return None
+
+
+def check_versions() -> dict:
+    """Do the copies of jStack on this machine agree about what runs?
+
+    A machine holds up to four — the checkout, the installed plugin cache,
+    the running host, the app build. The host and the app grade themselves in
+    `jstack-host doctor`; this check owns the two the plugin can see: the
+    checkout and the cache. They drift silently and under the SAME version
+    label, because the cache is a copy pinned to one commit at install time
+    while the checkout moves on — so the version string is decoration and the
+    commit shas are the identity. Everything here is a local read: origin is
+    compared against the last-fetched ref, never the network, and the fetch
+    age is reported so a clean bill from a stale ref reads as exactly that.
+    """
+    marketplace, record = _installed_jstack()
+    pin = str(record.get("gitCommitSha") or "")
+    repo = _git(PLUGIN_ROOT, "rev-parse", "--show-toplevel")
+    checkout = Path(repo) if repo else _marketplace_checkout(marketplace)
+
+    if not pin and not checkout:
+        return _check("versions", WARN, "no installed plugin record and no "
+                      "checkout — this copy's identity is unknowable",
+                      "install via the marketplace, or run from a git checkout")
+    if not checkout:
+        return _check("versions", OK, f"cache {record.get('version')} at "
+                      f"{pin[:12]} — no local checkout on this machine, the "
+                      "cache is the only copy")
+
+    head = _git(checkout, "rev-parse", "HEAD")
+    if not head:
+        return _check("versions", WARN, f"checkout at {checkout}, but git "
+                      "cannot read it — no identity to compare",
+                      "install git, or repair the checkout")
+
+    dirty = len(_git(checkout, "status", "--porcelain").splitlines())
+    facts, actions = [], []
+
+    if not pin:
+        facts.append(f"checkout {head[:12]}, not installed as a plugin")
+    elif pin == head:
+        facts.append(f"cache in step with the checkout ({head[:12]})")
+    else:
+        behind = _git(checkout, "rev-list", "--count", f"{pin}..{head}")
+        gap = (f"{behind} commit(s) behind the checkout" if behind else
+               "at a sha the checkout does not contain")
+        facts.append(f"cache pinned {pin[:12]}, {gap}")
+        actions.append("reinstall/update the plugin to re-pin the cache")
+        try:
+            manifest = json.loads(
+                (checkout / "plugins" / "jstack" / ".claude-plugin" /
+                 "plugin.json").read_text())
+            if str(manifest.get("version")) == str(record.get("version")):
+                # The trap this check exists for: two different trees both
+                # answering to one version string.
+                facts.append(f"BOTH call themselves {manifest.get('version')} "
+                             "— the label distinguishes nothing")
+        except (OSError, json.JSONDecodeError, KeyError):
+            pass
+
+    behind_origin = _git(checkout, "rev-list", "--count", "HEAD..origin/main")
+    ahead_origin = _git(checkout, "rev-list", "--count", "origin/main..HEAD")
+    if behind_origin == "" and ahead_origin == "":
+        facts.append("no origin/main to compare")
+    else:
+        if int(behind_origin or 0):
+            facts.append(f"{behind_origin} behind origin/main")
+            actions.append("pull the checkout")
+        if int(ahead_origin or 0):
+            facts.append(f"{ahead_origin} ahead of origin/main (unpushed)")
+            actions.append("push — finished work that never reaches origin "
+                           "is invisible to every other machine")
+        if not int(behind_origin or 0) and not int(ahead_origin or 0):
+            facts.append("even with origin/main")
+        fetch_head = checkout / ".git" / "FETCH_HEAD"
+        try:
+            import time
+            age = int((time.time() - fetch_head.stat().st_mtime) / 3600)
+            facts.append(f"last fetch {age}h ago" if age else "fetched <1h ago")
+        except OSError:
+            facts.append("never fetched here")
+
+    if dirty:
+        facts.append(f"{dirty} uncommitted file(s) in the checkout")
+        actions.append("commit or drop them — an editable host restart would "
+                       "ship them as-is")
+
+    detail = f"{checkout} — " + "; ".join(facts)
+    if actions:
+        return _check("versions", WARN, detail, "; ".join(dict.fromkeys(actions)))
+    return _check("versions", OK, detail)
+
+
 CHECKS = (check_python, check_claude, check_git, check_dateutil, check_root,
           check_agents, check_timeline, check_rules, check_commands, check_hooks,
-          check_bin, check_config, check_scheduler)
+          check_bin, check_config, check_scheduler, check_versions)
 
 
 def checks() -> list:

@@ -119,6 +119,11 @@ def declare(*, port: int, server: str = "", root: str | Path = "") -> Path | Non
     server = server or getattr(profile, "embedded_in", "") or ""
     if not server:
         return None
+    # The source stamp rides along because declare() runs in the serving
+    # process at its startup — the one moment the loaded bytes and the tree
+    # are the same thing. An embedded host has no /api/health of its own, so
+    # this marker is where the doctor learns which source is actually serving.
+    from . import sourcestamp
     record = {
         "server": server,
         "port": int(port),
@@ -128,6 +133,7 @@ def declare(*, port: int, server: str = "", root: str | Path = "") -> Path | Non
         "state_dir": str(hostenv.state_dir()),
         "token_path": str(hostenv.token_path()),
         "agent_label": _agent_label(),
+        "source": sourcestamp.capture(),
     }
     path = marker_path()
     path.parent.mkdir(parents=True, exist_ok=True)

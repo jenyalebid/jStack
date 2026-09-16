@@ -304,6 +304,13 @@ h = client.get("/api/health")
 assert h.status_code == 200, h.status_code
 assert h.json()["standalone"] is True and h.json()["profile"] == "default", h.json()
 assert h.json()["provisioned"] is True, h.json()
+
+# The source stamp: sha and dirty flag only — the probe is unauthenticated,
+# so the checkout PATH stays out of it, and the doctor still gets enough to
+# compare the serving bytes against the tree.
+src = h.json()["source"]
+assert set(src) == {"sha", "dirty"}, src
+assert src["sha"] == "" or len(src["sha"]) == 40, src
 ''')
     assert r.returncode == 0 and "OK" in r.stdout, r.stderr[-3000:]
 

@@ -9,6 +9,7 @@ exit status is the worst grade.
 import io
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -34,7 +35,7 @@ def test_every_check_answers_with_a_grade(machine):
     names = [r["name"] for r in results]
     assert names == ["python", "claude", "tmux", "websocket", "open files", "token",
                      "profile", "agents", "registry", "timeline", "transcripts",
-                     "scheduler", "allowance", "repos", "service"]
+                     "scheduler", "allowance", "repos", "service", "source", "app"]
     assert all(r["grade"] in (doctor.OK, doctor.WARN, doctor.FAIL) for r in results)
     by = {r["name"]: r for r in results}
     assert by["token"]["grade"] == doctor.FAIL, "no token minted in this state dir"
@@ -73,6 +74,128 @@ def test_the_report_exits_with_the_worst_grade(machine, monkeypatch):
     assert doctor.report(io.StringIO()) == 2
     monkeypatch.setattr(doctor, "CHECKS", (lambda: doctor._check("d", doctor.OK, "yes"),))
     assert doctor.report(io.StringIO()) == 0
+
+
+# ── the source check: does the running host serve the bytes the tree holds ──
+#
+# The serving side is the stamp the process recorded at its own startup (the
+# embed marker here — written into the isolated path conftest points every
+# test at); the tree side is monkeypatched through sourcestamp's own cache,
+# because these tests are about the comparison, not about git.
+
+
+def _tree(monkeypatch, sha, dirty=False):
+    from jstack_host import sourcestamp
+    monkeypatch.setattr(sourcestamp, "_stamp",
+                        {"sha": sha, "dirty": dirty, "root": "/repo"})
+
+
+def _marker(source):
+    record = {"server": "the dashboard"}
+    if source is not None:
+        record["source"] = source
+    Path(os.environ["JREMOTE_EMBED_MARKER"]).write_text(json.dumps(record))
+
+
+def test_a_host_serving_the_tree_it_came_from_is_ok(machine, monkeypatch):
+    _tree(monkeypatch, "a" * 40)
+    _marker({"sha": "a" * 40, "dirty": False})
+    r = doctor.check_source()
+    assert r["grade"] == doctor.OK and "in step" in r["detail"]
+
+
+def test_serving_uncommitted_bytes_is_named_exactly_that(machine, monkeypatch):
+    """The failure the stamp exists for: the running code is not any commit,
+    so no sha anywhere names it and no other machine can reproduce it."""
+    _tree(monkeypatch, "a" * 40)
+    _marker({"sha": "a" * 40, "dirty": True})
+    r = doctor.check_source()
+    assert r["grade"] == doctor.WARN and "UNCOMMITTED" in r["detail"]
+    assert "commit" in r["hint"]
+
+
+def test_a_stale_serving_host_warns_with_the_gap_and_the_action(machine, monkeypatch):
+    _tree(monkeypatch, "b" * 40)
+    _marker({"sha": "a" * 40, "dirty": False})
+    monkeypatch.setattr(doctor, "_behind", lambda root, old, new: "3")
+    r = doctor.check_source()
+    assert r["grade"] == doctor.WARN and "3 commit(s) not deployed" in r["detail"]
+    assert "restart" in r["hint"]
+
+
+def test_a_dirty_tree_behind_a_clean_host_warns_about_the_next_restart(machine, monkeypatch):
+    """Shas agree, the process is clean — but the tree has uncommitted edits
+    in the served package, so the NEXT restart ships bytes nobody committed.
+    Saying it now is the difference between a policy and an autopsy."""
+    _tree(monkeypatch, "a" * 40, dirty=True)
+    _marker({"sha": "a" * 40, "dirty": False})
+    r = doctor.check_source()
+    assert r["grade"] == doctor.WARN and "next" in r["detail"]
+
+
+def test_a_serving_process_without_a_stamp_is_told_to_restart(machine, monkeypatch):
+    _tree(monkeypatch, "a" * 40)
+    _marker(None)
+    r = doctor.check_source()
+    assert r["grade"] == doctor.WARN and "predates" in r["detail"]
+    assert "restart" in r["hint"]
+
+
+def test_no_host_on_the_machine_means_nothing_to_drift(machine, tmp_path, monkeypatch):
+    from jstack_host import install_host
+    _tree(monkeypatch, "a" * 40)
+    monkeypatch.setattr(install_host, "plist_path",
+                        lambda *a, **k: tmp_path / "absent.plist")
+    r = doctor.check_source()
+    assert r["grade"] == doctor.OK and "nothing serving" in r["detail"]
+
+
+# ── the app check: the fourth copy, graded only where the feed lives ────────
+
+
+def _install_app(tmp_path, monkeypatch, build):
+    import plistlib
+    from jstack_host import desk
+    contents = tmp_path / "jRemote.app" / "Contents"
+    contents.mkdir(parents=True)
+    with open(contents / "Info.plist", "wb") as fh:
+        plistlib.dump({"CFBundleVersion": str(build),
+                       "CFBundleShortVersionString": "1.4"}, fh)
+    monkeypatch.setattr(desk, "APP", str(tmp_path / "jRemote.app"))
+
+
+def test_no_app_installed_is_not_a_finding(machine, tmp_path, monkeypatch):
+    from jstack_host import desk
+    monkeypatch.setattr(desk, "APP", str(tmp_path / "jRemote.app"))
+    assert doctor.check_app()["grade"] == doctor.OK
+
+
+def test_an_app_behind_the_feed_it_updates_from_warns(machine, tmp_path, monkeypatch):
+    from jstack_host import releases
+    _install_app(tmp_path, monkeypatch, 60)
+    monkeypatch.setattr(releases, "publishes", lambda: True)
+    monkeypatch.setattr(releases, "latest", lambda: {"build": 67})
+    r = doctor.check_app()
+    assert r["grade"] == doctor.WARN and "behind its own feed" in r["detail"]
+
+
+def test_an_app_ahead_of_the_feed_is_the_unaccounted_copy(machine, tmp_path, monkeypatch):
+    """A build newer than anything published came out of somebody's Xcode and
+    exists on exactly one machine — the copy no version census can explain."""
+    from jstack_host import releases
+    _install_app(tmp_path, monkeypatch, 99)
+    monkeypatch.setattr(releases, "publishes", lambda: True)
+    monkeypatch.setattr(releases, "latest", lambda: {"build": 67})
+    r = doctor.check_app()
+    assert r["grade"] == doctor.WARN and "AHEAD" in r["detail"]
+
+
+def test_a_non_publishing_mac_reports_its_build_without_a_verdict(machine, tmp_path, monkeypatch):
+    from jstack_host import releases
+    _install_app(tmp_path, monkeypatch, 67)
+    monkeypatch.setattr(releases, "publishes", lambda: False)
+    r = doctor.check_app()
+    assert r["grade"] == doctor.OK and "build 67" in r["detail"]
 
 
 def test_status_and_doctor_adopt_the_installed_agents_environment(machine, tmp_path, monkeypatch):
