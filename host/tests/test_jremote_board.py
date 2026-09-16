@@ -1862,3 +1862,25 @@ def test_both_builders_preview_a_codex_session_the_same_way(ws, monkeypatch, tmp
     opened = next(r for r in board.open_sessions() if r["session_id"] == sid)
     active = next(r for r in board.active_sessions() if r["session_id"] == sid)
     assert opened["preview"] == active["preview"] == "One session, one name"
+
+
+def test_open_section_recovers_a_dead_rollout_link(ws, monkeypatch, tmp_path):
+    """A Codex entry bound to a rollout that no longer exists must be re-run
+    through recovery by the Open section itself. active_sessions() already
+    recovered; open_sessions() read the registry raw, so the one section a
+    just-spawned session sits in was the one that could never repair a dead
+    link — the card stayed blank while the real rollout sat on disk."""
+    from jstack_host import managed, codex_transcript, messages
+    sid = "cccc0006-1111-2222-3333-444444444444"
+    dead = tmp_path / "rollout-gone.jsonl"
+    live = tmp_path / "rollout-live.jsonl"
+    live.write_text('{}\n')
+    monkeypatch.setattr(managed, "open_registry", lambda: {
+        sid: {"agent": "nova", "engine": "codex", "transcript": str(dead)}})
+    monkeypatch.setattr(codex_transcript, "recover_open_sessions",
+                        lambda reg: {sid: dict(reg[sid], transcript=str(live))})
+    monkeypatch.setattr(codex_transcript, "summary",
+                        lambda p: {"title": "Recovered title"} if str(p) == str(live) else {})
+    monkeypatch.setattr(messages, "parse_session", lambda sid: {"messages": []})
+    row = next(r for r in board.open_sessions() if r["session_id"] == sid)
+    assert row["preview"] == "Recovered title"

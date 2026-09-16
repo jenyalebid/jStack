@@ -181,14 +181,26 @@ def message_entries(path: Path) -> list[dict]:
 
 
 def recover_open_sessions(reg: dict) -> dict:
-    """Recover links lost on reattach or when initial startup outlasted polling.
+    """Recover links lost on reattach, when initial startup outlasted polling,
+    or when the bound rollout no longer exists on disk.
+
+    A registered path whose file is gone counts as no link at all: the binder
+    can mis-claim a short-lived probe's rollout, and once that file is deleted
+    the card would otherwise stay blank forever while the session's real
+    rollout sits unclaimed beside it.
 
     A pane's creation time bounds its launch. Never claim another registered
     transcript, or a rollout born after the next pane in the same workspace.
-    Ambiguous candidates stay unbound instead of showing another chat's text.
+    Among candidates inside that window the earliest wins — the same rule
+    `bind_open_session` applies at launch — because the pane's own rollout is
+    born with the pane, while anything later in the window is a probe or stub
+    launched from the same directory.
     """
+    def bound(info: dict) -> bool:
+        path = info.get("transcript")
+        return bool(path) and Path(path).is_file()
     missing = {sid for sid, info in reg.items()
-               if info.get("engine") == "codex" and not info.get("transcript")}
+               if info.get("engine") == "codex" and not bound(info)}
     if not missing:
         return reg
     from . import managed
@@ -207,7 +219,7 @@ def recover_open_sessions(reg: dict) -> dict:
                 panes[names[name]] = (float(stamp), cwd)
     except (OSError, ValueError, subprocess.SubprocessError):
         return reg
-    claimed = {info.get("transcript") for info in reg.values()}
+    claimed = {info.get("transcript") for info in reg.values() if bound(info)}
     candidates = []
     for path in root().glob("**/rollout-*.jsonl"):
         if str(path) in claimed:
@@ -226,11 +238,12 @@ def recover_open_sessions(reg: dict) -> dict:
             continue
         end = min((t for other, (t, loc) in panes.items()
                    if other != sid and loc == cwd and t > start), default=float("inf"))
-        matches = [path for stamp, loc, path in candidates
-                   if loc == cwd and start <= stamp < end and str(path) not in claimed]
-        if len(matches) != 1:
+        matches = sorted((stamp, path) for stamp, loc, path in candidates
+                         if loc == cwd and start <= stamp < end
+                         and str(path) not in claimed)
+        if not matches:
             continue
-        path = str(matches[0])
+        path = str(matches[0][1])
         managed.record_transcript(sid, path)
         reg[sid] = dict(reg[sid], transcript=path)
         claimed.add(path)

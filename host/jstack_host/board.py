@@ -1215,6 +1215,12 @@ def open_sessions() -> list[dict]:
     reg = managed.open_registry()
     if not reg:
         return []
+    # The same recovery active_sessions() runs. Without it, a Codex entry
+    # whose bound rollout is wrong or gone stays blank in exactly the section
+    # a just-spawned session sits in — the other builder would repair the
+    # link on its next build and this one never would.
+    from . import codex_transcript
+    reg = codex_transcript.recover_open_sessions(reg)
     agents = active_agents()
     tags = _session_tags()
     out = []

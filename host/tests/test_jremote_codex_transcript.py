@@ -42,6 +42,14 @@ def _rollout(path: Path) -> Path:
     return path
 
 
+def _stamp(path: Path, ts: str) -> None:
+    """Set the session_meta payload timestamp recovery reads."""
+    rows = path.read_text().splitlines()
+    meta = json.loads(rows[0])
+    meta['payload']['timestamp'] = ts
+    path.write_text(json.dumps(meta) + '\n' + '\n'.join(rows[1:]) + '\n')
+
+
 def test_rollout_parser_filters_boot_context_and_keeps_tools(tmp_path):
     path = _rollout(tmp_path / f"rollout-2026-08-26T21-00-00-{SID}.jsonl")
     parsed = codex_transcript.message_entries(path)
@@ -178,6 +186,59 @@ def test_delayed_rollout_recovers_without_stealing_a_sibling(tmp_path, monkeypat
     assert 'transcript' not in result[older]
     assert result[current]['transcript'] == str(path)
     assert managed._reg_load()[current]['transcript'] == str(path)
+
+
+def test_dead_rollout_link_rebinds_to_the_live_file(tmp_path, monkeypatch):
+    """A bound transcript whose file is gone is no link at all.
+
+    The launch-time binder can claim a short-lived probe's rollout; once that
+    file is deleted the card stayed blank forever, because recovery only ever
+    looked at sessions with no transcript recorded — a dead path passed as
+    bound, and the session's real rollout sat unclaimed beside it."""
+    from jstack_host import managed
+    from types import SimpleNamespace
+    monkeypatch.setattr(managed, '_REG', tmp_path / 'open.json')
+    sessions = tmp_path / 'sessions'
+    monkeypatch.setattr(codex_transcript, 'root', lambda: sessions)
+    sid = 'cafe0001-0000-0000-0000-000000000000'
+    cwd = '/Users/x/Agents/Nova/chat'
+    start = datetime.fromisoformat('2026-08-26T20:59:59+00:00').timestamp()
+    managed.record_open(sid, 'nova', engine='codex')
+    managed.record_transcript(sid, str(sessions / 'rollout-deleted.jsonl'))
+    live = _rollout(sessions / f'rollout-live-{SID}.jsonl')
+    _stamp(live, '2026-08-26T21:00:00Z')
+    panes = f'jr-cafe0001\t{start}\t{cwd}\n'
+    monkeypatch.setattr(codex_transcript.subprocess, 'run',
+                        lambda *a, **k: SimpleNamespace(returncode=0, stdout=panes))
+    result = codex_transcript.recover_open_sessions(managed._reg_load())
+    assert result[sid]['transcript'] == str(live)
+    assert managed._reg_load()[sid]['transcript'] == str(live)
+
+
+def test_a_later_stub_in_the_window_does_not_block_recovery(tmp_path, monkeypatch):
+    """Rollouts keep landing in a pane's directory after its own — parity
+    probes, failed spawns, one-off CLI runs. Recovery used to refuse any
+    window holding more than one candidate, which left the card blank in
+    exactly the common case. The earliest rollout after pane creation is the
+    pane's own — the same rule the launch-time binder applies."""
+    from jstack_host import managed
+    from types import SimpleNamespace
+    monkeypatch.setattr(managed, '_REG', tmp_path / 'open.json')
+    sessions = tmp_path / 'sessions'
+    monkeypatch.setattr(codex_transcript, 'root', lambda: sessions)
+    sid = 'cafe0002-0000-0000-0000-000000000000'
+    cwd = '/Users/x/Agents/Nova/chat'
+    start = datetime.fromisoformat('2026-08-26T20:59:59+00:00').timestamp()
+    managed.record_open(sid, 'nova', engine='codex')
+    own = _rollout(sessions / f'rollout-own-{SID}.jsonl')
+    _stamp(own, '2026-08-26T21:00:00Z')
+    stub = _rollout(sessions / f'rollout-stub-{SID}.jsonl')
+    _stamp(stub, '2026-08-26T21:02:00Z')
+    panes = f'jr-cafe0002\t{start}\t{cwd}\n'
+    monkeypatch.setattr(codex_transcript.subprocess, 'run',
+                        lambda *a, **k: SimpleNamespace(returncode=0, stdout=panes))
+    result = codex_transcript.recover_open_sessions(managed._reg_load())
+    assert result[sid]['transcript'] == str(own)
 
 
 def test_card_metadata_tracks_model_usage_and_turn_events(tmp_path):
