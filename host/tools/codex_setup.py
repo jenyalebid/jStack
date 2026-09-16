@@ -13,6 +13,11 @@ import sys
 from pathlib import Path
 
 
+_SKIP_TREES = {"pad", "git", "scratch", "node_modules", "__pycache__", ".venv",
+               "venv", "build", "DerivedData", ".build", "dist", ".git", ".agents",
+               ".claude"}
+
+
 def link_skills(source, target):
     target.mkdir(parents=True, exist_ok=True)
     for skill in sorted(source.glob("*/SKILL.md")):
@@ -35,6 +40,40 @@ def link_commands(source, target):
                         f"Read and follow the existing command at [{command.name}]({command.resolve()}).\n"
                         "Use the user's supplied arguments wherever it refers to `$ARGUMENTS`.\n")
         print(f"shared workspace command {command.stem}")
+
+
+def workspace_directories(workspace):
+    """Directories whose local Claude commands/skills Codex must also see.
+
+    The installer receives the Agents root, not one leaf seat.  Walking only
+    the root's ancestors therefore misses every command scoped to a real seat.
+    A seat is a directory carrying CLAUDE.md; include its ancestor chain so an
+    agent-level .claude also reaches nested seats, while pruning pad/checkouts
+    and machine trees by the same boundaries the seat resolver uses.
+    """
+    workspace = workspace.resolve()
+    found = {workspace, *workspace.parents}
+    if not workspace.is_dir():
+        return sorted(found, key=lambda path: (len(path.parts), str(path)))
+    for current, dirs, files in os.walk(workspace):
+        dirs[:] = [name for name in dirs
+                   if not name.startswith(".") and name not in _SKIP_TREES]
+        if "CLAUDE.md" not in files:
+            continue
+        directory = Path(current)
+        while directory == workspace or workspace in directory.parents:
+            found.add(directory)
+            if directory == workspace:
+                break
+            directory = directory.parent
+    return sorted(found, key=lambda path: (len(path.parts), str(path)))
+
+
+def share_workspace(workspace):
+    for directory in workspace_directories(workspace):
+        if (directory / ".claude/skills").is_dir():
+            link_skills(directory / ".claude/skills", directory / ".agents/skills")
+        link_commands(directory / ".claude/commands", directory / ".agents/skills")
 
 
 def shell_config(text, plugin, path):
@@ -74,11 +113,7 @@ def main():
     link_skills(home / ".claude/skills", home / ".agents/skills")
     link_commands(home / ".claude/commands", home / ".agents/skills")
     if args.workspace:
-        cwd = args.workspace.resolve()
-        for directory in [*reversed(cwd.parents), cwd]:
-            if (directory / ".claude/skills").is_dir():
-                link_skills(directory / ".claude/skills", directory / ".agents/skills")
-            link_commands(directory / ".claude/commands", directory / ".agents/skills")
+        share_workspace(args.workspace)
     # Config's shell policy also applies to noninteractive commands, which do
     # not source .zshrc. Only manage our own block; never replace another table.
     config = codex / "config.toml"

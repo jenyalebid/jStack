@@ -158,6 +158,45 @@ def test_setup_preserves_mcp_tables_when_codex_moves_comments():
     assert module.shell_config(changed, PLUGIN, "/bin") == changed
 
 
+def test_setup_bridges_commands_scoped_to_nested_seats(tmp_path):
+    path = PLUGIN.parents[1] / "host/tools/codex_setup.py"
+    spec = importlib.util.spec_from_file_location("setup_seat_commands", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    agents = tmp_path / "Agents"
+    profile = tmp_path / "profiles/code/commands"
+    profile.mkdir(parents=True)
+    command = profile / "distribute.md"
+    command.write_text("Build and distribute the selected app.\n")
+    seat = agents / "Lynda/code"
+    (seat / ".claude").mkdir(parents=True)
+    (seat / "CLAUDE.md").write_text("# Code seat\n")
+    (seat / ".claude/commands").symlink_to(profile, target_is_directory=True)
+
+    module.share_workspace(agents)
+
+    skill = seat / ".agents/skills/distribute/SKILL.md"
+    assert skill.is_file()
+    assert str(command.resolve()) in skill.read_text()
+    assert codex_commands.translate("/distribute habits", str(seat)) == "$distribute habits"
+
+
+def test_setup_does_not_bridge_checkout_commands_from_a_seat_pad(tmp_path):
+    path = PLUGIN.parents[1] / "host/tools/codex_setup.py"
+    spec = importlib.util.spec_from_file_location("setup_pad_commands", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    agents = tmp_path / "Agents"
+    checkout = agents / "Jarvis/chat/pad/copied-repo"
+    (checkout / ".claude/commands").mkdir(parents=True)
+    (checkout / "CLAUDE.md").write_text("# Not a seat\n")
+    (checkout / ".claude/commands/foreign.md").write_text("Do foreign work.\n")
+
+    module.share_workspace(agents)
+
+    assert not (checkout / ".agents/skills/foreign/SKILL.md").exists()
+
+
 def test_startup_watchers_do_not_hold_a_spawning_hook_pipe(monkeypatch):
     from jstack_host import managed
     calls = []
