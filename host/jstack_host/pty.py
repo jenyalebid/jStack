@@ -17,11 +17,14 @@ Protocol:
                    instance drove (typed the handoff into this session); the
                    app opens it per its own window setting, or not at all
   close codes      4401 bad/missing token, or the device revoked mid-connection ·
-                   4404 unknown session ·
+                   4404 malformed sid — a string that is not a session id at
+                   all, and the ONLY thing this code means; a well-formed sid
+                   with no session behind it is 4411 ·
                    4409 session held by a raw Mac terminal ·
-                   4411 session ended (EOF, or `?reattach=1` on an idle
-                   session) · 4412 dismissed from another device (the view
-                   closes, the session lives) · 1000 detached
+                   4411 session ended — nothing behind a well-formed sid, or
+                   EOF with the tmux session gone · 4412 dismissed from
+                   another device (the view closes, the session lives) ·
+                   1000 detached
 
 `?instance=<id>&platform=mac|pad|phone` names the app install behind the
 connection (attach.py): who is showing each thread, and — stamped by every
