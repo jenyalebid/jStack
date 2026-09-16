@@ -54,7 +54,11 @@ SEAT="$AGENTS/Alpha/chat"
 
 SID="aaaaaaaa-1111-2222-3333-444444444444"
 SRC="$PROJ/$SID.jsonl"
-printf '%s\n' '{"type":"user","sessionId":"'"$SID"'"}' > "$SRC"
+printf '%s\n' \
+  '{"type":"user","sessionId":"'"$SID"'"}' \
+  '{"type":"ai-title","aiTitle":"Old generated title","sessionId":"'"$SID"'"}' \
+  '{"type":"custom-title","customTitle":"End the broken cycle","sessionId":"'"$SID"'"}' \
+  > "$SRC"
 
 fails=0
 pass() { echo "ok: $1"; }
@@ -113,8 +117,8 @@ run "/takeover"
 BRIEF="$(opt --prompt-file)"
 [[ -n "$BRIEF" && -f "$BRIEF" ]] \
   && pass "a briefing is staged and handed over" || fail "no briefing ($BRIEF)"
-[[ "$(opt --name)" == "TO · alpha/chat" ]] \
-  && pass "titled from the source seat when no focus is given" || fail "title ($(opt --name))"
+[[ "$(opt --name)" == "TO · End the broken cycle" ]] \
+  && pass "titled from the source session's current name" || fail "title ($(opt --name))"
 KICK="$(opt --first-prompt)"
 [[ -n "$KICK" && "$KICK" == *"verify what it claims"* ]] \
   && pass "--first-prompt makes it a task, not a staged context" || fail "kick ($KICK)"
@@ -154,8 +158,8 @@ run "/takeover" "$SRC" "$SEAT/pad/a-checkout"
 [[ $CODE == 2 && "$(opened_cwd)" == "$SEAT" ]] \
   && pass "a wandered cwd opens on its seat, not where the shell stood" \
   || fail "pad cwd ($(opened_cwd))"
-[[ "$(opt --name)" == "TO · alpha/chat" ]] \
-  && pass "and the source is named by its seat, not by the folder below it" \
+[[ "$(opt --name)" == "TO · End the broken cycle" ]] \
+  && pass "and a wandered cwd does not change the source session title" \
   || fail "pad title ($(opt --name))"
 grep -q "$SEAT\$" "$(opt --prompt-file)" \
   && pass "the briefing names the seat as the workspace" || fail "brief workspace"
@@ -167,10 +171,10 @@ run "/takeover" "$SRC" "$TMP"
   && pass "a cwd outside the agent tree is left exactly where it is" \
   || fail "offtree cwd ($(opened_cwd))"
 
-# 6. A focus scopes the work and names the window
+# 6. A focus scopes the work but never renames it
 run "/takeover cellular not working"
-[[ $CODE == 2 && "$(opt --name)" == "TO · cellular not working" ]] \
-  && pass "the focus names the window" || fail "focus title ($(opt --name))"
+[[ $CODE == 2 && "$(opt --name)" == "TO · End the broken cycle" ]] \
+  && pass "the source title wins over focus text" || fail "focus title ($(opt --name))"
 BRIEF="$(opt --prompt-file)"
 grep -q "Your scope is: \*\*cellular not working\*\*" "$BRIEF" \
   && pass "the focus is stated as an explicit narrowing" || fail "focus not scoped in brief"
@@ -181,7 +185,7 @@ grep -q "Your scope is: \*\*cellular not working\*\*" "$BRIEF" \
 run "/takeover @alpha the reply engine"
 [[ $CODE == 2 && "$(opened_cwd)" == "$AGENTS/Alpha/chat" ]] \
   && pass "@agent lands in the agent's chat seat" || fail "@alpha ($(opened_cwd))"
-[[ "$(opt --name)" == "TO→Alpha · the reply engine" ]] \
+[[ "$(opt --name)" == "TO→Alpha · End the broken cycle" ]] \
   && pass "a retargeted takeover is titled for its agent" || fail "agent title ($(opt --name))"
 run "/takeover @bravo"
 [[ $CODE == 2 && "$(opened_cwd)" == "$AGENTS/Bravo" ]] \
@@ -189,6 +193,35 @@ run "/takeover @bravo"
 run "/takeover @ALPHA-meta look again"
 [[ $CODE == 2 && "$(opened_cwd)" == "$AGENTS/Alpha/meta" ]] \
   && pass "@agent-seat names a seat, case-blind" || fail "@alpha-meta ($(opened_cwd))"
+
+# Codex stores the current title outside the rollout. A rename appends another
+# index row, so the last matching native id is the title the takeover inherits.
+CODEX_HOME="$TMP/codex"; export CODEX_HOME
+mkdir -p "$CODEX_HOME"
+CODEX_SID="bbbbbbbb-1111-2222-3333-444444444444"
+CODEX_SRC="$PROJ/rollout-$CODEX_SID.jsonl"
+printf '%s\n' '{"type":"session_meta","payload":{"id":"'"$CODEX_SID"'","cwd":"'"$SEAT"'"}}' > "$CODEX_SRC"
+printf '%s\n' \
+  '{"id":"'"$CODEX_SID"'","thread_name":"First title"}' \
+  '{"id":"'"$CODEX_SID"'","thread_name":"Current Codex title"}' \
+  > "$CODEX_HOME/session_index.jsonl"
+CLAUDE_SID="$SID"; SID="$CODEX_SID"
+run "/takeover this is scope only" "$CODEX_SRC"
+[[ $CODE == 0 && "$(opt --name)" == "TO · Current Codex title" ]] \
+  && pass "Codex takeovers inherit the latest indexed thread title" \
+  || fail "codex title (code=$CODE name=$(opt --name))"
+[[ "$(opt --engine)" == "codex" ]] \
+  && pass "the Codex source still selects the Codex engine" || fail "codex engine ($(opt --engine))"
+SID="$CLAUDE_SID"
+
+# A source can be too young to have a provider title. The seat is the honest
+# fallback; the focus is still not promoted into a made-up session name.
+UNTITLED="$PROJ/untitled.jsonl"
+printf '%s\n' '{"type":"user","sessionId":"'"$SID"'"}' > "$UNTITLED"
+run "/takeover do not use these words" "$UNTITLED"
+[[ $CODE == 2 && "$(opt --name)" == "TO · alpha/chat" ]] \
+  && pass "an unnamed source falls back to its seat, never its focus" \
+  || fail "untitled fallback ($(opt --name))"
 
 # The slash was this command's own spelling for one release and no other
 # command's. It must name the mistake, not report the token as a bad agent.

@@ -29,6 +29,61 @@ def metadata(path) -> dict:
     return {}
 
 
+def session_title(path, sid: str = "") -> str:
+    """The provider's current title for ``path``, or ``""`` when unnamed.
+
+    Claude writes generated and user-renamed titles into the transcript. A
+    custom title is the current one whenever present, matching its own session
+    picker. Codex keeps titles in ``session_index.jsonl`` instead of the
+    rollout, so its native thread id joins the two files. Read the whole index:
+    renames append another row and the last matching row wins.
+
+    This deliberately does not derive a title from a prompt. Callers may use a
+    prompt as scope, but scope is not the session's name.
+    """
+    transcript = Path(path)
+    meta = metadata(transcript)
+    if meta:
+        native_sid = str(meta.get("id") or meta.get("session_id") or sid or "")
+        title = ""
+        try:
+            with (codex_root() / "session_index.jsonl").open() as stream:
+                for line in stream:
+                    try:
+                        row = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    if row.get("id") != native_sid:
+                        continue
+                    candidate = row.get("thread_name")
+                    if isinstance(candidate, str):
+                        title = " ".join(candidate.split())
+        except OSError:
+            pass
+        return title
+
+    generated = ""
+    custom = ""
+    try:
+        with transcript.open() as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if row.get("type") == "ai-title":
+                    candidate = row.get("aiTitle")
+                    if isinstance(candidate, str):
+                        generated = " ".join(candidate.split())
+                elif row.get("type") == "custom-title":
+                    candidate = row.get("customTitle")
+                    if isinstance(candidate, str):
+                        custom = " ".join(candidate.split())
+    except OSError:
+        pass
+    return custom or generated
+
+
 def engine(payload=None) -> str:
     payload = payload or {}
     path = payload.get("transcript_path")

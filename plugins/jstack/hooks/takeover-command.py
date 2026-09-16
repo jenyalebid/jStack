@@ -50,7 +50,7 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(PLUGIN_ROOT))
-from session_runtime import engine
+from session_runtime import engine, session_title
 from _answer import block, configure    # noqa: E402 — sibling modules, path set above
 from _prompts import load as load_prompt  # noqa: E402
 
@@ -193,16 +193,15 @@ def stage(text: str) -> str:
     return path
 
 
-def title_for(agent: str, focus: str, source_seat: str) -> str:
-    """`TO · <topic>` / `TO→<Agent> · <topic>`, matching handoff's `HF ·`.
+def title_for(agent: str, current_title: str, source_seat: str) -> str:
+    """`TO · <source title>` / `TO→<Agent> · <source title>`.
 
-    The topic is the focus as typed, clipped — there is no model here to name
-    the work in three words, and an invented title would be the one piece of
-    this payload that nobody wrote."""
-    words = " ".join(focus.split()[:5])
-    if len(words) > 40:
-        words = words[:39].rstrip() + "…"
-    topic = words or source_seat
+    A takeover inherits the source session's current name. Its optional focus
+    narrows the work in the briefing and kickoff only; it never renames the
+    work. An unnamed source falls back to its seat so the new row is still
+    identifiable without inventing a title from user prose.
+    """
+    topic = current_title or source_seat
     return f"TO→{agent} · {topic}" if agent else f"TO · {topic}"
 
 
@@ -262,7 +261,7 @@ def main() -> None:
         transcript=transcript, focus_line=focus_line, continue_line=continue_line)
     brief_path = stage(briefing)
 
-    title = title_for(agent, focus, source_seat)
+    title = title_for(agent, session_title(transcript, sid), source_seat)
     kick = ("Take over the session named in your briefing: read it from the "
             "transcript, verify what it claims against the tree, then continue"
             + (f" — focus: {focus}." if focus else "."))
