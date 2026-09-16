@@ -33,8 +33,10 @@ instead of waiting at an empty box. `--claude-args` is one flat, pre-tokenized
 string spliced verbatim after the standard flags — exactly the stock adapter's
 pass-through contract.
 
-Prints the sid on success. Exit 75 when the jRemote app is not installed (and
-then no session exists), so the adapter falls back to a raw window.
+Prints the sid only after the requested agent CLI is observed alive in the
+managed pane. Exit 70 when the pane never reaches that state (the provisional
+registry row and pane are removed), or 75 when the jRemote app is not installed
+and no session was attempted, so the adapter may fall back to a raw window.
 """
 
 import argparse
@@ -43,10 +45,13 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
 _DASHBOARD = "http://127.0.0.1:9090/api/jremote/v1"
+_START_TIMEOUT = 10.0
+_START_STABLE = 0.5
 
 
 def build_shell_parts(name: str, prompt_file: str, claude_args: str,
@@ -154,6 +159,51 @@ def _route_window(origin: str, new_sid: str, cwd: str) -> str:
         return "mac"
 
 
+def _agent_started(sid: str, engine: str) -> bool:
+    """Does this managed pane currently own the requested agent CLI?
+
+    Registry and tmux existence are promises made by the spawner, not proof
+    that the provider accepted its argv. Join the pane's tty to an independent
+    ``ps`` scan of the actual executable instead. This is the distinction
+    between "we recorded a Codex row" and "Codex is running in that row".
+    """
+    from . import managed, procscan
+    name = managed._name(sid)
+    pane_ttys = {tty for tty, pane_name in managed.pane_ttys().items()
+                 if pane_name == name}
+    if not pane_ttys:
+        return False
+    comms = ("codex",) if engine == "codex" else ("claude", "claude.exe")
+    return bool(pane_ttys.intersection(
+        procscan._engine_ttys_from_ps(comms).values()))
+
+
+def _wait_for_agent(sid: str, engine: str, timeout: float = _START_TIMEOUT) -> bool:
+    """Require a real provider process to survive startup, bounded by timeout.
+
+    One instantaneous sighting is not enough: a CLI with invalid flags exists
+    briefly while printing its usage, then exits. A half-second continuous
+    observation rejects that false positive without waiting for a prompt that
+    a ``--first-prompt`` task may never sit idle long enough to draw.
+    """
+    from . import managed
+    deadline = time.monotonic() + timeout
+    stable_since = None
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        if _agent_started(sid, engine):
+            if stable_since is None:
+                stable_since = now
+            if now - stable_since >= _START_STABLE:
+                return True
+        else:
+            stable_since = None
+            if not managed.is_open(sid):
+                return False
+        time.sleep(0.1)
+    return False
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cwd", required=True)
@@ -200,6 +250,14 @@ def main(argv=None) -> int:
     if a.model:
         options["model"] = a.model
     managed.open_managed(sid, cwd, **options)
+    if not _wait_for_agent(sid, a.engine):
+        # This row was provisional. A provider that rejected its invocation is
+        # not a session, even if tmux or the registry outlived it for a moment.
+        managed.close_managed(sid, review=False)
+        managed.record_close(sid)
+        print(f"spawn: {a.engine} did not start — nothing was spawned",
+              file=sys.stderr)
+        return 70
     # The window opens where the spawn was driven: a handoff typed on the
     # iPad gets its open frame down that device's own socket ("device"),
     # a device that can't be reached gets no window at all ("none" — the

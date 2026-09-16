@@ -177,7 +177,7 @@ def test_registry_row_carries_spawn_name(monkeypatch):
 # ── the CLI main path — the spawn's product is a jRemote thread window ──────
 
 def _run_main(monkeypatch, tmp_path, app_exists=True, open_ok=True, argv=None,
-              route=None):
+              route=None, started=True):
     """Drive spawn.main with every side effect recorded, none performed.
 
     `route=None` pins origin_sid to '' (not inside a managed session), so
@@ -198,9 +198,15 @@ def _run_main(monkeypatch, tmp_path, app_exists=True, open_ok=True, argv=None,
     monkeypatch.setattr(spawn, "agent_base_for", lambda cwd: "testy")
     monkeypatch.setattr(managed, "record_open",
                         lambda sid, agent, name="", **kw: events.append(("record", sid)))
+    monkeypatch.setattr(managed, "record_close",
+                        lambda sid: events.append(("forget", sid)))
+    monkeypatch.setattr(managed, "close_managed",
+                        lambda sid, review=False: events.append(("close", sid)) or True)
     monkeypatch.setattr(managed, "open_managed",
                         lambda sid, cwd, resume=False, extra="", prelude="", **kw:
                         events.append(("open", sid, resume)))
+    monkeypatch.setattr(spawn, "_wait_for_agent",
+                        lambda sid, engine: started)
     monkeypatch.setattr(desk, "open_thread",
                         lambda sid, cwd="": events.append(("window", sid)) or open_ok)
     rc = spawn.main(argv or ["--cwd", str(tmp_path), "--sid", "sid-cli"])
@@ -220,6 +226,47 @@ def test_main_without_the_app_refuses_before_anything_exists(monkeypatch, tmp_pa
     rc, events = _run_main(monkeypatch, tmp_path, app_exists=False)
     assert rc == 75
     assert events == []
+
+
+def test_main_refuses_and_removes_a_row_when_provider_never_starts(monkeypatch,
+                                                                   tmp_path):
+    """A registry write is intent, not evidence that the CLI accepted argv."""
+    rc, events = _run_main(monkeypatch, tmp_path, started=False)
+    assert rc == 70
+    assert [e[0] for e in events] == ["record", "open", "close", "forget"]
+    assert "window" not in [e[0] for e in events]
+
+
+def test_agent_started_joins_provider_process_to_the_managed_pane(monkeypatch):
+    monkeypatch.setattr(managed, "pane_ttys",
+                        lambda: {"/dev/ttys009": "jr-sid-cli",
+                                 "/dev/ttys010": "jr-someone"})
+    monkeypatch.setattr(procscan, "_engine_ttys_from_ps",
+                        lambda comms: {51: "/dev/ttys009"}
+                        if comms == ("codex",) else {52: "/dev/ttys010"})
+    assert spawn._agent_started("sid-cli", "codex") is True
+    assert spawn._agent_started("sid-cli", "claude") is False
+
+
+def test_wait_for_agent_rejects_a_provider_seen_only_while_it_exits(monkeypatch):
+    now = [0.0]
+    sightings = iter((True, True, True, False))
+    monkeypatch.setattr(spawn.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(spawn.time, "sleep",
+                        lambda seconds: now.__setitem__(0, now[0] + 0.2))
+    monkeypatch.setattr(spawn, "_agent_started",
+                        lambda sid, engine: next(sightings))
+    monkeypatch.setattr(managed, "is_open", lambda sid: False)
+    assert spawn._wait_for_agent("sid-cli", "codex", timeout=2) is False
+
+
+def test_wait_for_agent_accepts_a_provider_stable_past_startup(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(spawn.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(spawn.time, "sleep",
+                        lambda seconds: now.__setitem__(0, now[0] + 0.2))
+    monkeypatch.setattr(spawn, "_agent_started", lambda sid, engine: True)
+    assert spawn._wait_for_agent("sid-cli", "codex", timeout=2) is True
 
 
 def test_main_failed_window_keeps_the_session(monkeypatch, tmp_path):
