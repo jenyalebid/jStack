@@ -9,14 +9,14 @@ that contract from the implementation and evidence available today.
 - `5cd12c4` adds the running host's source stamp and doctor comparisons for
   checkout, plugin cache, running host and installed app. These are local
   observations, not a fleet inventory or an updater.
-- `host/jstack_host/releases.py` serves the authenticated jRemote Mac feed.
-  The jRemote repository's `release-mac.sh` builds, signs, notarizes and
+- `host/jstack_host/releases.py` serves the authenticated Mac client feed.
+  The client repository's `release-mac.sh` builds, signs, notarizes and
   publishes the app. Its managed-access gate does not cover a complete
   installation or cellular journey.
-- jRemote's `MacUpdater.swift` checks registered hosts at launch and every
+- The client's `MacUpdater.swift` checks registered hosts at launch and every
   six hours, stages a verified app, and offers a relaunch. Its helper checks
   the archive again before replacement. Update ownership currently lives in
-  jRemote, not the menu bar.
+  the client app, not the menu bar.
 - `install.sh` updates the stack and installs the client. The menu bar is
   compiled locally by `host/menubar/install.sh`; it is not yet a separately
   published, signed update artifact.
@@ -27,7 +27,7 @@ that contract from the implementation and evidence available today.
 
 - The home hub owns release selection and update management for its fleet.
 - Every Mac has one update surface in the jStack menu bar for the host,
-  plugin, menu bar app and jRemote. The jRemote update entry leads there.
+  plugin, menu bar app and client app. The client's update entry leads there.
 - The hub can update itself, one managed Mac, or all eligible managed Macs.
   A managed Mac can also apply the release its hub offers with a local tap.
 - Every host and client learns of releases while connected and checks again
@@ -41,7 +41,7 @@ that contract from the implementation and evidence available today.
 
 One release action, reachable from either repository, submits exact committed
 source revisions to the build/publishing machine. That machine produces one
-release manifest covering the stack, menu bar and jRemote platform builds.
+release manifest covering the stack, menu bar and client platform builds.
 No release is assembled from a developer's moving working directory.
 
 The manifest has a release ID, source revisions, component versions and
@@ -50,7 +50,7 @@ test receipts. Unchanged components can retain their existing verified
 artifacts; one release action need not rebuild unrelated binaries.
 
 Build and test a candidate privately. Sign the manifest and Mac artifacts;
-reuse the jRemote signing and notarization pipeline and package the menu bar
+reuse the client's signing and notarization pipeline and package the menu bar
 through it. Validate the complete candidate, then atomically promote the
 manifest in the existing host feed. An incomplete candidate is not offered.
 Keep immutable artifacts and a previous compatible release for recovery.
@@ -65,7 +65,7 @@ reconnect reconciliation recover missed events.
 
 The menu bar shows the available release and one Update action for this Mac.
 On the hub it also shows each managed Mac, with Update and Update All actions.
-The update control stays usable when jRemote is closed.
+The update control stays usable when the client app is closed.
 
 For each machine, record desired release, installed component versions,
 actually running component versions, last contact, and the latest update

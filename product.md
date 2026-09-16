@@ -132,13 +132,13 @@ app we ship is one client, not the product.
 - Removal takes only what install wrote; a deeper option takes the stored data too.
 
 **Releases**
-- Changes to either jStack or jRemote have one release action that prepares a compatible release of the stack and its apps.
+- Changes to either jStack or its client app have one release action that prepares a compatible release of the stack and its apps.
 - The home hub manages which release is offered to its connected machines and apps.
 - A release becomes available only after its required product journeys pass on the release being offered.
 - Every connected host and client learns when an update is available, including after reconnecting.
 
 **Updates**
-- The menu bar is the Mac's updater for jStack, its menu bar app and jRemote, with one update action.
+- The menu bar is the Mac's updater for jStack, its menu bar app and its client app, with one update action.
 - From the home hub, update one managed Mac or all eligible managed Macs remotely.
 - See what each machine has installed, what it is running, the available update, and its last verified contact.
 - Follow each update through completion or recovery; an offline machine stays pending and a failed update is never reported as current.
