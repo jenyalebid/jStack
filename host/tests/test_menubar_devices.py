@@ -95,6 +95,7 @@ let window = HostInfoWindow()
 window.render(machine: "Lab Mac", status: "Port 9090 · open", details: details)
 let scroll = window.contentView as! NSScrollView
 let rows = scroll.documentView as! NSStackView
+assert(rows.isFlipped, "short status content must start at the top of the window")
 let labels = rows.arrangedSubviews.compactMap { ($0 as? NSTextField)?.stringValue }
 assert(labels == ["Lab Mac", "Port 9090 · open", "No release available"])
 let button = rows.arrangedSubviews.compactMap { $0 as? NSButton }.first!
@@ -157,8 +158,10 @@ assert(app.windows.filter { $0.title == "jStack Info" && $0.isVisible }.count ==
 firstInfo.close()
 controller.showUpdates() // The jstack://updates entry uses this exact method.
 assert(firstInfo.isVisible)
+firstInfo.close()
 let available = statusItem.menu!.items.first { $0.title == "Update Available" }!
 NSApp.sendAction(available.action!, to: available.target, from: available)
+assert(firstInfo.isVisible, "a direct update must open its progress window")
 waitUntil { statusItem.menu?.items.contains { $0.title == "Update Available" } == false }
 firstInfo.close()
 print("live menu actions passed")

@@ -1440,7 +1440,10 @@ enum MenuBarAgent {
 /// A reusable, nonmodal status window. Update actions retain their menu command
 /// so the window and deep link use the same authority and request handling.
 final class HostInfoWindow: NSWindow {
-    private let rows = NSStackView()
+    private final class TopAlignedStack: NSStackView {
+        override var isFlipped: Bool { true }
+    }
+    private let rows = TopAlignedStack()
     private var lastContent: [String] = []
     private final class CommandButton: NSButton {
         let command: NSMenuItem
@@ -1476,6 +1479,7 @@ final class HostInfoWindow: NSWindow {
         rows.orientation = .vertical
         rows.alignment = .leading
         rows.spacing = 8
+        rows.setContentHuggingPriority(.required, for: .vertical)
         rows.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
         rows.translatesAutoresizingMaskIntoConstraints = false
         scroll.documentView = rows
@@ -1499,6 +1503,7 @@ final class HostInfoWindow: NSWindow {
             let field = NSTextField(wrappingLabelWithString: text)
             field.font = NSFont.preferredFont(forTextStyle: heading ? .headline : .body)
             field.isSelectable = true
+            field.setContentHuggingPriority(.required, for: .vertical)
             rows.addArrangedSubview(field)
             field.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -40).isActive = true
         }
@@ -1749,7 +1754,7 @@ final class StatusController: NSObject {
     @objc private func doUpdate(_ sender: NSMenuItem) {
         guard !updateRequestInFlight, let target = sender.representedObject as? String else { return }
         updateRequestInFlight = true
-        refreshInfoWindow()
+        showUpdates()
         probe.update(target: target, requestID: UUID().uuidString) { [weak self] ok, detail in
             guard let self else { return }
             self.updateRequestInFlight = false
