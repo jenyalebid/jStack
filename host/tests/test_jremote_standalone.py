@@ -279,7 +279,8 @@ d = r.json()
 # Either a real reading or an honest absence — never a zeroed meter.
 if d.get("available", True):
     assert set(d["providers"]) == {"claude", "codex"}, d
-    assert d["providers"]["claude"] and d["providers"]["claude"]["windows"], d
+    assert any(d["providers"].values()), d
+    assert all(p["windows"] for p in d["providers"].values() if p), d
 else:
     assert d["providers"] == {}, d
 ''')

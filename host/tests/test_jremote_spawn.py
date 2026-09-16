@@ -79,6 +79,7 @@ def test_agent_base_resolution(tmp_path, monkeypatch):
     root = tmp_path / "Agents"
     (root / "Nova" / "chat").mkdir(parents=True)
     monkeypatch.setenv("JREMOTE_INSTANCE_ROOT", str(root))
+    monkeypatch.setenv("JREMOTE_HOST_PROFILE", "default")
     hostenv.reset_profile()
     assert spawn.agent_base_for(str(root / "Nova" / "chat")) == "nova"
     assert spawn.agent_base_for("/tmp/nowhere") == ""

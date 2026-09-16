@@ -109,6 +109,8 @@ def test_auto_falls_back_to_default_without_lib(monkeypatch, tmp_path):
     """A machine with no embedding tree gets a working roster, not an exception."""
     monkeypatch.delenv("JREMOTE_HOST_PROFILE", raising=False)
     monkeypatch.setenv("JREMOTE_INSTANCE_ROOT", str(tmp_path))
+    # Imported embedding profiles survive in sys.modules between tests.
+    monkeypatch.setenv("JREMOTE_PROFILE_MODULE", "absent_test_host_profile")
     _block_lib(monkeypatch)
     assert hostenv.profile().name == "default"
 

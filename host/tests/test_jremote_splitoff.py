@@ -46,6 +46,7 @@ def home(monkeypatch, tmp_path):
     root = tmp_path / "Agents"
     (root / "Nova" / "chat").mkdir(parents=True)
     monkeypatch.setenv("JREMOTE_INSTANCE_ROOT", str(root))
+    monkeypatch.setenv("JREMOTE_HOST_PROFILE", "default")
     hostenv.reset_profile()
     monkeypatch.setattr(sys.modules[__name__], "KEY",
                         str(root).replace("/", "-") + "-Nova-chat")
