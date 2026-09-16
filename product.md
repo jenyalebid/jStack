@@ -1,4 +1,4 @@
-# JStack
+# jStack
 
 ## The problem
 
@@ -9,7 +9,7 @@ help. It is a second desk with the same problem.
 
 ## The offering
 
-JStack turns a Mac into a hub. One script installs it, and from then on every
+jStack turns a Mac into a hub. One script installs it, and from then on every
 session that machine runs is visible and drivable from any device you own —
 on your own network by default, off-network when you choose it, and other
 Macs can attach to a hub to be reachable through the same door. The hub owns
@@ -56,8 +56,14 @@ app we ship is one client, not the product.
   lived.
 - Each device carries its own key. Revoking a lost phone cuts off that phone
   only, and immediately.
-- The list of what may connect lives on the Mac that owns it: name, rename,
-  remove.
+- The home hub's menu bar owns the device list: name, rename and remove.
+- A remote app can disconnect only itself; a managed Mac does not administer devices.
+
+**Managed Macs**
+- Add a Mac to the home hub by running one generated file on that Mac.
+- Devices paired with the hub automatically reach its managed Macs without pairing again.
+- The hub controls whether each managed Mac sees the home instance and the other managed Macs. Both are allowed by default.
+- Each instance's name and icon remain editable; access and connection settings stay controlled by the hub.
 
 ### Working unattended
 **Scheduling**
@@ -119,10 +125,20 @@ app we ship is one client, not the product.
 - Shows what is true right now: the mode, the sessions running, the machines
   attached.
 
-**Install and updates**
+**Install**
 - One command on a clean machine ends with a working session on screen.
-- Running the same command again is the update. Every step is safe to
-  repeat.
+- Repeating installation safely repairs the installed components.
 - The install checks itself and ends with a verdict, not an assumption.
-- Removal takes only what install wrote; a deeper option takes the stored
-  data too.
+- Removal takes only what install wrote; a deeper option takes the stored data too.
+
+**Releases**
+- Changes to either jStack or jRemote have one release action that prepares a compatible release of the stack and its apps.
+- The home hub manages which release is offered to its connected machines and apps.
+- A release becomes available only after its required product journeys pass on the release being offered.
+- Every connected host and client learns when an update is available, including after reconnecting.
+
+**Updates**
+- The menu bar is the Mac's updater for jStack, its menu bar app and jRemote, with one update action.
+- From the home hub, update one managed Mac or all eligible managed Macs remotely.
+- See what each machine has installed, what it is running, the available update, and its last verified contact.
+- Follow each update through completion or recovery; an offline machine stays pending and a failed update is never reported as current.
