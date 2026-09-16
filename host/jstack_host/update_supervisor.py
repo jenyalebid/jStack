@@ -189,6 +189,8 @@ class Supervisor:
             raise
         except Exception as exc:
             if self.current.get("state") in {"applying", "verifying"}:
+                self.save(detail=str(exc))
+                print(f"update application failed: {exc}", flush=True)
                 self.backend.rollback(self.current)
                 self.save(state="rolled_back", detail=str(exc))
             else:

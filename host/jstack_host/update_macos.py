@@ -129,7 +129,7 @@ class MacBackend:
         team = self.config["team_id"]
         identifier = self.config[kind + "_bundle_id"]
         command(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R",
-                 f'anchor apple generic and certificate leaf[subject.OU] = "{team}" and identifier "{identifier}"',
+                 f'=anchor apple generic and certificate leaf[subject.OU] = "{team}" and identifier "{identifier}"',
                  str(path)])
         command(["/usr/sbin/spctl", "--assess", "--type", "execute", str(path)])
         if str(bundle_info(path)["CFBundleVersion"]) != component["version"]:
@@ -176,7 +176,7 @@ class MacBackend:
             if not os.access(target.parent, os.W_OK):
                 raise releases.ReleaseError(f"{kind} install directory is not writable")
             apps[kind] = {"source": str(app), "target": str(target),
-                          "backup": str(target.with_name(target.name + ".previous-" + manifest["release"])),
+                          "backup": str(target.with_name(target.name + ".previous-" + manifest["release"] + "-" + stage.name)),
                           "was_running": bool(target.exists() and running(target)),
                           "existed": target.exists()}
             if Path(apps[kind]["backup"]).exists():
@@ -224,12 +224,24 @@ class MacBackend:
 
     def _unload(self, kind: str):
         label = self.config[kind + "_label"]
-        # A service already down is a legitimate recovery starting state.
+        print(f"update: unloading {kind}", flush=True)
+        # bootout returns before launchd necessarily removes the service.
+        # Wait for that removal before trying to bootstrap its replacement.
         subprocess.run(["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
                        capture_output=True, timeout=30)
+        deadline = time.monotonic() + 30
+        while subprocess.run(["/bin/launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                             capture_output=True, timeout=5).returncode == 0:
+            if time.monotonic() >= deadline:
+                raise releases.ReleaseError(f"{kind} service did not unload")
+            time.sleep(0.1)
 
     def _load(self, kind: str):
-        command(["/bin/launchctl", "bootstrap", f"gui/{os.getuid()}", self.config[kind + "_plist"]])
+        print(f"update: loading {kind}", flush=True)
+        try:
+            command(["/bin/launchctl", "bootstrap", f"gui/{os.getuid()}", self.config[kind + "_plist"]])
+        except releases.ReleaseError as exc:
+            raise releases.ReleaseError(f"{kind} service did not load: {exc}") from exc
 
     def apply(self, job: dict):
         transaction = job["transaction"]
@@ -237,6 +249,7 @@ class MacBackend:
         update_plugins.install(transaction["providers"], Path(transaction["stack"]))
         self._unload("menubar")
         for kind, app in transaction["apps"].items():
+            print(f"update: replacing {kind}", flush=True)
             target, backup = Path(app["target"]), Path(app["backup"])
             stop_app(target)
             if target.exists():
@@ -307,7 +320,7 @@ class MacBackend:
     def verify(self, job: dict) -> bool:
         try:
             from . import update_plugins
-            plugins = update_plugins.observed(job["transaction"]["providers"])
+            plugins = update_plugins.observed(update_plugins.discover())
             expected = job["envelope"]["manifest"]["components"]["stack"]["version"]
             if any(value["version"] != expected for value in plugins.values()):
                 return False
@@ -362,7 +375,7 @@ class MacBackend:
                             for kind in ("client", "menubar")))
         try:
             from . import update_plugins
-            components["plugins"] = update_plugins.observed(job.get("transaction", {}).get("providers", []))
+            components["plugins"] = update_plugins.observed(update_plugins.discover())
         except (OSError, ValueError, subprocess.SubprocessError):
             components["plugins"] = {"error": "could not observe installed plugin versions"}
         verified = verified and all(isinstance(value, dict) and value.get("version") ==
