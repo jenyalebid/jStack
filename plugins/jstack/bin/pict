@@ -22,6 +22,19 @@ Options:
                     The reading copy: what the context IS, where the default
                     view answers why each file is in it and what it costs.
 
+  --session ID      read a session that ALREADY RAN instead of previewing a
+                    new one. Its SessionStart hook context comes from its own
+                    transcript — the bytes it really received — so the
+                    timeline block is the session's, pin and all, not a guess
+                    from this shell's env (the pin lives in JSTACK_TIMELINE_TAG
+                    and a shell that was never the session's has no way to
+                    know it). The directory defaults to the session's recorded
+                    cwd, so the walk-up is the one it composed against; pass a
+                    dir to compose another against its real hook context.
+                    Everything else stays emulated — the walk-up, memory, base
+                    prompt and schemas are built per request and never written
+                    to the transcript.
+
 Options — describe the spawn being previewed:
 
   --headless        preview a headless spawn (`claude --print`): interactive-
@@ -81,9 +94,17 @@ Stages, in wire order (verified against captured request bodies):
   4. After the first       — SessionStart hook context + harness
      message                 reminders. The jStack timeline injection is
                              emulated faithfully (same seat resolution +
-                             config as hooks/session-start-inject.py).
-                             Other hooks are LISTED unless --exec-hooks
-                             runs them.
+                             config as hooks/session-start-inject.py), or
+                             read verbatim from the transcript with
+                             --session. Either way the annotated view
+                             resolves the rendered block back to the
+                             timeline db and tables it: one row per
+                             sitting, with the seat and the SUBJECTS that
+                             sitting is filed under. A subject window is
+                             built from a tag on the session, so a sitting
+                             filed under two lands in both — the table is
+                             where that shows. Other hooks are LISTED
+                             unless --exec-hooks runs them.
   5. Mid-session data      — --serve captures, in order given.
 
 Then the on-demand layer: path-scoped rules whose `paths:` globs match a
@@ -305,13 +326,19 @@ HTML_COMMENT = re.compile(r"\n*<!--.*?-->", re.S)
 
 class Source:
     def __init__(self, order: int, stage: str, label: str, mechanism: str,
-                 body: str | None, note: str = ""):
+                 body: str | None, note: str = "", extra: str = ""):
         self.order = order
         self.stage = stage
         self.label = label
         self.mechanism = mechanism
         self.body = body
         self.note = note
+        # A block the annotated view renders between the meta line and the
+        # body: structure the body itself cannot carry because the body is
+        # the wire bytes. Never rides --bare — that view is the injection and
+        # nothing else, and an annotation inside it would be a lie about what
+        # the session received.
+        self.extra = extra
 
 
 def display(path: Path) -> str:
@@ -328,8 +355,9 @@ def read_or_none(path: Path) -> str | None:
 
 
 def add(sources: list[Source], stage: str, label: str, mechanism: str,
-        body: str | None, note: str = "") -> None:
-    sources.append(Source(len(sources) + 1, stage, label, mechanism, body, note))
+        body: str | None, note: str = "", extra: str = "") -> None:
+    sources.append(Source(len(sources) + 1, stage, label, mechanism, body,
+                          note, extra))
 
 
 def strip_html_comments(body: str) -> tuple[str, int]:
@@ -642,6 +670,239 @@ def timeline_count(cfg: dict, agent: str, submode: str) -> tuple[int, str]:
         seat = seat.rsplit("/", 1)[0]
 
 
+def session_transcript(sid: str) -> Path | None:
+    """The jsonl a session id belongs to, wherever its project dir is."""
+    projects = claude_dir() / "projects"
+    if not projects.is_dir():
+        return None
+    for proj in sorted(projects.iterdir()):
+        path = proj / f"{sid}.jsonl"
+        if path.is_file():
+            return path
+    return None
+
+
+def session_capture(path: Path) -> dict:
+    """What a RUNNING session really received on start, off its own transcript.
+
+    The harness records SessionStart hook output verbatim — command, exit
+    code, stdout — so a session's injected hook context is not a thing to be
+    inferred: it is written down. Emulation has to guess the pin from ambient
+    env, and a shell that was never the session's shell guesses wrong; this
+    reads the bytes the session actually got.
+
+    What the transcript does NOT hold: the CLAUDE.md walk-up, the memory
+    index, the base prompt, the tool schemas. Those are composed per request
+    and never written down, so they stay emulated from the session's own cwd
+    (which the transcript does record). `--request` remains the only mode
+    that sees the base prompt and schemas."""
+    cwd, blocks = "", []
+    try:
+        with path.open() as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not cwd and isinstance(rec.get("cwd"), str):
+                    cwd = rec["cwd"]
+                if rec.get("type") != "attachment":
+                    continue
+                a = rec.get("attachment") or {}
+                if (a.get("type") != "hook_success"
+                        or a.get("hookEvent") != "SessionStart"):
+                    continue
+                body = ""
+                try:
+                    out = json.loads(a.get("stdout") or "")
+                    spec = out.get("hookSpecificOutput") or {}
+                    body = spec.get("additionalContext") or ""
+                except (ValueError, AttributeError):
+                    # A hook that prints plain text injects that text.
+                    body = (a.get("stdout") or "").strip()
+                if body:
+                    blocks.append({"hook": a.get("hookName") or "SessionStart",
+                                   "command": a.get("command") or "",
+                                   "body": body})
+    except OSError:
+        return {}
+    return {"path": path, "cwd": cwd, "blocks": blocks}
+
+
+def session_subjects(sid: str, log_event: str) -> list[str]:
+    """What the db has this session filed under — its own row in the relation.
+
+    Empty is the normal early state, not an error: a session tags itself when
+    it writes its first entry, so a sitting that has not logged yet is
+    genuinely unfiled."""
+    try:
+        r = subprocess.run([log_event, "tag", "list", "--session", sid,
+                            "--json"], capture_output=True, text=True,
+                           timeout=8)
+        data = json.loads(r.stdout) if r.returncode == 0 else {}
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError,
+            ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    # `tag list --session` returns the whole vocabulary with `carried` marking
+    # this session's own rows — the membership is the flag, not the list.
+    return sorted(t["name"] for t in data
+                  if isinstance(t, dict) and t.get("carried"))
+
+
+HEADLINE_LINE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})(?: \[([^\]]+)\])? — (.*)$")
+
+
+def sittings_of(block: str, log_event: str) -> list[dict]:
+    """Resolve the RENDERED block back to the db rows it was printed from.
+
+    Derived from the block rather than re-running the window query, and that
+    is the whole point: a second read can disagree with the first (an entry
+    logged in between, a differently-spelled argv) and would then annotate a
+    block nobody is looking at. Whatever is on screen is what gets explained.
+
+    A headline line carries date, time, seat (subject reads only) and the
+    headline itself — enough to key the row. `recall` over the block's own
+    date span is one call for the lot, and it now carries each entry's
+    session and that session's subjects.
+
+    Returns one dict per SITTING, in block order — the window's unit is the
+    sitting, so a session that logged three entries is one row, not three."""
+    keyed: dict[tuple, str] = {}
+    order: list[tuple] = []
+    for line in block.splitlines():
+        m = HEADLINE_LINE.match(line)
+        if m:
+            key = (m.group(1), m.group(2), m.group(4))
+            if key not in keyed:
+                keyed[key] = m.group(3) or ""
+                order.append(key)
+    if not order:
+        return []
+    days = sorted({k[0] for k in order})
+    try:
+        r = subprocess.run(
+            [log_event, "recall", f"{days[0]}..{days[-1]}", "all", "--json"],
+            capture_output=True, text=True, timeout=8)
+        rows = json.loads(r.stdout) if r.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError,
+            ValueError):
+        rows = []
+    index = {(e.get("date"), e.get("time"), e.get("headline")): e
+             for e in rows if isinstance(e, dict)}
+
+    sittings: list[dict] = []
+    seen: dict[str, dict] = {}
+    for key in order:
+        e = index.get(key)
+        seat = keyed[key] or (e or {}).get("source", "")
+        # Mirrors log_event's _SESSION_KEY: a row with no session_id is its
+        # own sitting, not a shared bucket with every other orphan.
+        sid = (e or {}).get("session_id") or f"entry:{(e or {}).get('id')}"
+        if sid in seen:
+            seen[sid]["entries"] += 1
+            continue
+        s = {"when": f"{key[0]} {key[1]}", "seat": seat,
+             "tags": list((e or {}).get("tags") or []),
+             "named_seat": bool(keyed[key]),
+             "resolved": e is not None, "entries": 1}
+        seen[sid] = s
+        sittings.append(s)
+    return sittings
+
+
+def pin_of(sittings: list[dict]) -> str:
+    """The subject a captured block was pinned to, derived from the block.
+
+    Not read off the prose header — a sentence is not a contract, and pict's
+    job here is to stop inferring. Two structural facts give it: `format_tail`
+    names the seat on every line of a SUBJECT read and on no line of a seat
+    read, and a subject window holds only sittings carrying that subject. So
+    the pin is the tag common to every sitting of a seat-named block.
+
+    Ambiguous (nothing common, or several) returns "" — an unbolded table
+    still tells the truth, and a guessed pin would not."""
+    if not sittings or not all(s["named_seat"] and s["resolved"]
+                               for s in sittings):
+        return ""
+    common = set(sittings[0]["tags"])
+    for s in sittings[1:]:
+        common &= set(s["tags"])
+    return common.pop() if len(common) == 1 else ""
+
+
+def sittings_table(sittings: list[dict], tag: str, seat: str) -> str:
+    """The window's provenance, one row per sitting.
+
+    Subjects are the point. A tag hangs off the SESSION, so a sitting filed
+    under two subjects lands in BOTH windows — its work may have been all one
+    of them and none of the other, and the block's prose never says which. A
+    row carrying a subject other than the pinned one is exactly that case, and
+    it is marked, because "why is this in my window" is otherwise unanswerable
+    without opening the db by hand."""
+    if not sittings:
+        return ""
+    head = ("Where this block comes from — one row per sitting, resolved "
+            "against the timeline db.\n**Subjects** are the sitting's tags: a "
+            "tag is a relation on the SESSION, so every entry\na sitting wrote "
+            "carries all of them.\n")
+    if tag:
+        head += (f"\nA subject other than `{tag}` is **bolded**: that sitting "
+                 f"is in this window because it\ncarries the pin, and the "
+                 f"bolded subject is what else it was filed under — the first\n"
+                 f"place to look when a row reads like another app's work.\n")
+    lines = [head, "| sitting | seat | entries | subjects |",
+             "|---------|------|---------|----------|"]
+    for s in sittings:
+        subjects = ", ".join(
+            f"**{t}**" if tag and t != tag else f"`{t}`" for t in s["tags"]
+        ) or ("*(untagged)*" if s["resolved"] else
+              "*(no db row — the block outlived the entry)*")
+        lines.append(f"| {s['when']} | `{s['seat']}` | {s['entries']} | "
+                     f"{subjects} |")
+    foreign = sorted({t for s in sittings for t in s["tags"] if tag and t != tag})
+    if foreign:
+        lines.append("")
+        lines.append(f"Subjects riding this window besides `{tag}`: "
+                     + ", ".join(f"**{t}**" for t in foreign) + ".")
+    return "\n".join(lines) + "\n"
+
+
+def gather_captured_start(capture: dict, sid: str, sources: list[Source],
+                          log_event: str) -> None:
+    """The start stage as it really happened, for a session that exists.
+
+    Replaces emulation for this stage only. Emulation answers "what would a
+    spawn from this directory get"; a running session is a different question
+    with a different answer, and the gap between them — a pin set in its shell
+    and nowhere else — is invisible from outside. Here it isn't inferred."""
+    subjects = session_subjects(sid, log_event)
+    filed = (", ".join(f"`{t}`" for t in subjects) if subjects
+             else "nothing yet — a session files itself when it writes its "
+                  "first entry")
+    for b in capture["blocks"]:
+        extra, pinned = "", ""
+        if "<jstack-timeline>" in b["body"]:
+            sittings = sittings_of(b["body"], log_event)
+            pinned = pin_of(sittings)
+            opened = (f"opened on subject `{pinned}`" if pinned else
+                      "opened on its own seat — no subject pin the window can "
+                      "attest to")
+            extra = (f"This session was {opened}, and is filed under: "
+                     f"{filed}.\n\n"
+                     + sittings_table(sittings, pinned, ""))
+        add(sources, "start", f"{b['hook']} — captured from session `{sid}`",
+            "the bytes this session really received, read from its own "
+            "transcript — not emulated, so the pin is the session's own and "
+            "not this shell's", b["body"], extra=extra)
+    if not capture["blocks"]:
+        add(sources, "start", f"(no SessionStart hook context) session `{sid}`",
+            "its transcript records no SessionStart hook output — the session "
+            "started with none", None)
+
+
 def gather_timeline(directory: Path, sources: list[Source]) -> None:
     cfg = review_config()
     root = Path(cfg.get("agent_root") or "~/Agents").expanduser()
@@ -723,7 +984,8 @@ def gather_timeline(directory: Path, sources: list[Source]) -> None:
         add(sources, "start", empty, mech + f" — {why}" + pin_note, None)
         return
     add(sources, "start", head,
-        mech + f" — {why}{pin_note}, wrapped in <jstack-timeline>", entries)
+        mech + f" — {why}{pin_note}, wrapped in <jstack-timeline>", entries,
+        extra=sittings_table(sittings_of(entries, log_event), tag, seat))
 
 
 # ------------------------------------------------------------------- prompt
@@ -1253,7 +1515,12 @@ def gather(directory: Path, opts: dict, hooks: list[Hook]) -> list[Source]:
         gather_prompt(opts["prompt"], directory, sources)
     if opts["exec_hooks"]:
         exec_session_hooks(directory, hooks, sources)
-    gather_timeline(directory, sources)
+    if opts.get("capture"):
+        gather_captured_start(
+            opts["capture"], opts["session"], sources,
+            os.environ.get("PICT_LOG_EVENT", str(PLUGIN_BIN / "log_event")))
+    else:
+        gather_timeline(directory, sources)
     gather_serves(opts["serves"], sources)
     return sources
 
@@ -1379,6 +1646,8 @@ def render(directory: Path, opts: dict) -> str:
             meta += f" · {s.note}"
         lines.append(meta)
         lines.append("")
+        if s.extra:
+            lines.append(s.extra)
         if s.body:
             lines += neutral(s.body)
         lines.append("")
@@ -1547,7 +1816,8 @@ def main(argv: list[str]) -> int:
         sys.stdout.write(__doc__.strip() + "\n")
         return 0
     opts = {"no_memory": False, "exec_hooks": False, "appends": [],
-            "serves": [], "prompt": "", "sources": []}
+            "serves": [], "prompt": "", "sources": [], "session": "",
+            "capture": None}
     bare = False
     provider = "claude"
     request: Path | None = None
@@ -1564,7 +1834,8 @@ def main(argv: list[str]) -> int:
             opts["exec_hooks"] = True
         elif a == "--bare":
             bare = True
-        elif a in ("--append", "--serve", "--prompt", "--request", "--sources", "--engine"):
+        elif a in ("--append", "--serve", "--prompt", "--request", "--sources",
+                   "--engine", "--session"):
             if i + 1 >= len(args):
                 sys.stderr.write(f"pict: {a} needs a value\n")
                 return 64
@@ -1581,6 +1852,8 @@ def main(argv: list[str]) -> int:
                 opts["serves"].append(Path(val).expanduser())
             elif a == "--sources":
                 opts["sources"].append(Path(val).expanduser())
+            elif a == "--session":
+                opts["session"] = val
             elif a == "--request":
                 request = Path(val).expanduser()
                 if not request.is_file():
@@ -1597,9 +1870,28 @@ def main(argv: list[str]) -> int:
     if len(positional) > 1:
         sys.stderr.write("usage: pict [dir] [--bare] [--headless] [--no-memory] "
                          "[--exec-hooks] [--append FILE]... [--prompt TEXT] "
-                         "[--serve FILE]... [--sources PATH]... [--request FILE]\n")
+                         "[--serve FILE]... [--sources PATH]... [--request FILE] "
+                         "[--session ID]\n")
         return 64
-    directory = Path(positional[0]).expanduser().resolve() if positional else Path.cwd()
+    if opts["session"]:
+        path = session_transcript(opts["session"])
+        if path is None:
+            sys.stderr.write(f"pict: no transcript for session "
+                             f"{opts['session']}\n")
+            return 64
+        opts["capture"] = session_capture(path)
+        if not opts["capture"]:
+            sys.stderr.write(f"pict: cannot read {path}\n")
+            return 64
+    # A session names its own directory; an explicit one still wins, since
+    # asking for another dir's composition against a real session's hook
+    # context is a legitimate comparison.
+    if positional:
+        directory = Path(positional[0]).expanduser().resolve()
+    elif opts["capture"] and opts["capture"].get("cwd"):
+        directory = Path(opts["capture"]["cwd"]).expanduser().resolve()
+    else:
+        directory = Path.cwd()
     if not directory.is_dir():
         sys.stderr.write(f"pict: not a directory: {directory}\n")
         return 64

@@ -402,4 +402,129 @@ OUT8="$(PICT_CLAUDE_DIR="$CLAUDE" PICT_WALK_ROOT="$FIX" PICT_LOG_EVENT="$TMP/log
 echo "$OUT8" | grep -q 'role files — seat' \
   && { echo "FAIL: cockpit seat got a duplicate identity block"; exit 1; }
 
+# ── the window's provenance: one row per sitting, with its SUBJECTS ─────────
+# A tag is a relation on the session, so a sitting filed under two subjects
+# lands in BOTH windows. The block's prose never says which one it was really
+# about, and reading it as the pinned subject's work is the whole failure
+# mode. The table names the other subject; nothing else in the render can.
+cat > "$TMP/log_event2" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  tail)
+    echo "2026-02-01 09:00 [alpha/chat] — pinned work one"
+    echo "2026-02-02 10:00 [beta/chat] — pinned work two"
+    echo "2026-02-02 10:30 [beta/chat] — pinned work two, later"
+    ;;
+  recall)
+    cat <<'JSON'
+[{"id": 1, "date": "2026-02-01", "time": "09:00", "source": "alpha/chat",
+  "headline": "pinned work one", "details": [], "session_id": "s1",
+  "origin": "direct", "tags": ["widgets"]},
+ {"id": 2, "date": "2026-02-02", "time": "10:00", "source": "beta/chat",
+  "headline": "pinned work two", "details": [], "session_id": "s2",
+  "origin": "direct", "tags": ["other-thing", "widgets"]},
+ {"id": 3, "date": "2026-02-02", "time": "10:30", "source": "beta/chat",
+  "headline": "pinned work two, later", "details": [], "session_id": "s2",
+  "origin": "direct", "tags": ["other-thing", "widgets"]}]
+JSON
+    ;;
+  tag) echo '[{"name": "widgets", "carried": true},
+               {"name": "other-thing", "carried": false}]' ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$TMP/log_event2"
+cat > "$CLAUDE/jstack/review.json" <<EOF
+{"agent_root": "$FIX/Agents", "timeline_inject": {"*/chat": 2}}
+EOF
+run_pinned() {
+  PICT_CLAUDE_DIR="$CLAUDE" PICT_WALK_ROOT="$FIX" PICT_LOG_EVENT="$TMP/log_event2" \
+  JSTACK_REVIEW_CONFIG="$CLAUDE/jstack/review.json" JSTACK_RULES_DIR="$CLAUDE/rules" \
+  JSTACK_TIMELINE_TAG=widgets "$PICT" "$@" "$FIX/Agents/Alpha/chat"
+}
+OUT9="$(run_pinned)"
+fail9() { echo "FAIL: $1"; echo "---- output ----"; echo "$OUT9"; exit 1; }
+
+echo "$OUT9" | grep -q '| sitting | seat | entries | subjects |' \
+  || fail9 "no provenance table under the timeline block"
+echo "$OUT9" | grep -q '| 2026-02-01 09:00 | `alpha/chat` | 1 |' \
+  || fail9 "sitting row missing its seat or entry count"
+# the window's unit is the SITTING: one session that logged twice is one row
+echo "$OUT9" | grep -q '| 2026-02-02 10:00 | `beta/chat` | 2 |' \
+  || fail9 "two entries of one session did not collapse into one sitting"
+echo "$OUT9" | grep -q '| 2026-02-02 10:30 |' \
+  && fail9 "second entry of a sitting got its own row"
+# the pin renders plain, the subject riding beside it renders bold
+echo "$OUT9" | grep -q '\*\*other-thing\*\*, `widgets`' \
+  || fail9 "foreign subject not marked against the pin"
+echo "$OUT9" | grep -q 'besides `widgets`: \*\*other-thing\*\*' \
+  || fail9 "no summary of the subjects riding this window"
+
+# --bare is the injection and nothing else — an annotation there would be a
+# claim about bytes the session never received
+OUT10="$(run_pinned --bare)"
+echo "$OUT10" | grep -q 'pinned work one' || fail9 "--bare lost the timeline body"
+echo "$OUT10" | grep -q '| sitting | seat |' \
+  && { echo "FAIL: --bare rendered the annotation table"; exit 1; }
+
+# ── --session: the pin is the session's, never this shell's ────────────────
+# The pin lives in an env var, so emulation from any other shell previews a
+# window the session never got. The harness records SessionStart hook output
+# verbatim in the transcript — that is where the real block comes from.
+SID="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+SDIR="$CLAUDE/projects/fixture-proj"
+mkdir -p "$SDIR"
+python3 - "$SDIR/$SID.jsonl" "$FIX/Agents/Alpha/chat" <<'PY'
+import json, sys
+path, cwd = sys.argv[1], sys.argv[2]
+block = ("<jstack-timeline>\nInjected on entry by jStack.\n\n"
+         "2026-02-01 09:00 [alpha/chat] — pinned work one\n"
+         "2026-02-02 10:00 [beta/chat] — pinned work two\n"
+         "2026-02-02 10:30 [beta/chat] — pinned work two, later\n"
+         "</jstack-timeline>")
+rows = [
+    {"type": "attachment", "cwd": cwd, "attachment": {
+        "type": "hook_success", "hookName": "SessionStart:startup",
+        "hookEvent": "SessionStart", "command": "session-start-inject.py",
+        "stdout": json.dumps({"hookSpecificOutput": {
+            "hookEventName": "SessionStart", "additionalContext": block}})}},
+    {"type": "user", "cwd": cwd, "message": {"role": "user", "content": "hi"}},
+]
+with open(path, "w") as fh:
+    for r in rows:
+        fh.write(json.dumps(r) + "\n")
+PY
+# no dir argument and NO pin in the environment: both must come from the
+# transcript, or the read is the guess it exists to replace
+OUT11="$(cd "$TMP" && env -u JSTACK_TIMELINE_TAG \
+       PICT_CLAUDE_DIR="$CLAUDE" PICT_WALK_ROOT="$FIX" PICT_LOG_EVENT="$TMP/log_event2" \
+       JSTACK_REVIEW_CONFIG="$CLAUDE/jstack/review.json" JSTACK_RULES_DIR="$CLAUDE/rules" \
+       "$PICT" --session "$SID")"
+fail11() { echo "FAIL: $1"; echo "---- output ----"; echo "$OUT11"; exit 1; }
+
+echo "$OUT11" | grep -q "captured from session .$SID" \
+  || fail11 "--session did not render the captured block"
+echo "$OUT11" | grep -q 'pinned work one' || fail11 "captured body missing"
+# the spawn dir came from the transcript, so the walk-up is the session's own
+echo "$OUT11" | grep -q "Alpha chat seat" \
+  || fail11 "--session did not compose against the session's recorded cwd"
+# the pin is DERIVED from the block (seat named on every line + one subject
+# common to every sitting) — never parsed out of the block's prose
+echo "$OUT11" | grep -q 'opened on subject `widgets`' \
+  || fail11 "--session did not derive the pin from the window"
+echo "$OUT11" | grep -q 'filed under: `widgets`' \
+  || fail11 "--session did not report what the db has the session filed under"
+echo "$OUT11" | grep -q '\*\*other-thing\*\*' \
+  || fail11 "captured view lost the foreign subject"
+# emulation must not sneak in beside the capture — one start stage, one truth
+echo "$OUT11" | grep -q 'emulated read-only' \
+  && fail11 "--session rendered the emulated timeline too"
+
+# an id with no transcript is a usage error, not an empty render
+if (cd "$TMP" && PICT_CLAUDE_DIR="$CLAUDE" PICT_WALK_ROOT="$FIX" \
+    JSTACK_REVIEW_CONFIG="$CLAUDE/jstack/review.json" \
+    "$PICT" --session no-such-session >/dev/null 2>&1); then
+  echo "FAIL: --session accepted an id with no transcript"; exit 1
+fi
+
 echo "PASS: pict"
