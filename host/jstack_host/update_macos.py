@@ -366,6 +366,7 @@ class MacBackend:
             return False
 
     def observe(self, job: dict) -> dict:
+        from . import sourcestamp
         components = {}
         for kind in ("client", "menubar"):
             try:
@@ -397,6 +398,8 @@ class MacBackend:
         verified = verified and all(isinstance(value, dict) and value.get("version") ==
                                     expected.get("stack", {}).get("version")
                                     for value in components["plugins"].values())
+        verified = verified and bool(components["menubar"]["running_pids"])
         return {"components": components, "host_source": source,
+                "updater_source": sourcestamp.capture(),
                 "release": source.get("release"),
                 "verified": verified, "job": {k: job.get(k) for k in ("id", "state", "detail")}}

@@ -425,3 +425,27 @@ def test_launchd_replacement_waits_for_service_removal(tmp_path, monkeypatch):
     monkeypatch.setattr(update_macos.time, "sleep", lambda _: None)
     update_macos.MacBackend(tmp_path, {"host_label": "lab-host"})._unload("host")
     assert calls == ["bootout", "print", "print", "print"]
+
+
+def test_inventory_observes_updater_source_and_requires_live_menubar(tmp_path, monkeypatch):
+    from jstack_host import update_macos, update_plugins, sourcestamp
+    token = tmp_path / "token"
+    token.write_text("test")
+    config = {"client_path": "Client", "menubar_path": "Menu", "token_path": str(token),
+              "local_url": "http://test"}
+    monkeypatch.setattr(update_macos, "bundle_info", lambda _: {"CFBundleVersion": "1"})
+    monkeypatch.setattr(update_plugins, "discover", lambda: [])
+    monkeypatch.setattr(update_plugins, "observed", lambda _: {})
+    monkeypatch.setattr(sourcestamp, "capture", lambda: {"sha": "actual-updater"})
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, json={"source": {
+        "release": "r1", "dirty": False}}))
+    real_client = httpx.Client
+    monkeypatch.setattr(update_macos.httpx, "Client", lambda **kwargs: real_client(transport=transport))
+    job = {"verified": True, "state": "current", "release": "r1", "envelope": {"manifest": {
+        "components": {"client": {"version": "1"}, "menubar": {"version": "1"}}}}}
+    backend = update_macos.MacBackend(tmp_path, config)
+    monkeypatch.setattr(update_macos, "running", lambda _: [12])
+    assert backend.observe(job)["verified"] is True
+    assert backend.observe(job)["updater_source"] == {"sha": "actual-updater"}
+    monkeypatch.setattr(update_macos, "running", lambda _: [])
+    assert backend.observe(job)["verified"] is False

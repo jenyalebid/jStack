@@ -227,6 +227,8 @@ class Supervisor:
 
 
 def main():
+    from . import sourcestamp
+    sourcestamp.capture()  # pin this updater's loaded source at process startup
     parser = argparse.ArgumentParser()
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--once", action="store_true")
