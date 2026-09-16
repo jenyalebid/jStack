@@ -334,6 +334,19 @@ struct Session: Decodable {
     /// Alive — a process is holding this session — whether or not it is
     /// producing anything this second. `live` is the narrower claim.
     var running: Bool?
+    var turn: String?
+    var attention: String?
+    var unread: Bool?
+
+    // Match jRemote's per-session semantics: a new working turn supersedes
+    // that same session's old unread reply. Across sessions, unread wins.
+    var signal: SessionSignal {
+        if !(attention ?? "").isEmpty { return .attention }
+        let working = (turn ?? "").isEmpty ? live == true : turn == "working"
+        if working { return .working }
+        if unread == true { return .unread }
+        return .idle
+    }
 
     /// What to call it, in the order the answer is most specific: the window's
     /// own title, then the agent it belongs to, then nothing anyone can act on.
@@ -357,6 +370,37 @@ struct Session: Decodable {
 }
 
 struct ActiveSessions: Decodable { var sessions: [Session]? }
+
+enum SessionSignal: Int {
+    case idle, working, unread, attention
+
+    static func collective(_ sessions: [Session]) -> SessionSignal {
+        sessions.map(\.signal).max(by: { $0.rawValue < $1.rawValue }) ?? .idle
+    }
+    var color: NSColor {
+        switch self {
+        case .idle: .secondaryLabelColor
+        case .working: .systemGreen
+        case .unread: .systemOrange
+        case .attention: .systemRed
+        }
+    }
+    var label: String {
+        switch self {
+        case .idle: "Idle"
+        case .working: "Working"
+        case .unread: "Done, unread"
+        case .attention: "Needs attention"
+        }
+    }
+    var image: NSImage {
+        NSImage(size: NSSize(width: 14, height: 14), flipped: false) { rect in
+            self.color.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 3, dy: 3)).fill()
+            return true
+        }
+    }
+}
 
 /// One row of `GET /devices` — the host's roster of paired devices. The token
 /// itself is never here: the host keeps only its hash, so a row is an identity
@@ -541,6 +585,11 @@ struct UpdateObservation: Decodable {
 struct UpdateInventory: Decodable {
     var release: String?
     var machines: [UpdateMachine]
+
+    func localUpdate(hostID: String?) -> UpdateMachine? {
+        guard release != nil, let hostID else { return nil }
+        return machines.first { $0.machine == hostID && $0.canUpdate }
+    }
 }
 
 /// One snapshot of the machine, as the menu will render it.
@@ -548,6 +597,7 @@ struct HostState {
     var installed = false
     var health: Health?
     var sessions: [Session] = []
+    var sessionsReadable = false
     /// The host's roster of paired devices, revoked ones included — the same
     /// list the client app shows, because #27 is the menu bar owning it too.
     var devices: [Device] = []
@@ -689,6 +739,7 @@ final class HostProbe {
                     if let data,
                        let active = try? Self.decoder.decode(ActiveSessions.self, from: data) {
                         state.sessions = active.sessions ?? []
+                        state.sessionsReadable = status == 200 && active.sessions != nil
                     }
                     // The roster, on the same token and last. A device-list
                     // failure must not throw away the sessions already gathered,
@@ -1386,6 +1437,88 @@ enum MenuBarAgent {
 
 // MARK: - The menu bar
 
+/// A reusable, nonmodal status window. Update actions retain their menu command
+/// so the window and deep link use the same authority and request handling.
+final class HostInfoWindow: NSWindow {
+    private let rows = NSStackView()
+    private var lastContent: [String] = []
+    private final class CommandButton: NSButton {
+        let command: NSMenuItem
+        init(_ command: NSMenuItem) {
+            self.command = command
+            super.init(frame: .zero)
+            title = command.title
+            bezelStyle = .rounded
+            target = self
+            action = #selector(invoke)
+            isEnabled = command.isEnabled
+            setAccessibilityIdentifier(command.accessibilityIdentifier())
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
+        @objc private func invoke() {
+            guard command.isEnabled, let action = command.action else { return }
+            NSApp.sendAction(action, to: command.target, from: command)
+        }
+    }
+
+    init() {
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 540, height: 440),
+                   styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                   backing: .buffered, defer: false)
+        title = "jStack Info"
+        isReleasedWhenClosed = false
+        minSize = NSSize(width: 420, height: 280)
+        setAccessibilityIdentifier("host_info_window")
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        contentView = scroll
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 8
+        rows.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
+        rows.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = rows
+        NSLayoutConstraint.activate([
+            rows.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            rows.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            rows.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
+        ])
+        center()
+    }
+
+    func render(machine: String, status: String, details: NSMenu) {
+        let content = [machine, status] + details.items.flatMap {
+            [$0.title, String($0.isEnabled), String($0.isSeparatorItem),
+             $0.accessibilityIdentifier(), $0.action.map(NSStringFromSelector) ?? ""]
+        }
+        guard content != lastContent else { return }
+        lastContent = content
+        for view in rows.arrangedSubviews { rows.removeArrangedSubview(view); view.removeFromSuperview() }
+        func label(_ text: String, heading: Bool = false) {
+            let field = NSTextField(wrappingLabelWithString: text)
+            field.font = NSFont.preferredFont(forTextStyle: heading ? .headline : .body)
+            field.isSelectable = true
+            rows.addArrangedSubview(field)
+            field.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -40).isActive = true
+        }
+        label(machine, heading: true)
+        label(status)
+        for item in details.items {
+            if item.isSeparatorItem {
+                let divider = NSBox()
+                divider.boxType = .separator
+                rows.addArrangedSubview(divider)
+                divider.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -40).isActive = true
+            } else if item.action != nil {
+                rows.addArrangedSubview(CommandButton(item))
+            } else {
+                label(item.title)
+            }
+        }
+    }
+}
+
 final class StatusController: NSObject {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let probe = HostProbe()
@@ -1396,6 +1529,7 @@ final class StatusController: NSObject {
     private var updateError: String?
     private var updateRequestInFlight = false
     private var menuIsOpen = false
+    private var infoWindow: HostInfoWindow?
 
     override init() {
         super.init()
@@ -1424,6 +1558,7 @@ final class StatusController: NSObject {
             guard let self else { return }
             self.updateInventory = inventory
             self.updateError = error
+            self.refreshInfoWindow()
             if !self.menuIsOpen { self.build() }
         }
         probe.poll { [weak self] state in
@@ -1432,6 +1567,7 @@ final class StatusController: NSObject {
             // A poll started before a successful removal cannot resurrect it.
             self.state.devices = DeviceMenu.active(state.devices, removed: self.removedDevices)
             self.draw()
+            self.refreshInfoWindow()
             if !self.menuIsOpen { self.build() }
         }
     }
@@ -1454,13 +1590,16 @@ final class StatusController: NSObject {
         // you want to find it in the same place.
         button.contentTintColor = unprovisioned ? .systemOrange : nil
         button.appearsDisabled = !state.isUp
-        // The count is the running indicator: a number that appears when work
-        // is actually in flight, and no chrome at all when the machine is idle.
-        let live = state.liveCount
-        button.title = live > 0 ? " \(live)" : ""
+        let signal = SessionSignal.collective(state.sessions)
+        button.attributedTitle = NSAttributedString(string: " ●", attributes: [
+            .foregroundColor: state.sessionsReadable ? signal.color : NSColor.secondaryLabelColor,
+            .font: NSFont.systemFont(ofSize: 10) // A status glyph, not reading text.
+        ])
         // The same line the menu's first row shows, since it is the answer to
         // "what is this icon telling me" and the icon has no room for it.
-        button.toolTip = "\(Machine.name) — \(state.headline)"
+        let activity = state.sessionsReadable ? signal.label : "Session status unavailable"
+        button.toolTip = "\(Machine.name) — \(state.headline) · \(activity)"
+        button.setAccessibilityLabel("jStack · \(activity)")
     }
 
     private func build() {
@@ -1497,7 +1636,18 @@ final class StatusController: NSObject {
         // about this hub that shows its devices but not its machines is a menu
         // that stops just short of what the hub actually is.
         if let machines = machinesItem() { menu.addItem(machines) }
-        menu.addItem(updatesItem())
+        if updateError == nil,
+           updateInventory?.localUpdate(hostID: state.identity?.hostId) != nil {
+            let update = Self.action("Update Available", #selector(doUpdate), self,
+                                     symbol: "arrow.down.circle")
+            update.setAccessibilityIdentifier("updates_available")
+            update.representedObject = "self"
+            update.isEnabled = !updateRequestInFlight
+            menu.addItem(update)
+        }
+        let info = Self.action("Info", #selector(doInfo), self, symbol: "info.circle")
+        info.setAccessibilityIdentifier("host_info")
+        menu.addItem(info)
 
         // ── The app ─────────────────────────────────────────────────────────
         menu.addItem(.separator())
@@ -1536,13 +1686,9 @@ final class StatusController: NSObject {
         item.menu = menu
     }
 
-    private func updatesItem() -> NSMenuItem {
-        let item = NSMenuItem(title: "Software Updates", action: nil, keyEquivalent: "")
-        item.setAccessibilityIdentifier("updates_menu")
-        item.image = Self.glyph("arrow.down.circle", size: 16)
+    private func updateDetails() -> NSMenu {
         let submenu = NSMenu()
         submenu.autoenablesItems = false
-        item.submenu = submenu
         if let error = updateError {
             submenu.addItem(Self.caption(error))
             // The supervisor's journal remains readable through a host restart.
@@ -1555,14 +1701,14 @@ final class StatusController: NSObject {
                     submenu.addItem(Self.caption(detail))
                 }
             }
-            return item
+            return submenu
         }
         guard let inventory = updateInventory else {
             submenu.addItem(Self.caption("Checking…"))
-            return item
+            return submenu
         }
         submenu.addItem(Self.caption(inventory.release.map { "Available release: \($0)" }
-                                       ?? "No complete release offered by the hub"))
+                                       ?? "No release available"))
         for machine in inventory.machines {
             submenu.addItem(.separator())
             submenu.addItem(Self.caption("\(machine.name) — \(machine.summary)"))
@@ -1597,12 +1743,13 @@ final class StatusController: NSObject {
             all.isEnabled = !updateRequestInFlight
             submenu.addItem(all)
         }
-        return item
+        return submenu
     }
 
     @objc private func doUpdate(_ sender: NSMenuItem) {
         guard !updateRequestInFlight, let target = sender.representedObject as? String else { return }
         updateRequestInFlight = true
+        refreshInfoWindow()
         probe.update(target: target, requestID: UUID().uuidString) { [weak self] ok, detail in
             guard let self else { return }
             self.updateRequestInFlight = false
@@ -1617,8 +1764,17 @@ final class StatusController: NSObject {
     }
 
     func showUpdates() {
+        if infoWindow == nil { infoWindow = HostInfoWindow() }
+        refreshInfoWindow()
+        NSApp.activate(ignoringOtherApps: true)
+        infoWindow?.makeKeyAndOrderFront(nil)
         refresh()
-        item.button?.performClick(nil)
+    }
+
+    @objc private func doInfo() { showUpdates() }
+
+    private func refreshInfoWindow() {
+        infoWindow?.render(machine: Machine.name, status: state.headline, details: updateDetails())
     }
 
     /// The Active section. Rows are informational — a menu bar is where you
@@ -1781,7 +1937,7 @@ final class StatusController: NSObject {
         }
 
         let sorted = state.sessions.sorted {
-            ($0.live == true ? 0 : 1, $0.title) < ($1.live == true ? 0 : 1, $1.title)
+            (-$0.signal.rawValue, $0.title) < (-$1.signal.rawValue, $1.title)
         }
         guard !sorted.isEmpty else {
             let item = NSMenuItem(title: "Nothing running", action: nil, keyEquivalent: "")
@@ -1796,10 +1952,7 @@ final class StatusController: NSObject {
             // The dot is the state, and it is an icon rather than a character
             // in the title so every row's text starts at the same x — a list
             // whose left edge moves with the status is one you cannot scan.
-            row.image = Self.dot(live: session.live == true,
-                                 idle: session.running == true
-                                       || session.onMac == true
-                                       || session.managed == true)
+            row.image = session.signal.image
 
             // Kill hangs off the process rather than sitting beside its name:
             // a one-click kill in a list you are scrolling is a session ended
@@ -1828,7 +1981,7 @@ final class StatusController: NSObject {
         // both. They partition the list rather than nest: working is a subset
         // of running everywhere else in this API, and counting it twice here
         // would leave the numbers refusing to add up to the rows beneath them.
-        let working = sorted.filter { $0.live == true }.count
+        let working = sorted.filter { $0.signal == .working }.count
         let idle = sorted.count - working
         let subtitle: String
         switch (working, idle) {
@@ -1881,10 +2034,7 @@ final class StatusController: NSObject {
         }
 
         let title = "\(active.count) " + (active.count == 1 ? "Device" : "Devices")
-        let subtitle = "\(active.count) paired"
         let item = Self.opener(title, symbol: "laptopcomputer.and.iphone", submenu: sub)
-        item.attributedTitle = Self.twoLine(title, subtitle)
-        item.image = Self.glyph("laptopcomputer.and.iphone", size: 26)
         return item
     }
 
@@ -1944,23 +2094,9 @@ final class StatusController: NSObject {
             sub.addItem(row)
         }
 
-        // Counted off what the host actually said. A machine whose row carries
-        // no `delegated` is neither in nor out of the count — the summary line
-        // would otherwise report "1 needs pairing by hand" about a machine
-        // nobody has established anything about.
-        let answered = machines.filter { $0.delegated != nil }.count
-        let pending = machines.filter { $0.delegated == false }.count
         let title = "\(machines.count) "
             + (machines.count == 1 ? "Managed Mac" : "Managed Macs")
-        let subtitle: String
-        switch (pending, answered == machines.count) {
-        case (0, true):  subtitle = "devices get into all of them"
-        case (0, false): subtitle = "\(machines.count) adopted"
-        default:         subtitle = "\(pending) need pairing by hand"
-        }
-        let item = Self.opener(title, symbol: "macpro.gen3", submenu: sub)
-        item.attributedTitle = Self.twoLine(title, subtitle)
-        item.image = Self.glyph("point.3.connected.trianglepath.dotted", size: 26)
+        let item = Self.opener(title, symbol: "point.3.connected.trianglepath.dotted", submenu: sub)
         return item
     }
 
