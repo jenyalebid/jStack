@@ -29,7 +29,7 @@ from .update_supervisor import atomic_json
 def command(argv: list[str], *, timeout=120, **kwargs) -> str:
     result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, **kwargs)
     if result.returncode:
-        raise releases.ReleaseError(f"{Path(argv[0]).name} failed: {result.stderr[-2000:]}")
+        raise releases.ReleaseError(f"{Path(argv[0]).name} failed: {(result.stdout + result.stderr)[-2000:]}")
     return result.stdout
 
 

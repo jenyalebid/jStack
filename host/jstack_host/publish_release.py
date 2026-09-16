@@ -80,9 +80,16 @@ def build(config: dict, notes: str) -> Path:
     candidates = Path(config["candidates_dir"])
     candidates.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="build-", suffix=".noindex", dir=candidates))
-    stack, client = work / "stack", work / "client"
+    stack, client = work / "stack", work / "Projects/client"
+    client.parent.mkdir()
     stack_sha = snapshot(Path(config["stack_repo"]), stack)
     client_sha = snapshot(Path(config["client_repo"]), client)
+    dependencies = {}
+    for name, repository in config.get("client_packages", {}).items():
+        releases.identifier(name)
+        target = work / "Packages" / name
+        target.parent.mkdir(exist_ok=True)
+        dependencies[name] = snapshot(Path(repository), target)
     print(f"Release sources: stack {stack_sha}, client {client_sha}", flush=True)
     release_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + stack_sha[:8]
     output = work / release_id
@@ -102,15 +109,19 @@ def build(config: dict, notes: str) -> Path:
     app_output = work / "client-output"
     app_script = client / "jRemote-Code/jRemote/release-mac.sh"
     print("Building, signing and notarizing client candidate", flush=True)
-    command(["bash", str(app_script), "--no-bump", "--candidate-dir", str(app_output),
-             "--notes", notes], timeout=2400,
-            env={**os.environ, "JSTACK_CHECKOUT": str(stack)})
+    log_path = work / "client-build.log"
+    with log_path.open("w") as log:
+        process = subprocess.run(["bash", str(app_script), "--no-bump", "--candidate-dir", str(app_output),
+                                  "--notes", notes], timeout=2400, stdout=log, stderr=subprocess.STDOUT,
+                                 env={**os.environ, "JSTACK_CHECKOUT": str(stack)})
+    if process.returncode:
+        raise releases.ReleaseError(f"client build failed; see {log_path}\n{log_path.read_text()[-4000:]}")
     app_manifest = json.loads((app_output / "latest.json").read_text())
     app = app_output / app_manifest["file"]
     destination = output / app.name
     shutil.copy2(app, destination)
     manifest = {"schema": 1, "release": release_id, "notes": notes,
-                "sources": {"stack": stack_sha, "client": client_sha},
+                "sources": {"stack": stack_sha, "client": client_sha, "client_packages": dependencies},
                 "components": {"stack": component(archive, version),
                                "menubar": component(menu, version),
                                "client": component(destination, str(app_manifest["build"]))},
