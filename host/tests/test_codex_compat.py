@@ -168,7 +168,7 @@ def test_setup_bridges_commands_scoped_to_nested_seats(tmp_path):
     profile.mkdir(parents=True)
     command = profile / "distribute.md"
     command.write_text("Build and distribute the selected app.\n")
-    seat = agents / "Lynda/code"
+    seat = agents / "Ada/code"
     (seat / ".claude").mkdir(parents=True)
     (seat / "CLAUDE.md").write_text("# Code seat\n")
     (seat / ".claude/commands").symlink_to(profile, target_is_directory=True)
@@ -187,7 +187,7 @@ def test_setup_does_not_bridge_checkout_commands_from_a_seat_pad(tmp_path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     agents = tmp_path / "Agents"
-    checkout = agents / "Jarvis/chat/pad/copied-repo"
+    checkout = agents / "Alice/chat/pad/copied-repo"
     (checkout / ".claude/commands").mkdir(parents=True)
     (checkout / "CLAUDE.md").write_text("# Not a seat\n")
     (checkout / ".claude/commands/foreign.md").write_text("Do foreign work.\n")
