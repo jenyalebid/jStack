@@ -16,6 +16,29 @@ ships, so a route that only works when someone else mounts it fails here.
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _no_live_desktop_launches(monkeypatch):
+    """A missing mock must fail here, never open the developer's real app."""
+    import os
+    import shlex
+    import shutil
+    import subprocess
+
+    original = subprocess.Popen
+
+    def guarded(args, *positional, **kwargs):
+        argv = shlex.split(args) if isinstance(args, str) else args
+        if argv:
+            program = os.fsdecode(kwargs.get("executable") or argv[0])
+            env = kwargs.get("env") or os.environ
+            resolved = shutil.which(program, path=env.get("PATH"))
+            if resolved and os.path.realpath(resolved) == "/usr/bin/open":
+                raise AssertionError("Test attempted to launch a real desktop app; mock this boundary")
+        return original(args, *positional, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", guarded)
+
+
 @pytest.fixture
 def app():
     """The standalone host app, built fresh per test.

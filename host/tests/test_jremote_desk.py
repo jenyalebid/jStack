@@ -73,6 +73,11 @@ def test_create_mints_a_sid_when_none_given(monkeypatch):
 
 # ── open_thread — pinned to /Applications, honest fallback ──
 
+def test_an_unmocked_launch_cannot_reach_the_live_desktop():
+    with pytest.raises(AssertionError, match="real desktop app"):
+        desk.open_url("jremote://pair?code=test-only&url=http://127.0.0.1:1")
+
+
 def test_open_thread_pins_the_applications_copy(monkeypatch):
     calls = []
     monkeypatch.setattr(desk.subprocess, "run",
