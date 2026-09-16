@@ -1095,6 +1095,34 @@ def _convo_lines(summary: dict) -> tuple[str, str]:
     return clean(summary.get("last_prompt") or ""), clean(summary.get("last_msg") or "")
 
 
+def _codex_preview(sid: str, transcript: str) -> str:
+    """One-line preview for a Codex card: the session's own title, or the first
+    thing typed into it until the provider has named it.
+
+    A Codex session writes nothing under `~/.claude/projects`, so every builder
+    that previews by looking for a `{sid}.jsonl` there finds no file and leaves
+    the card blank — the card draws, with nothing in it. That is a worse answer
+    than an absent card: the session is plainly there and plainly empty, so the
+    board reads as having lost its content rather than as not having looked.
+
+    Shared rather than inlined because a session shown in both the Open section
+    and the main board previewing two different ways reads as two sessions.
+    """
+    if not transcript:
+        return ""
+    from . import codex_transcript
+    title = (codex_transcript.summary(Path(transcript)) or {}).get("title", "")
+    if title:
+        return title
+    try:
+        from .messages import parse_session
+        entries = parse_session(sid).get("messages", [])
+    except Exception:
+        return ""
+    return next((m.get("text", "") for m in entries
+                 if m.get("role") == "user" and m.get("text")), "")[:80]
+
+
 def _preview(summary: dict) -> str:
     """One-line preview for a session box. A machine-spawned session previews
     as the task it was injected with — never an anonymous 'New session'."""
@@ -1194,7 +1222,17 @@ def open_sessions() -> list[dict]:
         base = info.get("agent", "")
         cfg = agents.get(base, {})
         preview, mtime = "", 0.0
-        if _CLAUDE_PROJECTS.exists():
+        if (info.get("engine") or "claude") == "codex":
+            # The scan below can only ever leave a Codex card blank — there is
+            # no `{sid}.jsonl` for it to find. Its rollout path rides the
+            # registry, the same place this loop already reads `engine` from.
+            path = info.get("transcript", "")
+            preview = _codex_preview(sid, path)
+            try:
+                mtime = Path(path).stat().st_mtime if path else 0.0
+            except OSError:
+                mtime = 0.0
+        elif _CLAUDE_PROJECTS.exists():
             for pd in _CLAUDE_PROJECTS.iterdir():
                 f = pd / f"{sid}.jsonl"
                 if f.exists():

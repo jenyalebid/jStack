@@ -1799,3 +1799,66 @@ def test_codex_board_uses_native_title(ws, monkeypatch, tmp_path):
     row = next(r for r in board.active_sessions() if r["session_id"] == sid)
     assert row["preview"] == "Repair session titles"
     assert row["last_prompt"] == "initial input"
+
+
+def test_open_section_previews_a_codex_card_by_its_native_title(ws, monkeypatch, tmp_path):
+    """The Open section drew Codex cards with nothing in them.
+
+    It previewed by scanning `~/.claude/projects` for a `{sid}.jsonl`, which a
+    Codex session never writes — so every Codex card in that section rendered
+    with an empty body. The card was there and the content was not, which reads
+    as the board having lost the session rather than never having looked.
+    """
+    from jstack_host import managed, codex_transcript, messages
+    sid = "cccc0003-1111-2222-3333-444444444444"
+    rollout = tmp_path / "rollout-open.jsonl"
+    rollout.write_text('{}\n')
+    monkeypatch.setattr(managed, "open_registry", lambda: {
+        sid: {"agent": "nova", "engine": "codex", "transcript": str(rollout)}})
+    monkeypatch.setattr(codex_transcript, "summary", lambda p: {"title": "Repair session titles"})
+    monkeypatch.setattr(messages, "parse_session", lambda sid: {"messages": [
+        {"role": "user", "text": "initial input"}]})
+    row = next(r for r in board.open_sessions() if r["session_id"] == sid)
+    assert row["preview"] == "Repair session titles"
+
+
+def test_an_untitled_codex_card_previews_the_first_thing_typed(ws, monkeypatch, tmp_path):
+    """Until the provider names the session there is no title, and that window
+    is exactly when a just-spawned session sits in the Open section. Falling
+    back to the first typed line is what keeps the card from being blank for
+    the whole of it."""
+    from jstack_host import managed, codex_transcript, messages
+    sid = "cccc0004-1111-2222-3333-444444444444"
+    rollout = tmp_path / "rollout-untitled.jsonl"
+    rollout.write_text('{}\n')
+    monkeypatch.setattr(managed, "open_registry", lambda: {
+        sid: {"agent": "nova", "engine": "codex", "transcript": str(rollout)}})
+    monkeypatch.setattr(codex_transcript, "summary", lambda p: {"title": ""})
+    monkeypatch.setattr(messages, "parse_session", lambda sid: {"messages": [
+        {"role": "assistant", "text": "working on it"},
+        {"role": "user", "text": "check the local stack"}]})
+    row = next(r for r in board.open_sessions() if r["session_id"] == sid)
+    assert row["preview"] == "check the local stack"
+
+
+def test_both_builders_preview_a_codex_session_the_same_way(ws, monkeypatch, tmp_path):
+    """One session shown in two places must read as one session. This is the
+    drift guard: the Open section and the main board resolve a Codex preview
+    from the same two facts, and a fix applied to one of them and not the other
+    is the bug this file just closed."""
+    from jstack_host import managed, codex_transcript, messages
+    loc, _ = ws
+    sid = "cccc0005-1111-2222-3333-444444444444"
+    rollout = tmp_path / "rollout-both.jsonl"
+    rollout.write_text('{}\n')
+    monkeypatch.setattr(managed, "open_registry", lambda: {
+        sid: {"agent": "nova", "engine": "codex", "transcript": str(rollout)}})
+    monkeypatch.setattr(managed, "attached_names", lambda: set())
+    monkeypatch.setattr(codex_transcript, "summary", lambda p: {"title": "One session, one name"})
+    monkeypatch.setattr(messages, "parse_session", lambda sid: {"messages": [
+        {"role": "user", "text": "initial input"}]})
+    _windows(monkeypatch, attached=set())
+    _procs(monkeypatch, [_raw(24, loc) | {"tty": "/dev/ttys002", "engine": "codex"}])
+    opened = next(r for r in board.open_sessions() if r["session_id"] == sid)
+    active = next(r for r in board.active_sessions() if r["session_id"] == sid)
+    assert opened["preview"] == active["preview"] == "One session, one name"
