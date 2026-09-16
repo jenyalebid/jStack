@@ -13,7 +13,8 @@ import pytest
 
 @pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("swiftc"),
                     reason="the menu bar uses macOS AppKit")
-def test_revoked_rows_and_stale_removal_responses(tmp_path):
+@pytest.mark.parametrize("mode", ["open", "managed"])
+def test_device_status_and_info_actions(tmp_path, mode):
     source = Path(__file__).resolve().parents[1] / "menubar" / "JStackHostBar.swift"
     main = tmp_path / "main.swift"
     main.write_text(source.read_text() + "\n" + r'''
@@ -136,9 +137,13 @@ func waitUntil(_ condition: () -> Bool) {
 }
 waitUntil { statusItem.menu?.items.contains { $0.title == "Update Available" } == true }
 let menu = statusItem.menu!
-let devices = menu.items.first { $0.title == "1 Device" }!
-let machines = menu.items.first { $0.title == "1 Managed Mac" }!
-assert(devices.attributedTitle == nil && machines.attributedTitle == nil)
+if ProcessInfo.processInfo.environment["FIXTURE_MODE"] == "open" {
+    let devices = menu.items.first { $0.title == "1 Device" }!
+    let machines = menu.items.first { $0.title == "1 Managed Mac" }!
+    assert(devices.attributedTitle == nil && machines.attributedTitle == nil)
+} else {
+    assert(!menu.items.contains { $0.title == "1 Device" || $0.title == "1 Managed Mac" })
+}
 assert(!menu.items.contains { $0.title == "Software Updates" })
 assert(statusItem.button!.attributedTitle.string == " ●")
 assert(statusItem.button!.accessibilityLabel() == "jStack · Needs attention")
@@ -183,7 +188,7 @@ print("live menu actions passed")
             path = self.path.removeprefix("/api/jremote/v1")
             payload = {
                 "/api/health": {"service": "jremote-host", "provisioned": True},
-                "/host": {"host_id": "lab", "mode": {"mode": "open"},
+                "/host": {"host_id": "lab", "mode": {"mode": mode},
                           "features": {"device_management": True}},
                 "/sessions/active": {"sessions": [
                     {"session_id": "a", "turn": "working"},
@@ -209,7 +214,8 @@ print("live menu actions passed")
     try:
         result = subprocess.run([str(binary), "--port", str(server.server_port)],
                                 capture_output=True, text=True, timeout=25,
-                                env={**os.environ, "JREMOTE_STATE_DIR": str(tmp_path),
+                                env={**os.environ, "FIXTURE_MODE": mode,
+                                     "JREMOTE_STATE_DIR": str(tmp_path),
                                      "JREMOTE_TOKEN_PATH": str(tmp_path / "api-token")})
     finally:
         server.shutdown()
