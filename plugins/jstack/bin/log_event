@@ -18,6 +18,9 @@ Query / admin (first positional is the subcommand):
         With --tag and NO seat it is the same window over a subject instead
         of a seat — the last N sittings anyone had on X, seat named on each
         line. That is what a tagged session boots on.
+        --json carries each entry's `tags` — its SESSION's subjects, so a
+        sitting that was filed under two shows both. That is how a foreign
+        row in a subject window is spotted: it rides on a tag it also has.
     log_event grep "<substring>" [--seat <seat>] [--since YYYY-MM-DD] [--json]
     log_event recall <YYYY-MM-DD[..YYYY-MM-DD]> [<seat>|all] [--full] [--json]
     log_event show <id>
@@ -489,6 +492,33 @@ def _entry_row(row: tuple) -> dict:
             "commits": _load_commits(cms)}
 
 
+def _attach_tags(con, entries: list[dict]) -> list[dict]:
+    """Hang each entry's subjects off it — one query for the whole batch.
+
+    A tag belongs to the SESSION, not the entry (see the tags section below),
+    so every row a sitting wrote carries that sitting's subjects. A window
+    read without them hides the case that matters most: a session opened on
+    one subject whose work moved to another still lands in the first
+    subject's window, and the tag line is the only thing that says so.
+
+    Deliberately not folded into `_ENTRY_COLS` as a join — a session carrying
+    two tags would return each of its entries twice and silently double the
+    window, which is the same bug class this is here to expose."""
+    ids = {e["session_id"] for e in entries if e.get("session_id")}
+    by_session: dict[str, list[str]] = {}
+    if ids:
+        marks = ",".join("?" * len(ids))
+        for sid, name in con.execute(
+                "SELECT st.session_id, t.name FROM session_tags st"
+                " JOIN tags t ON t.id = st.tag_id"
+                f" WHERE st.session_id IN ({marks}) ORDER BY t.name",
+                tuple(ids)):
+            by_session.setdefault(sid, []).append(name)
+    for e in entries:
+        e["tags"] = by_session.get(e.get("session_id") or "", [])
+    return entries
+
+
 def tail_entries(seat: str | None, n: int, origin: str | None = None,
                  tag: str | None = None) -> list[dict]:
     """Last n entries for a seat, oldest→newest.
@@ -516,8 +546,9 @@ def tail_entries(seat: str | None, n: int, origin: str | None = None,
         f"SELECT {_ENTRY_COLS} FROM entries WHERE {where}"
         " ORDER BY date DESC, time DESC, id DESC LIMIT ?", params + (n,),
     ).fetchall()
+    entries = _attach_tags(con, [_entry_row(r) for r in reversed(rows)])
     con.close()
-    return [_entry_row(r) for r in reversed(rows)]
+    return entries
 
 
 def tail_session_window(seat: str | None, sessions: int,
@@ -562,8 +593,9 @@ def tail_session_window(seat: str | None, sessions: int,
         f" AND {_SESSION_KEY} IN ({marks}) ORDER BY date, time, id",
         params + tuple(keys),
     ).fetchall()
+    entries = _attach_tags(con, [_entry_row(r) for r in rows])
     con.close()
-    return [_entry_row(r) for r in rows]
+    return entries
 
 
 def format_tail(entries: list[dict], show_seat: bool = False) -> str:
@@ -645,7 +677,6 @@ def recall_entries(day_from: str, day_to: str, seat: str | None = None,
         " verdict_note, session_id, context, origin, commits FROM entries"
         f" WHERE {' AND '.join(where)} ORDER BY date, time, id", params,
     ).fetchall()
-    con.close()
     out = []
     for i, d, t, a, s, h, dt, v, vn, sid, ctx, org, cms in rows:
         out.append({"id": i, "date": d, "time": t,
@@ -653,6 +684,8 @@ def recall_entries(day_from: str, day_to: str, seat: str | None = None,
                     "details": json.loads(dt), "verdict": v,
                     "verdict_note": vn, "session_id": sid, "context": ctx,
                     "origin": org, "commits": _load_commits(cms)})
+    _attach_tags(con, out)
+    con.close()
     return out
 
 
@@ -684,14 +717,17 @@ def show_entry(entry_id: int) -> dict | None:
         " pipeline_task, session_id, verdict, verdict_note, context, origin,"
         " commits FROM entries WHERE id = ?", (entry_id,),
     ).fetchone()
-    con.close()
     if row is None:
+        con.close()
         return None
     i, d, t, a, s, h, dt, pt, sid, v, vn, ctx, org, cms = row
-    return {"id": i, "date": d, "time": t, "source": format_source(a, s),
-            "headline": h, "details": json.loads(dt), "pipeline_task": pt,
-            "session_id": sid, "verdict": v, "verdict_note": vn,
-            "context": ctx, "origin": org, "commits": _load_commits(cms)}
+    entry = {"id": i, "date": d, "time": t, "source": format_source(a, s),
+             "headline": h, "details": json.loads(dt), "pipeline_task": pt,
+             "session_id": sid, "verdict": v, "verdict_note": vn,
+             "context": ctx, "origin": org, "commits": _load_commits(cms)}
+    _attach_tags(con, [entry])
+    con.close()
+    return entry
 
 
 # ---------------------------------------------------------------------- tags
@@ -900,15 +936,6 @@ def untag_session(session_id: str, names: list[str]) -> list[str]:
                 removed.append(n)
     con.close()
     return removed
-
-
-def session_tags(session_id: str) -> list[str]:
-    con = connect()
-    rows = con.execute(
-        "SELECT t.name FROM session_tags st JOIN tags t ON t.id = st.tag_id"
-        " WHERE st.session_id = ? ORDER BY t.name", (session_id,)).fetchall()
-    con.close()
-    return [r[0] for r in rows]
 
 
 def _tag_clause(tag: str) -> tuple[str, tuple]:
@@ -1130,9 +1157,8 @@ def _cmd_show(rest: list[str]) -> int:
         print(f"pipeline-task: {e['pipeline_task']}")
     if e["session_id"]:
         print(f"session: {e['session_id']}")
-        tags = session_tags(e["session_id"])
-        if tags:
-            print(f"tags: {', '.join(tags)}")
+    if e["tags"]:
+        print(f"tags: {', '.join(e['tags'])}")
     if e["origin"]:
         print(f"origin: {e['origin']}")
     if e["verdict"]:

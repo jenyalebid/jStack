@@ -410,6 +410,51 @@ out=$("$LOG_EVENT" tail kim/chat -n 10 --tag payments)
 [[ "$out" == *"Kim on the remote"* && "$out" != *"Kim on the daemons"* ]] \
   && pass "tail --tag filters through session_id" || fail "tail --tag ($out)"
 
+# A window can be filtered BY a subject but could not be asked what its rows
+# are filed under — so a sitting tagged twice rode someone else's window with
+# nothing on screen to say so. The relation is on the session; every entry
+# that session wrote carries it.
+"$LOG_EVENT" kim/chat --at 07:20 --date "$DAY" --session tag-s9 "Kim on both at once" >/dev/null
+"$LOG_EVENT" lee/chat --at 07:25 --date "$DAY" --session tag-s9 "Lee on both at once" >/dev/null
+"$LOG_EVENT" tag set payments --session tag-s9 >/dev/null
+"$LOG_EVENT" tag set infra --session tag-s9 >/dev/null
+out=$("$LOG_EVENT" tail kim/chat -n 10 --tag payments --json)
+[[ $(python3 -c "
+import json,sys
+e = [x for x in json.load(sys.stdin) if x['headline'] == 'Kim on both at once'][0]
+print(','.join(e['tags']))" <<<"$out") == "infra,payments" ]] \
+  && pass "tail --json carries the session's subjects, sorted" \
+  || fail "tail --json tags ($out)"
+# the second seat's entry is the SAME sitting — it inherits both, which is
+# what makes a cross-seat subject one thread
+[[ $(python3 -c "
+import json,sys
+print(sum(1 for x in json.load(sys.stdin) if x.get('tags') == ['infra','payments']))
+" <<<"$out") -ge 1 ]] \
+  && pass "tags ride every entry of the sitting, not just the first" \
+  || fail "tags per-entry inheritance"
+# an untagged sitting is an empty list, never a missing key — a consumer that
+# has to test for absence will forget to
+out=$("$LOG_EVENT" tail kim/chat -n 10 --json)
+[[ $(python3 -c "
+import json,sys
+print(all(isinstance(x.get('tags'), list) for x in json.load(sys.stdin)))
+" <<<"$out") == "True" ]] \
+  && pass "every entry carries a tags list, tagged or not" || fail "tags key absent"
+# show and recall are the same store read differently — a subject that only
+# appears on one of them is a surface that disagrees with itself
+EID=$(python3 -c "
+import json,sys
+print([x for x in json.load(sys.stdin) if x['headline']=='Kim on both at once'][0]['id'])
+" <<<"$("$LOG_EVENT" tail kim/chat -n 10 --json)")
+[[ "$("$LOG_EVENT" show "$EID")" == *"tags: infra, payments"* ]] \
+  && pass "show names the entry's subjects" || fail "show tags"
+[[ $(python3 -c "
+import json,sys
+print([x for x in json.load(sys.stdin) if x['headline']=='Kim on both at once'][0]['tags'])
+" <<<"$("$LOG_EVENT" recall "$DAY" all --json)") == "['infra', 'payments']" ]] \
+  && pass "recall --json carries subjects too" || fail "recall tags"
+
 # ---- the pick list ranks on breadth, not depth (issue #3) -------------------
 # A recurring job reuses ONE subject tag every run, all from its single seat.
 # Ranking on raw session count would float that tag to the top and bury a
