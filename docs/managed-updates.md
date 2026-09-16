@@ -19,8 +19,10 @@ acceptance target; implemented code and observed proof are separate facts.
   verify, replace and recover the host, both Mac apps and installed Claude/
   native Codex plugins. The separate launchd updater survives host replacement.
   A stable dispatcher advances its own runtime only after hub confirmation.
-- The menu bar offers local Update, per-leaf Update and Update All, with
-  component versions, progress and errors. The client hands updates to it;
+- The menu bar's Info window offers local Update, per-leaf Update and Update
+  All, with component versions, progress and errors. An offered release for
+  this Mac also exposes Update Available directly in the menu, whether the
+  release changes jRemote, jStack or both. The client opens the same window;
   older installations without the menu handler retain their legacy updater.
 - Two disposable GUI Macs have performed signed candidate upgrades with the
   real supervisor. Testing exposed and fixed signature requirement syntax,
