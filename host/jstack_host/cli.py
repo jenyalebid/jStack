@@ -496,15 +496,54 @@ def _cmd_adopt(args) -> int:
               "Otherwise run `install_hub.sh` to make this Mac a hub.",
               file=sys.stderr)
         return 1
-    # A carried file may need to install dependencies on a fresh Mac first.
-    # Give that normal path an hour; explicit shorter TTLs are still honored.
-    ttl = args.ttl if args.ttl is not None else (3600 if getattr(args, "offline", False) else ADOPT_TTL)
-    row = enrolment.mint_code(args.name, created_by="", ttl=ttl,
-                              kind=enrolment.KIND_HOST)
     port = getattr(args, "port", None) or addresses.DEFAULT_PORT
     found = addresses.reachable(port)
+    offline = getattr(args, "offline", False)
 
-    if getattr(args, "offline", False):
+    # Both refusals stand BEFORE the mint, and that placement is the point. A
+    # code is a one-shot credential: minting one and then explaining why it is
+    # useless leaves a live host code burning down in the table, and on the
+    # offline path it is worse than that — `_adopt_offline` writes the code
+    # into the machine's bundle on its way past, so a refusal printed
+    # afterwards would arrive over a JOIN.md that had already been rewritten.
+    if offline:
+        from . import presence
+        live = presence.live_on_mesh(args.name)
+        if live is not None:
+            where = f"{live['address']}:{live['port']}"
+            print(
+                f"{args.name} is already on this mesh — its peer is live and "
+                f"it answered at http://{where}.\nA Mac that holds the tunnel "
+                "redeems from where it stands, so the carried file is not "
+                "what\nit needs: it would rewrite that machine's bundle with a "
+                "fresh code and still\nleave you carrying a file to a Mac that "
+                "could have done it in one line.\n\nRun this instead:\n\n"
+                f"    jstack-host adopt {args.name}\n\n"
+                "and run the line it prints on that Mac. Nothing was minted "
+                "here.\n\nIf that Mac has genuinely lost the tunnel — "
+                "reinstalled, or its keys gone — take\nits peer out first "
+                f"(`{tunnel.PEER_SCRIPT} remove {live['peer']}`), and this "
+                "flow is\nthe right one again.", file=sys.stderr)
+            return 1
+    elif not any(a["kind"] in ("lan", "mesh") for a in found):
+        # Loopback only, and no mesh to fall back to: nothing another machine
+        # can redeem against exists. A real stop, not a prompt to guess — and
+        # the reason the address is resolved before the code rather than after.
+        print("this Mac has no address another machine can redeem against — "
+              "only loopback,\nand it runs no mesh. Nothing was minted: a code "
+              "with nowhere to send it is half\nan enrolment, and a command "
+              "printed around a blank reads as an instruction.\nPut this Mac "
+              "on a real network (`jstack-host where` prints what it has), "
+              "then\nadopt again.", file=sys.stderr)
+        return 1
+
+    # A carried file may need to install dependencies on a fresh Mac first.
+    # Give that normal path an hour; explicit shorter TTLs are still honored.
+    ttl = args.ttl if args.ttl is not None else (3600 if offline else ADOPT_TTL)
+    row = enrolment.mint_code(args.name, created_by="", ttl=ttl,
+                              kind=enrolment.KIND_HOST)
+
+    if offline:
         return _adopt_offline(args.name, row, port,
                               as_json=getattr(args, "json", False))
 
@@ -538,33 +577,28 @@ def _cmd_adopt(args) -> int:
     # `.local` still stays out: it needs the same LAN as the numeric address
     # while resolving less reliably on it, so it is never right when the
     # number is available and never available when it is not.
+    #
+    # Unconditional, because the case where there is neither address never
+    # reaches here any more — it is refused above, before the code exists.
     lan = next((a for a in found if a["kind"] == "lan"), None)
     mesh = next((a for a in found if a["kind"] == "mesh"), None)
-    if mesh or lan:
-        print("\nOn that Mac, with jStack installed:\n")
-        print(f"    jstack-host attach {row['code']} "
-              f"--parent {(mesh or lan)['url']}")
-        if mesh:
-            print("\nThat address is this hub on the mesh. It reaches here "
-                  "from anywhere in the world,\nand it is the answer for any "
-                  "Mac that has been on this mesh even once.")
-            if lan:
-                # Named, not printed as a command. A machine that has never
-                # held the tunnel has no route to 10.66 — the tunnel is what
-                # creates that route — so it does need a LAN address once.
-                # But that is a setup-in-person case, and putting its address
-                # beside the real one is what taught the reader to treat the
-                # first line as a guess and work down the list.
-                print("\nOnly a Mac that has NEVER been on this mesh needs a "
-                      "different address, and\nit has to be on this network "
-                      "for it — `jstack-host where` prints that one.")
-    else:
-        # Loopback only, and no mesh to fall back to: nothing another machine
-        # can redeem against exists. A real stop, not a prompt to guess.
-        print("\n  This Mac has no address another machine can redeem against "
-              "— only loopback,\n  and it runs no mesh. Put it on a real "
-              "network (check `jstack-host where`),\n  then mint a new code.")
-        return 1
+    print("\nOn that Mac, with jStack installed:\n")
+    print(f"    jstack-host attach {row['code']} "
+          f"--parent {(mesh or lan)['url']}")
+    if mesh:
+        print("\nThat address is this hub on the mesh. It reaches here "
+              "from anywhere in the world,\nand it is the answer for any "
+              "Mac that has been on this mesh even once.")
+        if lan:
+            # Named, not printed as a command. A machine that has never
+            # held the tunnel has no route to 10.66 — the tunnel is what
+            # creates that route — so it does need a LAN address once.
+            # But that is a setup-in-person case, and putting its address
+            # beside the real one is what taught the reader to treat the
+            # first line as a guess and work down the list.
+            print("\nOnly a Mac that has NEVER been on this mesh needs a "
+                  "different address, and\nit has to be on this network "
+                  "for it — `jstack-host where` prints that one.")
     print("\nThat Mac joins this mesh and hands back a grant, so every device "
           "already paired\nhere gets into it without a second code.")
     return 0
@@ -625,20 +659,33 @@ def _cmd_leaves(args) -> int:
     every device sees (the tile), and the grant is whether asking for access
     works. A machine with a tile and no grant is exactly the state that looks
     fine on a phone and fails when tapped, so it is printed, not inferred.
+
+    `--json` carries a third, `online`, and pays for it: the rows come from
+    `presence.roster`, which reads the peer table and probes the machines it
+    finds there. That is the split between the two outputs — the table is a
+    roster someone is reading, and JSON is what a program asks for when it is
+    about to make a decision off the answer. The menu bar's adopt dialog is
+    that program: it has to know which machines are already reachable before it
+    offers to write one a file to carry (#61). `online` is null where this Mac
+    could not read its own peer table, never false.
     """
     _adopt(args)
     from . import grants
     from .store import get_store
-    rows = get_store().list_hosts()
     holdings = {h["host_key"]: h for h in grants.holdings()}
+
+    def delegated(row: dict) -> bool:
+        held = holdings.get(row["key"])
+        return bool(held and held["revoked_at"] is None)
 
     if getattr(args, "json", False):
         import json
-        print(json.dumps([
-            {**r, "delegated": bool(holdings.get(r["key"], {}).get("revoked_at") is None
-                                    and r["key"] in holdings)}
-            for r in rows]))
+        from . import presence
+        print(json.dumps([{**r, "delegated": delegated(r)}
+                          for r in presence.roster()]))
         return 0
+
+    rows = get_store().list_hosts()
 
     if not rows:
         print("no machines adopted — `jstack-host adopt <name>` mints a code "
@@ -646,9 +693,7 @@ def _cmd_leaves(args) -> int:
         return 0
     print(f"{'MACHINE':<20} {'ADDRESS':<18} {'ACCESS':<10} ADOPTED")
     for r in rows:
-        held = holdings.get(r["key"])
-        access = ("delegated" if held and held["revoked_at"] is None
-                  else "pair-by-hand")
+        access = "delegated" if delegated(r) else "pair-by-hand"
         addr = f"{r['address'] or '—'}:{r['port']}" if r["address"] else "—"
         print(f"{(r['name'] or r['key'])[:19]:<20} {addr:<18} {access:<10} "
               f"{grants.stamp(r['enrolled_at'])}")

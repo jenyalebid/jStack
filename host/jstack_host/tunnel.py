@@ -150,11 +150,18 @@ def is_lan_caller(client_ip: str) -> bool:
     return addr.is_loopback or addr.is_private
 
 
-def _peer_is_live(device: str) -> bool:
-    """Whether wg0.conf still carries a peer entry for this name.
+#: One row of `wg_peer.py list` — `work-mac  10.66.0.7  added 2026-09-15`.
+#: Matched rather than split on whitespace so that the empty table's own line,
+#: "no devices paired", cannot be read as a peer named `no`.
+PEER_LINE_RE = re.compile(r"^\s*([a-z0-9][a-z0-9-]*)\s+(\d{1,3}(?:\.\d{1,3}){3})\b")
 
-    A stale artefact on disk with no live peer entry is not a pairing —
-    re-issuing it would hand back a key the host has stopped accepting.
+
+def live_peers() -> set[str]:
+    """Every name wg0.conf carries a peer entry for, right now.
+
+    One listing for the whole table. A caller asking about more than one
+    machine — the adopt dialog asks about all of them before it draws — would
+    otherwise shell out once per name, against a file that answers them all.
     """
     listed = subprocess.run(
         [sys.executable, str(PEER_SCRIPT), "list"],
@@ -162,7 +169,24 @@ def _peer_is_live(device: str) -> bool:
     )
     if listed.returncode != 0:
         raise TunnelError(f"could not list peers: {listed.stderr.strip()}")
-    return bool(re.search(rf"^\s*{re.escape(device)}\b", listed.stdout, re.M))
+    return {m.group(1) for m in
+            (PEER_LINE_RE.match(line) for line in listed.stdout.splitlines())
+            if m}
+
+
+def peer_is_live(device: str) -> bool:
+    """Whether wg0.conf still carries a peer entry for this name.
+
+    A stale artefact on disk with no live peer entry is not a pairing —
+    re-issuing it would hand back a key the host has stopped accepting.
+
+    Set membership and not a search. This ran `^\\s*{device}\\b`, and `-` is a
+    word boundary, so `work` read as live off a table holding only `work-mac`.
+    Every caller acts on the answer — the adopt steering refuses to write a
+    carried file on it — and a name that is merely the prefix of a real peer
+    must not be able to answer yes.
+    """
+    return device in live_peers()
 
 
 def existing_config(device: str) -> str | None:
@@ -170,7 +194,7 @@ def existing_config(device: str) -> str | None:
     path = CLIENTS_DIR / f"{device}.conf"
     if not path.exists():
         return None
-    return path.read_text() if _peer_is_live(device) else None
+    return path.read_text() if peer_is_live(device) else None
 
 
 #: What `wg_peer.py add --leaf` writes into the bundle folder. Named here so a
@@ -223,7 +247,7 @@ def existing_bundle(device: str) -> dict[str, str] | None:
     """The leaf bundle already issued to this machine, if it is still paired."""
     if not leaf_bundle_dir(device).is_dir():
         return None
-    return _read_bundle(device) if _peer_is_live(device) else None
+    return _read_bundle(device) if peer_is_live(device) else None
 
 
 def _refuse_unless_pairable(device: str) -> None:

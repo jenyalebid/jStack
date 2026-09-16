@@ -1087,8 +1087,17 @@ struct MintedPairing {
     /// `.local` stays out of both branches: it needs the same LAN as the
     /// numeric address while resolving less reliably on it, so it is never
     /// right when the number is available and never available when it is not.
-    var attachCommand: String {
-        attachCommand(meshAddress ?? lanAddress ?? "http://<this-mac>:\(port)")
+    ///
+    /// Optional, and nil is the whole change here. This fell through to
+    /// `http://<this-mac>:\(port)` when neither address was found, which put a
+    /// placeholder inside a line whose entire purpose is to be copied to
+    /// another keyboard and run — and the one blank in it is the field the
+    /// operator cannot fill, because working out this hub's address from the
+    /// other Mac is the question the dialog exists to answer. A command with a
+    /// hole in it does not read as an error; it reads as an instruction.
+    var attachCommand: String? {
+        guard let parent = meshAddress ?? lanAddress else { return nil }
+        return attachCommand(parent)
     }
 
     /// "10 minutes", from seconds — the dialog says how long the code lives,
@@ -1096,6 +1105,100 @@ struct MintedPairing {
     var validFor: String {
         let mins = max(1, expiresIn / 60)
         return mins == 1 ? "1 minute" : "\(mins) minutes"
+    }
+}
+
+/// Which machines this hub adopted are answering it over the mesh right now —
+/// `jstack-host leaves --json`, read before the adopt dialog is drawn.
+///
+/// There are two ways to adopt a Mac and they are not alternatives. A Mac that
+/// can reach this hub redeems a code where it stands; a Mac that cannot has
+/// the tunnel carried to it in a file, because redeeming needs a route and the
+/// route is what redeeming hands back. Nothing steered between them, so the
+/// carried file was offered for machines with no use for it — the operator
+/// walked a file to a Mac that was already answering over the tunnel, and that
+/// Mac's bundle was rewritten with a fresh code on the way out (#61).
+///
+/// The question is asked of the hub, not guessed from the registry: a row
+/// survives the machine being wiped, and a wiped machine is exactly the one
+/// the carried file is for.
+struct MeshRoster {
+    /// Peer names whose machine is live *and answering*. Only `online == true`
+    /// lands here. Null — the hub could not read its own peer table — stays
+    /// out on purpose: a dialog that read "could not tell" as "already on the
+    /// mesh" would take the carried file away from the machine that needs it
+    /// most, and that machine has no other route in.
+    let live: Set<String>
+
+    static let empty = MeshRoster(live: [])
+
+    init(live: Set<String>) { self.live = live }
+
+    init?(json: String) {
+        struct Row: Decodable {
+            var peer: String?
+            var online: Bool?
+        }
+        // The whole output first, then its last line. `HostControl.run` folds
+        // stderr into stdout, so a warning printed ahead of the payload must
+        // not read as "this hub adopted nothing".
+        let whole = json.data(using: .utf8)
+        let tail = json.split(separator: "\n").last.flatMap { $0.data(using: .utf8) }
+        let rows = [whole, tail].compactMap { $0 }
+            .compactMap { try? JSONDecoder().decode([Row].self, from: $0) }
+        guard let first = rows.first else { return nil }
+        live = Set(first.filter { $0.online == true }
+                        .compactMap { $0.peer }
+                        .filter { !$0.isEmpty })
+    }
+
+    /// Is the machine the operator just named already on the mesh.
+    func holds(_ typed: String) -> Bool {
+        let peer = Self.peerName(typed)
+        return !peer.isEmpty && live.contains(peer)
+    }
+
+    /// `enrolment.peer_name`, in Swift — "Work Mac" → "work-mac".
+    ///
+    /// The second copy of a rule, which is worth saying out loud: the name the
+    /// operator types is a display name, the peer is a filename and a config
+    /// stanza key, and the hub derives one from the other at adoption. Matching
+    /// on the typed name instead would miss the machine whose row reads "Work
+    /// Mac" the moment someone types "work-mac", which is the same miss this
+    /// whole check exists to close. The hub still owns the rule — it emits the
+    /// peer name it actually holds, and this only has to slug the live keystroke
+    /// the same way to compare against it.
+    static func peerName(_ name: String) -> String {
+        let runs = name.lowercased().map { ch -> Character in
+            (ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9") ? ch : "-"
+        }
+        var collapsed = ""
+        for ch in runs where ch != "-" || collapsed.last != "-" {
+            collapsed.append(ch)
+        }
+        var slug = String(collapsed.drop(while: { $0 == "-" }))
+        while slug.last == "-" { slug.removeLast() }
+        slug = String(slug.prefix(31))
+        while slug.last == "-" { slug.removeLast() }
+        return slug
+    }
+}
+
+/// Reports every keystroke in an `NSTextField` to a closure.
+///
+/// Because the adopt dialog has to steer on a name that does not exist until
+/// the operator types it: the choice between the two routes and the name they
+/// apply to are on the same panel, so the offline button's state has to follow
+/// the field rather than be decided once when the panel opens.
+final class FieldWatcher: NSObject, NSTextFieldDelegate {
+    private let onChange: (String) -> Void
+
+    init(_ onChange: @escaping (String) -> Void) {
+        self.onChange = onChange
+    }
+
+    func controlTextDidChange(_ note: Notification) {
+        onChange((note.object as? NSTextField)?.stringValue ?? "")
     }
 }
 
@@ -2221,6 +2324,14 @@ final class StatusController: NSObject {
         guard let binary = HostControl.hostBinary else { return }
         NSApp.activate(ignoringOtherApps: true)
 
+        // Asked before the panel is drawn, and that is the whole point. The
+        // carried file is wrong for a Mac already on this mesh, and the moment
+        // to act on that is while the route is still being *offered* — an
+        // alert cannot un-offer a button somebody has already pressed, and by
+        // then `adopt --offline` has rewritten that machine's bundle.
+        let roster = MeshRoster(json: HostControl.run(binary, ["leaves", "--json"]).out)
+            ?? .empty
+
         let ask = NSAlert()
         ask.messageText = "Adopt a Mac"
         ask.informativeText = "What should this hub call it?"
@@ -2232,11 +2343,35 @@ final class StatusController: NSObject {
         // gets a file instead: the tunnel travels to the machine.
         ask.addButton(withTitle: "Save a Joiner File…")
         ask.addButton(withTitle: "Cancel")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
         field.stringValue = "New Mac"
-        ask.accessoryView = field
+        let note = NSTextField(wrappingLabelWithString: Self.onMeshNote)
+        note.font = .systemFont(ofSize: 11)
+        note.textColor = .secondaryLabelColor
+        note.preferredMaxLayoutWidth = 280
+        let stack = NSStackView(views: [field, note])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        // Measured with the note in place and emptied afterwards: the panel is
+        // laid out once, so a frame sized around a blank label would clip the
+        // sentence the moment a typed name earns it.
+        stack.frame = NSRect(x: 0, y: 0, width: 280,
+                             height: stack.fittingSize.height)
+        note.stringValue = ""
+        ask.accessoryView = stack
         ask.window.initialFirstResponder = field
-        let choice = ask.runModal()
+
+        let offline = ask.buttons[1]
+        let steer = { (typed: String) in
+            let onMesh = roster.holds(typed)
+            offline.isEnabled = !onMesh
+            note.stringValue = onMesh ? Self.onMeshNote : ""
+        }
+        let watcher = FieldWatcher(steer)
+        field.delegate = watcher
+        steer(field.stringValue)
+        let choice = withExtendedLifetime(watcher) { ask.runModal() }
         guard choice == .alertFirstButtonReturn
                 || choice == .alertSecondButtonReturn else { return }
 
@@ -2289,20 +2424,42 @@ final class StatusController: NSObject {
                 + "address that reaches it from anywhere else. The code is "
                 + "good for \(minted.validFor)."
         } else {
+            // Nothing to run, so nothing is drawn to run. `adopt` refuses this
+            // case outright now — before it mints, so there is no live code
+            // burning down behind this panel — and a hub too old to refuse it
+            // reaches here instead, where the answer is the same: say what is
+            // missing, and offer no command at all rather than one with a hole
+            // where the address goes.
             shown.informativeText =
                 "This Mac has no address another machine can redeem against — "
                 + "only loopback, and it runs no mesh. Put it on a real "
                 + "network, then mint a new code."
         }
-        shown.accessoryView = Self.commandAccessory(minted.attachCommand)
+        if let command = minted.attachCommand {
+            shown.accessoryView = Self.commandAccessory(command)
+        }
         shown.addButton(withTitle: "Done")
-        shown.addButton(withTitle: "Copy Command")
-        if shown.runModal() == .alertSecondButtonReturn {
+        if minted.attachCommand != nil {
+            shown.addButton(withTitle: "Copy Command")
+        }
+        if shown.runModal() == .alertSecondButtonReturn,
+           let command = minted.attachCommand {
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(minted.attachCommand, forType: .string)
+            NSPasteboard.general.setString(command, forType: .string)
         }
         refresh()
     }
+
+    /// Why the carried file is greyed out, and what to press instead.
+    ///
+    /// Both halves matter. "Already on this mesh" alone leaves the operator
+    /// working out for themselves that the other button applies to them, and a
+    /// disabled control that does not say what to do instead is a dead end
+    /// wearing the clothes of a refusal.
+    private static let onMeshNote =
+        "That Mac is already on this mesh — it answers this hub over the "
+        + "tunnel, so it can redeem a code from where it stands. Use Get a "
+        + "Code. The joiner file is for a Mac that cannot reach here at all."
 
     /// Adopt a Mac this hub cannot reach — by handing over a file, not a code.
     ///
