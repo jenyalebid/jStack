@@ -129,7 +129,7 @@ app we ship is one client, not the product.
   The highest-priority session on this Mac wins.
 - Devices and Managed Macs are single-line counts. Info opens a status and
   version window; update controls live there. When this Mac has an offered
-  jRemote or jStack update, Update Available also appears in the main menu.
+  client app or jStack update, Update Available also appears in the main menu.
 
 **Install**
 - One command on a clean machine ends with a working session on screen.
