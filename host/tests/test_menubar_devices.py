@@ -1,5 +1,6 @@
 """Compile the actual menu's device policy without starting a desktop app."""
 from pathlib import Path
+import os
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,9 @@ assert(DeviceMenu.removalSucceeded(status: 404, data: removed))
 assert(!DeviceMenu.removalSucceeded(status: 403, data: removed))
 assert(!DeviceMenu.removalSucceeded(status: 404, data: Data(#"{"detail":"Not Found"}"#.utf8)))
 assert(!DeviceMenu.removalSucceeded(status: 0, data: nil))
+assert(HostAgent.token() == "legacy-still-valid")
+assert(HostAgent.updaterToken() == "jr1.host-internal.local-proof",
+       "updates must never prefer a legacy token over local administrative authority")
 print("device menu contract passed")
 ''')
     binary = tmp_path / "menu-contract"
@@ -39,6 +43,10 @@ print("device menu contract passed")
                             str(main), "-o", str(binary)], capture_output=True,
                            text=True, timeout=120)
     assert built.returncode == 0, built.stderr
-    result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+    (tmp_path / "api-token").write_text("legacy-still-valid")
+    (tmp_path / "internal-token").write_text("jr1.host-internal.local-proof\n")
+    result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10,
+                            env={**os.environ, "JREMOTE_STATE_DIR": str(tmp_path),
+                                 "JREMOTE_TOKEN_PATH": str(tmp_path / "api-token")})
     assert result.returncode == 0, result.stderr
     assert "device menu contract passed" in result.stdout

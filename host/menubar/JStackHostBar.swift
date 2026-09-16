@@ -226,6 +226,14 @@ enum HostAgent {
         stateDir().appendingPathComponent("internal-token")
     }
 
+    /// Update authority is deliberately narrower than ordinary host reads.
+    /// Never substitute a still-valid legacy or paired-device credential.
+    static func updaterToken() -> String? {
+        guard let raw = try? String(contentsOf: internalTokenPath(), encoding: .utf8) else { return nil }
+        let token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return token.hasPrefix("jr1.host-internal.") ? token : nil
+    }
+
     /// Tokens this host has answered 401 to, by value.
     ///
     /// **A token file existing says nothing about the credential being live.**
@@ -765,7 +773,7 @@ final class HostProbe {
     }
 
     func updates(_ done: @escaping (UpdateInventory?, String?) -> Void) {
-        guard let token = HostAgent.token() else {
+        guard let token = HostAgent.updaterToken() else {
             done(nil, "Local updater credential unavailable")
             return
         }
@@ -779,7 +787,7 @@ final class HostProbe {
 
     func update(target: String, requestID: String,
                 _ done: @escaping (Bool, String) -> Void) {
-        guard let token = HostAgent.token(),
+        guard let token = HostAgent.updaterToken(),
               let url = URL(string: "http://127.0.0.1:\(HostAgent.port())\(Self.apiPrefix)/updates/queue")
         else { return done(false, "Local updater credential unavailable") }
         var request = URLRequest(url: url)
