@@ -371,16 +371,33 @@ struct Device: Decodable {
         name = try c.decode(String.self, forKey: .name)
         createdAt = try c.decodeIfPresent(Int.self, forKey: .createdAt)
         lastSeenAt = try c.decodeIfPresent(Int.self, forKey: .lastSeenAt)
-        revoked = try c.decodeIfPresent(Bool.self, forKey: .revoked) ?? false
+        revoked = try c.decodeIfPresent(Bool.self, forKey: .revoked) == true
+            || c.decodeIfPresent(Int.self, forKey: .revokedAt) != nil
         current = try c.decodeIfPresent(Bool.self, forKey: .current) ?? false
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, revoked, current, createdAt, lastSeenAt
+        case id, name, revoked, current, createdAt, lastSeenAt, revokedAt
     }
 }
 
 struct DeviceList: Decodable { var devices: [Device] }
+
+enum DeviceMenu {
+    /// The menu is current access, not the host's retained audit history.
+    static func active(_ devices: [Device], removed: Set<String> = []) -> [Device] {
+        devices.filter { !$0.revoked && $0.id != "host-internal" && !removed.contains($0.id) }
+            .sorted { $0.name < $1.name }
+    }
+
+    static func removalSucceeded(status: Int, data: Data?) -> Bool {
+        if status == 200 { return true }
+        guard status == 404, let data,
+              let body = try? JSONDecoder().decode([String: String].self, from: data)
+        else { return false }
+        return body["detail"] == "unknown or already revoked device"
+    }
+}
 
 /// `/host` — the route that proves which machine this is. Behind the token by
 /// design, and that is the point: a host answering on loopback that rejects
@@ -726,7 +743,8 @@ final class HostProbe {
     /// token opens nothing and any live connection it held is already cut.
     func revoke(deviceId: String, token: String,
                 _ done: @escaping (Bool, String) -> Void) {
-        post("/devices/\(escaped(deviceId))/revoke", token: token, timeout: 10, done)
+        post("/devices/\(escaped(deviceId))/revoke", token: token, timeout: 10,
+             removal: true, done)
     }
 
     /// Drop an adopted machine from the grid, through the host's own route.
@@ -759,6 +777,7 @@ final class HostProbe {
     /// logs, so whatever the host actually answered is carried up verbatim.
     private func post(_ path: String, token: String, timeout: TimeInterval,
                       body: [String: Bool]? = nil,
+                      removal: Bool = false,
                       _ done: @escaping (Bool, String) -> Void) {
         let port = HostAgent.port()
         guard let url = URL(string: "http://127.0.0.1:\(port)\(Self.apiPrefix)\(path)")
@@ -778,7 +797,8 @@ final class HostProbe {
             else if let data, let text = String(data: data, encoding: .utf8), !text.isEmpty {
                 detail = text
             } else { detail = "the hub answered \(status)" }
-            DispatchQueue.main.async { done(status == 200, detail) }
+            let ok = removal ? DeviceMenu.removalSucceeded(status: status, data: data) : status == 200
+            DispatchQueue.main.async { done(ok, detail) }
         }.resume()
     }
 
@@ -1282,6 +1302,7 @@ final class StatusController: NSObject {
     private let probe = HostProbe()
     private var timer: Timer?
     private var state = HostState()
+    private var removedDevices: Set<String> = []
 
     override init() {
         super.init()
@@ -1309,6 +1330,8 @@ final class StatusController: NSObject {
         probe.poll { [weak self] state in
             guard let self else { return }
             self.state = state
+            // A poll started before a successful removal cannot resurrect it.
+            self.state.devices = DeviceMenu.active(state.devices, removed: self.removedDevices)
             self.draw()
             if self.item.menu?.highlightedItem == nil { self.build() }
         }
@@ -1636,12 +1659,6 @@ final class StatusController: NSObject {
         return item
     }
 
-    /// The host's own self-credential — minted as a device row so the registry
-    /// can audit it, but not a device anyone paired, and revoking it would cut
-    /// the host off from itself. Kept off the roster the menu offers to remove.
-    /// Mirrors `jstack_host.devices.INTERNAL_ID`.
-    private static let internalDeviceID = "host-internal"
-
     /// The paired-devices row: a count read at the top level, the roster opened
     /// off it. Only where the host answered a token, since the list lives behind
     /// it — and only when something is actually paired, because a row that can
@@ -1650,10 +1667,8 @@ final class StatusController: NSObject {
     private func devicesItem() -> NSMenuItem? {
         guard state.isUp, state.isProvisioned, !state.unauthorized,
               state.identity?.canManageDevices == true else { return nil }
-        let roster = state.devices.filter { $0.id != Self.internalDeviceID }
-        let active = roster.filter { !$0.revoked }.sorted { $0.name < $1.name }
-        let revoked = roster.filter { $0.revoked }.sorted { $0.name < $1.name }
-        guard !active.isEmpty || !revoked.isEmpty else { return nil }
+        let active = DeviceMenu.active(state.devices, removed: removedDevices)
+        guard !active.isEmpty else { return nil }
 
         let sub = NSMenu()
         sub.autoenablesItems = false
@@ -1680,25 +1695,8 @@ final class StatusController: NSObject {
             sub.addItem(row)
         }
 
-        // Removed devices stay on the list — the registry is the audit surface,
-        // and a device that vanishes the instant it is revoked is one you cannot
-        // confirm you removed. No action on them: revoking a revoked device is a
-        // 404, and a Remove that answers "already gone" is a button that lies.
-        if !revoked.isEmpty {
-            sub.addItem(.separator())
-            sub.addItem(Self.caption("Removed"))
-            for device in revoked {
-                sub.addItem(Self.caption("    \(device.name)"))
-            }
-        }
-
         let title = "\(active.count) " + (active.count == 1 ? "Device" : "Devices")
-        let subtitle: String
-        switch (active.count, revoked.count) {
-        case (_, 0): subtitle = "\(active.count) paired"
-        case (0, _): subtitle = "\(revoked.count) removed"
-        default:     subtitle = "\(active.count) paired, \(revoked.count) removed"
-        }
+        let subtitle = "\(active.count) paired"
         let item = Self.opener(title, symbol: "laptopcomputer.and.iphone", submenu: sub)
         item.attributedTitle = Self.twoLine(title, subtitle)
         item.image = Self.glyph("laptopcomputer.and.iphone", size: 26)
@@ -2001,6 +1999,11 @@ final class StatusController: NSObject {
         guard state.identity?.canManageDevices == true,
               let device = sender.representedObject as? Device,
               !device.id.isEmpty, let token = HostAgent.token() else { return }
+        guard DeviceMenu.active(state.devices, removed: removedDevices).contains(where: { $0.id == device.id }) else {
+            build()
+            refresh()
+            return
+        }
 
         let alert = NSAlert()
         alert.alertStyle = device.current ? .critical : .warning
@@ -2017,7 +2020,11 @@ final class StatusController: NSObject {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         probe.revoke(deviceId: device.id, token: token) { [weak self] ok, detail in
-            if !ok {
+            if ok, let self {
+                self.removedDevices.insert(device.id)
+                self.state.devices.removeAll { $0.id == device.id }
+                self.build()
+            } else if !ok {
                 let failed = NSAlert()
                 failed.alertStyle = .warning
                 failed.messageText = "Could not remove \(device.name)"
@@ -2634,6 +2641,7 @@ extension StatusController: NSMenuDelegate {
     /// a board up to ten seconds stale is the thing that makes an indicator
     /// stop being believed.
     func menuWillOpen(_ menu: NSMenu) { refresh() }
+    func menuDidClose(_ menu: NSMenu) { build() }
 }
 
 // MARK: - The app
@@ -2650,7 +2658,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+#if !JSTACK_MENUBAR_TEST
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()
+#endif
