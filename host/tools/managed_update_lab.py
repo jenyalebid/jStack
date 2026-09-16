@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pwd
+import shlex
 import shutil
 import subprocess
 import sys
@@ -80,7 +82,16 @@ def main():
             return subprocess.run([str(args.vm_tool), *argv], check=True, capture_output=True, text=True).stdout
         def ssh(command):
             return vm("ssh", args.vm, command)
-        machine = ssh("/bin/cat /Users/admin/.local/state/jremote/host-id").strip()
+        if ssh("id -un").strip() != "admin":
+            raise RuntimeError("registration requires the disposable VM account")
+        guest_home = Path(ssh('printf "%s" "$HOME"').strip())
+        if not guest_home.is_absolute() or guest_home == Path("/"):
+            raise RuntimeError("guest did not report a valid home directory")
+        def guest(relative):
+            return str(guest_home / relative)
+        def quoted(relative):
+            return shlex.quote(guest(relative))
+        machine = ssh("/bin/cat " + quoted(".local/state/jremote/host-id")).strip()
         address = vm("ip", args.vm).strip()
         if get_store().host_row(machine):
             raise RuntimeError("fixture already registered; refusing to rotate a running adoption")
@@ -94,13 +105,14 @@ def main():
                   "parent_port": args.port, "parent_url": f"http://{args.hub_address}:{args.port}"}
         adoption = root / (args.vm + "-adoption.json")
         atomic_json(adoption, record)
-        vm("cp", args.vm, str(adoption), "/Users/admin/update-lab-adoption.json")
-        ssh("mkdir -p /Users/admin/update-bootstrap")
-        vm("cp", args.vm, str(args.bootstrap), "/Users/admin/update-bootstrap/jstack_host")
-        ssh("/Users/admin/jStack/host/.venv/bin/python3 -m pip install 'cryptography>=43'")
-        vm("cp", args.vm, str(Path(__file__)), "/Users/admin/update-lab.py")
-        response = ssh("PYTHONPATH=/Users/admin/update-bootstrap /Users/admin/jStack/host/.venv/bin/python3 "
-                       "/Users/admin/update-lab.py --leaf-fixture")
+        vm("cp", args.vm, str(adoption), guest("update-lab-adoption.json"))
+        ssh("mkdir -p " + quoted("update-bootstrap"))
+        vm("cp", args.vm, str(args.bootstrap), guest("update-bootstrap/jstack_host"))
+        ssh(quoted("jStack/host/.venv/bin/python3") + " -m pip install 'cryptography>=43'")
+        vm("cp", args.vm, str(Path(__file__)), guest("update-lab.py"))
+        response = ssh("PYTHONPATH=" + quoted("update-bootstrap") + " "
+                       + quoted("jStack/host/.venv/bin/python3") + " "
+                       + quoted("update-lab.py") + " --leaf-fixture")
         grant = json.loads(response)["grant"]
         grants.remember(machine, grant)
         print(json.dumps({"machine": machine, "vm": args.vm, "address": address, "fixture_adoption": True}))
@@ -138,7 +150,8 @@ def main():
 
 
 def leaf_fixture():
-    if Path.home() != Path("/Users/admin"):
+    account = pwd.getpwuid(os.getuid())
+    if account.pw_name != "admin" or Path.home() != Path(account.pw_dir):
         raise RuntimeError("fixture bootstrap is restricted to the disposable VM account")
     from jstack_host import grants, hostenv, install_updater
     from jstack_host.update_supervisor import atomic_json

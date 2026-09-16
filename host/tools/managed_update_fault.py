@@ -7,6 +7,8 @@ withholds the staged client bundle while apply is paused. Production is refused.
 """
 import argparse
 import json
+import os
+import pwd
 from pathlib import Path
 import signal
 import time
@@ -21,7 +23,9 @@ def main():
     args = parser.parse_args()
     root = Path.home() / ".local/state/jremote/updates"
     config = json.loads((root / "config.json").read_text())
-    if (Path.home() != Path("/Users/admin") or not config.get("candidate_test")
+    account = pwd.getpwuid(os.getuid())
+    if (account.pw_name != "admin" or Path.home() != Path(account.pw_dir)
+            or not config.get("candidate_test")
             or not (Path.home() / "update-lab-adoption.json").is_file()):
         raise RuntimeError("fault injection requires the disposable VM fixture")
     journal = root / "job.json"

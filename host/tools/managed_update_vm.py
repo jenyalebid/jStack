@@ -5,6 +5,8 @@ network topology are not covered. No production acceptance receipt is emitted.
 """
 import argparse
 import json
+import os
+import pwd
 from pathlib import Path
 import shutil
 import sys
@@ -26,7 +28,9 @@ def main():
     state = Path.home() / ".local/state/jremote"
     root = state / "updates"
     config = json.loads((root / "config.json").read_text())
-    if (Path.home() != Path("/Users/admin") or not config.get("candidate_test")
+    account = pwd.getpwuid(os.getuid())
+    if (account.pw_name != "admin" or Path.home() != Path(account.pw_dir)
+            or not config.get("candidate_test")
             or not (Path.home() / "update-lab-adoption.json").is_file()):
         raise RuntimeError("operation requires the disposable candidate-test VM fixture")
     for path in reversed(config["runtime_imports"]):
