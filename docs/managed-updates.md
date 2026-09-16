@@ -58,8 +58,9 @@ cannot be updated remotely until bootstrap has run on that leaf.
 - Complete and retain all nine final-artifact receipts: fresh_install,
   upgrade, fleet, offline_catchup, session_survival, interruption, rollback,
   revocation, cellular. Unit passes are not these receipts.
-- Exercise Update All including a genuinely self-updating disposable hub,
-  and the exact fresh-install path (not a baseline install followed by upgrade).
+- Complete the two-leaf fleet case and exact fresh-install path (not a
+  baseline install followed by upgrade). Self-update and the actual Update All
+  menu action have passed with one disposable hub and one disposable leaf.
 - Automate the complete acceptance run and connect it to one release action.
   The present tools build/promote and provide lab fixtures; they do not yet
   supply an unattended end-to-end acceptance pipeline.
@@ -68,6 +69,8 @@ cannot be updated remotely until bootstrap has run on that leaf.
 - Staged Python dependencies are resolved by pip, not yet a locked, bundled
   offline dependency set. The source archive and Mac apps are exact artifacts;
   do not claim fully hermetic installation.
+
+Remaining qualification is tracked in [#72](https://github.com/jenyalebid/jStack/issues/72).
 
 ## Product decisions
 

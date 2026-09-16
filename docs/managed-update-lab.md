@@ -71,3 +71,25 @@ any later adoption must mint a new credential, never resurrect the old one.
 - Baseline installation followed by upgrade is not exact-candidate fresh install.
 - `record` writes fixture-only observations and job history, never the nine
   publisher receipts. Keep private machine details out of public repositories.
+
+## Real hub self-update and concurrent Update All
+
+`host/tools/managed_update_vm.py` operates inside the same candidate-only
+disposable account. With its updater stopped, `hub --candidate DIR` preserves
+the old fixture parent record and turns that guest into a real local update
+hub serving the signed candidate. Restart its updater; `queue` exercises its
+self-update. `offer --candidate DIR` changes only that fixture's offered release.
+
+For a second guest, `enrol` writes a private fixture adoption record on the hub;
+copy it privately to the leaf and use `adopt`. Return the generated grant record
+privately to the hub and use `grant`. These replace only fixture relationships;
+they remain no proof of enrollment or WireGuard. The relay/parent endpoints
+are explicit arguments. `queue --target all` exercises the shared jobs, while
+the real menu's **Update All Macs** action is the UI proof. `inventory` reads
+the installed guest hub, not the external fixture server. `spawn --agent
+update-proof-chat` starts a fresh Codex session and asks it to run only `pwd`.
+
+Observed 2026-09-16: hub and leaf updated concurrently through the real menu
+from 0.69.2/client 69 to 0.69.3/client 70. Both reported current and independently
+observed source identities; duplicate delivery preserved both job IDs. This
+is a two-Mac proof, not the contract's hub-plus-two-leaves qualification.
