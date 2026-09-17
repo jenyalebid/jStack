@@ -964,7 +964,11 @@ def build_parser() -> argparse.ArgumentParser:
         state_dir=_path(a.state_dir)))
 
     p = sub.add_parser("uninstall", help="remove the LaunchAgent (state and token stay)")
-    p.set_defaults(fn=lambda a: install_host.uninstall(label=a.label))
+    p.add_argument("--all-services", action="store_true",
+                   help="remove every signed Hub/Services user registration; "
+                        "retain bundles, Network, pairing and private data")
+    p.set_defaults(fn=lambda a: install_host.uninstall(
+        label=a.label, all_services=a.all_services))
 
     p = sub.add_parser("status", help="is the host installed, loaded and answering")
     # No default: the agent's own port is the answer, and a default here is
