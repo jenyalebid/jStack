@@ -13,7 +13,49 @@ process builds its own; the package's own tests exercise the one the package
 ships, so a route that only works when someone else mounts it fails here.
 """
 
+import os
+import shutil
+import tempfile
+from pathlib import Path
+
 import pytest
+
+#: The state dir for this whole run, and the reason it is a module statement
+#: rather than a fixture.
+#:
+#: THE SUITE WAS WRITING INTO WHICHEVER STATE DIR THE MACHINE RESOLVED. Not a
+#: fixture's tmp_path — the real one, the one a host is serving out of. The
+#: four isolations below cover four call-time seams each found the hard way,
+#: and `hostenv.state_dir()` is the seam under all of them: run from a checkout
+#: with no profile module importable it answers `~/.local/state/jremote`, so
+#: every run minted a `host-id` there, scanned this Mac's whole
+#: `~/.claude/projects` into a 734K `token_usage/cache.json`, and appended its
+#: `"not a clock"` fixture to `allowance_rejects.jsonl`. A directory that is
+#: nobody's host then holds a second `host-id` for this machine, which the app
+#: reads as a different host at the same address (#45). Run from a tree where
+#: the profile *does* import — the embedding host's own checkout — the same
+#: writes land in the live host's state dir instead. One hole, both dirs.
+#:
+#: A FIXTURE CANNOT CLOSE IT. Seven modules name a file in the state dir as a
+#: module constant (`spend.CACHE`, `board._TURN_DIR`, …), bound the moment the
+#: module is imported — which for a test module is collection, before any
+#: fixture has run. An autouse fixture would redirect the call-time readers and
+#: leave the constants pointing at the machine, which is worse than either
+#: answer alone: half the suite isolated, half not, and nothing saying which.
+#: pytest imports this file before it collects anything, so setting the
+#: variable here is the one moment that is ahead of every binding.
+#:
+#: One directory for the session rather than one per test, for the same reason:
+#: a constant binds once, so per-test dirs would be a promise only the
+#: call-time half could keep. `test_jremote_isolation` pins both halves.
+_STATE_DIR = Path(tempfile.mkdtemp(prefix="jstack-host-tests-state-"))
+os.environ["JREMOTE_STATE_DIR"] = str(_STATE_DIR)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Take the run's state dir away with it. Best-effort: a leftover temp
+    directory is untidy, and failing the run over one would be worse."""
+    shutil.rmtree(_STATE_DIR, ignore_errors=True)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -29,6 +71,53 @@ def _isolated_security_alerts():
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(hostenv, "security_alert", captured.append)
         yield captured
+
+
+# ── The suite's scheduler is an empty install ───────────────────────────────
+#
+# Module scope, not a fixture, because the thing this protects binds at
+# *import* and a test module is imported before any fixture of its own runs.
+#
+# `tests/test_codex_parity.py` imports jStack's scheduler package in-process
+# (`from scheduler import runner`). That package bootstraps the machine's
+# `python_path` onto `sys.path` as it imports — by design, so a live daemon can
+# load an install's own workspace resolver — and on a machine that runs one,
+# the entry is the embedding tree. From that moment `jremote_host_profile` is
+# importable to the whole pytest process, so the next `hostenv.reset_profile()`
+# (there are twenty of them, in eight files) re-resolves `auto` to the
+# machine's *live* profile and caches it. Every later test that reaches a
+# profile method touching the embedding dashboard then dies inside it — ten
+# tests in two unrelated files, green alone, red in a full run, naming neither
+# the scheduler nor the profile.
+#
+# One `sys.path.append` in a shared interpreter is not undoable, so the fix is
+# to leave nothing to append: point the scheduler at a home it has never been
+# installed into. Its config reader answers built-in defaults for a missing
+# file, which is what a package's own tests should be asserting against anyway
+# — a unit test whose answer depends on the operator's `scheduler.json` is
+# already reporting on the wrong machine.
+#
+# A fresh temporary root cannot inherit another test process's install.
+# The explicit overrides go too — setting
+# the home alone leaves an exported `SCHEDULER_CONFIG_DIR` still pointing at
+# the live install.
+for _override in ("SCHEDULER_CONFIG_DIR", "SCHEDULER_STATE_DIR",
+                  "SCHEDULER_CREDENTIALS_DIR", "SCHEDULER_INSTALL_FILE"):
+    os.environ.pop(_override, None)
+_scheduler_home = tempfile.TemporaryDirectory(prefix="jstack-host-test-scheduler-")
+os.environ["SCHEDULER_HOME"] = _scheduler_home.name
+
+
+@pytest.fixture(autouse=True)
+def _no_live_fileshare_audit(monkeypatch):
+    """A TestClient lifespan must never inspect the developer's share points."""
+    import asyncio
+    from jstack_host import fileshare
+
+    async def idle():
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(fileshare, "audit_loop", idle)
 
 
 @pytest.fixture(autouse=True)

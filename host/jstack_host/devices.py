@@ -482,6 +482,12 @@ def revoke(device_id: str) -> bool:
     """Stamp the row and cut its live connections. False = nothing to do."""
     if not _store().revoke_device(device_id):
         return False
+    notify_revoked(device_id)
+    return True
+
+
+def notify_revoked(device_id: str) -> None:
+    """Wake streams after a revocation committed by this or another workflow."""
     with _watch_lock:
         waiting = list(_watchers.get(device_id, ()))
     for loop, event in waiting:
@@ -491,7 +497,6 @@ def revoke(device_id: str) -> bool:
         board_watch.poke()  # wakes the board SSE loops so they re-check now
     except Exception:  # noqa: BLE001 — a stream lingering a tick must not fail the revoke
         pass
-    return True
 
 
 async def wait_revoked(device_id: str) -> None:
@@ -610,6 +615,13 @@ def _internal_token_locked() -> str:
         _, secret = parse(token)
         if secret and hmac.compare_digest(row["token_hash"], _hash(secret)):
             return token
+    # Past here is a mint or a re-key, which is this host claiming an identity
+    # — and a process that resolved the wrong state dir claims it into a store
+    # the real host never reads. The plaintext and the hash both land in that
+    # world, so nothing later reconciles them and every caller re-keys again.
+    # Reading an existing credential above is unaffected: it answers for
+    # whoever wrote it, and that is the same answer whoever asks.
+    hostenv.refuse_second_identity(path.parent, "the host's internal token")
     secret = secrets.token_urlsafe(32)
     if row is None:
         if not store.add_device(INTERNAL_ID, INTERNAL_ID, _hash(secret)):

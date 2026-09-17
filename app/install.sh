@@ -283,6 +283,8 @@ else
     echo
     echo "${BOLD}Open it:${RESET} open -a $APP_NAME"
     echo
-    echo "It needs a host to talk to. On the Mac you want to reach:"
-    echo "    ./host/install.sh"
+    echo "Connect to a local or remote jStack Hub:"
+    echo "    On the Hub, choose Pair a Device."
+    echo "    In jRemote, choose Add a Mac and enter its address and pairing code."
+    echo "No local Hub installation is required to use this client."
 fi

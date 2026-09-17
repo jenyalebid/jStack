@@ -8,7 +8,7 @@ argument-hint: "<owner/repo#N>"
 
 `$ARGUMENTS` is `owner/repo#N`. Missing → ask which issue, never guess.
 
-Take that issue from open to a PR waiting to be merged. The issue body is your whole brief, and the issue is where your answer must land — this session's prose does not survive.
+Take the issue to a verified PR. Explicit landing or release requests continue through the authorized workflow; otherwise leave it ready for review. Read the user's current instructions and record the outcome on the issue.
 
 Two contracts hold the machinery together. **The branch is `issue-<N>`**, exactly: closing the issue merges the open PR whose head is `issue-<N>`, and nothing else records which branch belonged to which issue. And **never switch branches in the shared checkout** — every agent on this machine shares one working tree per repo, so `git checkout -b` moves the branch under other sessions mid-edit. Use a worktree, with no exception for a small change.
 
@@ -56,7 +56,7 @@ gh pr create --repo <owner/repo> --head issue-<N> --title "<title>" --body "Fixe
 <what changed and why, in a few lines>"
 ```
 
-`Fixes #<N>` is what ties the PR to the issue in GitHub's own UI. Do not merge and do not close the issue — closing is what merges, and it is not your call.
+`Fixes #<N>` ties the PR to its issue. Without explicit landing authorization, do not merge or close: this installation may treat closing as a merge request. With authorization, run the required gates, merge through the repository's workflow, and verify the requested runtime outcome before closing. Authorization to merge is not authorization to publish a release unless the user requested that too.
 
 ## 5. Answer on the issue
 
@@ -66,7 +66,7 @@ gh issue comment <N> --repo <owner/repo> --body "..."
 
 Short and specific: what changed as behaviour rather than a file tour, the PR number, the actual test result, and anything you left undone and why.
 
-Your turn can end here. A later comment on the issue resumes this conversation — read it as the live instruction and answer it on the issue again.
+For a review-only assignment, the verified PR and issue answer complete the work. For an authorized landing or release, an open PR is intermediate progress, not completion. A later comment resumes the conversation; read it as the live instruction and answer on the issue again.
 
 ## Blocked
 

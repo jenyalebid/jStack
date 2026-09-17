@@ -62,6 +62,11 @@ def capture() -> dict:
             "dirty": bool(sha) and bool(_git("status", "--porcelain", "--", str(_PKG))),
             "root": _git("rev-parse", "--show-toplevel") if sha else "",
         }
+        # Read the version belonging to these loaded sources, not whichever
+        # editable distribution happens to be registered in the interpreter.
+        manifest = _PKG.parent.parent / "plugins/jstack/.claude-plugin/plugin.json"
+        if manifest.is_file():
+            _stamp["version"] = json.loads(manifest.read_text())["version"]
         # An immutable release archive has no .git. Its identity is packaged
         # into the signed stack artifact, not copied from desired fleet state.
         identity = _PKG.parent / "release-identity.json"
@@ -69,6 +74,10 @@ def capture() -> dict:
             data = json.loads(identity.read_text())
             _stamp.update(sha=data["sha"], release=data["release"],
                           dirty=data.get("package_sha256") != fingerprint(_PKG))
+            if data.get("version"):
+                _stamp["version"] = data["version"]
+            if data.get("build"):
+                _stamp["build"] = data["build"]
     return dict(_stamp)
 
 

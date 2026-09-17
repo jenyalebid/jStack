@@ -19,9 +19,31 @@ from pathlib import Path
 
 from . import devices, embed, hostenv, install_host
 from .update_supervisor import atomic_json
-from .update_macos import atomic_bytes, bundle_info
+from .update_macos import atomic_bytes, bundle_info, client_distribution
 
 LABEL = "com.jremote.updater"
+
+
+def stage_runtime(package: Path, root: Path) -> Path:
+    """Keep the bootstrap's exact source identity beside its copied package."""
+    from . import sourcestamp
+    identity_path = package.parent / "release-identity.json"
+    identity = (json.loads(identity_path.read_text()) if identity_path.exists() else
+                {**sourcestamp.capture(), "package_sha256": sourcestamp.fingerprint(package)})
+    identity.setdefault("release", "")
+    identity_bytes = json.dumps(identity, sort_keys=True).encode()
+    stamp = hashlib.sha256(identity_bytes + b"".join(
+        p.read_bytes() for p in sorted(package.glob("*.py")))).hexdigest()[:16]
+    destination = root / "bootstrap" / stamp
+    if not destination.exists():
+        import tempfile
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=".stage-", dir=destination.parent))
+        shutil.copytree(package, staging / "jstack_host",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        atomic_json(staging / "release-identity.json", identity)
+        os.rename(staging, destination)
+    return destination
 
 
 def bootstrap(public_key: str, *, state_dir: Path | None = None, load=True,
@@ -46,12 +68,13 @@ def bootstrap(public_key: str, *, state_dir: Path | None = None, load=True,
     menu_exe = Path(menu_job["ProgramArguments"][0])
     menu_app = next(p for p in menu_exe.parents if p.suffix == ".app")
     client = Path("/Applications/jRemote.app")
-    info = bundle_info(client)
-    signing = subprocess.run(["/usr/bin/codesign", "-dv", "--verbose=4", str(client)],
+    info = bundle_info(client) if client.exists() else {}
+    signing_target = client if client.exists() else menu_app
+    signing = subprocess.run(["/usr/bin/codesign", "-dv", "--verbose=4", str(signing_target)],
                              capture_output=True, text=True, check=True).stderr
     team = re.search(r"^TeamIdentifier=([A-Z0-9]+)$", signing, re.MULTILINE)
     if team is None:
-        raise ValueError("install a Developer ID signed client before bootstrapping updates")
+        raise ValueError("a Developer ID signed menu or client is required to establish update trust")
     # Mints only the machine's own existing plumbing credential; never rotates
     # a paired device or revives a revoked internal credential.
     token = devices.internal_token()
@@ -70,16 +93,25 @@ def bootstrap(public_key: str, *, state_dir: Path | None = None, load=True,
                      "menubar_plist": str(menu_plist), "menubar_label": menu_job["Label"],
                      "menubar_path": str(menu_app), "client_path": str(client),
                      "menubar_bundle_id": bundle_info(menu_app)["CFBundleIdentifier"],
-                     "client_bundle_id": info["CFBundleIdentifier"]}
+                     "client_bundle_id": info.get("CFBundleIdentifier", ""),
+                     "client_managed": client_distribution(client, {**old_config, "client_managed":
+                                         old_config.get("client_managed", bool(old_config))}) == "hub"}
     # Versioned stable bootstrap. Never overwrite imported supervisor modules
     # while an older process could still be recovering a transaction.
     package = Path(__file__).parent
-    stamp = hashlib.sha256(b"".join(p.read_bytes() for p in sorted(package.glob("*.py")))).hexdigest()[:16]
-    bootstrap_dir = root / "bootstrap" / stamp
-    if not bootstrap_dir.exists():
-        shutil.copytree(package, bootstrap_dir / "jstack_host", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    bootstrap_dir = stage_runtime(package, root)
     configuration["runtime_imports"] = [str(bootstrap_dir)]
     configuration["dispatcher"] = str(bootstrap_dir / "jstack_host/update_dispatcher.py")
+    from . import releases as app_releases
+    configuration["feed_dir"] = str(app_releases.RELEASE_DIR.parent / "fleet")
+    from .release_channel import repository
+    origin = subprocess.run(["git", "-C", str(package), "remote", "get-url", "origin"],
+                            capture_output=True, text=True)
+    identity_path = package.parent / "release-identity.json"
+    identity = json.loads(identity_path.read_text()) if identity_path.exists() else {}
+    source = old_config.get("github_repo") or identity.get("github_repo") or origin.stdout.strip()
+    if source:
+        configuration["github_repo"] = repository(source)
     atomic_json(root / "config.json", configuration)
     logs = root / "logs"
     logs.mkdir(exist_ok=True)

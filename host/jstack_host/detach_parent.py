@@ -211,8 +211,19 @@ def detach(*, host_key: str = "", keep_tunnel: bool = False,
     state = state or hostenv.state_dir()
     steps: list[dict] = []
 
-    from . import grants
-    revoked = grants.revoke_issued()
+    from . import devices, grants
+    rec = parent_record(state)
+    attached = bool(rec) or any(r["revoked_at"] is None for r in grants.issued())
+    attached = attached or (root / "etc/wireguard/jrleaf.conf").exists()
+    try:
+        if attached:
+            revoked, device_ids = grants._store().revoke_parent_authority()
+            for device_id in device_ids:
+                devices.notify_revoked(device_id)
+        else:
+            revoked = 0
+    except Exception as exc:
+        raise DetachError("could not revoke parent authority; attachment preserved") from exc
     steps.append({
         "step": "grants", "ok": True,
         "note": (f"revoked {revoked} grant{'' if revoked == 1 else 's'} — no "
@@ -220,7 +231,6 @@ def detach(*, host_key: str = "", keep_tunnel: bool = False,
                  if revoked else
                  "no grants were outstanding — nothing could mint here")})
 
-    rec = parent_record(state)
     if tell_parent:
         steps.extend(_tell_parent(rec, host_key, poster))
 

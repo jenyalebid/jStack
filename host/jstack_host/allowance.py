@@ -449,7 +449,7 @@ def sync_from_scheduler(state_path: Path | None = None) -> bool:
     re-recorded on every read. The state file is either a map of jobs or a
     `{"jobs": {...}}` wrapper, depending on the scheduler's vintage.
     """
-    path = state_path or (hostenv.scheduler_dir() / "state" / "scheduler" / "state.json")
+    path = state_path or (hostenv.scheduler_state_dir() / "state.json")
     try:
         raw = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):

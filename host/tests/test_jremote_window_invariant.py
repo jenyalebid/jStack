@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -44,7 +45,7 @@ pytestmark = pytest.mark.skipif(not shutil.which(managed._TMUX),
 
 INFRA = Path(__file__).resolve().parents[1]
 TEST_SOCK = "jrtest-invariant"
-SID = "aaaaaaaa-1111-2222-3333-444444444444"
+SID = str(uuid.uuid4())
 
 
 def _t(*a):
@@ -68,6 +69,7 @@ def sock(monkeypatch):
     session" — a green suite that goes red on its own second run, blaming the
     detach path for a stale file.
     """
+    monkeypatch.setitem(globals(), "TEST_SOCK", "jr-invariant-" + uuid.uuid4().hex)
     monkeypatch.setattr(managed, "_SOCK", TEST_SOCK)
 
     def _wipe_transcript():
@@ -508,7 +510,7 @@ def test_importing_the_dashboard_closes_nothing():
     `dashboard.app` — ended live sessions on the Mac as a side effect. Anything
     that so much as imports the dashboard (a test run, a REPL, a one-off
     script) would do the same. Import must be inert."""
-    sock = "jrtest-import"
+    sock = "jr-import-" + uuid.uuid4().hex
     tmux = [managed._TMUX, "-L", sock]
     subprocess.run(tmux + ["kill-server"], capture_output=True)
     subprocess.run(tmux + ["new-session", "-d", "-s", "jr-cccccccc"], check=True)

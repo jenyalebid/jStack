@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
+import fcntl
 import hashlib
 import io
 import json
@@ -36,6 +37,18 @@ def component(path: Path, version: str) -> dict:
             "sha256": releases.digest(path)}
 
 
+def allocate_build(candidates: Path, minimum: int) -> int:
+    """Reserve an identity before building; failed builds never recycle it."""
+    candidates.mkdir(parents=True, exist_ok=True)
+    with (candidates / "build-number.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = candidates / "build-number.json"
+        previous = json.loads(state.read_text())["build"] if state.exists() else 0
+        number = max(previous, minimum) + 1
+        atomic_json(state, {"build": number})
+        return number
+
+
 def sign_menu(stack: Path, output: Path, version: str, config: dict) -> Path:
     password_path = config.get("sign_keychain_password_file")
     if password_path:
@@ -51,9 +64,12 @@ def sign_menu(stack: Path, output: Path, version: str, config: dict) -> Path:
     binary.parent.mkdir(parents=True)
     command(["xcrun", "swiftc", "-O", "-o", str(binary),
              str(stack / "host/menubar/JStackHostBar.swift")], timeout=180)
+    identity = json.loads((stack / "host/release-identity.json").read_text())
     info = {"CFBundleExecutable": "JStackHostBar", "CFBundleIdentifier": "com.jremote.menubar",
-            "CFBundleName": "JStack Host", "CFBundlePackageType": "APPL",
-            "CFBundleShortVersionString": version, "CFBundleVersion": version,
+            "CFBundleName": "jStack Hub", "CFBundleDisplayName": "jStack Hub",
+            "CFBundlePackageType": "APPL",
+            "CFBundleShortVersionString": version, "CFBundleVersion": str(identity["build"]),
+            "JStackSourceCommit": identity["sha"],
             "LSUIElement": True, "NSHighResolutionCapable": True,
             "CFBundleURLTypes": [{"CFBundleURLName": "jStack updates", "CFBundleURLSchemes": ["jstack"]}]}
     (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
@@ -91,13 +107,21 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
         target.parent.mkdir(exist_ok=True)
         dependencies[name] = snapshot(Path(repository), target)
     print(f"Release sources: stack {stack_sha}, client {client_sha}", flush=True)
-    release_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + stack_sha[:8]
+    import re
+    project = client / "jRemote-Code/jRemote/jRemote.xcodeproj/project.pbxproj"
+    current = max(map(int, re.findall(r"CURRENT_PROJECT_VERSION = (\d+);", project.read_text())))
+    build_number = allocate_build(candidates, current)
+    release_id = f"{build_number}-" + stack_sha[:8]
     output = work / release_id
     output.mkdir()
     version = json.loads((stack / "plugins/jstack/.claude-plugin/plugin.json").read_text())["version"]
+    from .release_channel import repository
+    github_repo = repository(config.get("github_repo") or command(
+        ["git", "-C", str(stack), "remote", "get-url", "origin"]).strip())
     from .sourcestamp import fingerprint
     (stack / "host/release-identity.json").write_text(json.dumps({
-        "release": release_id, "sha": stack_sha,
+        "release": release_id, "sha": stack_sha, "version": version, "build": build_number,
+        "github_repo": github_repo,
         "package_sha256": fingerprint(stack / "host/jstack_host")}))
     archive = output / "stack.tar.gz"
     with tarfile.open(archive, "w:gz") as bundle:
@@ -125,7 +149,7 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
     print("Building, signing and notarizing client candidate", flush=True)
     log_path = work / "client-build.log"
     with log_path.open("w") as log:
-        process = subprocess.run(["bash", str(app_script), "--no-bump", "--candidate-dir", str(app_output),
+        process = subprocess.run(["bash", str(app_script), "--build-number", str(build_number), "--candidate-dir", str(app_output),
                                   "--notes", notes], timeout=2400, stdout=log, stderr=subprocess.STDOUT,
                                  env={**os.environ, "JSTACK_CHECKOUT": str(stack)})
     if process.returncode:
@@ -154,10 +178,12 @@ def seal(work: Path, config: dict, notes: str) -> Path:
     destination = output / app.name
     shutil.copy2(app, destination)
     manifest = {"schema": 1, "release": release_id, "notes": notes,
+                "build": identity.get("build"),
+                "channel": {"github_repo": identity.get("github_repo")},
                 "sources": {"stack": stack_sha, "client": client_sha},
                 "client_packages": dependencies,
                 "components": {"stack": component(archive, version),
-                               "menubar": component(menu, version),
+                               "menubar": component(menu, str(identity.get("build", version))),
                                "client": component(destination, str(app_manifest["build"]))},
                 "compatibility": {"protocol": 1, "rollback": True, "platform": "macos",
                                   "architecture": "arm64", "minimum_os": "26.0"},
@@ -291,6 +317,13 @@ def ship(config: dict, candidate: Path, receipts: Path, private_key: bytes,
     envelope = promote(candidate, receipts, Path(config["feed_dir"]), private_key)
     release = envelope["manifest"]["release"]
     result = {"promoted": release}
+    github_repo = config.get("github_repo") or envelope["manifest"].get("channel", {}).get("github_repo")
+    if github_repo:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from .release_channel import publish
+        public = base64.b64encode(Ed25519PrivateKey.from_private_bytes(private_key).public_key().public_bytes_raw()).decode()
+        publish(Path(config["feed_dir"]) / release, github_repo, public)
+        result["published"] = release
     if deploy_after:
         result["deployed"] = deploy(release, port=config.get("hub_port", 9090))
     return result

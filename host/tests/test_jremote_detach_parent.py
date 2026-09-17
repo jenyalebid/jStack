@@ -67,6 +67,68 @@ def test_detach_revokes_the_grants_first_and_says_how_many(tmp_path):
     assert grants.issued() and all(r["revoked_at"] for r in grants.issued())
 
 
+def test_detach_never_revives_legacy_credentials(tmp_path, monkeypatch):
+    from jstack_host import devices, managed_access, auth
+    from jstack_host.store import SessionStore
+    database = tmp_path / "authority.sqlite"
+    store = SessionStore(db_path=database)
+    monkeypatch.setattr(grants, "_store", lambda: store)
+    monkeypatch.setattr(devices, "_store", lambda: store)
+    state = tmp_path / "state"
+    _record(state)
+    monkeypatch.setattr(managed_access, "is_leaf", lambda: (state / PARENT_RECORD).exists())
+    store.add_device("old-delegated", "old", devices._hash("old-secret"))
+    grant = grants.issue("parent")
+    _, secret = grants.parse(grant)
+    store.add_device("projected", "projected", devices._hash("projected-secret"))
+    store.bind_device_authority("projected", grants._hash(secret), "owner")
+    store.add_device(devices.INTERNAL_ID, "internal", devices._hash("internal-secret"))
+    monkeypatch.setattr(auth, "_expected_token", lambda: "old-file-token")
+    assert managed_access.device_allowed("old-delegated") is False
+    detach_parent.detach(root=tmp_path, state=state, runner=_Runner(), poster=_poster(), sudo=False)
+    assert not (state / PARENT_RECORD).exists()
+    store = SessionStore(db_path=database)
+    assert managed_access.device_allowed("old-delegated") is False
+    assert devices.authenticate("jr1.old-delegated.old-secret") is None
+    assert devices.authenticate("jr1.projected.projected-secret") is None
+    assert grants.authenticate(grant) is None
+    assert devices.authenticate("old-file-token") is None
+    assert store.device(devices.LEGACY_ID)["revoked_at"] is not None
+    assert store.device(devices.INTERNAL_ID)["revoked_at"] is None
+    store.add_device("new-independent", "new", devices._hash("new-secret"))
+    detach_parent.detach(root=tmp_path, state=state, runner=_Runner(), poster=_poster(), sudo=False)
+    assert store.device("new-independent")["revoked_at"] is None
+
+
+def test_revocation_failure_preserves_attachment(tmp_path, monkeypatch):
+    store = grants._store()
+    def fail():
+        raise OSError("database unavailable")
+    monkeypatch.setattr(store, "revoke_parent_authority", fail)
+    state = tmp_path / "state"
+    _record(state)
+    calls, runner = [], _Runner()
+    with pytest.raises(detach_parent.DetachError, match="attachment preserved"):
+        detach_parent.detach(root=tmp_path, state=state, runner=runner,
+                             poster=_poster(calls=calls), sudo=False)
+    assert (state / PARENT_RECORD).exists()
+    assert calls == []
+    assert runner.calls == []
+
+
+def test_revocation_transaction_rolls_back_every_authority(tmp_path):
+    store = grants._store()
+    grant = grants.issue("parent")
+    store.add_device("old", "old", "hash")
+    with store._conn() as db:
+        db.execute("CREATE TRIGGER refuse_revoke BEFORE UPDATE ON devices "
+                   "BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
+    with pytest.raises(Exception, match="injected failure"):
+        store.revoke_parent_authority()
+    assert grants.authenticate(grant) == "parent"
+    assert store.device("old")["revoked_at"] is None
+
+
 def test_the_grants_go_even_when_the_parent_cannot_be_reached(tmp_path):
     """The one step that ends real authority is local and unconditional. A
     parent that is off must not be able to keep a machine attached."""

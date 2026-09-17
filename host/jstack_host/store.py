@@ -1477,6 +1477,27 @@ class SessionStore:
         with self._write_lock, self._conn() as db:
             return db.execute(sql, params).rowcount
 
+    def revoke_parent_authority(self) -> tuple[int, list[str]]:
+        """Close a managed role before removing the record enforcing it.
+
+        Older delegated credentials have no authority provenance. None may
+        become an independent credential after detach. The legacy tombstone
+        also prevents an old token file being imported on the next request.
+        """
+        from .devices import INTERNAL_ID, LEGACY_ID
+        now = int(time.time())
+        with self._write_lock, self._conn() as db:
+            db.execute("BEGIN IMMEDIATE")
+            grants = db.execute(
+                "UPDATE parent_grants SET revoked_at=? WHERE revoked_at IS NULL", (now,)).rowcount
+            revoked = [r[0] for r in db.execute(
+                "SELECT id FROM devices WHERE id<>? AND revoked_at IS NULL", (INTERNAL_ID,))]
+            db.execute("UPDATE devices SET revoked_at=? WHERE id<>? AND revoked_at IS NULL",
+                       (now, INTERNAL_ID))
+            db.execute("INSERT OR IGNORE INTO devices (id,name,token_hash,created_at,revoked_at) "
+                       "VALUES (?,?,?,?,?)", (LEGACY_ID, "legacy", "", now, now))
+            return grants, revoked
+
     def shortcuts(self) -> list[dict]:
         """The live shortcuts, in the order they are drawn. Tombstones stay in
         the table for the devices that have not heard about them yet; nobody

@@ -83,6 +83,23 @@ def bundle_info(path: Path) -> dict:
         return plistlib.load(stream)
 
 
+def client_distribution(path: Path, config: dict) -> str:
+    """Only hub-distributed bundles and previously enrolled clients are ours."""
+    if not path.exists():
+        return "missing"
+    if (path / "Contents/_MASReceipt/receipt").exists():
+        return "app_store"
+    info = bundle_info(path)
+    if info.get("JStackDistribution") == "hub":
+        return "hub"
+    # Old bootstrap explicitly enrolled the installed client. Do not extend
+    # that enrollment to a different bundle, or to any Store installation.
+    if (config.get("client_managed", True) and config.get("client_bundle_id")
+            and info.get("CFBundleIdentifier") == config["client_bundle_id"]):
+        return "hub"
+    return "external"
+
+
 def running(path: Path) -> list[int]:
     executable = str(path / "Contents/MacOS" / bundle_info(path)["CFBundleExecutable"])
     result = []
@@ -153,6 +170,10 @@ class MacBackend:
     def _check_app(self, path: Path, component: dict, kind: str):
         team = self.config["team_id"]
         identifier = self.config[kind + "_bundle_id"]
+        if kind == "client" and not identifier:
+            # A host bootstrapped without a client can later discover a signed
+            # direct-distribution app. Pin to that installed bundle identity.
+            identifier = bundle_info(Path(self.config["client_path"]))["CFBundleIdentifier"]
         command(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R",
                  f'=anchor apple generic and certificate leaf[subject.OU] = "{team}" and identifier "{identifier}"',
                  str(path)])
@@ -189,6 +210,8 @@ class MacBackend:
                 env={**os.environ, "PYTHONPATH": pythonpath})
         apps = {}
         for kind in ("menubar", "client"):
+            if kind == "client" and client_distribution(Path(self.config["client_path"]), self.config) != "hub":
+                continue
             folder = stage / kind
             folder.mkdir()
             component = manifest["components"][kind]
@@ -215,7 +238,8 @@ class MacBackend:
                 raise releases.ReleaseError("service identity changed since updater bootstrap")
             updated = dict(job)
             if kind == "host":
-                environment = dict(job.get("EnvironmentVariables", {}))
+                from .install_host import upgraded_environment
+                environment = upgraded_environment(job.get("EnvironmentVariables", {}))
                 environment["PYTHONPATH"] = pythonpath + (
                     os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else "")
                 updated["EnvironmentVariables"] = environment
@@ -293,8 +317,8 @@ class MacBackend:
             atomic_bytes(Path(launcher["target"]), Path(launcher["updated"]).read_bytes(), mode=0o755)
         self._load("host")
         self._load("menubar")
-        client = transaction["apps"]["client"]
-        if client["was_running"]:
+        client = transaction["apps"].get("client")
+        if client and client["was_running"]:
             command(["/usr/bin/open", "-a", client["target"]])
 
     def rollback(self, job: dict):
@@ -336,8 +360,8 @@ class MacBackend:
                 atomic_bytes(target, Path(launcher["original"]).read_bytes(), mode=launcher["mode"])
         self._load("host")
         self._load("menubar")
-        client = transaction["apps"]["client"]
-        if client["was_running"]:
+        client = transaction["apps"].get("client")
+        if client and client["was_running"]:
             command(["/usr/bin/open", "-a", client["target"]])
         if plugin_error:
             raise releases.ReleaseError(f"host/apps restored; plugin recovery pending: {plugin_error}") from plugin_error
@@ -380,8 +404,12 @@ class MacBackend:
         for kind in ("client", "menubar"):
             try:
                 target = Path(self.config[kind + "_path"])
-                components[kind] = {"installed": str(bundle_info(target)["CFBundleVersion"]),
+                info = bundle_info(target)
+                components[kind] = {"installed": str(info["CFBundleVersion"]),
+                                    "version": info.get("CFBundleShortVersionString"),
                                     "running_pids": self._app_running(kind, target)}
+                if kind == "client":
+                    components[kind]["distribution"] = client_distribution(target, self.config)
             except (OSError, ValueError, KeyError):
                 components[kind] = {"installed": None, "running_pids": []}
         source = {}
@@ -398,7 +426,7 @@ class MacBackend:
         verified = (bool(job.get("verified")) and job.get("state") in {"current", "verifying"}
                     and source.get("release") == job.get("release") and not source.get("dirty")
                     and all(components[kind]["installed"] == expected.get(kind, {}).get("version")
-                            for kind in ("client", "menubar")))
+                            for kind in job.get("transaction", {}).get("apps", {"client": {}, "menubar": {}})))
         try:
             from . import update_plugins
             components["plugins"] = update_plugins.observed(update_plugins.discover())
