@@ -134,6 +134,26 @@ def test_failed_api_verification_is_not_installed(fresh, monkeypatch):
     assert json.loads(install_signed.journal_path().read_text())["state"] != "installed"
 
 
+@pytest.mark.parametrize("conflict", ["legacy", "port"])
+def test_resume_rechecks_ownership_before_provisioning(fresh, monkeypatch, conflict):
+    app, recovery, state, _, calls, _ = fresh
+
+    def interrupted(*args, **kwargs):
+        raise OSError("provisioning interrupted")
+
+    monkeypatch.setattr(install_signed, "command", interrupted)
+    with pytest.raises(OSError):
+        install_signed.install(app, recovery, state)
+    if conflict == "legacy":
+        monkeypatch.setattr(install_signed, "legacy_present", lambda: True)
+    else:
+        monkeypatch.setattr(install_signed.install_host, "port_answers", lambda _: True)
+    monkeypatch.setattr(install_signed, "command", lambda *args, **kwargs: pytest.fail("must not provision a competing identity"))
+    with pytest.raises(ValueError, match="during installation"):
+        install_signed.install(app, recovery, state)
+    assert all(call[1] == "status" for call in calls)
+
+
 def test_sealed_provisioning_clears_inherited_identity_overrides(monkeypatch, tmp_path):
     expected = str(tmp_path / "installed-state")
     monkeypatch.setattr(service_settings, "read", lambda:
@@ -141,6 +161,8 @@ def test_sealed_provisioning_clears_inherited_identity_overrides(monkeypatch, tm
     monkeypatch.setenv("JREMOTE_STATE_DIR", str(tmp_path / "wrong-state"))
     monkeypatch.setenv("JREMOTE_HOST_ID", "wrong-identity")
     monkeypatch.setenv("JREMOTE_TOKEN_PATH", str(tmp_path / "wrong-token"))
+    monkeypatch.setenv("JREMOTE_HOST_PROFILE", "auto")
+    monkeypatch.setenv("PATH", os.environ["PATH"])
     monkeypatch.setattr(sys, "argv", ["JStackRuntime", "provision"])
     monkeypatch.setattr(sys, "path", list(sys.path))
     observed = []
@@ -151,3 +173,27 @@ def test_sealed_provisioning_clears_inherited_identity_overrides(monkeypatch, tm
     assert observed[0]["JREMOTE_STATE_DIR"] == expected
     assert "JREMOTE_HOST_ID" not in observed[0]
     assert "JREMOTE_TOKEN_PATH" not in observed[0]
+
+
+def test_provisioning_keeps_existing_credentials_and_unknown_client_identity(fresh, monkeypatch):
+    from jstack_host import devices, hostenv, releases, update_macos
+    app, recovery, state, _, _, _ = fresh
+    install_signed.install(app, recovery, state)
+    trust = app / "Contents/Resources/packages/jstack_host/release-trust.json"
+    trust.parent.mkdir(parents=True)
+    trust.write_text(json.dumps({"public_key": "fixture-public-key"}))
+    monkeypatch.setattr(hostenv, "state_dir", lambda: state)
+    monkeypatch.setattr(hostenv, "token_path", lambda: state / "token")
+    monkeypatch.setattr(hostenv, "host_id", lambda: "existing-identity")
+    monkeypatch.setattr(install_signed.install_host, "mint_token", lambda _: ("fixture", False))
+    monkeypatch.setattr(devices, "adopt_master_token", lambda _: pytest.fail("must preserve provisioned credential"))
+    monkeypatch.setattr(devices, "internal_token", lambda: "fixture")
+    monkeypatch.setattr(devices, "_credential_dir", lambda: state)
+    monkeypatch.setattr(releases, "RELEASE_DIR", state / "releases/mac")
+    monkeypatch.setattr(update_macos, "bundle_info", lambda _: {})
+    monkeypatch.setattr(update_macos, "client_distribution", lambda *_: "external")
+    install_signed.provision()
+    config = json.loads((state / "updates/config.json").read_text())
+    assert config["machine"] == "existing-identity"
+    assert config["client_bundle_id"] == "" and config["client_managed"] is False
+    assert config["service_model"] == "app" and config["services_app"] == str(recovery)

@@ -88,6 +88,10 @@ def install(app: Path, services: Path, state: Path, *, port=9090, bind="0.0.0.0"
                        "state": "prepared", "attempted": []}
             atomic_json(path, journal)
             atomic_json(service_settings.path(), settings)
+        if legacy_present():
+            raise ValueError("legacy ownership appeared during installation; reviewed migration is required")
+        if "host" not in journal["attempted"] and install_host.port_answers(port):
+            raise ValueError("the requested endpoint acquired a listener during installation")
         command([str(app / "Contents/MacOS/JStackRuntime"), "provision"])
         for role, owner in (("host", app), ("updater", services), ("menu", app)):
             observed = control(owner, "status")[role]
