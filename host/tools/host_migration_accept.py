@@ -22,6 +22,7 @@ def run(*args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=["baseline", "prepare", "apply", "verify", "rollback"])
+    parser.add_argument("--embedded", action="store_true")
     args = parser.parse_args()
     assert run("/usr/sbin/sysctl", "-n", "hw.model").strip().startswith("VirtualMac")
     assert run("/usr/bin/stat", "-f", "%Su", "/dev/console").strip() == os.environ["USER"]
@@ -67,6 +68,8 @@ def main():
                         "services_app": "/Applications/jStack Hub Services.app", "port": 9392,
                         "bind": "127.0.0.1", "migration_dir": str(root),
                         "environment": install_host.carried_environment(jobs["host"]["EnvironmentVariables"])}
+            if args.embedded:
+                settings.update(host_capability="dashboard", automation_settings=str(root / "automation.json"))
             request = {"settings": settings, "jobs": jobs,
                        "provenance": {role: migrate_host.provenance(install_host.plist_path(job["Label"]))
                                       for role, job in jobs.items()}}
@@ -114,6 +117,15 @@ def main():
             response = client.get(base + "/host", headers={"Authorization": "Bearer " + token})
             response.raise_for_status()
             receipt["source"] = response.json()["source"]
+            if args.embedded:
+                response = client.get("http://127.0.0.1:9392/fixture/import")
+                response.raise_for_status()
+                embedding = response.json()
+                assert embedding["profile"] == "embedding-lab"
+                assert embedding["state"] == str(state)
+                expected = str(home / "release76/host") if args.phase == "rollback" else "/Applications/jStack Hub.app/Contents/Resources/packages"
+                assert embedding["package"].startswith(expected + "/")
+                receipt["embedding"] = embedding
             if args.phase in {"baseline", "rollback"}:
                 assert receipt["source"]["release"] == manifest["release"]
                 assert receipt["source"]["sha"] == manifest["sources"]["stack"]
