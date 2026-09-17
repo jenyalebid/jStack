@@ -117,6 +117,10 @@ def main():
             response = client.get(base + "/host", headers={"Authorization": "Bearer " + token})
             response.raise_for_status()
             receipt["source"] = response.json()["source"]
+            sessions = client.get(base + "/sessions/active", headers={"Authorization": "Bearer " + token})
+            sessions.raise_for_status()
+            assert isinstance(sessions.json()["sessions"], list)
+            receipt["sessions_api_verified"] = True
             if args.embedded:
                 response = client.get("http://127.0.0.1:9392/fixture/import")
                 response.raise_for_status()
