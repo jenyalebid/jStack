@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import uuid
@@ -23,10 +24,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=("prepare", "stage", "activate", "rollback", "uninstall", "verify"))
     parser.add_argument("--app", required=True, type=Path)
+    parser.add_argument("--case", default="initial")
     args = parser.parse_args()
+    assert re.fullmatch(r"[a-zA-Z0-9-]+", args.case), "invalid fixture case"
     assert run("/usr/sbin/sysctl", "-n", "hw.model").startswith("VirtualMac"), "VM only"
     assert os.getuid() != 0, "use the actual administrator prompt"
-    root = Path.home() / "Operations/Infrastructure/Credentials/network-installer-lab"
+    root = Path.home() / "Operations/Infrastructure/Credentials/network-installer-lab" / args.case
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     request_path = root / "stage.json"
     installed = Path("/Library/PrivilegedHelperTools/jStack Network.app")
@@ -62,8 +65,8 @@ def main():
         if args.phase != "stage":
             request = {"schema": 1, "action": args.phase, "transaction": request["transaction"]}
         result = approve(args.app, request, root)
-    receipts = Path.home() / "network-installer-receipts"
-    receipts.mkdir(exist_ok=True)
+    receipts = Path.home() / "network-installer-receipts" / args.case
+    receipts.mkdir(parents=True, exist_ok=True)
     atomic_json(receipts / (args.phase + ".json"), result)
     print(json.dumps(result))
 
