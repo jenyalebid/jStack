@@ -58,7 +58,7 @@ final paths, the Hub's sealed runtime can provision a fresh standalone host:
 "/Applications/jStack Hub.app/Contents/MacOS/JStackRuntime" install \
   --app "/Applications/jStack Hub.app" \
   --services "/Applications/jStack Hub Services.app" \
-  --state-dir "$HOME/.local/state/jremote"
+  --state-dir "$HOME/.local/state/jstack-hub"
 ```
 
 This path refuses existing hosts, nonempty state and existing registrations;

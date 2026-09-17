@@ -147,7 +147,7 @@ def provision() -> None:
                      "token_path": str(devices._credential_dir() / "internal-token"),
                      "menubar_path": str(app), "menubar_bundle_id": "live.jstack.hub",
                      "services_app": str(services), "client_path": str(client),
-                     "client_bundle_id": info.get("CFBundleIdentifier", "dev.jenya.jRemote"),
+                     "client_bundle_id": info.get("CFBundleIdentifier", ""),
                      "client_managed": client_distribution(client, {"client_managed": False}) == "hub",
                      "feed_dir": str(releases.RELEASE_DIR.parent / "fleet")}
     if source.get("github_repo"):
