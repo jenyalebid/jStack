@@ -49,6 +49,35 @@ macOS determines its settings presentation. Acceptance measures the actual
 registered owners and names; do not promise a precise row count based only
 on an app name or AssociatedBundleIdentifiers metadata.
 
+### Fresh candidate installation
+
+After placing a matching signed/notarized Hub and Services pair at their
+final paths, the Hub's sealed runtime can provision a fresh standalone host:
+
+```sh
+"/Applications/jStack Hub.app/Contents/MacOS/JStackRuntime" install \
+  --app "/Applications/jStack Hub.app" \
+  --services "/Applications/jStack Hub Services.app" \
+  --state-dir "$HOME/.local/state/jremote"
+```
+
+This path refuses existing hosts, nonempty state and existing registrations;
+it is not the upgrade or embedded-host migration path. The installation
+journal records every registration attempt before it occurs. Pending OS
+approval remains pending; an interrupted attempt is never silently repeated.
+After granting approval in System Settings, rerun the same command to resume.
+An observed stopped service requires the explicit Start control. Repeating a
+completed installation reports the existing choices without enabling them.
+Provisioning preserves credentials on retry. Completion requires observed
+running services, the expected authenticated host/source identity, sessions,
+an enforced authentication gate and the independent updater's source report.
+
+For release candidates, `build_hub --release-id ... --github-repo ...
+--build-number ...` records the publisher's identity and numeric bundle build.
+Supply all three together. Omitting them produces a prototype identity that
+does not qualify as a managed release. The distribution installer, publisher
+integration and full lifecycle qualification remain tracked by #76.
+
 ## Migration requirements
 
 1. Capture installed definitions, disabled/approval states, schedules and
