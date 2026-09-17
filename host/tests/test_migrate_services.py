@@ -119,3 +119,31 @@ def test_interrupted_migration_requires_recovery_not_blind_retry(lab):
     migration.apply(journal)
     with pytest.raises(ValueError, match="already attempted"):
         migration.apply(journal)
+
+
+def test_private_definitions_and_backups_stay_in_selected_storage(lab, monkeypatch, tmp_path):
+    private = tmp_path / "private-data"
+    configuration = {"automation_settings": str(private / "automation.json"),
+                     "migration_dir": str(private / "migrations")}
+    monkeypatch.setattr(migration.service_settings, "read", lambda: configuration)
+    original = lab.path.read_bytes()
+    journal = migration.prepare(lab.app, lab.catalog)
+    assert journal.parent == private / "migrations"
+    migration.apply(journal)
+    assert json.loads((private / "automation.json").read_text()) == lab.catalog
+    assert not (tmp_path / ".local/state/jremote/automation-settings.json").exists()
+    assert (journal / "probe.original.plist").read_bytes() == original
+    assert (journal / "probe.original.plist").stat().st_mode & 0o777 == 0o600
+    migration.rollback(journal)
+    assert lab.path.read_bytes() == original
+    assert not (private / "automation.json").exists()
+
+
+def test_location_change_does_not_redirect_a_prepared_migration(lab, monkeypatch, tmp_path):
+    configuration = {"automation_settings": str(tmp_path / "private-data/automation.json")}
+    monkeypatch.setattr(migration.service_settings, "read", lambda: configuration)
+    journal = migration.prepare(lab.app, lab.catalog)
+    configuration["automation_settings"] = str(tmp_path / "other/automation.json")
+    with pytest.raises(ValueError, match="location changed"):
+        migration.apply(journal)
+    assert lab.path.exists() and lab.loaded == {"test.legacy"}

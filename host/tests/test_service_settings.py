@@ -51,3 +51,14 @@ def test_malformed_settings_fail_with_a_validation_error(monkeypatch, tmp_path, 
     monkeypatch.setattr(service_settings, "path", lambda: path)
     with pytest.raises(ValueError):
         service_settings.read()
+
+
+@pytest.mark.parametrize("key", ["automation_settings", "migration_dir"])
+@pytest.mark.parametrize("value", ["relative", None, 42])
+def test_private_storage_requires_absolute_paths(monkeypatch, tmp_path, key, value):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"schema": 1, "port": 9090, "environment": {},
+                               "app": "/Applications/jStack Hub.app", key: value}))
+    monkeypatch.setattr(service_settings, "path", lambda: path)
+    with pytest.raises(ValueError, match="absolute private data path"):
+        service_settings.read()

@@ -5,7 +5,7 @@ from pathlib import Path
 import signal
 import subprocess
 
-from . import service_catalog
+from . import service_catalog, service_settings
 
 
 def run(resources: Path, slug: str) -> int:
@@ -13,7 +13,8 @@ def run(resources: Path, slug: str) -> int:
         raise PermissionError("local capabilities must never run privileged")
     manifest = json.loads((resources / "automation-catalog.json").read_text())
     approved = manifest[slug]
-    configuration = Path.home() / ".local/state/jremote/automation-settings.json"
+    installation = service_settings.read()
+    configuration = service_settings.automation_path(installation)
     job = json.loads(configuration.read_text())[slug]
     service_catalog.validate(slug, job)
     if service_catalog.digest(job) != approved["job_sha256"]:
@@ -24,8 +25,6 @@ def run(resources: Path, slug: str) -> int:
     environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
     environment.update(job.get("EnvironmentVariables", {}))
     environment["XPC_SERVICE_NAME"] = "live.jstack.automation." + slug
-    from . import service_settings
-    installation = service_settings.read()
     if installation.get("host_capability") == slug:
         # Preserve an embedding application's own interpreter, dependencies
         # and profile, but load the Hub API from the checked signed release.

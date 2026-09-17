@@ -16,7 +16,7 @@ import plistlib
 import re
 import tempfile
 
-from . import install_host, service_catalog
+from . import install_host, service_catalog, service_settings
 from .update_app import control
 from .update_macos import atomic_bytes, command
 from .update_supervisor import atomic_json
@@ -27,12 +27,23 @@ def digest(path: Path) -> str:
 
 
 def settings_path() -> Path:
-    return Path.home() / ".local/state/jremote/automation-settings.json"
+    return service_settings.automation_path()
+
+
+def migration_root() -> Path:
+    return Path(service_settings.read().get("migration_dir", Path.home() / ".local/state/jremote/migrations"))
+
+
+def journal_settings(value: dict) -> Path:
+    current = settings_path()
+    if value.get("settings_path", str(current)) != str(current):
+        raise ValueError("private configuration location changed during migration")
+    return current
 
 
 @contextmanager
 def exclusive():
-    root = Path.home() / ".local/state/jremote/migrations"
+    root = migration_root()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor = os.open(root / "migration.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
@@ -89,7 +100,7 @@ def prepare(app: Path, catalog: dict) -> Path:
                         "sha256": digest(path), "loaded": loaded, "approval": approval,
                         "destination_status": statuses[slug],
                         "enabled": loaded and job["Label"] not in disabled and approval == "enabled"})
-    root = Path.home() / ".local/state/jremote/migrations"
+    root = migration_root()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     journal = Path(tempfile.mkdtemp(prefix="services-", dir=root))
     settings = settings_path()
@@ -108,6 +119,7 @@ def prepare(app: Path, catalog: dict) -> Path:
         atomic_bytes(journal / (record["slug"] + ".original.plist"), original, mode=0o600)
     atomic_json(journal / "journal.json", {"schema": 1, "app": str(app), "state": "prepared",
         "records": records, "settings_existed": previous is not None,
+        "settings_path": str(settings),
         "settings_before_sha256": hashlib.sha256(previous).hexdigest() if previous is not None else None,
         "settings": merged, "attempted": []})
     return journal
@@ -124,6 +136,7 @@ def load(journal: Path) -> dict:
 
 def _rollback(journal: Path):
     value = load(journal)
+    settings = journal_settings(value)
     app = Path(value["app"])
     approved_app(app)
     held = []
@@ -156,7 +169,6 @@ def _rollback(journal: Path):
                 raise ValueError("legacy service could not be restored")
     value["state"] = "approval_required" if held else "rolled_back"
     value["held"] = held
-    settings = settings_path()
     if not held and settings.exists() and json.loads(settings.read_text()) == value["settings"]:
         if value["settings_existed"]:
             atomic_bytes(settings, (journal / "settings.before").read_bytes(), mode=0o600)
@@ -171,7 +183,7 @@ def _apply(journal: Path):
         raise ValueError("migration already attempted; recover it before retrying")
     app = Path(value["app"])
     approved_app(app)
-    settings = settings_path()
+    settings = journal_settings(value)
     current = digest(settings) if settings.exists() else None
     if current != value["settings_before_sha256"]:
         raise ValueError("local settings changed since preparation")

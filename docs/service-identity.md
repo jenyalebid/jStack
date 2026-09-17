@@ -78,6 +78,13 @@ Supply all three together. Omitting them produces a prototype identity that
 does not qualify as a managed release. The distribution installer, publisher
 integration and full lifecycle qualification remain tracked by #76.
 
+Machine settings may select absolute `automation_settings` and `migration_dir`
+paths inside the operator's existing private storage. Full job definitions,
+environment values and original plist backups belong there. The sealed app
+contains only scheduling metadata and definition digests. Migration records
+the chosen location and refuses to follow a changed location during apply or
+rollback; moving private configuration is a separate reviewed operation.
+
 ## Migration requirements
 
 1. Capture installed definitions, disabled/approval states, schedules and

@@ -63,6 +63,19 @@ def test_local_capabilities_refuse_root(monkeypatch, tmp_path):
         local_service.run(tmp_path, "health")
 
 
+def test_local_capability_reads_selected_private_configuration(monkeypatch, tmp_path):
+    from jstack_host import service_settings
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    private = tmp_path / "private-data/automation.json"
+    private.parent.mkdir()
+    definition = job()
+    private.write_text(json.dumps({"health": definition}))
+    monkeypatch.setattr(service_settings, "read", lambda: {"automation_settings": str(private)})
+    (tmp_path / "automation-catalog.json").write_text(json.dumps(service_catalog.definitions({"health": definition})[1]))
+    assert local_service.run(tmp_path, "health") == 0
+    assert not (tmp_path / ".local/state/jremote/automation-settings.json").exists()
+
+
 def test_embedding_overlay_checks_hub_and_does_not_write_bytecode(monkeypatch, tmp_path):
     from jstack_host import app_services, service_settings
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
