@@ -102,6 +102,33 @@ def test_cancel_stops_descendant_that_ignores_term_and_closes_output(runtime):
     assert not (runtime / "ESCAPED").exists()
 
 
+def test_backgrounded_descendant_does_not_stall_or_falsify_completion(runtime):
+    """A job ends when its command exits, not when its output pipe closes.
+
+    asyncio resolves Process.wait() from the subprocess transport, which stays
+    unfinished while a descendant holds the inherited stdout. Waiting on that
+    meant a command succeeding in milliseconds sat for its whole timeout and
+    was then recorded as timed_out. The descendant is left alive on purpose —
+    only cancellation and timeout reap the group.
+    """
+    pidfile = runtime / "descendant.pid"
+    code = (f"import os,time; open({str(pidfile)!r},'w').write(str(os.getpid())); "
+            "time.sleep(30)")
+    command = shlex.join([sys.executable, "-c", code]) + " & printf started; exit 0"
+    started = time.monotonic()
+    row = completed(monitor.start(command, str(runtime), str(uuid.uuid4()), 3600))
+    elapsed = time.monotonic() - started
+
+    assert row["state"] == "succeeded" and row["exit_code"] == 0
+    assert elapsed < monitor.DRAIN_GRACE + 4, f"completion waited {elapsed:.1f}s on a descendant"
+    assert row["output_tail"] == "started" and row["output_bytes"] == 7
+    assert row["log_incomplete"] and not row["log_truncated"]
+
+    lingering = int(pidfile.read_text())
+    os.kill(lingering, 0)  # succeeded means the command ended, not that its children died
+    os.kill(lingering, signal.SIGKILL)
+
+
 def test_stale_running_state_is_unknown_not_success(runtime):
     job_id = uuid.uuid4().hex
     folder = monitor.private_dir(monitor.root() / job_id)

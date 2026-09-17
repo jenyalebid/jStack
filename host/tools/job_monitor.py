@@ -3,6 +3,10 @@
 
 Standard-library only. CLI and MCP use the same detached supervisor. No model
 polling, terminal keystrokes, inferred recipient, or concurrent thread resume.
+
+A job ends when its command exits, never when its output pipe closes — those
+are different moments whenever the command backgrounds something, and only the
+first one is the job.
 """
 import argparse
 import asyncio
@@ -21,6 +25,11 @@ import uuid
 
 TERMINAL = {"succeeded", "failed", "timed_out", "cancelled", "launch_failed"}
 MAX_LOG = 16 * 1024 * 1024
+# How long to keep reading stdout after the command itself has exited, and how
+# often to ask whether it has. Both exist because output outlives the command:
+# see leader_exit and settle.
+DRAIN_GRACE = 5
+EXIT_POLL = 0.05
 
 
 def private_dir(path):
@@ -148,15 +157,55 @@ async def worker(job_id):
             await writer.wait_closed()
 
     async def drain(reader):
+        # Published per chunk, not at EOF: settle can stop this task early, and
+        # a count that only exists on the clean path would be missing exactly
+        # when the log is partial and the reader most needs to know how much.
         count = 0
+        row["output_bytes"], row["log_truncated"] = 0, False
         with (folder / "output.log").open("wb") as output:
             while chunk := await reader.read(65536):
                 remaining = max(0, MAX_LOG - count)
                 output.write(chunk[:remaining])
                 output.flush()
                 count += len(chunk)
-        row["output_bytes"] = count
-        row["log_truncated"] = count > MAX_LOG
+                row["output_bytes"], row["log_truncated"] = count, count > MAX_LOG
+
+    async def leader_exit():
+        """Wait for the command to exit — not for its output pipe to close.
+
+        asyncio resolves Process.wait() from the subprocess TRANSPORT, which is
+        not finished until every pipe reaches EOF. A descendant that inherits
+        stdout and outlives the shell therefore keeps wait() pending long after
+        the command is gone, and the job burns its entire timeout before being
+        recorded as timed_out — an hour, at the default, for a command that
+        succeeded in milliseconds. returncode is set the moment the child is
+        reaped, independently of any pipe, so read that instead.
+
+        Measured: on 3.12 wait() lags the exit by exactly as long as the pipe
+        is held; on 3.14 it does not. This machine runs job_monitor under
+        .venv/bin/python3 (3.12), so the lag is live, and on 3.14 this loop
+        resolves at the same instant wait() would. Do not drop it for a newer
+        interpreter without checking which one Codex actually launches.
+        """
+        while proc.returncode is None:
+            await asyncio.sleep(EXIT_POLL)
+        return proc.returncode
+
+    async def settle(output):
+        """Collect what is left of the output, then stop waiting for it.
+
+        The command has exited, so anything still holding the write end of
+        stdout is a descendant that outlived it. Give it a short grace to
+        flush, then stop reading and say so. The job is NOT killed here: a
+        deliberately backgrounded process is allowed to keep running, it just
+        stops being logged.
+        """
+        try:
+            await asyncio.wait_for(asyncio.shield(output), timeout=DRAIN_GRACE)
+        except asyncio.TimeoutError:
+            row["log_incomplete"] = True
+            output.cancel()
+            await asyncio.gather(output, return_exceptions=True)
 
     sock = control_path(job_id)
     server = await asyncio.start_unix_server(control, path=str(sock))
@@ -173,7 +222,7 @@ async def worker(job_id):
             row.update(state="running", pid=proc.pid, started_at=time.time())
             save(folder, row)
             output = asyncio.create_task(drain(proc.stdout))
-            exited = asyncio.create_task(proc.wait())
+            exited = asyncio.create_task(leader_exit())
             stopped = asyncio.create_task(cancelled.wait())
             done, _ = await asyncio.wait([exited, stopped], timeout=row["timeout_seconds"],
                                          return_when=asyncio.FIRST_COMPLETED)
@@ -199,7 +248,7 @@ async def worker(job_id):
                 await exited
             stopped.cancel()
             await asyncio.gather(stopped, return_exceptions=True)
-            await output
+            await settle(output)
             row["exit_code"] = proc.returncode
         row["finished_at"] = time.time()
         save(folder, row)  # Job result survives notification failure.
@@ -237,7 +286,9 @@ def tool_specs():
         {"name": "start", "description": "Run a long shell command under a detached monitor. "
          "Returns a job ID immediately; one completion message is queued to the exact native "
          "Codex thread when it ends. Do other work or yield the turn; do not poll. "
-         "Use the same authorization as a normal shell command. No interactive stdin.",
+         "Use the same authorization as a normal shell command. No interactive stdin. "
+         "Anything the command leaves running in the background keeps running but stops "
+         "being logged shortly after the command exits.",
          "inputSchema": {"type": "object", "properties": {
              "command": {"type": "string"}, "cwd": {"type": "string"},
              "thread_id": {"type": "string", "description": "Your native CODEX_THREAD_ID; never guess."},
