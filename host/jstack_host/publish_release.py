@@ -114,9 +114,13 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
     output = work / release_id
     output.mkdir()
     version = json.loads((stack / "plugins/jstack/.claude-plugin/plugin.json").read_text())["version"]
+    from .release_channel import repository
+    github_repo = repository(config.get("github_repo") or command(
+        ["git", "-C", str(stack), "remote", "get-url", "origin"]).strip())
     from .sourcestamp import fingerprint
     (stack / "host/release-identity.json").write_text(json.dumps({
         "release": release_id, "sha": stack_sha, "version": version, "build": build_number,
+        "github_repo": github_repo,
         "package_sha256": fingerprint(stack / "host/jstack_host")}))
     archive = output / "stack.tar.gz"
     with tarfile.open(archive, "w:gz") as bundle:
@@ -174,6 +178,7 @@ def seal(work: Path, config: dict, notes: str) -> Path:
     shutil.copy2(app, destination)
     manifest = {"schema": 1, "release": release_id, "notes": notes,
                 "build": identity.get("build"),
+                "channel": {"github_repo": identity.get("github_repo")},
                 "sources": {"stack": stack_sha, "client": client_sha},
                 "client_packages": dependencies,
                 "components": {"stack": component(archive, version),
@@ -311,6 +316,13 @@ def ship(config: dict, candidate: Path, receipts: Path, private_key: bytes,
     envelope = promote(candidate, receipts, Path(config["feed_dir"]), private_key)
     release = envelope["manifest"]["release"]
     result = {"promoted": release}
+    github_repo = config.get("github_repo") or envelope["manifest"].get("channel", {}).get("github_repo")
+    if github_repo:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from .release_channel import publish
+        public = base64.b64encode(Ed25519PrivateKey.from_private_bytes(private_key).public_key().public_bytes_raw()).decode()
+        publish(Path(config["feed_dir"]) / release, github_repo, public)
+        result["published"] = release
     if deploy_after:
         result["deployed"] = deploy(release, port=config.get("hub_port", 9090))
     return result
