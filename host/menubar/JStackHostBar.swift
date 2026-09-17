@@ -29,6 +29,7 @@ import AppKit
 import CoreImage
 import Foundation
 import Network
+import ServiceManagement
 
 // MARK: - Where the host is
 
@@ -41,6 +42,17 @@ import Network
 /// different, empty host — the same trap `jstack-host` avoids by adopting the
 /// installed environment before every read command.
 enum HostAgent {
+    static var appOwned: Bool { Bundle.main.bundleIdentifier == "live.jstack.hub" }
+
+    static func serviceSettings() -> [String: Any] {
+        guard appOwned else { return [:] }
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/jremote/service-settings.json")
+        guard let data = try? Data(contentsOf: path),
+              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              value["schema"] as? Int == 1 else { return [:] }
+        return value
+    }
     /// The LaunchAgent that owns the host's lifecycle.
     ///
     /// `com.jremote.host` is what `jstack-host install` writes, and on a
@@ -55,6 +67,7 @@ enum HostAgent {
     /// `environment()` below — that resolves by *reading this label's plist*,
     /// so sourcing the label from it would be circular.
     static let label: String = {
+        if appOwned { return "live.jstack.hub.host" }
         let env = ProcessInfo.processInfo.environment["JREMOTE_AGENT_LABEL"] ?? ""
         return env.isEmpty ? "com.jremote.host" : env
     }()
@@ -66,7 +79,8 @@ enum HostAgent {
     }
 
     static var isInstalled: Bool {
-        FileManager.default.fileExists(atPath: plistURL.path)
+        if appOwned { return !serviceSettings().isEmpty }
+        return FileManager.default.fileExists(atPath: plistURL.path)
     }
 
     private static func job() -> [String: Any]? {
@@ -117,6 +131,7 @@ enum HostAgent {
     /// otherwise the port the installed agent serves on — taken from the argv
     /// launchd execs, which is the same string the host is running with.
     static func port() -> Int {
+        if let port = serviceSettings()["port"] as? Int, (1...65535).contains(port) { return port }
         let mine = ProcessInfo.processInfo.arguments
         if let i = mine.firstIndex(of: "--port"), i + 1 < mine.count,
            let p = Int(mine[i + 1]) { return p }
@@ -139,6 +154,7 @@ enum HostAgent {
     /// of its own to read, and guessing `0.0.0.0` there would put "reachable
     /// from your LAN" under a machine's name on the evidence of nothing.
     static func bind() -> String? {
+        if appOwned { return serviceSettings()["bind"] as? String }
         let mine = ProcessInfo.processInfo.arguments
         if let i = mine.firstIndex(of: "--bind"), i + 1 < mine.count {
             return mine[i + 1]
@@ -186,6 +202,9 @@ enum HostAgent {
     /// what answers; run by hand against a second host, the export is.
     static func environment() -> [String: String] {
         var out: [String: String] = [:]
+        if let environment = serviceSettings()["environment"] as? [String: String] {
+            out = environment.filter { carries($0.key) }
+        }
         if let env = job()?["EnvironmentVariables"] as? [String: Any] {
             for (k, v) in env where carries(k) {
                 out[k] = String(describing: v)
@@ -1320,10 +1339,19 @@ enum HostControl {
     }
 
     static func stop() {
+        if HostAgent.appOwned {
+            run(Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/JStackHub").path, ["unregister", "host"])
+            return
+        }
         run("/bin/launchctl", ["bootout", "\(domain)/\(HostAgent.label)"])
     }
 
     static func start() {
+        if HostAgent.appOwned {
+            let answer = run(Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/JStackHub").path, ["register", "host"])
+            if answer.out.contains("requires_approval") { SMAppService.openSystemSettingsLoginItems() }
+            return
+        }
         run("/bin/launchctl", ["bootstrap", domain, HostAgent.plistURL.path])
         run("/bin/launchctl", ["kickstart", "-k", "\(domain)/\(HostAgent.label)"])
     }
@@ -1332,6 +1360,7 @@ enum HostControl {
     /// line because it is the one thing that knows for certain; the search is
     /// the fallback for an app launched by hand.
     static var hostBinary: String? = {
+        if HostAgent.appOwned { return Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/JStackCLI").path }
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "--host-bin"), i + 1 < args.count,
            FileManager.default.isExecutableFile(atPath: args[i + 1]) {

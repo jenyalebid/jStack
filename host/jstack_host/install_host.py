@@ -131,6 +131,11 @@ def installed_environment(path: Path | None = None) -> dict[str, str]:
     writes into a plist and a shell then declines to adopt is a host that reads
     differently depending on who is asking.
     """
+    if path is None:
+        from . import service_settings
+        configuration = service_settings.read()
+        if configuration:
+            return {k: str(v) for k, v in configuration["environment"].items() if _carries(k)}
     path = path or plist_path()
     try:
         with path.open("rb") as fh:
@@ -153,6 +158,11 @@ def installed_port(path: Path | None = None) -> int | None:
     would otherwise be handed a URL for a port nothing is listening on, and
     the failure arrives later, somewhere else, as "the app cannot reach it".
     """
+    if path is None:
+        from . import service_settings
+        configuration = service_settings.read()
+        if configuration:
+            return configuration["port"]
     path = path or plist_path()
     try:
         with path.open("rb") as fh:
