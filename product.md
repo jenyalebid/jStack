@@ -1,5 +1,44 @@
 # jStack
 
+## Core contract
+
+Approved 2026-09-16. This section governs terminology, installation and
+releases. Historical plans do not override it. Implementation and deployment
+evidence are recorded separately in [managed updates](docs/managed-updates.md).
+
+| Term | Meaning |
+| --- | --- |
+| jStack Plugin | Commands, skills and agent tooling usable independently in Claude Code or Codex, without Hub or jRemote. |
+| jStack Hub | The server and its menu bar, installed once per macOS installation. A leaf runs this same software. |
+| Parent Hub | An independent Hub managing leaves. An independent Hub without leaves is simply a Hub. |
+| Leaf | A Mac whose Hub is managed by, and fully accessible through, its parent Hub. |
+| Host | A technical machine/server term, not another product or the name of the root role. |
+| jRemote | The independently installed client app, connecting to local or remote Hubs. |
+
+- One installed Hub per operating-system installation, with one active version.
+  Menu, service and CLI must resolve to that installation. Updates, repairs and
+  role changes replace it; none creates another Hub. Recovery artifacts stay
+  inactive and must not register another app or service.
+- Develop on feature or release branches. Test installations run in separate
+  macOS VMs. Main accepts complete, verified functionality only.
+- Every build gets a new build number and records its exact source commit.
+  A rebuild of the same commit is a new build. Display product version, build
+  and source identity; never ship different bytes under one build identity.
+- Publish only when explicitly requested. Promote the exact tested artifacts,
+  without rebuilding during publication. A release manifest pins compatible
+  Hub and jRemote builds. A push or merge does not publish or deploy a release.
+- One menu action updates the existing Hub and its eligible client. A parent
+  can update itself, one leaf or all eligible leaves. Verify the running build
+  after restart; offline, failed and rolled-back targets remain explicit.
+- jRemote has its own version and distribution channel. A local Hub is
+  optional. The Hub observes a local client's version but updates it only
+  when it belongs to hub-managed distribution. App Store and other independently
+  managed installations retain their own update paths.
+- Info uses a native macOS form: Hub version/build/source and running status;
+  jRemote icon, version and status; Open when installed, Download when absent;
+  update availability and progress. No published release must not make a
+  healthy running Hub appear unknown.
+
 ## The problem
 
 A Mac running coding agents is only useful while you are sitting at it. The
@@ -139,12 +178,12 @@ app we ship is one client, not the product.
 
 **Releases**
 - Changes to either jStack or its client app have one release action that prepares a compatible release of the stack and its apps.
-- The home hub manages which release is offered to its connected machines and apps.
+- The parent Hub manages which published release is offered to its leaves and hub-managed clients.
 - A release becomes available only after its required product journeys pass on the release being offered.
 - Every connected host and client learns when an update is available, including after reconnecting.
 
 **Updates**
-- The menu bar is the Mac's updater for jStack, its menu bar app and its client app, with one update action.
+- The menu bar updates the single jStack Hub installation and any hub-managed jRemote client with one action.
 - From the home hub, update one managed Mac or all eligible managed Macs remotely.
 - See what each machine has installed, what it is running, the available update, and its last verified contact.
 - Follow each update through completion or recovery; an offline machine stays pending and a failed update is never reported as current.
