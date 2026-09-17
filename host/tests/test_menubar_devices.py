@@ -50,6 +50,19 @@ for state in ["pending", "pending/offline", "downloading", "applying", "verifyin
 inventory.machines[1].state = "available"
 inventory.release = nil
 assert(inventory.localUpdate(hostID: "leaf") == nil, "no release is not an available update")
+let bootstrapJSON = #"{"release":"new","machines":[{"machine":"local","name":"This Mac","desired":"new","state":"unknown/offline","supervisor":false}]}"#
+var bootstrap = try decoder.decode(UpdateInventory.self, from: Data(bootstrapJSON.utf8))
+assert(!bootstrap.machines[0].canUpdate, "an absent supervisor cannot consume a queued job")
+assert(bootstrap.machines[0].needsBootstrap)
+assert(bootstrap.machines[0].summary == "Updater setup required")
+assert(bootstrap.localUpdate(hostID: "local") != nil,
+       "the local menu must repair a missing supervisor instead of drawing a dead button")
+bootstrap.machines[0].state = "pending"
+assert(bootstrap.machines[0].needsBootstrap,
+       "a job already stranded pending still needs the local recovery action")
+let identity = try decoder.decode(HostIdentity.self, from: Data(#"{"host_id":"local","source":{"sha":"abcdef","version":"0.69.3","build":74}}"#.utf8))
+assert(identity.source?.displayVersion == "0.69.3 (74)",
+       "current Hub version must not depend on a supervisor report")
 func device(_ json: String) throws -> Device {
     try decoder.decode(Device.self, from: Data(json.utf8))
 }

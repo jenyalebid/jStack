@@ -47,6 +47,20 @@ def _adopt(args) -> None:
         hostenv.reset_profile()
 
 
+def _cmd_updates_enable(args) -> int:
+    """Install the local supervisor that turns queued update jobs into work."""
+    _adopt(args)
+    import json
+    from pathlib import Path
+    from . import install_updater
+
+    trust = json.loads((Path(install_updater.__file__).parent
+                        / "release-trust.json").read_text())["public_key"]
+    result = install_updater.bootstrap(trust, state_dir=_path(args.state_dir))
+    print(json.dumps(result))
+    return 0
+
+
 def _cmd_pair(args) -> int:
     """Mint an enrolment code, the way the app expects to be introduced.
 
@@ -1081,6 +1095,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("version", help="the installed package version")
     p.set_defaults(fn=_cmd_version)
+
+    p = sub.add_parser("updates", help="set up managed software updates")
+    updates = p.add_subparsers(dest="updates_cmd", required=True)
+    up = updates.add_parser(
+        "enable", help="install and start the local update supervisor")
+    up.add_argument("--state-dir", default=None)
+    up.set_defaults(fn=_cmd_updates_enable)
 
     p = sub.add_parser("files", help="declare and inspect selected-folder SMB access")
     files = p.add_subparsers(dest="files_cmd", required=True)

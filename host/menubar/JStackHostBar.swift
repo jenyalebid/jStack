@@ -560,11 +560,17 @@ struct UpdateMachine: Decodable {
     var observed: UpdateObservation?
     var contactStatus: String?
 
-    var canUpdate: Bool {
+    private var idleForUpdate: Bool {
         desired != nil && !["downloading", "applying", "verifying", "current", "pending",
                             "pending/offline"].contains(state)
     }
+    var canUpdate: Bool { supervisor && idleForUpdate }
+    var needsBootstrap: Bool {
+        !supervisor && desired != nil && !["downloading", "applying", "verifying", "current"]
+            .contains(state)
+    }
     var summary: String {
+        if needsBootstrap { return "Updater setup required" }
         switch state {
         case "not_published", "unknown": return "No update published"
         case "unknown/offline": return lastContact == nil ? "Not connected to updates" : "Offline"
@@ -608,7 +614,9 @@ struct UpdateInventory: Decodable {
 
     func localUpdate(hostID: String?) -> UpdateMachine? {
         guard release != nil, let hostID else { return nil }
-        return machines.first { $0.machine == hostID && $0.canUpdate }
+        return machines.first {
+            $0.machine == hostID && ($0.canUpdate || $0.needsBootstrap)
+        }
     }
 }
 
@@ -1749,6 +1757,7 @@ final class StatusController: NSObject {
     private var updateInventory: UpdateInventory?
     private var updateError: String?
     private var updateRequestInFlight = false
+    private var updateActionStatus: String?
     private var menuIsOpen = false
     private var infoWindow: HostInfoWindow?
 
@@ -1930,6 +1939,7 @@ final class StatusController: NSObject {
         }
         submenu.addItem(Self.caption(inventory.release.map { "Available release: \($0)" }
                                        ?? "No release available"))
+        let localID = state.identity?.hostId
         for machine in inventory.machines {
             submenu.addItem(.separator())
             submenu.addItem(Self.caption("\(machine.name) — \(machine.summary)"))
@@ -1948,8 +1958,10 @@ final class StatusController: NSObject {
             if let detail = machine.job?.detail, !detail.isEmpty {
                 submenu.addItem(Self.caption(detail))
             }
-            if machine.canUpdate {
-                let update = Self.action("Update \(machine.name)", #selector(doUpdate), self)
+            let canRecoverHere = machine.machine == localID && machine.needsBootstrap
+            if machine.canUpdate || canRecoverHere {
+                let title = canRecoverHere ? "Enable Updates and Continue" : "Update \(machine.name)"
+                let update = Self.action(title, #selector(doUpdate), self)
                 update.setAccessibilityIdentifier("updates_tap_" + machine.machine)
                 update.representedObject = machine.machine
                 update.isEnabled = !updateRequestInFlight
@@ -1970,18 +1982,53 @@ final class StatusController: NSObject {
     @objc private func doUpdate(_ sender: NSMenuItem) {
         guard !updateRequestInFlight, let target = sender.representedObject as? String else { return }
         updateRequestInFlight = true
+        let localID = state.identity?.hostId
+        let local = updateInventory?.machines.first { $0.machine == localID }
+        if (target == "self" || target == localID), local?.needsBootstrap == true {
+            updateActionStatus = "Enabling managed updates…"
+            showUpdates()
+            guard let binary = HostControl.hostBinary else {
+                finishUpdate(false, "The installed jStack host command could not be found.")
+                return
+            }
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let result = HostControl.run(binary, ["updates", "enable"])
+                let detail = result.out.trimmingCharacters(in: .whitespacesAndNewlines)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if result.code == 0 {
+                        self.updateActionStatus = "Updater enabled · queueing update…"
+                        self.refreshInfoWindow()
+                        self.queueUpdate(target)
+                    } else {
+                        self.finishUpdate(false, detail.isEmpty
+                            ? "The update supervisor could not be installed." : detail)
+                    }
+                }
+            }
+            return
+        }
         showUpdates()
+        queueUpdate(target)
+    }
+
+    private func queueUpdate(_ target: String) {
         probe.update(target: target, requestID: UUID().uuidString) { [weak self] ok, detail in
             guard let self else { return }
-            self.updateRequestInFlight = false
-            if !ok {
-                let alert = NSAlert()
-                alert.messageText = "Update request needs attention"
-                alert.informativeText = detail
-                alert.runModal()
-            }
-            self.refresh()
+            self.finishUpdate(ok, detail)
         }
+    }
+
+    private func finishUpdate(_ ok: Bool, _ detail: String) {
+        updateRequestInFlight = false
+        updateActionStatus = nil
+        if !ok {
+            let alert = NSAlert()
+            alert.messageText = "Update request needs attention"
+            alert.informativeText = detail
+            alert.runModal()
+        }
+        refresh()
     }
 
     func showUpdates() {
@@ -2010,8 +2057,8 @@ final class StatusController: NSObject {
             version: source?.displayVersion ?? "Version not reported",
             source: source?.sha,
             app: InfoAppSnapshot.read(),
-            updateStatus: updateError != nil ? "Could not check for updates"
-                : local?.summary ?? (updateInventory == nil ? "Checking…" : "No update published"),
+            updateStatus: updateActionStatus ?? (updateError != nil ? "Could not check for updates"
+                : local?.summary ?? (updateInventory == nil ? "Checking…" : "No update published")),
             error: updateError ?? local?.job?.detail,
             localCommand: commands[localID],
             machines: updateInventory?.machines.filter { $0.machine != localID } ?? [],

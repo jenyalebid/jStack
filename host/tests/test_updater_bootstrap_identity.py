@@ -1,6 +1,6 @@
 import json
 
-from jstack_host import install_updater, sourcestamp
+from jstack_host import cli, install_updater, sourcestamp
 
 
 def test_bootstrap_preserves_release_identity_and_loaded_fingerprint(tmp_path, monkeypatch):
@@ -23,3 +23,20 @@ def test_bootstrap_preserves_release_identity_and_loaded_fingerprint(tmp_path, m
     identity["build"] = 74
     (package.parent / "release-identity.json").write_text(json.dumps(identity))
     assert install_updater.stage_runtime(package, tmp_path / "state") != staged
+
+
+def test_updates_enable_is_a_supported_host_command(tmp_path, monkeypatch, capsys):
+    called = {}
+    monkeypatch.setattr(cli, "_adopt", lambda args: called.setdefault("adopted", True))
+    monkeypatch.setattr(
+        install_updater, "bootstrap",
+        lambda public, state_dir=None: called.update(public=public, state_dir=state_dir)
+        or {"supervisor": "installed"})
+
+    args = cli.build_parser().parse_args(
+        ["updates", "enable", "--state-dir", str(tmp_path)])
+    assert args.fn(args) == 0
+    assert called["adopted"] is True
+    assert called["state_dir"] == tmp_path
+    assert called["public"]
+    assert json.loads(capsys.readouterr().out) == {"supervisor": "installed"}
