@@ -13,6 +13,10 @@ process builds its own; the package's own tests exercise the one the package
 ships, so a route that only works when someone else mounts it fails here.
 """
 
+import os
+import tempfile
+from pathlib import Path
+
 import pytest
 
 
@@ -29,6 +33,41 @@ def _isolated_security_alerts():
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(hostenv, "security_alert", captured.append)
         yield captured
+
+
+# ── The suite's scheduler is an empty install ───────────────────────────────
+#
+# Module scope, not a fixture, because the thing this protects binds at
+# *import* and a test module is imported before any fixture of its own runs.
+#
+# `tests/test_codex_parity.py` imports jStack's scheduler package in-process
+# (`from scheduler import runner`). That package bootstraps the machine's
+# `python_path` onto `sys.path` as it imports — by design, so a live daemon can
+# load an install's own workspace resolver — and on a machine that runs one,
+# the entry is the embedding tree. From that moment `jremote_host_profile` is
+# importable to the whole pytest process, so the next `hostenv.reset_profile()`
+# (there are twenty of them, in eight files) re-resolves `auto` to the
+# machine's *live* profile and caches it. Every later test that reaches a
+# profile method touching the embedding dashboard then dies inside it — ten
+# tests in two unrelated files, green alone, red in a full run, naming neither
+# the scheduler nor the profile.
+#
+# One `sys.path.append` in a shared interpreter is not undoable, so the fix is
+# to leave nothing to append: point the scheduler at a home it has never been
+# installed into. Its config reader answers built-in defaults for a missing
+# file, which is what a package's own tests should be asserting against anyway
+# — a unit test whose answer depends on the operator's `scheduler.json` is
+# already reporting on the wrong machine.
+#
+# A fresh temporary root cannot inherit another test process's install.
+# The explicit overrides go too — setting
+# the home alone leaves an exported `SCHEDULER_CONFIG_DIR` still pointing at
+# the live install.
+for _override in ("SCHEDULER_CONFIG_DIR", "SCHEDULER_STATE_DIR",
+                  "SCHEDULER_CREDENTIALS_DIR", "SCHEDULER_INSTALL_FILE"):
+    os.environ.pop(_override, None)
+_scheduler_home = tempfile.TemporaryDirectory(prefix="jstack-host-test-scheduler-")
+os.environ["SCHEDULER_HOME"] = _scheduler_home.name
 
 
 @pytest.fixture(autouse=True)
