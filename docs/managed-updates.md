@@ -23,11 +23,12 @@ entry points must resolve to the same active Hub installation.
 
 ## Current implementation status
 
-The contract above is not yet fully shipped. Unique build allocation, unified
-installed identity, client distribution ownership, public release discovery
-and the revised native Info form require implementation and verification.
-Release qualification remains tracked by #72. A branch or passing unit suite
-does not establish production readiness.
+The candidate implements unique build allocation, unified installed identity,
+client distribution ownership, public release discovery and the native Info
+form. Build 74 has exact-artifact receipts for the eight Mac journeys below.
+The cellular journey and complete unattended release configuration remain
+unfinished under #72. A branch or passing unit suite does not establish
+production readiness.
 
 Status: implemented candidate under real-Mac acceptance (2026-09-16).
 Not promoted to the production feed. The product contract below remains the
@@ -63,9 +64,13 @@ acceptance target; implemented code and observed proof are separate facts.
   the receipt incomplete, and `gate` refuses promotion naming every journey
   that is not a genuine pass over this candidate's exact artifact set.
 - `host/tools/managed_update_accept.py` is the unattended runner: one command
-  drives the journeys over disposable Macs and writes those receipts. Its
-  journey logic is under test; it has not yet completed a live qualification,
-  so no candidate has passed the gate.
+  drives the journeys over disposable Macs and writes those receipts. Selected
+  reruns retain existing receipts; their artifact bindings are checked again.
+  Prior releases are staged through the real updater, and artifact-corruption
+  checks restore the original bytes even when the probe fails. New-session
+  checks wait for the initial response before testing subsequent input.
+  Build 74's eight Mac receipts combine retained observations and additional
+  live runs. A complete unattended run has not yet passed the promotion gate.
 - Production promotion rejects absent/skipped/stale receipts. No production
   acceptance receipt has been issued by the disposable fixture tools.
 
@@ -110,9 +115,17 @@ cannot be updated remotely until bootstrap has run on that leaf.
   nine final-artifact receipts: fresh_install, upgrade, fleet, offline_catchup,
   session_survival, interruption, rollback, revocation, cellular. Unit passes
   are not these receipts, and the runner existing is not a run.
-- Complete the two-leaf fleet case and exact fresh-install path (not a
-  baseline install followed by upgrade). Self-update and the actual Update All
-  menu action have passed with one disposable hub and one disposable leaf.
+- Build 74 passed fresh installation, upgrade, fleet, offline catch-up,
+  session survival, interruption/reboot, rollback/artifact refusal and queued
+  authority revocation. Fleet evidence covers one parent and two leaves,
+  with one leaf offline because the qualification host permits only two
+  concurrent macOS guests. The native Info Update All control was exercised.
+  Fresh-install evidence retains the original installation observations and
+  a subsequent successful Codex session after provider authentication setup.
+- The revocation fixture uses the shipped device store to revoke its credential
+  and verifies cancellation plus authenticated-request rejection. It does not
+  claim mesh enrollment or the native device-removal UI: the HTTP-relay lab is
+  not a mesh-owning Hub.
 - The cellular journey is not automated: it needs the designated test phone
   wired and unlocked, and the runner records it skipped until then.
 - Mobile distribution and release notification in the phone UI remain open.
