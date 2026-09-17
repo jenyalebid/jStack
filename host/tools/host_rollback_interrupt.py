@@ -34,10 +34,11 @@ def main():
             while task.poll() is None and time.monotonic() < deadline:
                 for child in psutil.Process(task.pid).children():
                     try:
-                        argv = child.cmdline()
-                    except psutil.NoSuchProcess:
+                        executable = child.exe()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
                         continue
-                    if argv == [controller, "unregister", "menu"]:
+                    phase = json.loads((journal / "journal.json").read_text())["state"]
+                    if executable == controller and phase == "rolling_back":
                         os.kill(task.pid, signal.SIGSTOP)
                         paused = True
                         break
