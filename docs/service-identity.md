@@ -85,6 +85,34 @@ contains only scheduling metadata and definition digests. Migration records
 the chosen location and refuses to follow a changed location during apply or
 rollback; moving private configuration is a separate reviewed operation.
 
+### Existing host cutover
+
+The sealed runtime's `migrate prepare --request PATH --journal-root PATH`
+accepts an explicitly reviewed request containing installation settings,
+the exact `host`, `menu` and `updater` job definitions, and their code
+provenance. Keep that request and its journal in private storage. Preparation
+checks the installed identity, endpoint, release key, matching signed owners,
+and disabled/approval state. It does not provision another identity.
+
+`migrate apply JOURNAL` retires all three originals before registering any
+replacement. It verifies authenticated host identity, sessions, authentication
+enforcement and the recovery process's source. `migrate rollback JOURNAL`
+restores exact configuration and eligible originals. A denied replacement
+holds the shared transaction; rollback never revives its legacy approval path.
+An original that was OFF remains OFF. Ambiguous or externally modified state
+requires review instead of an automatic overwrite.
+
+Inventory observes explicit local `python -m` packages without importing
+them. Package fingerprints detect changes, but are not a dependency seal.
+Unresolved interpreter paths and protected application data remain unknown.
+Unknown module provenance cannot authorize migration.
+
+`host/tools/host_migration_accept.py` exercises released standalone upgrade,
+actual reboot and exact rollback on a disposable GUI Mac. The separate
+`service_migration_accept.py` retains the optional-job migration fixture.
+These component journeys do not establish embedded-host, network, privacy,
+or production qualification.
+
 ## Migration requirements
 
 1. Capture installed definitions, disabled/approval states, schedules and
