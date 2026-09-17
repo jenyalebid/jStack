@@ -46,8 +46,8 @@ final class TunnelProcess {
                 throw NetworkFailure.invalid("cannot configure tunnel process")
             }
         }
-        let argv = ["wireguard-go", "-f", "utun"].map { strdup($0) } + [nil]
-        let environment = ["PATH=/usr/bin:/bin:/usr/sbin:/sbin", "WG_TUN_NAME_FILE=" + nameFile].map { strdup($0) } + [nil]
+        let argv: [UnsafeMutablePointer<CChar>?] = ["wireguard-go", "-f", "utun"].map { $0.withCString { strdup($0) } } + [nil]
+        let environment: [UnsafeMutablePointer<CChar>?] = ["PATH=/usr/bin:/bin:/usr/sbin:/sbin", "WG_TUN_NAME_FILE=" + nameFile].map { $0.withCString { strdup($0) } } + [nil]
         defer { argv.forEach { free($0) }; environment.forEach { free($0) } }
         let executable = applicationURL.appendingPathComponent("Contents/MacOS/wireguard-go").path
         guard posix_spawn(&child, executable, &actions, nil, argv, environment) == 0 else {
