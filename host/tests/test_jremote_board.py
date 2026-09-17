@@ -1884,3 +1884,49 @@ def test_open_section_recovers_a_dead_rollout_link(ws, monkeypatch, tmp_path):
     monkeypatch.setattr(messages, "parse_session", lambda sid: {"messages": []})
     row = next(r for r in board.open_sessions() if r["session_id"] == sid)
     assert row["preview"] == "Recovered title"
+
+
+def test_open_section_carries_the_title_the_spawn_pinned(monkeypatch, tmp_path):
+    """A handoff names its session `HF · <topic>` so the person who typed it can
+    find it. `record_open` stores that name; the Open section dropped it and
+    drew the row under the provider's own auto-title instead — so the one
+    section a just-spawned handoff lives in was the one that could not say what
+    it had been opened as. Observed 2026-09-17: `HF · Service consolidation`
+    spawned, ran for an hour, and was not findable by its own title."""
+    from jstack_host import managed, codex_transcript, messages
+    sid = "cccc0007-1111-2222-3333-444444444444"
+    rollout = tmp_path / "rollout-named.jsonl"
+    rollout.write_text('{}\n')
+    monkeypatch.setattr(managed, "open_registry", lambda: {
+        sid: {"agent": "nova", "name": "HF · Service consolidation",
+              "engine": "codex", "transcript": str(rollout)}})
+    monkeypatch.setattr(codex_transcript, "summary",
+                        lambda p: {"title": "Reviewing launchd job ownership"})
+    monkeypatch.setattr(messages, "parse_session", lambda sid: {"messages": []})
+    row = next(r for r in board.open_sessions() if r["session_id"] == sid)
+    assert row["window_name"] == "HF · Service consolidation"
+    # The preview still says what it is talking about. The two are different
+    # facts and the row has always needed both.
+    assert row["preview"] == "Reviewing launchd job ownership"
+
+
+def test_both_builders_carry_a_spawned_title_the_same_way(ws, monkeypatch, tmp_path):
+    """Drift guard, same shape as the preview one above: a session shown in the
+    Open section and on the main board must report one title, or a fix to one
+    builder silently leaves the other wrong."""
+    from jstack_host import managed, codex_transcript, messages
+    loc, _ = ws
+    sid = "cccc0008-1111-2222-3333-444444444444"
+    rollout = tmp_path / "rollout-both-named.jsonl"
+    rollout.write_text('{}\n')
+    monkeypatch.setattr(managed, "open_registry", lambda: {
+        sid: {"agent": "nova", "name": "HF · Service consolidation",
+              "engine": "codex", "transcript": str(rollout)}})
+    monkeypatch.setattr(managed, "attached_names", lambda: set())
+    monkeypatch.setattr(codex_transcript, "summary", lambda p: {"title": "auto title"})
+    monkeypatch.setattr(messages, "parse_session", lambda sid: {"messages": []})
+    _windows(monkeypatch, attached=set())
+    _procs(monkeypatch, [_raw(25, loc) | {"tty": "/dev/ttys002", "engine": "codex"}])
+    opened = next(r for r in board.open_sessions() if r["session_id"] == sid)
+    active = next(r for r in board.active_sessions() if r["session_id"] == sid)
+    assert opened["window_name"] == active["window_name"] == "HF · Service consolidation"
