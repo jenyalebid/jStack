@@ -47,6 +47,14 @@ class Supervisor:
         self.current.update(changes)
         atomic_json(self.journal, self.current)
 
+    def finalize(self) -> None:
+        if self.current.get("finalized"):
+            return
+        finish = getattr(self.backend, "finalize", None)
+        if finish:
+            finish(self.current)
+        self.save(finalized=True)
+
     def connection(self) -> tuple[str, str, str]:
         # Reread the adoption on EVERY request. Detach/re-attach invalidates an
         # outstanding job; an old token cached in a long-running daemon must
@@ -134,6 +142,8 @@ class Supervisor:
             # revocation) must not strand an unconfirmed candidate forever.
             self.backend.rollback(self.current)
             self.save(state="rolled_back", detail="verification deadline expired")
+        if self.current.get("state") == "current":
+            self.finalize()
         # Feed discovery is independent of recovery and fleet heartbeats.
         # A public-channel outage must not strand a job already authorized.
         try:
@@ -152,6 +162,7 @@ class Supervisor:
             # The hub may have committed confirmation just before this process
             # died. Adopt that durable answer instead of timing out a success.
             self.save(state="current", verified=True)
+            self.finalize()
         if not job or job.get("state") not in fleet.ACTIVE:
             return
         if self.current.get("id") != job["id"]:
@@ -165,6 +176,7 @@ class Supervisor:
                 confirmed = self.heartbeat().get("job") or {}
                 if confirmed.get("state") == "current":
                     self.save(state="current")
+                    self.finalize()
                 elif time.time() - self.current["verify_started"] > 180:
                     self.backend.rollback(self.current)
                     self.save(state="rolled_back", detail="hub did not confirm the updated host")

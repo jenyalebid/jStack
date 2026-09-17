@@ -294,6 +294,9 @@ class Backend:
     def rollback(self, job):
         self.events.append("rollback")
 
+    def finalize(self, job):
+        self.events.append("finalize")
+
     def verify(self, job):
         return self.healthy
 
@@ -329,8 +332,11 @@ def test_supervisor_stages_before_apply_then_requires_hub_confirmation(tmp_path,
     assert daemon.current["state"] == "verifying"
     daemon.tick()
     assert daemon.current["state"] == "current"
+    assert daemon.current["finalized"] is True
+    assert daemon.backend.events[-1] == "finalize"
     daemon.tick()
     assert daemon.backend.events.count("apply") == 1
+    assert daemon.backend.events.count("finalize") == 1
 
 
 def test_crash_mid_apply_recovers_from_disk_before_accepting_work(tmp_path, release):
@@ -399,7 +405,37 @@ def test_restart_adopts_hub_confirmation_before_local_commit(tmp_path, release):
     restarted = Supervisor(daemon.root, daemon.config, daemon.backend, daemon.client)
     restarted.tick()
     assert restarted.current["state"] == "current"
+    assert restarted.current["finalized"] is True
     assert restarted.backend.events.count("apply") == 1
+
+
+def test_confirmed_transaction_removes_temporary_app_backups(tmp_path):
+    from jstack_host.update_macos import MacBackend
+    target = tmp_path / "Client.app"
+    target.mkdir()
+    backup = tmp_path / "Client.app.previous-release-stage-123"
+    backup.mkdir()
+    (backup / "old").write_text("old")
+    job = {"transaction": {"apps": {"client": {
+        "target": str(target), "backup": str(backup)}}}}
+    backend = MacBackend(tmp_path, {})
+    backend.finalize(job)
+    assert target.is_dir()
+    assert not backup.exists()
+    backend.finalize(job)
+
+
+def test_finalize_refuses_a_path_outside_the_updaters_backup_shape(tmp_path):
+    from jstack_host.update_macos import MacBackend
+    target = tmp_path / "Client.app"
+    target.mkdir()
+    unrelated = tmp_path / "Keep.app"
+    unrelated.mkdir()
+    job = {"transaction": {"apps": {"client": {
+        "target": str(target), "backup": str(unrelated)}}}}
+    with pytest.raises(releases.ReleaseError, match="unexpected recovery bundle"):
+        MacBackend(tmp_path, {}).finalize(job)
+    assert unrelated.is_dir()
 
 
 def test_completed_job_accepts_repeated_current_heartbeats(rig):
