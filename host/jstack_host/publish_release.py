@@ -92,6 +92,19 @@ def sign_menu(stack: Path, output: Path, version: str, config: dict) -> Path:
     return final
 
 
+def sign_service_owners(stack: Path, output: Path, version: str, config: dict) -> None:
+    """Build public, catalog-free owners with the publisher's exact identity."""
+    from . import build_hub
+    identity = json.loads((stack / "host/release-identity.json").read_text())
+    for kind, recovery in (("menubar", False), ("services", True)):
+        destination = output / (kind + "-build")
+        app = build_hub.build(stack, destination, version, config, recovery=recovery,
+                             release_id=identity["release"], github_repo=identity["github_repo"],
+                             build_number=identity["build"])
+        build_hub.notarize(app, destination, config)
+        shutil.copy2(destination / "hub-notarized.zip", output / (kind + "-notarized.zip"))
+
+
 def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
     candidates = Path(config["candidates_dir"])
     candidates.mkdir(parents=True, exist_ok=True)
@@ -128,8 +141,16 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
         for path in sorted(stack.iterdir()):
             if path.name != ".git":
                 bundle.add(path, arcname=path.name)
-    print("Building, signing and notarizing menu bar", flush=True)
-    menu = sign_menu(stack, output, version, config)
+    native_services = config.get("native_services", False)
+    if type(native_services) is not bool:
+        raise releases.ReleaseError("native_services must be an explicit boolean")
+    atomic_json(work / "owner-format.json", {"schema": 2 if native_services else 1})
+    if native_services:
+        print("Building, signing and notarizing Hub and Services", flush=True)
+        sign_service_owners(stack, output, version, config)
+    else:
+        print("Building, signing and notarizing menu bar", flush=True)
+        sign_menu(stack, output, version, config)
     app_output = work / "client-output"
     if reuse_client is not None:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -177,7 +198,13 @@ def seal(work: Path, config: dict, notes: str) -> Path:
     releases.check_artifact(app, app_manifest)
     destination = output / app.name
     shutil.copy2(app, destination)
-    manifest = {"schema": 1, "release": release_id, "notes": notes,
+    format_path = work / "owner-format.json"
+    schema = json.loads(format_path.read_text())["schema"] if format_path.exists() else 1
+    if schema not in {1, 2}:
+        raise releases.ReleaseError("unsupported owner format")
+    if (output / "services-notarized.zip").exists() != (schema == releases.NATIVE_SCHEMA):
+        raise releases.ReleaseError("owner format and recovery artifact disagree")
+    manifest = {"schema": schema, "release": release_id, "notes": notes,
                 "build": identity.get("build"),
                 "channel": {"github_repo": identity.get("github_repo")},
                 "sources": {"stack": stack_sha, "client": client_sha},
@@ -189,6 +216,8 @@ def seal(work: Path, config: dict, notes: str) -> Path:
                                   "architecture": "arm64", "minimum_os": "26.0"},
                 "mobile": {"source": client_sha, "status": "not_distributed"},
                 "receipts": {}}
+    if schema == releases.NATIVE_SCHEMA:
+        manifest["components"]["services"] = component(output / "services-notarized.zip", str(identity["build"]))
     private_key = base64.b64decode(Path(config["private_key"]).read_text().strip(), validate=True)
     atomic_json(output / "candidate.json", releases.sign(manifest, private_key, promoted=False))
     return output
@@ -230,6 +259,8 @@ def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -
 
 def promote(candidate: Path, receipts_dir: Path, feed: Path, private_key: bytes) -> dict:
     manifest = candidate_manifest(candidate, private_key)
+    if manifest["schema"] == releases.NATIVE_SCHEMA:
+        raise releases.ReleaseError("native owner publication requires qualified Services self-update")
     # One door. Every journey is a genuine pass over these exact artifacts, or
     # this raises and names the ones that are not.
     manifest["receipts"] = acceptance.gate(receipts_dir, manifest)

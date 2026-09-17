@@ -85,6 +85,17 @@ contains only scheduling metadata and definition digests. Migration records
 the chosen location and refuses to follow a changed location during apply or
 rollback; moving private configuration is a separate reviewed operation.
 
+### Native release candidates
+
+The release publisher accepts explicit `native_services: true` for candidate
+builds. It builds both public owners from the publisher's committed snapshot,
+release ID, origin and build number, with no private capability catalog.
+Schema 2 includes the independent `services` artifact in the signed component
+set and acceptance-receipt digest; schema 1 remains the released legacy format.
+Promotion, public publication and updater compatibility currently refuse
+schema 2 pending Services self-update implementation and qualification. This
+candidate path does not publish a new feed or migrate a released host.
+
 ### Removing user-service registrations
 
 `jstack-host uninstall --all-services` (also available through

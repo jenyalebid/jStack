@@ -158,6 +158,8 @@ class MacBackend:
         return True
 
     def compatible(self, manifest: dict):
+        if manifest.get("schema", releases.SCHEMA) != releases.SCHEMA:
+            raise releases.ReleaseError("native owner updates require Services self-update support")
         compatibility = manifest["compatibility"]
         if platform.system() != "Darwin":
             raise releases.ReleaseError("this release requires macOS")
