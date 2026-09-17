@@ -500,6 +500,8 @@ def pane(monkeypatch, reg):
     assertion is on the exact string the pane's shell would run — and no
     `claude` starts, which is what makes this test cheap enough to keep.
     """
+    import uuid
+    monkeypatch.setitem(globals(), "TEST_SOCK", "jr-tags-" + uuid.uuid4().hex)
     monkeypatch.setattr(managed, "_SOCK", TEST_SOCK)
     monkeypatch.setattr(managed, "_auto_accept_bypass", lambda name: None)
     sent = []

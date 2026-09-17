@@ -19,6 +19,7 @@ import shutil
 import signal
 import subprocess
 import time
+import uuid
 
 import pytest
 
@@ -37,6 +38,7 @@ def _t(*a):
 
 @pytest.fixture
 def sock(monkeypatch):
+    monkeypatch.setitem(globals(), "TEST_SOCK", "jr-close-" + uuid.uuid4().hex)
     monkeypatch.setattr(managed, "_SOCK", TEST_SOCK)
     subprocess.run(_t("kill-server"), capture_output=True)
     yield
