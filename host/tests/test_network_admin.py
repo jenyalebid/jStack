@@ -67,11 +67,12 @@ def test_bootstrap_quotes_paths_and_checks_copies_before_execution(monkeypatch, 
     assert observations[0] == ("ancestry", admin.ROOT / "invocations")
     assert observations[2][1][:3] == ["/usr/sbin/spctl", "--assess", "--type"]
     assert shlex.split(lines[2]) == ["/usr/bin/install", "-d", "-o", "root", "-g", "wheel", "-m", "755", str(admin.ROOT.parent)]
-    assert shlex.split(lines[5])[-2] == str(installer)
-    assert shlex.split(lines[6])[-2] == str(request)
-    assert hashlib.sha256(installer.read_bytes()).hexdigest() in lines[7]
-    assert hashlib.sha256(request.read_bytes()).hexdigest() in lines[8]
-    assert shlex.split(lines[9])[:3] == ["/usr/bin/codesign", "--verify", "--strict"]
+    assert "0:700:Directory" in lines[3] and "0:700:Directory" in lines[4]
+    assert shlex.split(lines[6])[-2] == str(installer)
+    assert shlex.split(lines[7])[-2] == str(request)
+    assert hashlib.sha256(installer.read_bytes()).hexdigest() in lines[8]
+    assert hashlib.sha256(request.read_bytes()).hexdigest() in lines[9]
+    assert shlex.split(lines[10])[:3] == ["/usr/bin/codesign", "--verify", "--strict"]
     protected = admin.ROOT / "invocations" / invocation
     assert shlex.split(lines[-1]) == [str(protected / "Installer"), str(protected / "request.json")]
 
@@ -97,3 +98,15 @@ def test_bootstrap_refuses_writable_root_ancestry(monkeypatch, tmp_path):
     monkeypatch.setattr(admin.app_services, "verify", lambda *args: pytest.fail("unsafe staging reached signature check"))
     with pytest.raises(ValueError, match="unprotected"):
         admin.bootstrap_script(tmp_path, tmp_path, "a" * 32)
+
+
+def test_root_private_ancestor_is_checked_before_unobservable_child(monkeypatch):
+    calls = []
+    def inspect(path):
+        calls.append(str(path))
+        if str(path) == "/protected/private/child":
+            raise PermissionError("root-private ancestor")
+        return SimpleNamespace(st_uid=0, st_mode=0o40700)
+    monkeypatch.setattr(Path, "lstat", inspect)
+    admin.protected_ancestry(Path("/protected/private/child"))
+    assert calls == ["/", "/protected", "/protected/private", "/protected/private/child"]

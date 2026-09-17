@@ -86,10 +86,15 @@ def digest(path: Path) -> str:
 
 
 def protected_ancestry(path: Path):
-    for item in (path, *path.parents):
-        if not item.exists() and not item.is_symlink():
+    for item in reversed((path, *path.parents)):
+        try:
+            info = item.lstat()
+        except FileNotFoundError:
             continue
-        info = item.lstat()
+        except PermissionError:
+            # A verified root-private ancestor may hide its descendants.
+            # The approved fixed-tool bootstrap checks those before copying.
+            return
         if info.st_uid != 0 or info.st_mode & 0o022 or stat.S_ISLNK(info.st_mode):
             raise ValueError("unprotected administrator staging ancestry")
 
@@ -109,9 +114,12 @@ def bootstrap_script(app: Path, request: Path, invocation: str) -> str:
     # Recheck exact hashes AFTER copying beneath protected root ancestry and
     # before execution. The source may change while the OS approval is open.
     lines = ["set -eu", "umask 077",
-             "/usr/bin/install -d -o root -g wheel -m 755 " + q(ROOT.parent),
-             "/usr/bin/install -d -o root -g wheel -m 700 " + q(ROOT / "invocations"),
-             "/bin/mkdir -m 700 " + q(target),
+             "/usr/bin/install -d -o root -g wheel -m 755 " + q(ROOT.parent)]
+    for directory in (ROOT, ROOT / "invocations"):
+        lines.append("if test -e " + q(directory) + " || test -L " + q(directory) +
+                     '; then test "$(/usr/bin/stat -f \'%u:%Lp:%HT\' ' + q(directory) +
+                     ')" = \'0:700:Directory\'; else /bin/mkdir -m 700 ' + q(directory) + "; fi")
+    lines += ["/bin/mkdir -m 700 " + q(target),
              "/usr/bin/install -o root -g wheel -m 755 " + q(installer) + " " + q(executable),
              "/usr/bin/install -o root -g wheel -m 600 " + q(request) + " " + q(copied_request)]
     for source, destination in ((installer, executable), (request, copied_request)):
