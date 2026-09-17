@@ -177,6 +177,42 @@ def test_rollback_does_not_claim_completion_with_unknown_legacy_approval(lab, mo
     assert not any(call[0] == "bootstrap" for call in lab.calls)
 
 
+@pytest.mark.parametrize("host_off", [False, True])
+def test_interrupted_rollback_does_not_treat_its_own_stop_as_user_off(lab, monkeypatch, host_off):
+    journal = migration.prepare(lab.request, lab.root)
+    migration.apply(journal)
+    if host_off:
+        lab.statuses["host"] = "not_registered"
+        lab.loaded.discard("live.jstack.hub.host")
+    original = migration.control
+    crashed = False
+
+    def interrupted(owner, action, role=None):
+        nonlocal crashed
+        result = original(owner, action, role)
+        if action == "unregister" and not crashed:
+            crashed = True
+            raise OSError("interrupted after stopping replacement")
+        return result
+
+    monkeypatch.setattr(migration, "control", interrupted)
+    with pytest.raises(OSError, match="interrupted"):
+        migration.rollback(journal)
+    migration.rollback(journal)
+    assert lab.loaded == {job["Label"] for role, job in lab.request["jobs"].items() if role != "host" or not host_off}
+
+
+def test_completed_rollback_is_idempotent_after_user_stops_legacy_host(lab):
+    journal = migration.prepare(lab.request, lab.root)
+    migration.apply(journal)
+    migration.rollback(journal)
+    lab.loaded.discard("old.host")
+    calls = list(lab.calls)
+    migration.rollback(journal)
+    assert "old.host" not in lab.loaded
+    assert not any(call[0] == "bootstrap" for call in lab.calls[len(calls):])
+
+
 @pytest.mark.parametrize("change", ["source", "trust", "endpoint", "state", "label"])
 def test_unreviewed_source_or_identity_is_rejected_before_stopping(lab, change):
     if change == "source":

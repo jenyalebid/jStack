@@ -206,10 +206,12 @@ def load(journal: Path) -> dict:
 
 def _rollback(journal: Path):
     value = load(journal)
+    if value["state"] == "rolled_back":
+        return
     current = statuses(value["settings"])
-    stopped = {record["role"] for record in value["records"]
-               if value["state"] == "migrated" and record["enabled"] and
-               current[record["role"]] in {"not_registered", "not_found"}}
+    stopped = set(value.get("rollback_stopped", [record["role"] for record in value["records"]
+                  if value["state"] == "migrated" and record["enabled"] and
+                  current[record["role"]] in {"not_registered", "not_found"}]))
     if any(status == "requires_approval" for status in current.values()):
         # All three share one configuration. Never restore a legacy owner to
         # evade a denial, or leave old and new updaters using mixed settings.
@@ -228,6 +230,10 @@ def _rollback(journal: Path):
             raise ValueError("legacy definition changed during migration")
         if file_hash(journal / (record["role"] + ".plist.before")) != record["sha256"]:
             raise ValueError("legacy backup changed")
+    # Save the user's OFF choices before our first stop. Recovery must not
+    # misinterpret our own interrupted unregister as another user decision.
+    value.update(state="rolling_back", rollback_stopped=sorted(stopped))
+    atomic_json(journal / "journal.json", value)
     for role in reversed(ROLES):
         owner, service, label = target(value["settings"], role)
         if current[role] == "enabled":
