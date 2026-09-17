@@ -39,3 +39,15 @@ def test_explicit_legacy_plist_remains_readable_during_migration(monkeypatch, tm
     monkeypatch.setattr(service_settings, "read", lambda: {"port": 9432, "environment": {}})
     assert install_host.installed_port(path) == 9182
     assert install_host.installed_environment(path) == {"JREMOTE_STATE_DIR": "old-state"}
+
+
+@pytest.mark.parametrize("change", [{"port": True}, {"app": None},
+                                    {"environment": {"KEY": None}},
+                                    {"environment": {"BAD=KEY": "value"}}])
+def test_malformed_settings_fail_with_a_validation_error(monkeypatch, tmp_path, change):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"schema": 1, "port": 9090, "environment": {},
+                               "app": "/Applications/jStack Hub.app", **change}))
+    monkeypatch.setattr(service_settings, "path", lambda: path)
+    with pytest.raises(ValueError):
+        service_settings.read()
