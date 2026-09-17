@@ -87,7 +87,8 @@ rollback; moving private configuration is a separate reviewed operation.
 
 ### Removing user-service registrations
 
-`python -m jstack_host.install_host uninstall --all-services` explicitly
+`jstack-host uninstall --all-services` (also available through
+`python -m jstack_host.install_host uninstall --all-services`) explicitly
 unregisters the Hub and Services catalogs, including the updater and optional
 capabilities. Run it from an independent user Terminal. Both signatures,
 sealed definitions and approval observations are checked before any stop.
@@ -100,8 +101,12 @@ This command retains application bundles, Network, pairing and private data.
 It is the user-registration portion of product removal, not a full product
 uninstaller. Candidate 16 passed core registration removal, identity retention,
 repeat removal and reboot on a fresh GUI VM with Gatekeeper enforced. The
-subsequent private-journal storage change and optional capabilities still
-require signed-artifact qualification.
+subsequent candidate 17 (source `2a400e3`) passed fresh installation with
+Gatekeeper enforced, four-role removal including an optional worker,
+interruption after native updater unregister, journal recovery, repeat removal
+and post-reboot absence. Identity and private configuration were preserved;
+the journal used selected private storage without copying environment values.
+The main CLI forwarding added afterward requires final-artifact qualification.
 
 ### Existing host cutover
 
