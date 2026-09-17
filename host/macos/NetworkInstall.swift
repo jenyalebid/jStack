@@ -224,8 +224,11 @@ func userControl(_ owner: UInt32, action: String, work: URL) throws -> String {
     }
     return status
 }
-func stopNetwork(_ owner: UInt32, at work: URL) throws {
+func stopNetwork(_ owner: UInt32, at work: URL, allowDenied: Bool = false) throws {
     let status = try userControl(owner, action: "status", work: work)
+    guard allowDenied || status != "requires_approval" else {
+        throw refuse("Network approval changed before unregister; leaving the approval choice intact")
+    }
     var group: pid_t?
     if try loaded("live.jstack.network", at: work) {
         let observation = try run("/bin/launchctl", ["print", "system/live.jstack.network"], at: work).1
@@ -418,7 +421,7 @@ func rollback(at transaction: URL, work: URL, uninstall: Bool = false) throws {
         try recoveryBundle(journal, at: transaction)
         policy.active = false
         try write(policy, to: policyPath)
-        try stopNetwork(policy.owner, at: work)
+        try stopNetwork(policy.owner, at: work, allowDenied: uninstall)
         if try !uninstall && userControl(policy.owner, action: "status", work: work) == "requires_approval" {
             throw refuse("Network approval changed during recovery")
         }
