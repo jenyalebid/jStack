@@ -16,6 +16,21 @@ ships, so a route that only works when someone else mounts it fails here.
 import pytest
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_security_alerts():
+    """Test alerts stay in memory, never in the machine's real notifier.
+
+    Session scope also covers delayed alert threads between test fixtures.
+    Tests can still replace this sink to assert their exact alert payload.
+    """
+    from jstack_host import hostenv
+
+    captured = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(hostenv, "security_alert", captured.append)
+        yield captured
+
+
 @pytest.fixture(autouse=True)
 def _no_live_desktop_launches(monkeypatch):
     """A missing mock must fail here, never open the developer's real app."""

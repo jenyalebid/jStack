@@ -495,7 +495,7 @@ def test_spraying_many_device_ids_still_locks_the_address(store, monkeypatch):
     assert e.value.status_code == 429
 
 
-def test_startup_reconciles_a_credential_that_drifted_from_its_row(store):
+def test_startup_reconciles_a_credential_that_drifted_from_its_row(store, monkeypatch):
     """The live 2026-09-11 "No Access": the menu bar reads the plaintext file
     directly, the file had drifted from its row, and only showdoc and spawn
     ever call the repair — so the menu sat refused over a host that was up and
@@ -507,7 +507,20 @@ def test_startup_reconciles_a_credential_that_drifted_from_its_row(store):
     already worked before this bug, it was simply never reached.
     """
     from fastapi.testclient import TestClient
-    from jstack_host import hostenv, server
+    from jstack_host import board_watch, feed, hostenv, managed, server
+    from jstack_host import store as session_store
+
+    # Exercise credential reconciliation through the real lifespan without
+    # launching unrelated indexers that outlive it and resolve live profiles
+    # after this test's state-directory fixtures have been restored.
+    async def no_watch():
+        pass
+
+    monkeypatch.setattr(session_store, "start_indexer", lambda: None)
+    monkeypatch.setattr(feed, "start_indexer", lambda: None)
+    monkeypatch.setattr(managed, "reconcile", lambda: [])
+    monkeypatch.setattr(board_watch, "add_consumer", lambda _consumer: None)
+    monkeypatch.setattr(board_watch, "ensure_running", no_watch)
 
     devices.internal_token()                       # row + file agree
     path = devices._credential_dir() / "internal-token"
