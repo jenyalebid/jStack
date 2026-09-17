@@ -50,6 +50,10 @@ def build(stack: Path, source: Path, output: Path, version: str, config: dict | 
                 protection = Path(temporary) / "ProtectedPaths.swift"
                 protection.write_text(command(["git", "-C", str(stack), "show", f"{source_sha}:host/macos/ProtectedPaths.swift"]))
                 sources.append(str(protection))
+            if filename == "Network.swift":
+                commands = Path(temporary) / "NetworkCommand.swift"
+                commands.write_text(command(["git", "-C", str(stack), "show", f"{source_sha}:host/macos/NetworkCommand.swift"]))
+                sources.append(str(commands))
             command(["xcrun", "swiftc", *flags, "-O", "-o", str(macos / name), *sources], timeout=180)
     # Distribute the exact corresponding GPL source, not an external URL
     # that can disappear. Build only files emitted by git archive.

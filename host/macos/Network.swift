@@ -163,41 +163,9 @@ func configuration(_ policy: NetworkPolicy) throws -> Data {
     return data
 }
 
-func process(_ executable: String, _ arguments: [String], input: Data? = nil) throws -> Process {
-    let task = Process()
-    task.executableURL = URL(fileURLWithPath: executable)
-    task.arguments = arguments
-    task.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
-    task.standardOutput = FileHandle.nullDevice
-    task.standardError = FileHandle.nullDevice // never log configuration/key fragments
-    if let input {
-        let pipe = Pipe()
-        task.standardInput = pipe
-        try task.run()
-        try pipe.fileHandleForWriting.write(contentsOf: input)
-        try pipe.fileHandleForWriting.close()
-    } else { try task.run() }
-    return task
-}
-
-func wait(_ task: Process, seconds: TimeInterval = 30) throws {
-    let deadline = Date().addingTimeInterval(seconds)
-    while task.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
-    if task.isRunning {
-        task.terminate()
-        let grace = Date().addingTimeInterval(5)
-        while task.isRunning && Date() < grace { Thread.sleep(forTimeInterval: 0.05) }
-        if task.isRunning { kill(task.processIdentifier, SIGKILL) }
-        task.waitUntilExit()
-        throw NetworkFailure.invalid("network operation timed out")
-    }
-    task.waitUntilExit()
-}
-
 func execute(_ executable: String, _ arguments: [String], input: Data? = nil) throws {
-    let task = try process(executable, arguments, input: input)
-    try wait(task)
-    guard task.terminationStatus == 0 else { throw NetworkFailure.invalid("network operation failed") }
+    let result = try runNetworkCommand(executable, arguments, input: input, cancelled: { shutdownState.requested })
+    guard result.status == 0 else { throw NetworkFailure.invalid("network operation failed") }
 }
 
 func serve(_ policy: NetworkPolicy) throws {
@@ -212,9 +180,8 @@ func serve(_ policy: NetworkPolicy) throws {
         guard previous.range(of: "^utun[0-9]+$", options: .regularExpression) != nil else {
             throw NetworkFailure.invalid("invalid stale interface name")
         }
-        let probe = try process("/sbin/ifconfig", [previous])
-        try wait(probe)
-        guard probe.terminationStatus != 0 else {
+        let probe = try runNetworkCommand("/sbin/ifconfig", [previous], cancelled: { shutdownState.requested })
+        guard probe.status != 0 else {
             throw NetworkFailure.invalid("existing live tunnel requires migration")
         }
         try FileManager.default.removeItem(at: name)
@@ -241,16 +208,10 @@ func serve(_ policy: NetworkPolicy) throws {
     } catch {
         // ifconfig may already have installed the connected route. Accept
         // that only when an independent route lookup names this interface.
-        let probe = Process()
-        let pipe = Pipe()
-        probe.executableURL = URL(fileURLWithPath: "/sbin/route")
-        probe.arguments = ["-n", "get", "-inet", String(policy.subnet.split(separator: "/")[0])]
-        probe.standardOutput = pipe
-        probe.standardError = FileHandle.nullDevice
-        try probe.run()
-        try wait(probe)
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        guard probe.terminationStatus == 0,
+        let probe = try runNetworkCommand("/sbin/route", ["-n", "get", "-inet", String(policy.subnet.split(separator: "/")[0])],
+                                          captureOutput: true, cancelled: { shutdownState.requested })
+        let output = String(data: probe.output, encoding: .utf8) ?? ""
+        guard probe.status == 0,
               output.components(separatedBy: .newlines).contains(where: { $0.trimmingCharacters(in: .whitespaces) == "interface: \(interface)" }) else {
             throw NetworkFailure.invalid("mesh route did not become active")
         }
