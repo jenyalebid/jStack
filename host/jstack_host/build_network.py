@@ -45,7 +45,12 @@ def build(stack: Path, source: Path, output: Path, version: str, config: dict | 
         with tempfile.TemporaryDirectory(prefix="jstack-native-") as temporary:
             native = Path(temporary) / filename
             native.write_text(command(["git", "-C", str(stack), "show", f"{source_sha}:host/macos/{filename}"]))
-            command(["xcrun", "swiftc", *flags, "-O", "-o", str(macos / name), str(native)], timeout=180)
+            sources = [str(native)]
+            if filename in {"Network.swift", "NetworkInstall.swift"}:
+                protection = Path(temporary) / "ProtectedPaths.swift"
+                protection.write_text(command(["git", "-C", str(stack), "show", f"{source_sha}:host/macos/ProtectedPaths.swift"]))
+                sources.append(str(protection))
+            command(["xcrun", "swiftc", *flags, "-O", "-o", str(macos / name), *sources], timeout=180)
     # Distribute the exact corresponding GPL source, not an external URL
     # that can disappear. Build only files emitted by git archive.
     archive = resources / "wireguard-tools-source.tar"

@@ -69,6 +69,7 @@ func protected(_ url: URL) throws {
               info.st_mode & 0o022 == 0, info.st_mode & S_IFMT != S_IFLNK else {
             throw refuse("unprotected administrator path")
         }
+        try rejectWritableACL(current)
         if current == "/" { return }
         current = (current as NSString).deletingLastPathComponent
     }

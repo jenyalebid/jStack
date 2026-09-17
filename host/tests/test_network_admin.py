@@ -2,6 +2,7 @@ import copy
 import hashlib
 from pathlib import Path
 import shlex
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -66,13 +67,14 @@ def test_bootstrap_quotes_paths_and_checks_copies_before_execution(monkeypatch, 
     lines = script.splitlines()
     assert observations[0] == ("ancestry", admin.ROOT / "invocations")
     assert observations[2][1][:3] == ["/usr/sbin/spctl", "--assess", "--type"]
-    assert shlex.split(lines[2]) == ["/usr/bin/install", "-d", "-o", "root", "-g", "wheel", "-m", "755", str(admin.ROOT.parent)]
-    assert "0:700:Directory" in lines[3] and "0:700:Directory" in lines[4]
-    assert shlex.split(lines[6])[-2] == str(installer)
-    assert shlex.split(lines[7])[-2] == str(request)
-    assert hashlib.sha256(installer.read_bytes()).hexdigest() in lines[8]
-    assert hashlib.sha256(request.read_bytes()).hexdigest() in lines[9]
-    assert shlex.split(lines[10])[:3] == ["/usr/bin/codesign", "--verify", "--strict"]
+    assert any(shlex.split(line) == ["/usr/bin/install", "-d", "-o", "root", "-g", "wheel", "-m", "755", str(admin.ROOT.parent)] for line in lines)
+    assert sum("0:700:Directory" in line for line in lines) == 2
+    assert "check_acl " + shlex.quote(str(admin.ROOT / "invocations")) in lines
+    assert shlex.split(lines[-6])[-2] == str(installer)
+    assert shlex.split(lines[-5])[-2] == str(request)
+    assert hashlib.sha256(installer.read_bytes()).hexdigest() in lines[-4]
+    assert hashlib.sha256(request.read_bytes()).hexdigest() in lines[-3]
+    assert shlex.split(lines[-2])[:3] == ["/usr/bin/codesign", "--verify", "--strict"]
     protected = admin.ROOT / "invocations" / invocation
     assert shlex.split(lines[-1]) == [str(protected / "Installer"), str(protected / "request.json")]
 
@@ -110,3 +112,33 @@ def test_root_private_ancestor_is_checked_before_unobservable_child(monkeypatch)
     monkeypatch.setattr(Path, "lstat", inspect)
     admin.protected_ancestry(Path("/protected/private/child"))
     assert calls == ["/", "/protected", "/protected/private", "/protected/private/child"]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS ACLs")
+def test_bootstrap_acl_check_runs_before_copied_code(monkeypatch, tmp_path):
+    import os
+    import pwd
+    import subprocess
+    app = tmp_path / "candidate.app"
+    installer = app / "Contents/MacOS/JStackNetworkInstaller"
+    installer.parent.mkdir(parents=True)
+    installer.write_bytes(b"fixture")
+    request = tmp_path / "request.json"
+    request.write_text("{}")
+    monkeypatch.setattr(admin, "protected_ancestry", lambda path: None)
+    monkeypatch.setattr(admin.app_services, "verify", lambda *args: None)
+    monkeypatch.setattr(admin, "command", lambda args: None)
+    lines = admin.bootstrap_script(app, request, "a" * 32).splitlines()
+    checker = next(line for line in lines if line.startswith("check_acl()"))
+    shell = "set -e\n" + checker + '\ncheck_acl "$1"'
+    name = pwd.getpwuid(os.getuid()).pw_name
+    for grant, expected in (("deny delete", 0), ("allow read", 1), ("allow write", 1)):
+        entry = f"user:{name} {grant}"
+        subprocess.run(["/bin/chmod", "+a", entry, str(request)], check=True, capture_output=True)
+        try:
+            result = subprocess.run(["/bin/sh", "-c", shell, "acl-test", str(request)], capture_output=True)
+            assert result.returncode == expected
+        finally:
+            subprocess.run(["/bin/chmod", "-a", entry, str(request)], check=True, capture_output=True)
+    assert subprocess.run(["/bin/sh", "-c", shell, "acl-test", str(request)], capture_output=True).returncode == 0
+    assert subprocess.run(["/bin/sh", "-c", shell, "acl-test", str(tmp_path / "missing")], capture_output=True).returncode != 0

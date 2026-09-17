@@ -94,6 +94,7 @@ func rootProtected(_ url: URL, runtime: Bool = false) throws {
               value.st_mode & S_IFMT != S_IFLNK else {
             throw NetworkFailure.invalid("unprotected privileged path")
         }
+        try rejectWritableACL(current)
         if current == "/" { return }
         current = (current as NSString).deletingLastPathComponent
     }

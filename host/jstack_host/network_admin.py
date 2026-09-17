@@ -113,13 +113,20 @@ def bootstrap_script(app: Path, request: Path, invocation: str) -> str:
     q = lambda value: shlex.quote(str(value))
     # Recheck exact hashes AFTER copying beneath protected root ancestry and
     # before execution. The source may change while the OS approval is open.
-    lines = ["set -eu", "umask 077",
-             "/usr/bin/install -d -o root -g wheel -m 755 " + q(ROOT.parent)]
+    lines = ["set -eu", "umask 077", "export LC_ALL=C",
+             "check_acl() { acl_listing=$(/bin/ls -lde \"$1\"); printf '%s\\n' \"$acl_listing\" | /usr/bin/awk 'NR > 1 && / allow / { exit 1 }'; }"]
+    # The bootstrap cannot trust the copied native checker until its own
+    # ancestry is safe. Conservatively reject allow ACLs here using fixed OS
+    # tools; the native runtime understands individual permission bits.
+    for directory in reversed((ROOT.parent, *ROOT.parent.parents)):
+        lines.append("if test -e " + q(directory) + "; then check_acl " + q(directory) + "; fi")
+    lines.append("/usr/bin/install -d -o root -g wheel -m 755 " + q(ROOT.parent))
     for directory in (ROOT, ROOT / "invocations"):
         lines.append("if test -e " + q(directory) + " || test -L " + q(directory) +
                      '; then test "$(/usr/bin/stat -f \'%u:%Lp:%HT\' ' + q(directory) +
                      ')" = \'0:700:Directory\'; else /bin/mkdir -m 700 ' + q(directory) + "; fi")
-    lines += ["/bin/mkdir -m 700 " + q(target),
+        lines.append("check_acl " + q(directory))
+    lines += ["/bin/mkdir -m 700 " + q(target), "check_acl " + q(target),
              "/usr/bin/install -o root -g wheel -m 755 " + q(installer) + " " + q(executable),
              "/usr/bin/install -o root -g wheel -m 600 " + q(request) + " " + q(copied_request)]
     for source, destination in ((installer, executable), (request, copied_request)):

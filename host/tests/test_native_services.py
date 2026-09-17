@@ -13,7 +13,10 @@ import pytest
                                           ("ServiceControl.swift", [])])
 def test_native_service_compiles(tmp_path, filename, flags):
     source = Path(__file__).resolve().parents[1] / "macos" / filename
-    result = subprocess.run(["swiftc", *flags, "-O", "-o", str(tmp_path / "probe"), str(source)],
+    sources = [str(source)]
+    if filename in {"Network.swift", "NetworkInstall.swift"}:
+        sources.append(str(source.parent / "ProtectedPaths.swift"))
+    result = subprocess.run(["swiftc", *flags, "-O", "-o", str(tmp_path / "probe"), *sources],
                             capture_output=True, text=True, timeout=180)
     assert result.returncode == 0, result.stderr
 
@@ -64,3 +67,43 @@ precondition(actions == ["status", "unregister"], "explicit uninstall should sti
     subprocess.run(["swiftc", "-o", str(binary), str(path)], check=True, capture_output=True, text=True, timeout=60)
     result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.fixture(scope="module")
+def acl_probe(tmp_path_factory):
+    if sys.platform != "darwin" or not shutil.which("swiftc"):
+        pytest.skip("requires macOS Swift toolchain")
+    directory = tmp_path_factory.mktemp("native-acl")
+    source = Path(__file__).resolve().parents[1] / "macos/ProtectedPaths.swift"
+    main = directory / "main.swift"
+    main.write_text('''import Darwin
+do {
+    try rejectWritableACL(CommandLine.arguments[1])
+    exit(0)
+} catch PathProtectionFailure.writableACL { exit(10) }
+catch { exit(11) }
+''')
+    binary = directory / "probe"
+    subprocess.run(["swiftc", "-o", str(binary), str(main), str(source)], check=True, capture_output=True, text=True, timeout=60)
+    return binary
+
+
+@pytest.mark.parametrize("grant,expected", [(None, 0), ("allow read", 0), ("deny delete", 0),
+                                           ("allow write", 10), ("allow append", 10),
+                                           ("allow writesecurity", 10), ("allow writeattr", 10),
+                                           ("allow writeextattr", 10), ("allow chown", 10)])
+def test_native_acl_protection(acl_probe, tmp_path, grant, expected):
+    import os
+    import pwd
+    target = tmp_path / "protected-resource"
+    target.write_text("fixture")
+    target.chmod(0o600)
+    entry = f"user:{pwd.getpwuid(os.getuid()).pw_name} {grant}"
+    if grant:
+        subprocess.run(["/bin/chmod", "+a", entry, str(target)], check=True, capture_output=True)
+    try:
+        result = subprocess.run([str(acl_probe), str(target)], capture_output=True, text=True, timeout=10)
+        assert result.returncode == expected, result.stderr
+    finally:
+        if grant:
+            subprocess.run(["/bin/chmod", "-a", entry, str(target)], check=True, capture_output=True)
