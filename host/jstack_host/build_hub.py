@@ -60,6 +60,21 @@ def relocate(path: Path, source: Path, target: Path):
 
 
 def build(stack: Path, output: Path, version: str, config: dict | None = None, *, recovery=False, catalog=None) -> Path:
+    # Build one immutable git snapshot. A clean-tree check alone does not
+    # exclude untracked package files or concurrent changes during pip/build.
+    command(["git", "-C", str(stack), "diff", "--quiet", "HEAD", "--", "host"])
+    source_sha = command(["git", "-C", str(stack), "rev-parse", "HEAD"]).strip()
+    with tempfile.TemporaryDirectory(prefix="jstack-source-") as temporary:
+        root = Path(temporary)
+        archive = root / "source.tar"
+        snapshot = root / "source"
+        snapshot.mkdir()
+        command(["git", "-C", str(stack), "archive", "--format=tar", "-o", str(archive), source_sha])
+        command(["/usr/bin/tar", "-xf", str(archive), "-C", str(snapshot)])
+        return _build(snapshot, output, version, config, recovery=recovery, catalog=catalog, source_sha=source_sha)
+
+
+def _build(stack: Path, output: Path, version: str, config: dict | None, *, recovery, catalog, source_sha: str) -> Path:
     if sys.version_info[:2] != (3, 12):
         raise ValueError("this runtime build requires the audited CPython 3.12 framework")
     source = Path(sys.base_prefix)
@@ -109,8 +124,6 @@ def build(stack: Path, output: Path, version: str, config: dict | None = None, *
         metadata.write_text(json.dumps({"url": "source:jstack-host", "dir_info": {}}) + "\n")
     shutil.copy2(stack / "host/macos/runtime_entry.py", resources / "runtime_entry.py")
     from .sourcestamp import fingerprint
-    source_sha = command(["git", "-C", str(stack), "rev-parse", "HEAD"]).strip()
-    command(["git", "-C", str(stack), "diff", "--quiet", "HEAD", "--", "host"])
     (packages / "release-identity.json").write_text(json.dumps({
         "sha": source_sha, "release": f"hub-{version}-{source_sha[:8]}",
         "package_sha256": fingerprint(packages / "jstack_host")}) + "\n")
