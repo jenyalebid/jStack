@@ -109,6 +109,7 @@ def bootstrap_script(app: Path, request: Path, invocation: str) -> str:
     # Recheck exact hashes AFTER copying beneath protected root ancestry and
     # before execution. The source may change while the OS approval is open.
     lines = ["set -eu", "umask 077",
+             "/usr/bin/install -d -o root -g wheel -m 755 " + q(ROOT.parent),
              "/usr/bin/install -d -o root -g wheel -m 700 " + q(ROOT / "invocations"),
              "/bin/mkdir -m 700 " + q(target),
              "/usr/bin/install -o root -g wheel -m 755 " + q(installer) + " " + q(executable),

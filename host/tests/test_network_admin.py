@@ -66,11 +66,12 @@ def test_bootstrap_quotes_paths_and_checks_copies_before_execution(monkeypatch, 
     lines = script.splitlines()
     assert observations[0] == ("ancestry", admin.ROOT / "invocations")
     assert observations[2][1][:3] == ["/usr/sbin/spctl", "--assess", "--type"]
-    assert shlex.split(lines[4])[-2] == str(installer)
-    assert shlex.split(lines[5])[-2] == str(request)
-    assert hashlib.sha256(installer.read_bytes()).hexdigest() in lines[6]
-    assert hashlib.sha256(request.read_bytes()).hexdigest() in lines[7]
-    assert shlex.split(lines[8])[:3] == ["/usr/bin/codesign", "--verify", "--strict"]
+    assert shlex.split(lines[2]) == ["/usr/bin/install", "-d", "-o", "root", "-g", "wheel", "-m", "755", str(admin.ROOT.parent)]
+    assert shlex.split(lines[5])[-2] == str(installer)
+    assert shlex.split(lines[6])[-2] == str(request)
+    assert hashlib.sha256(installer.read_bytes()).hexdigest() in lines[7]
+    assert hashlib.sha256(request.read_bytes()).hexdigest() in lines[8]
+    assert shlex.split(lines[9])[:3] == ["/usr/bin/codesign", "--verify", "--strict"]
     protected = admin.ROOT / "invocations" / invocation
     assert shlex.split(lines[-1]) == [str(protected / "Installer"), str(protected / "request.json")]
 
