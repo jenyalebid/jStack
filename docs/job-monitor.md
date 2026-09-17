@@ -41,6 +41,34 @@ nobody read is not an outcome.
   group. It does not signal a PID from a saved record, so stale PID reuse cannot
   cancel an unrelated process. Cancellation produces a completion event too.
 
+A completion event carries the state and exit code. For a **failed** job it also
+carries a bounded tail of the log, fenced as data rather than instructions,
+because the log is the whole point of that event and fetching it separately
+spends a round trip on the same bytes. A success carries no output.
+
+## The wrapper: a command that hands itself over
+
+`start` is a decision. `job_monitor.py run --command '<cmd>'` is not: it wraps a
+command the caller was going to execute anyway, waits `--threshold-seconds` (20
+by default), and only hands it over once it has PROVEN slow.
+
+- Inside the threshold it is the bare command — same exit code, same output
+  (merged, since the log is one stream), no job to settle, nothing to remember.
+- Past it, the wait ends and nothing else changes: the command keeps running
+  under the supervisor that has owned it since the first millisecond, and the
+  handover prints the job ID and log path. Do not poll it or run the command
+  again.
+- Nothing here is allowed to be the reason a command does not run. No thread to
+  notify, no `codex` binary, no private job directory: it execs the command in
+  the foreground and behaves like the plain shell.
+
+This is for a **shim or a script**, not for a model choosing a tool, and it is
+deliberately absent from the MCP surface — a model calling it would be back to
+holding the turn open. It exists because the engine's own exec yields while the
+command is still running, and a session that meets a half-finished command starts
+polling partial output. Wrap the surfaces that produce long commands and the
+waiting stops being a choice anyone can get wrong.
+
 CLI equivalent (from this checkout):
 
 ```sh
