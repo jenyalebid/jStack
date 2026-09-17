@@ -526,7 +526,7 @@ def test_history_endpoint_queries_store(client, store, home):
     assert none == []
 
 
-def test_a_store_call_closes_the_connection_it_opened(store):
+def test_a_store_call_closes_the_connection_it_opened(store, monkeypatch):
     """Every store call opens its own connection, so one that outlives the
     call is a descriptor leak paid per call — two of them, the file and its
     WAL. `with connection:` manages only the transaction, and on CPython 3.14
@@ -535,16 +535,19 @@ def test_a_store_call_closes_the_connection_it_opened(store):
     schedule. The host learned this at launchd's 256-descriptor ceiling —
     accept() failing with EMFILE after half an hour of a device polling the
     board. Collector off, so the store has to have closed it itself."""
-    import gc
-    import os
+    import sqlite3
+    original = sqlite3.connect
+    opened = []
 
-    gc.collect()
-    gc.disable()
-    try:
-        before = len(os.listdir("/dev/fd"))
-        for _ in range(50):
-            store.current_seq()
-        after = len(os.listdir("/dev/fd"))
-    finally:
-        gc.enable()
-    assert after == before, f"{after - before} descriptors leaked over 50 calls"
+    def connect(*args, **kwargs):
+        connection = original(*args, **kwargs)
+        opened.append(connection)  # retain it, so GC cannot hide missing close()
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    for _ in range(50):
+        store.current_seq()
+    assert len(opened) == 50
+    for connection in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
