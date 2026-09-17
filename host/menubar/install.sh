@@ -164,6 +164,15 @@ trap 'rm -rf "$BUILD"' EXIT
 STAGE="$BUILD/$APP_NAME.app"
 mkdir -p "$STAGE/Contents/MacOS"
 
+IDENTITY_PYTHON="$SELF_DIR/../.venv/bin/python3"
+if [ ! -x "$IDENTITY_PYTHON" ]; then
+    IDENTITY_PYTHON="$(command -v python3 || true)"
+fi
+[ -n "$IDENTITY_PYTHON" ] || die "Python 3 is required to reserve a source-build identity"
+IDENTITY=$("$IDENTITY_PYTHON" "$SELF_DIR/build_identity.py" "$SELF_DIR/../.." \
+    "$HOME/Library/Application Support/jStack/build-identity") || die "cannot reserve build identity"
+read -r BUILD_VERSION BUILD_NUMBER BUILD_SHA <<< "$IDENTITY"
+
 "${SWIFTC[@]}" -O -o "$STAGE/Contents/MacOS/JStackHostBar" "$SELF_DIR/$SOURCE" \
     || die "the build failed — the compiler output above says why"
 ok "compiled"
@@ -181,8 +190,9 @@ cat > "$STAGE/Contents/Info.plist" <<EOF
     <key>CFBundleName</key><string>jStack Hub</string>
     <key>CFBundleDisplayName</key><string>jStack Hub</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>$BUILD_VERSION</string>
+    <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
+    <key>JStackSourceCommit</key><string>$BUILD_SHA</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
     <key>CFBundleURLTypes</key><array><dict>
