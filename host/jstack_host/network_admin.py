@@ -62,11 +62,13 @@ def validate_request(request: dict) -> None:
         raise ValueError("legacy review must be an explicit list")
     labels = set()
     for job in request["legacy"]:
-        if not isinstance(job, dict) or set(job) != {"label", "sha256", "loaded", "disabled", "sources"}:
+        if not isinstance(job, dict) or set(job) != {"label", "sha256", "mode", "group", "loaded", "disabled", "sources"}:
             raise ValueError("invalid legacy job review")
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", job["label"]) or job["label"] == "live.jstack.network" or job["label"] in labels:
             raise ValueError("invalid or repeated legacy label")
         labels.add(job["label"])
+        if type(job["mode"]) is not int or not 0 <= job["mode"] <= 0o777 or job["mode"] & 0o022 or type(job["group"]) is not int or job["group"] < 0:
+            raise ValueError("invalid legacy definition permissions")
         if not re.fullmatch(r"[a-f0-9]{64}", job["sha256"]) or any(type(job[key]) is not bool for key in ("loaded", "disabled")):
             raise ValueError("invalid legacy definition or lifecycle")
         if not isinstance(job["sources"], list) or not job["sources"]:

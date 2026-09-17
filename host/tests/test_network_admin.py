@@ -17,7 +17,7 @@ def plan():
             "policy": {"owner": 501, "configuration": "/private/network.conf",
                        "address": "10.66.0.1/24", "subnet": "10.66.0.0/24",
                        "nameFile": "/var/run/wireguard/network.name", "forwarding": True, "active": True},
-            "legacy": [{"label": "example.network", "sha256": "d" * 64, "loaded": True,
+            "legacy": [{"label": "example.network", "sha256": "d" * 64, "mode": 0o644, "group": 0, "loaded": True,
                         "disabled": False, "sources": [{"path": "/private/network.sh", "sha256": "e" * 64, "owner": 501}]}]}
 
 
@@ -28,6 +28,7 @@ def plan():
     lambda p: p["legacy"][0].update(disabled=True),
     lambda p: p["legacy"][0].update(loaded=False),
     lambda p: p["legacy"][0].update(sources=[]),
+    lambda p: p["legacy"][0].update(mode=0o666),
     lambda p: p["legacy"].append(copy.deepcopy(p["legacy"][0])),
     lambda p: p.update(candidateSeal="unsigned"),
     lambda p: p.update(command="/bin/sh"),

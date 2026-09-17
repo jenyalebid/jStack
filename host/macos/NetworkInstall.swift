@@ -20,6 +20,8 @@ struct CodePin: Codable {
 struct LegacyJob: Codable {
     let label: String
     let sha256: String
+    let mode: UInt16
+    let group: UInt32
     let loaded: Bool
     let disabled: Bool
     let sources: [CodePin]
@@ -161,12 +163,16 @@ func disabled(at work: URL) throws -> Set<String> {
     return result
 }
 func legacyPath(_ job: LegacyJob) throws -> URL {
-    guard safeName(job.label), job.label != "live.jstack.network", !job.sources.isEmpty else { throw refuse("invalid reviewed legacy job") }
+    guard safeName(job.label), job.label != "live.jstack.network", !job.sources.isEmpty,
+          job.mode <= 0o777, job.mode & 0o022 == 0 else { throw refuse("invalid reviewed legacy job") }
     return URL(fileURLWithPath: "/Library/LaunchDaemons").appendingPathComponent(job.label + ".plist")
 }
 func checkLegacy(_ job: LegacyJob, at work: URL, lifecycle: Bool) throws {
     let path = try legacyPath(job)
     try protected(path)
+    var metadata = stat()
+    guard lstat(path.path, &metadata) == 0, metadata.st_mode & 0o777 == job.mode,
+          metadata.st_gid == job.group else { throw refuse("legacy definition permissions changed") }
     guard try hashFile(path) == job.sha256 else { throw refuse("legacy definition changed") }
     let plist = try PropertyListSerialization.propertyList(from: Data(contentsOf: path), format: nil) as? [String: Any]
     guard plist?["Label"] as? String == job.label else { throw refuse("legacy label differs from its definition") }
@@ -468,7 +474,15 @@ func rollback(at transaction: URL, work: URL, uninstall: Bool = false) throws {
             guard try hashFile(backup) == job.sha256 else { throw refuse("legacy backup changed") }
             if journal.restoreActive == false && job.loaded && !job.disabled { continue }
             let original = try legacyPath(job)
-            if !manager.fileExists(atPath: original.path) { try hardenedCopy(backup, original) }
+            if !manager.fileExists(atPath: original.path) {
+                // Build the restored definition privately with its reviewed
+                // metadata before making it visible to launchd or readers.
+                let restoring = transaction.appendingPathComponent(job.label + ".restoring.plist")
+                if !manager.fileExists(atPath: restoring.path) { try hardenedCopy(backup, restoring) }
+                guard try hashFile(restoring) == job.sha256 else { throw refuse("restored definition changed") }
+                try manager.setAttributes([.posixPermissions: Int(job.mode), .groupOwnerAccountID: job.group], ofItemAtPath: restoring.path)
+                try manager.moveItem(at: restoring, to: original)
+            }
             try checkLegacy(job, at: work, lifecycle: false)
             let legacyApproval = SMAppService.statusForLegacyPlist(at: original)
             if legacyApproval == .requiresApproval { throw refuse("legacy Network owner requires approval; recovery remains pending") }

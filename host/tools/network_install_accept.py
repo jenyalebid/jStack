@@ -24,10 +24,12 @@ def digest(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("prepare", "prepare-legacy", "legacy", "stage", "activate", "rollback", "uninstall", "verify", "verify-legacy"))
+    parser.add_argument("phase", choices=("prepare", "prepare-legacy", "prepare-existing", "legacy", "stage", "activate", "rollback", "uninstall", "verify", "verify-legacy"))
     parser.add_argument("--app", required=True, type=Path)
     parser.add_argument("--private-storage", required=True, type=Path)
     parser.add_argument("--case", default="initial")
+    parser.add_argument("--legacy-mode", choices=("600", "644"), default="600")
+    parser.add_argument("--from-case")
     args = parser.parse_args()
     assert re.fullmatch(r"[a-zA-Z0-9-]+", args.case), "invalid fixture case"
     assert run("/usr/sbin/sysctl", "-n", "hw.model").startswith("VirtualMac"), "VM only"
@@ -39,6 +41,21 @@ def main():
     installed = Path("/Library/PrivilegedHelperTools/jStack Network.app")
     label = "live.jstack.network.acceptance.legacy"
     original = Path("/Library/LaunchDaemons") / (label + ".plist")
+    if args.phase == "prepare-existing":
+        assert args.from_case and re.fullmatch(r"[a-zA-Z0-9-]+", args.from_case)
+        assert not request_path.exists() and not installed.exists()
+        request = json.loads((args.private_storage / args.from_case / "stage.json").read_text())
+        assert len(request["legacy"]) == 1 and request["legacy"][0]["label"] == label
+        assert run("sudo", "/usr/bin/shasum", "-a", "256", str(original)).split()[0] == request["legacy"][0]["sha256"]
+        metadata = original.stat()
+        assert metadata.st_uid == 0 and metadata.st_mode & 0o777 == int(args.legacy_mode, 8)
+        request["legacy"][0].update(mode=int(args.legacy_mode, 8), group=metadata.st_gid)
+        request.update(transaction=uuid.uuid4().hex, candidate=str(args.app),
+                       candidateSeal=digest(args.app / "Contents/_CodeSignature/CodeResources"),
+                       candidateBinary=digest(args.app / "Contents/MacOS/JStackHub"))
+        atomic_json(request_path, request)
+        print(json.dumps({"prepared_existing": True, "transaction": request["transaction"]}))
+        return
     if args.phase in {"prepare", "prepare-legacy"}:
         assert not request_path.exists() and not installed.exists(), "fresh fixture already exists"
         configuration = root / "network.conf"
@@ -78,7 +95,7 @@ def main():
                 "StandardOutPath": "/var/log/jstack-network-legacy-lab.log",
                 "StandardErrorPath": "/var/log/jstack-network-legacy-lab.log"}))
             plist.chmod(0o600)
-            request["legacy"] = [{"label": label, "sha256": digest(plist), "loaded": True, "disabled": False,
+            request["legacy"] = [{"label": label, "sha256": digest(plist), "mode": int(args.legacy_mode, 8), "group": 0, "loaded": True, "disabled": False,
                 "sources": [{"path": str(item), "sha256": digest(item), "owner": item.stat().st_uid}
                             for item in (Path("/bin/bash"), wrapper, go, wg)]}]
         atomic_json(request_path, request)
@@ -93,7 +110,8 @@ def main():
         assert request["legacy"] and not original.exists(), "refusing to replace a legacy definition"
         # This deliberately creates the old user-writable-code fixture. The
         # product installer never uses this legacy bootstrap path.
-        script = "set -eu\n/usr/bin/install -o root -g wheel -m 644 " + shlex.quote(str(root / "legacy.plist")) + " " + shlex.quote(str(original))
+        mode = format(request["legacy"][0]["mode"], "o")
+        script = "set -eu\n/usr/bin/install -o root -g wheel -m " + mode + " " + shlex.quote(str(root / "legacy.plist")) + " " + shlex.quote(str(original))
         script += "\n/bin/launchctl bootstrap system " + shlex.quote(str(original))
         literal = '"' + script.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
         run("/usr/bin/osascript", "-e", "do shell script " + literal + ' with administrator privileges with prompt "Create the disposable legacy Network test fixture"')
@@ -114,7 +132,12 @@ def main():
             assert not request["legacy"] or not original.exists(), "legacy persistence remains installed"
             result = {"active": True, "signature_identity": True, "transaction": request["transaction"]}
         else:
-            assert request["legacy"] and digest(original) == request["legacy"][0]["sha256"]
+            assert request["legacy"]
+            original_digest = run("sudo", "/usr/bin/shasum", "-a", "256", str(original)).split()[0]
+            assert original_digest == request["legacy"][0]["sha256"]
+            metadata = original.stat()
+            assert metadata.st_uid == 0 and metadata.st_gid == request["legacy"][0]["group"]
+            assert metadata.st_mode & 0o777 == request["legacy"][0]["mode"]
             run("/bin/launchctl", "print", "system/" + label)
             absent = subprocess.run(["/bin/launchctl", "print", "system/live.jstack.network"], capture_output=True, text=True)
             assert absent.returncode != 0 and "Could not find service" in absent.stdout + absent.stderr
