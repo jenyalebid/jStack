@@ -32,6 +32,18 @@ def _isolated_security_alerts():
 
 
 @pytest.fixture(autouse=True)
+def _no_live_fileshare_audit(monkeypatch):
+    """A TestClient lifespan must never inspect the developer's share points."""
+    import asyncio
+    from jstack_host import fileshare
+
+    async def idle():
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(fileshare, "audit_loop", idle)
+
+
+@pytest.fixture(autouse=True)
 def _no_live_desktop_launches(monkeypatch):
     """A missing mock must fail here, never open the developer's real app."""
     import os

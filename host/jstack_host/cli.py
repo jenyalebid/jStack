@@ -841,6 +841,23 @@ def _cmd_version(args) -> int:
     return 0
 
 
+def _cmd_files(args) -> int:
+    import json
+    from . import fileshare
+    try:
+        if args.files_cmd == "status":
+            result = fileshare.status()
+        elif args.files_cmd == "setup":
+            result = fileshare.setup(apply=args.apply)
+        else:
+            result = fileshare.off(apply=args.apply)
+    except (fileshare.FileShareError, PermissionError) as e:
+        print(f"jstack-host files: {e}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("ready", result.get("status", {}).get("ready", True)) else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="jstack-host",
@@ -1000,6 +1017,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("version", help="the installed package version")
     p.set_defaults(fn=_cmd_version)
+
+    p = sub.add_parser("files", help="declare and inspect selected-folder SMB access")
+    files = p.add_subparsers(dest="files_cmd", required=True)
+    fs = files.add_parser("status", help="compare declared and observed sharing state")
+    fs.set_defaults(fn=_cmd_files)
+    fs = files.add_parser("setup", help="print or apply the selected-folder setup")
+    fs.add_argument("--apply", action="store_true",
+                    help="apply as root (default: print a dry run)")
+    fs.set_defaults(fn=_cmd_files)
+    fs = files.add_parser("off", help="print or remove all SMB share points")
+    fs.add_argument("--apply", action="store_true",
+                    help="remove as root (default: print a dry run)")
+    fs.set_defaults(fn=_cmd_files)
     return ap
 
 
