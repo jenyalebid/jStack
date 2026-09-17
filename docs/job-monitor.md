@@ -20,6 +20,14 @@ commands. Interactive stdin is not supported.
 
 ## Use
 
+Any command expected to outlast a minute belongs here rather than in a turn
+held open waiting for it — a push into a `pre-push` gate that runs the repo's
+suite, a VM boot, a full test run. Spend the wait on work outside that repo's
+working tree: a gate runs the suite out of the tree, so editing it mid-gate
+judges a tree that never existed. Settle the job in the session that started
+it — read its result, report what it says, own a red gate — because a result
+nobody read is not an outcome.
+
 - `start(command, cwd, thread_id, timeout_seconds=3600)` returns a job ID.
   Read `CODEX_THREAD_ID` from the current shell; never infer a recipient from
   a seat, session name, most recent transcript, or managed board identifier.
