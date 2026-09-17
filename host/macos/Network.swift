@@ -19,6 +19,58 @@ enum NetworkFailure: Error { case invalid(String) }
 let policyURL = URL(fileURLWithPath: "/Library/Preferences/live.jstack.network.json")
 let applicationURL = URL(fileURLWithPath: "/Library/PrivilegedHelperTools/jStack Network.app")
 
+final class ShutdownState {
+    private let lock = NSLock()
+    private var stopped = false
+    func request() { lock.lock(); stopped = true; lock.unlock() }
+    var requested: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+}
+let shutdownState = ShutdownState()
+
+// Foundation.Process starts a separate process group. launchd cannot reap
+// that group if this supervisor is SIGKILLed. Spawn the persistent tunnel in
+// our own group so launchd owns crash cleanup as well as graceful shutdown.
+final class TunnelProcess {
+    let pid: pid_t
+    private var reaped = false
+    init(nameFile: String) throws {
+        var child: pid_t = 0
+        var actions: posix_spawn_file_actions_t?
+        guard posix_spawn_file_actions_init(&actions) == 0 else {
+            throw NetworkFailure.invalid("cannot initialize tunnel process")
+        }
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        for descriptor in [STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO] {
+            guard posix_spawn_file_actions_addopen(&actions, descriptor, "/dev/null",
+                descriptor == STDIN_FILENO ? O_RDONLY : O_WRONLY, 0) == 0 else {
+                throw NetworkFailure.invalid("cannot configure tunnel process")
+            }
+        }
+        let argv = ["wireguard-go", "-f", "utun"].map { strdup($0) } + [nil]
+        let environment = ["PATH=/usr/bin:/bin:/usr/sbin:/sbin", "WG_TUN_NAME_FILE=" + nameFile].map { strdup($0) } + [nil]
+        defer { argv.forEach { free($0) }; environment.forEach { free($0) } }
+        let executable = applicationURL.appendingPathComponent("Contents/MacOS/wireguard-go").path
+        guard posix_spawn(&child, executable, &actions, nil, argv, environment) == 0 else {
+            throw NetworkFailure.invalid("cannot spawn tunnel process")
+        }
+        pid = child
+    }
+    var isRunning: Bool {
+        if reaped { return false }
+        var status: Int32 = 0
+        let result = waitpid(pid, &status, WNOHANG)
+        if result == pid || (result < 0 && errno == ECHILD) { reaped = true }
+        return !reaped
+    }
+    func stop() {
+        if !isRunning { return }
+        kill(pid, SIGTERM)
+        let deadline = Date().addingTimeInterval(5)
+        while isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        if isRunning { kill(pid, SIGKILL); var status: Int32 = 0; _ = waitpid(pid, &status, 0); reaped = true }
+    }
+}
+
 func rootProtected(_ url: URL, runtime: Bool = false) throws {
     var current = url.path
     if runtime {
@@ -166,19 +218,14 @@ func serve(_ policy: NetworkPolicy) throws {
         }
         try FileManager.default.removeItem(at: name)
     }
-    let task = Process()
-    task.executableURL = applicationURL.appendingPathComponent("Contents/MacOS/wireguard-go")
-    task.arguments = ["-f", "utun"]
-    task.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "WG_TUN_NAME_FILE": name.path]
-    task.standardOutput = FileHandle.nullDevice
-    task.standardError = FileHandle.nullDevice
-    try task.run()
+    let task = try TunnelProcess(nameFile: name.path)
     defer {
-        if task.isRunning { task.terminate(); try? wait(task, seconds: 5) }
+        task.stop()
         try? FileManager.default.removeItem(at: name)
     }
     let deadline = Date().addingTimeInterval(10)
-    while !FileManager.default.fileExists(atPath: name.path) && task.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+    while !FileManager.default.fileExists(atPath: name.path) && task.isRunning && Date() < deadline && !shutdownState.requested { Thread.sleep(forTimeInterval: 0.1) }
+    if shutdownState.requested { return }
     let interface = try String(contentsOf: name, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
     guard interface.range(of: "^utun[0-9]+$", options: .regularExpression) != nil else {
         throw NetworkFailure.invalid("invalid interface name")
@@ -210,7 +257,7 @@ func serve(_ policy: NetworkPolicy) throws {
     if policy.forwarding { try execute("/usr/sbin/sysctl", ["-w", "net.inet.ip.forwarding=1"]) }
     print("jStack Network: interface active", terminator: "\n"); fflush(stdout)
     var refresh = Date()
-    while task.isRunning {
+    while task.isRunning && !shutdownState.requested {
         Thread.sleep(forTimeInterval: 1)
         if !(try readPolicy()).active { return }
         do {
@@ -225,6 +272,7 @@ func serve(_ policy: NetworkPolicy) throws {
             fputs("jStack Network: configuration synchronization failed\n", stderr)
         }
     }
+    if shutdownState.requested { return }
     throw NetworkFailure.invalid("tunnel process exited")
 }
 
@@ -241,7 +289,18 @@ func serve(_ policy: NetworkPolicy) throws {
                 print("jStack Network: policy and signature verified")
                 return
             }
-            while true {
+            // Process does not promise to kill children when its parent dies.
+            // Handle launchd's SIGTERM and let serve's bounded cleanup finish.
+            signal(SIGTERM, SIG_IGN)
+            signal(SIGINT, SIG_IGN)
+            let signals = [SIGTERM, SIGINT].map { number in
+                let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
+                source.setEventHandler { shutdownState.request() }
+                source.resume()
+                return source
+            }
+            defer { signals.forEach { $0.cancel() } }
+            while !shutdownState.requested {
                 let policy = try readPolicy()
                 if policy.active { try serve(policy) }
                 Thread.sleep(forTimeInterval: 1)

@@ -16,7 +16,8 @@ WG_COMMIT = "49ce333da02056ae7b22ee2aeb6afe8aaed79b19"
 def service_plist():
     return {"Label": "live.jstack.network", "BundleProgram": "Contents/MacOS/JStackNetwork",
             "ProgramArguments": ["JStackNetwork"], "RunAtLoad": True, "KeepAlive": True,
-            "ThrottleInterval": 30, "AssociatedBundleIdentifiers": ["live.jstack.network"],
+            "ThrottleInterval": 30, "ExitTimeOut": 15,
+            "AssociatedBundleIdentifiers": ["live.jstack.network"],
             "StandardOutPath": "/var/log/live.jstack.network.log",
             "StandardErrorPath": "/var/log/live.jstack.network.log"}
 
