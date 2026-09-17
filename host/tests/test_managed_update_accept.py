@@ -271,7 +271,8 @@ def test_new_session_with_a_provider_but_no_reply_fails(runner, monkeypatch):
         def tool_call(self, action, *args, **kwargs):
             if action == "spawn":
                 return {"session": "wanted"}
-            return {"session": "wanted", "holders": [{"pid": 1, "started": 1}]}
+            return {"session": "wanted", "holders": [{"pid": 1, "started": 1}],
+                    "messages": [{"role": "assistant", "text": "/Users/admin/Agents/update-proof"}]}
 
     def no_reply(*args):
         raise runner.AcceptanceFailure("provider login expired")
@@ -354,3 +355,20 @@ def test_hub_refusal_requires_artifact_error_and_unchanged_installation(runner, 
     else:
         with pytest.raises(runner.AcceptanceFailure, match="unrelated"):
             runner.refused_release(fleet, guest, "leaf")
+
+
+def test_revocation_failure_restores_the_fixture_supervisor(runner, monkeypatch):
+    from types import SimpleNamespace
+    commands = []
+    guest = SimpleNamespace(sh=lambda command: commands.append(command))
+    monkeypatch.setattr(runner, "stage_prior", lambda *args: {})
+
+    def fail(*args):
+        raise runner.AcceptanceFailure("credential revocation failed")
+
+    hub = SimpleNamespace(queue=lambda *args: {"jobs": [{"id": "queued"}]}, tool_call=fail)
+    fleet = SimpleNamespace(leaves=[guest], machine=lambda _: "leaf", hub=hub)
+    with pytest.raises(runner.AcceptanceFailure, match="revocation failed"):
+        runner.revocation(SimpleNamespace(observe=lambda *args: None), fleet, None)
+    assert "bootout" in commands[0]
+    assert "bootstrap" in commands[-1]

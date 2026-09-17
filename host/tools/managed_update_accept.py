@@ -387,12 +387,14 @@ def revocation(journey, fleet: Fleet, candidate: Candidate) -> None:
     machine = fleet.machine(guest)
     stage_prior(fleet, guest)
     guest.sh("/bin/launchctl bootout gui/$(id -u)/com.jremote.updater || true")
-    job = fleet.hub.queue(machine, request_id("revoked"))["jobs"][0]
-    journey.observe("revoked_device", fleet.hub.tool_call("revoke", "--machine", machine))
-    row = fleet.hub.wait_for("cancelled", machine, timeout=300, poll=5)
-    journey.observe("cancelled_job", {"job": job["id"], "state": row["state"]})
-    guest.sh("/bin/launchctl bootstrap gui/$(id -u) "
-             "~/Library/LaunchAgents/com.jremote.updater.plist || true")
+    try:
+        job = fleet.hub.queue(machine, request_id("revoked"))["jobs"][0]
+        journey.observe("revoked_device", fleet.hub.tool_call("revoke", "--machine", machine))
+        row = fleet.hub.wait_for("cancelled", machine, timeout=300, poll=5)
+        journey.observe("cancelled_job", {"job": job["id"], "state": row["state"]})
+    finally:
+        guest.sh("/bin/launchctl bootstrap gui/$(id -u) "
+                 "~/Library/LaunchAgents/com.jremote.updater.plist || true")
     time.sleep(SETTLE * 4)
     log = guest.sh("/usr/bin/tail -n 40 ~/.local/state/jremote/updates/logs/supervisor.err "
                    "~/.local/state/jremote/updates/logs/supervisor.out 2>/dev/null || true")
@@ -523,10 +525,14 @@ def new_session(guest: Guest) -> dict:
     while time.monotonic() < deadline:
         time.sleep(SETTLE)
         proof = guest.tool_call("session-proof", "--session", session)
-        if proof.get("session") == session and len(proof.get("holders", [])) == 1:
+        answered = any(message.get("role") == "assistant" and
+                       GUEST_HOME in message.get("text", "")
+                       for message in proof.get("messages", []))
+        if proof.get("session") == session and len(proof.get("holders", [])) == 1 and answered:
             break
     expect(proof.get("session") == session and len(proof.get("holders", [])) == 1,
            "the new session never acquired exactly one identified provider")
+    expect(answered, "the new session did not answer its initial pwd request")
     reply = send_to_session(guest, session)
     return {"session": session, "pid": proof["holders"][0]["pid"],
             "holders": proof["holders"], "reply": reply}

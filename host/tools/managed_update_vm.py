@@ -181,10 +181,14 @@ def main():
         row = get_store().host_row(args.machine or "")
         if row is None or not str(row["name"]).startswith("Update lab"):
             raise RuntimeError("only a machine this fixture enrolled may be revoked")
-        result = httpx.post(config["local_url"] + "/api/jremote/v1/devices/"
-                            + row["device_id"] + "/revoke", headers=headers, timeout=args.timeout)
-        result.raise_for_status()
-        print(json.dumps({"revoked": row["device_id"], "machine": args.machine}))
+        # This lab has HTTP relays, not a WireGuard mesh; the native device
+        # management route correctly refuses to call it a mesh-owning hub.
+        # Revoke the fixture credential through the shipped device store and
+        # test the updater's response. This is NOT menu/mesh acceptance.
+        if not devices.revoke(row["device_id"]):
+            raise RuntimeError("fixture credential is missing or already revoked")
+        print(json.dumps({"revoked": row["device_id"], "machine": args.machine,
+                          "method": "local fixture credential revocation"}))
         return
     if args.action == "spawn":
         if not args.agent or not args.agent.startswith("update-proof"):
