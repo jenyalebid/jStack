@@ -387,11 +387,13 @@ def relift(name: str) -> Path:
         f"PersistentKeepalive = 25\n")
     leaf_conf.chmod(0o600)
 
-    (folder / "leaf.env").write_text(
+    leaf_env = folder / "leaf.env"
+    leaf_env.write_text(
         f"WG_ADDR={address if '/' in address else address + '/32'}\n"
         f"WG_SUBNET={subnet}\n"
         f"WG_HUB={hub_ip}\n"
         f"WG_MTU={mtu}\n")
+    leaf_env.chmod(0o600)
 
     # The bringup scripts are the hub's own, copied in — same three
     # `wg_peer.py` copies, read from where it reads them so a leaf rebuilt
@@ -405,9 +407,14 @@ def relift(name: str) -> Path:
                 "installs nothing")
         target = folder / script
         target.write_bytes(src.read_bytes())
-        target.chmod(0o755)
+        # 0700, not 0755. This bundle is minted inside the hub's credential
+        # store, next to the private key above, and a host that audits that
+        # store for group/world-readable paths would go red on every new leaf.
+        # The account that unpacks the bundle is the only one that runs these.
+        target.chmod(0o700)
 
-    (folder / "README.md").write_text(
+    readme = folder / "README.md"
+    readme.write_text(
         f"# jRemote leaf — {name}\n"
         f"\n"
         f"This machine dials out to the hub's WireGuard endpoint and joins the\n"
@@ -419,6 +426,7 @@ def relift(name: str) -> Path:
         f"one the hub already expects, so nothing on the hub changed.\n"
         f"\n"
         f"Run `./join.sh` — see JOIN.md.\n")
+    readme.chmod(0o600)
     return folder
 
 
@@ -443,11 +451,17 @@ def emit(name: str, code: str, port: int, hub: str = HUB_MESH_IP) -> Path:
 
     script = folder / JOIN_SCRIPT
     script.write_text(_join_script(name, code, port, hub))
-    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    # Executable by its owner only. The enrolment code is baked into this
+    # script, so it is as much a secret as the conf beside it, and it is
+    # written into the hub's credential store — granting group and world the
+    # execute bit hands them the code on a machine that audits that store.
+    script.chmod(0o700)
 
     # Written beside the tunnel's own README rather than over it: that one is
     # the hub's description of a leaf and is read back by `tunnel._read_bundle`
     # as issued state. Clobbering it would change what every future redeem of
     # this peer hands back.
-    (folder / "JOIN.md").write_text(_join_readme(name, code, port, hub))
+    join_md = folder / "JOIN.md"
+    join_md.write_text(_join_readme(name, code, port, hub))
+    join_md.chmod(0o600)
     return folder
