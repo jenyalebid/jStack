@@ -948,7 +948,7 @@ fi
 
 # ── 11. the verdict ─────────────────────────────────────────────────────────
 
-if [ "$HOST_INSTALLED" = "1" ] && [ "$APP_INSTALLED" = "1" ] && [ "$WANT_MENUBAR" = "1" ]; then
+if [ "$HOST_INSTALLED" = "1" ] && [ "$WANT_MENUBAR" = "1" ]; then
     step "Managed updater"
     if [ "$DRY_RUN" = "1" ]; then
         would "bootstrap the restart-independent updater with the shipped release trust key"

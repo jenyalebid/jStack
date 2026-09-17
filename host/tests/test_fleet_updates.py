@@ -47,6 +47,55 @@ def test_signature_rejects_payload_and_trust_key_substitution(release):
         releases.verify(releases.sign(envelope["manifest"], wrong.private_bytes_raw()), public)
 
 
+@pytest.mark.parametrize("invalid_artifact", [False, True])
+def test_public_channel_advances_only_after_complete_verified_download(tmp_path, release, invalid_artifact):
+    from jstack_host import release_channel
+    root = tmp_path / "updates"
+    feed = tmp_path / "feed"
+    atomic_json(feed / "latest.json", {"previous": True})
+    tag = release_channel.TAG_PREFIX + "test-1"
+    calls = []
+
+    def transport(request):
+        calls.append(str(request.url))
+        if request.url.host == "api.github.com":
+            return httpx.Response(200, json=[
+                {"draft": True, "prerelease": False, "tag_name": tag + "-draft"},
+                {"draft": False, "prerelease": True, "tag_name": tag + "-preview"},
+                {"draft": False, "prerelease": False, "tag_name": "mac-71"},
+                {"draft": False, "prerelease": False, "tag_name": tag}])
+        if request.url.path.endswith("manifest.json"):
+            return httpx.Response(200, json=release[2])
+        return httpx.Response(200, content=b"tampered" if invalid_artifact else b"artifact")
+
+    config = {"github_repo": "example/stack", "feed_dir": str(feed), "public_key": release[1]}
+    with httpx.Client(transport=httpx.MockTransport(transport)) as client:
+        if invalid_artifact:
+            with pytest.raises(releases.ReleaseError):
+                release_channel.refresh(root, config, client=client, now=1000)
+            assert json.loads((feed / "latest.json").read_text()) == {"previous": True}
+        else:
+            release_channel.refresh(root, config, client=client, now=1000)
+            assert json.loads((feed / "latest.json").read_text()) == release[2]
+            for component in release[2]["manifest"]["components"].values():
+                assert (feed / "test-1" / component["file"]).read_bytes() == b"artifact"
+        previous_calls = len(calls)
+        release_channel.refresh(root, config, client=client, now=1001)
+        assert len(calls) == previous_calls
+
+
+@pytest.mark.parametrize("excluded", ["managed", "candidate_test", "parent_record"])
+def test_public_channel_never_overrides_parent_or_candidate_feed(tmp_path, excluded):
+    from jstack_host import release_channel
+    config = {"github_repo": "example/stack"}
+    if excluded == "parent_record":
+        (tmp_path / "parent.json").write_text("{}")
+    else:
+        config[excluded] = True
+    release_channel.refresh(tmp_path / "updates", config)
+    assert not (tmp_path / "updates" / "channel.json").exists()
+
+
 @pytest.mark.parametrize("mutation", ["missing", "skipped", "stale", "wrong_digest", "failed"])
 def test_promotion_requires_exact_artifact_receipts(release, mutation):
     _, _, envelope = release

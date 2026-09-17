@@ -133,6 +133,13 @@ class Supervisor:
             # revocation) must not strand an unconfirmed candidate forever.
             self.backend.rollback(self.current)
             self.save(state="rolled_back", detail="verification deadline expired")
+        # Feed discovery is independent of recovery and fleet heartbeats.
+        # A public-channel outage must not strand a job already authorized.
+        try:
+            from .release_channel import refresh
+            refresh(self.root, self.config)
+        except Exception as exc:
+            self.last_error = "Release check failed: " + str(exc)
         reply = self.heartbeat()
         job = reply.get("job")
         if (job and job.get("id") == self.current.get("id") and job.get("state") == "current"

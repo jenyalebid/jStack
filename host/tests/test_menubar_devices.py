@@ -92,30 +92,17 @@ update.representedObject = "lab"
 update.setAccessibilityIdentifier("updates_tap_lab")
 details.addItem(update)
 let window = HostInfoWindow()
-window.render(machine: "Lab Mac", status: "Port 9090 · open", details: details)
-let scroll = window.contentView as! NSScrollView
-let rows = scroll.documentView as! NSStackView
-assert(rows.isFlipped, "short status content must start at the top of the window")
-let labels = rows.arrangedSubviews.compactMap { ($0 as? NSTextField)?.stringValue }
-assert(labels == ["Lab Mac", "Port 9090 · open", "No release available"])
-let button = rows.arrangedSubviews.compactMap { $0 as? NSButton }.first!
-assert(button.accessibilityIdentifier() == "updates_tap_lab")
-button.performClick(nil)
-assert(receiver.targets == ["lab"], "the window lost the update command's target")
-window.render(machine: "Lab Mac", status: "Port 9090 · open", details: details)
-assert(rows.arrangedSubviews.contains { $0 === button }, "unchanged polls reset keyboard focus")
-update.isEnabled = false
-window.render(machine: "Lab Mac", status: "Port 9090 · open", details: details)
-let disabled = rows.arrangedSubviews.compactMap { $0 as? NSButton }.first!
-assert(!disabled.isEnabled)
-disabled.performClick(nil)
-assert(receiver.targets == ["lab"], "an in-flight update was submitted twice")
-let failure = NSMenu()
-failure.addItem(NSMenuItem(title: "Update status unavailable (503)", action: nil, keyEquivalent: ""))
-window.render(machine: "Lab Mac", status: "Offline", details: failure)
-assert(rows.arrangedSubviews.compactMap { $0 as? NSButton }.isEmpty)
-assert(rows.arrangedSubviews.compactMap { ($0 as? NSTextField)?.stringValue }.last
-       == "Update status unavailable (503)")
+let form = HostInfoForm(machine: "Lab Mac", status: "Running", version: "0.70.0",
+    source: "abc123", app: InfoAppSnapshot(), updateStatus: "Update available",
+    error: nil, localCommand: update, machines: [], commands: [:], allCommand: nil,
+    open: {}, download: {})
+window.render(form)
+let hosting = window.contentView as! NSHostingView<HostInfoForm>
+assert(hosting.rootView.version == "0.70.0")
+assert(hosting.rootView.app.url == nil)
+assert(hosting.rootView.localCommand?.representedObject as? String == "lab")
+window.render(form)
+assert(window.contentView === hosting, "polls must preserve the hosting view and focus")
 window.makeKeyAndOrderFront(nil)
 assert(window.isVisible)
 window.close()

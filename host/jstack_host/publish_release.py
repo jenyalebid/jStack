@@ -97,7 +97,7 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
     version = json.loads((stack / "plugins/jstack/.claude-plugin/plugin.json").read_text())["version"]
     from .sourcestamp import fingerprint
     (stack / "host/release-identity.json").write_text(json.dumps({
-        "release": release_id, "sha": stack_sha,
+        "release": release_id, "sha": stack_sha, "version": version,
         "package_sha256": fingerprint(stack / "host/jstack_host")}))
     archive = output / "stack.tar.gz"
     with tarfile.open(archive, "w:gz") as bundle:

@@ -29,6 +29,7 @@ import AppKit
 import CoreImage
 import Foundation
 import Network
+import SwiftUI
 
 // MARK: - Where the host is
 
@@ -459,6 +460,7 @@ struct HostIdentity: Decodable {
     var name: String?
     var profile: String?
     var features: [String: Bool]?
+    var source: UpdateSource?
 
     /// local / open / managed — the host's own verdict on how a device off
     /// this network reaches it, computed by `jstack_host.mode`. Nil where an
@@ -556,25 +558,37 @@ struct UpdateMachine: Decodable {
     var supervisor: Bool
     var job: UpdateJobStatus?
     var observed: UpdateObservation?
+    var contactStatus: String?
 
     var canUpdate: Bool {
         desired != nil && !["downloading", "applying", "verifying", "current", "pending",
                             "pending/offline"].contains(state)
     }
     var summary: String {
-        let status = state.replacingOccurrences(of: "_", with: " ")
-        return supervisor ? status : "\(status) — updater not yet observed"
+        switch state {
+        case "not_published", "unknown": return "No update published"
+        case "unknown/offline": return lastContact == nil ? "Not connected to updates" : "Offline"
+        case "pending/offline": return "Update queued · offline"
+        case "current": return "Up to date"
+        case "available": return "Update available"
+        case "rolled_back": return "Previous version restored"
+        default: return state.replacingOccurrences(of: "_", with: " ").capitalized
+        }
     }
 }
 
 struct UpdateComponent: Decodable {
     var installed: String?
     var runningPids: [Int]?
+    var version: String?
+    var distribution: String?
 }
 
 struct UpdateSource: Decodable {
     var sha: String?
     var dirty: Bool?
+    var version: String?
+    var release: String?
 }
 
 struct UpdateObservation: Decodable {
@@ -713,7 +727,7 @@ final class HostProbe {
     /// Where the token-bearing routes live. `/api/health` is not under it —
     /// the health probe is mounted on the app itself, precisely so it stays
     /// reachable without the version prefix or the token.
-    private static let apiPrefix = "/api/jremote/v1"
+    static let apiPrefix = "/api/jremote/v1"
 
     func poll(_ done: @escaping (HostState) -> Void) {
         var state = HostState()
@@ -1439,87 +1453,180 @@ enum MenuBarAgent {
 
 /// A reusable, nonmodal status window. Update actions retain their menu command
 /// so the window and deep link use the same authority and request handling.
-final class HostInfoWindow: NSWindow {
-    private final class TopAlignedStack: NSStackView {
-        override var isFlipped: Bool { true }
+struct InfoAppSnapshot {
+    var url: URL?
+    var icon: NSImage?
+    var version = "Not installed"
+    var status = "Download jRemote to use this Mac’s sessions."
+    var distribution = ""
+
+    static func read() -> Self {
+        guard let url = RemoteApp.url, let bundle = Bundle(url: url) else { return Self() }
+        let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+        let running = NSWorkspace.shared.runningApplications.contains { $0.bundleURL == url }
+        let store = FileManager.default.fileExists(atPath: url.appendingPathComponent("Contents/_MASReceipt/receipt").path)
+        let channel = bundle.object(forInfoDictionaryKey: "JStackDistribution") as? String
+        return Self(url: url, icon: NSWorkspace.shared.icon(forFile: url.path),
+                    version: "\(version) (\(build))", status: running ? "Running" : "Installed",
+                    distribution: store ? "App Store" : channel == "hub" ? "Managed by your hub" : "Separate installation")
     }
-    private let rows = TopAlignedStack()
-    private var lastContent: [String] = []
-    private final class CommandButton: NSButton {
-        let command: NSMenuItem
-        init(_ command: NSMenuItem) {
-            self.command = command
-            super.init(frame: .zero)
-            title = command.title
-            bezelStyle = .rounded
-            target = self
-            action = #selector(invoke)
-            isEnabled = command.isEnabled
-            setAccessibilityIdentifier(command.accessibilityIdentifier())
-        }
-        required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
-        @objc private func invoke() {
+}
+
+struct InfoCommand: View {
+    let command: NSMenuItem
+    var body: some View {
+        Button(command.title) {
             guard command.isEnabled, let action = command.action else { return }
             NSApp.sendAction(action, to: command.target, from: command)
         }
+        .disabled(!command.isEnabled)
+        .accessibilityIdentifier(command.accessibilityIdentifier())
     }
+}
 
+struct InfoHubSection: View {
+    let name: String
+    let status: String
+    let version: String
+    let source: String?
+    var body: some View {
+        Section {
+            LabeledContent("Mac", value: name)
+            LabeledContent("Status", value: status)
+            LabeledContent("Version", value: version)
+            if let source {
+                DisclosureGroup("Technical details") {
+                    LabeledContent("Source", value: source)
+                        .textSelection(.enabled)
+                }
+                .accessibilityIdentifier("info_hub_details")
+            }
+        } header: {
+            Label("jStack Hub", systemImage: "server.rack")
+                .font(.headline)
+        }
+    }
+}
+
+struct InfoClientSection: View {
+    let app: InfoAppSnapshot
+    let open: () -> Void
+    let download: () -> Void
+    var body: some View {
+        Section {
+            HStack(spacing: 12) {
+                if let icon = app.icon {
+                    Image(nsImage: icon).resizable().frame(width: 48, height: 48)
+                        .accessibilityHidden(true)
+                } else {
+                    Image(systemName: "terminal").font(.largeTitle)
+                        .frame(width: 48, height: 48).accessibilityHidden(true)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("jRemote").font(.headline)
+                    Text(app.version).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if app.url != nil {
+                    Button("Open", action: open).accessibilityIdentifier("info_open_client")
+                } else {
+                    Button("Download…", action: download).accessibilityIdentifier("info_download_client")
+                }
+            }
+            LabeledContent("Status", value: app.status)
+            if !app.distribution.isEmpty {
+                LabeledContent("Updates", value: app.distribution)
+            }
+        }
+    }
+}
+
+struct InfoMachineSection: View {
+    let machine: UpdateMachine
+    let command: NSMenuItem?
+    var body: some View {
+        Section(machine.name) {
+            LabeledContent("Updates", value: machine.summary)
+            if let version = machine.observed?.hostSource?.version {
+                LabeledContent("jStack", value: version)
+            }
+            if let client = machine.observed?.components?["client"], let build = client.installed {
+                LabeledContent("jRemote", value: client.version.map { "\($0) (\(build))" } ?? "Build \(build)")
+            }
+            if let contact = machine.lastContact {
+                LabeledContent("Last seen") {
+                    Text(Date(timeIntervalSince1970: contact), format: .dateTime.month().day().hour().minute())
+                }
+            }
+            if !machine.supervisor {
+                Text("Run the current installer on this Mac once to enable managed updates.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            if let detail = machine.job?.detail, !detail.isEmpty {
+                Text(detail).font(.callout).textSelection(.enabled)
+            }
+            if let command { InfoCommand(command: command) }
+        }
+    }
+}
+
+struct HostInfoForm: View {
+    let machine: String
+    let status: String
+    let version: String
+    let source: String?
+    let app: InfoAppSnapshot
+    let updateStatus: String
+    let error: String?
+    let localCommand: NSMenuItem?
+    let machines: [UpdateMachine]
+    let commands: [String: NSMenuItem]
+    let allCommand: NSMenuItem?
+    let open: () -> Void
+    let download: () -> Void
+
+    var body: some View {
+        Form {
+            InfoHubSection(name: machine, status: status, version: version, source: source)
+            InfoClientSection(app: app, open: open, download: download)
+            Section("Software Updates") {
+                LabeledContent("Status", value: updateStatus)
+                if let error {
+                    Text(error).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+                if let localCommand { InfoCommand(command: localCommand) }
+                if let allCommand { InfoCommand(command: allCommand) }
+            }
+            ForEach(machines, id: \.machine) { machine in
+                InfoMachineSection(machine: machine, command: commands[machine.machine])
+            }
+        }
+        .formStyle(.grouped)
+        .accessibilityIdentifier("host_info_form")
+    }
+}
+
+/// Keep a single hosting view alive across polls so focus and disclosures survive.
+final class HostInfoWindow: NSWindow {
+    private var hosting: NSHostingView<HostInfoForm>?
     init() {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 540, height: 440),
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
                    styleMask: [.titled, .closable, .resizable, .miniaturizable],
                    backing: .buffered, defer: false)
         title = "jStack Info"
         isReleasedWhenClosed = false
-        minSize = NSSize(width: 420, height: 280)
+        minSize = NSSize(width: 460, height: 400)
         setAccessibilityIdentifier("host_info_window")
-        let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-        contentView = scroll
-        rows.orientation = .vertical
-        rows.alignment = .leading
-        rows.spacing = 8
-        rows.setContentHuggingPriority(.required, for: .vertical)
-        rows.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
-        rows.translatesAutoresizingMaskIntoConstraints = false
-        scroll.documentView = rows
-        NSLayoutConstraint.activate([
-            rows.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
-            rows.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
-            rows.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
-        ])
         center()
     }
 
-    func render(machine: String, status: String, details: NSMenu) {
-        let content = [machine, status] + details.items.flatMap {
-            [$0.title, String($0.isEnabled), String($0.isSeparatorItem),
-             $0.accessibilityIdentifier(), $0.action.map(NSStringFromSelector) ?? ""]
-        }
-        guard content != lastContent else { return }
-        lastContent = content
-        for view in rows.arrangedSubviews { rows.removeArrangedSubview(view); view.removeFromSuperview() }
-        func label(_ text: String, heading: Bool = false) {
-            let field = NSTextField(wrappingLabelWithString: text)
-            field.font = NSFont.preferredFont(forTextStyle: heading ? .headline : .body)
-            field.isSelectable = true
-            field.setContentHuggingPriority(.required, for: .vertical)
-            rows.addArrangedSubview(field)
-            field.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -40).isActive = true
-        }
-        label(machine, heading: true)
-        label(status)
-        for item in details.items {
-            if item.isSeparatorItem {
-                let divider = NSBox()
-                divider.boxType = .separator
-                rows.addArrangedSubview(divider)
-                divider.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -40).isActive = true
-            } else if item.action != nil {
-                rows.addArrangedSubview(CommandButton(item))
-            } else {
-                label(item.title)
-            }
+    func render(_ form: HostInfoForm) {
+        if let hosting { hosting.rootView = form }
+        else {
+            let view = NSHostingView(rootView: form)
+            hosting = view
+            contentView = view
         }
     }
 }
@@ -1779,7 +1886,65 @@ final class StatusController: NSObject {
     @objc private func doInfo() { showUpdates() }
 
     private func refreshInfoWindow() {
-        infoWindow?.render(machine: Machine.name, status: state.headline, details: updateDetails())
+        guard let infoWindow else { return }
+        let local = updateInventory?.machines.first { $0.machine == state.identity?.hostId }
+        let source = state.identity?.source ?? local?.observed?.hostSource
+        let details = updateDetails()
+        var commands: [String: NSMenuItem] = [:]
+        for item in details.items where item.action != nil {
+            if let target = item.representedObject as? String { commands[target] = item }
+        }
+        let localID = state.identity?.hostId ?? ""
+        infoWindow.render(HostInfoForm(
+            machine: Machine.name,
+            status: state.isUp ? (state.identity?.mode?.isManaged == true ? "Running · Managed Mac" : "Running") : "Not running",
+            version: source?.version ?? "Version not reported",
+            source: source?.sha,
+            app: InfoAppSnapshot.read(),
+            updateStatus: updateError != nil ? "Could not check for updates"
+                : local?.summary ?? (updateInventory == nil ? "Checking…" : "No update published"),
+            error: updateError ?? local?.job?.detail,
+            localCommand: commands[localID],
+            machines: updateInventory?.machines.filter { $0.machine != localID } ?? [],
+            commands: commands, allCommand: commands["all"],
+            open: { [weak self] in self?.doOpenApp() },
+            download: { [weak self] in self?.downloadClient() }))
+    }
+
+    private func downloadClient() {
+        guard let token = HostAgent.updaterToken(),
+              let url = URL(string: "http://127.0.0.1:\(HostAgent.port())\(HostProbe.apiPrefix)/app/mac/download")
+        else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "jRemote.zip"
+        panel.begin { [weak self] response in
+            guard response == .OK, let destination = panel.url else { return }
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            URLSession.shared.downloadTask(with: request) { temporary, response, error in
+                var failure = error?.localizedDescription
+                if let temporary, (response as? HTTPURLResponse)?.statusCode == 200 {
+                    do {
+                        // The save panel owns overwrite confirmation.
+                        let data = try Data(contentsOf: temporary)
+                        try data.write(to: destination, options: .atomic)
+                    } catch { failure = error.localizedDescription }
+                } else if failure == nil {
+                    failure = "This hub has no downloadable jRemote release. Check its release settings."
+                }
+                DispatchQueue.main.async {
+                    if let failure {
+                        let alert = NSAlert()
+                        alert.messageText = "Could not download jRemote"
+                        alert.informativeText = failure
+                        alert.runModal()
+                    } else {
+                        NSWorkspace.shared.activateFileViewerSelecting([destination])
+                    }
+                    self?.refresh()
+                }
+            }.resume()
+        }
     }
 
     /// The Active section. Rows are informational — a menu bar is where you

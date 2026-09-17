@@ -162,7 +162,7 @@ class FleetStore:
                     leaf is None or leaf["deleted"] or leaf["key"] != machine):
                 job = self.transition(job["id"], machine, "cancelled", "adoption authority revoked")
         fresh = bool(row and time.time() - row["seen"] < STALE_SECONDS)
-        state = "unknown"
+        state = "not_published" if fresh and not desired else "unknown"
         if job:
             state = job["state"]
         elif report.get("job", {}).get("state"):
@@ -173,10 +173,11 @@ class FleetStore:
             state = "pending/offline" if job and job["state"] in ACTIVE else "unknown/offline"
         elif state == "current" and (report.get("release") != desired or
                                      report.get("verified") is not True):
-            state = "available" if desired else "unknown"
+            state = "available" if desired else "not_published"
         return {"machine": machine, "name": name, "desired": desired, "state": state,
                 "last_contact": row["seen"] if row else None, "observed": report,
-                "job": public_job(job), "supervisor": report.get("supervisor") == 1}
+                "job": public_job(job), "supervisor": report.get("supervisor") == 1,
+                "contact_status": "online" if fresh else "offline" if row else "not_observed"}
 
 
 def public_job(job: dict | None) -> dict | None:
