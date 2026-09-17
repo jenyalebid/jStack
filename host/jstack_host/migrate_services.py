@@ -15,8 +15,9 @@ from pathlib import Path
 import plistlib
 import re
 import tempfile
+import time
 
-from . import install_host, service_catalog, service_settings
+from . import install_host, service_catalog, service_settings, service_inventory
 from .update_app import control
 from .update_macos import atomic_bytes, command
 from .update_supervisor import atomic_json
@@ -63,7 +64,26 @@ def disabled_labels() -> set[str]:
     result = install_host._launchctl("print-disabled", install_host._domain())
     if result.returncode:
         raise ValueError("cannot observe launchd disabled state")
-    return set(re.findall(r'"([^"\n]+)"\s*=>\s*true', result.stdout))
+    entries = re.findall(r'"([^"\n]+)"\s*=>\s*([A-Za-z]+)', result.stdout)
+    if "disabled services = {" not in result.stdout or any(value not in {"true", "false", "enabled", "disabled"} for _, value in entries):
+        raise ValueError("cannot interpret launchd disabled state")
+    return {label for label, value in entries if value in {"true", "disabled"}}
+
+
+def loaded(label: str) -> bool:
+    observed = service_inventory.launch_state(install_host._domain(), label)["status"]
+    if observed not in {"loaded", "not_loaded"}:
+        raise ValueError("cannot observe launchd registration")
+    return observed == "loaded"
+
+
+def wait_unloaded(label: str, seconds: float = 30) -> bool:
+    deadline = time.monotonic() + seconds
+    while loaded(label):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.25)
+    return True
 
 
 def legacy_status(app: Path, path: Path) -> str:
@@ -90,16 +110,16 @@ def prepare(app: Path, catalog: dict) -> Path:
             raise ValueError("legacy definition ownership changed")
         if plistlib.loads(path.read_bytes()) != job:
             raise ValueError("legacy definition differs from reviewed catalog")
-        loaded = install_host.is_loaded(job["Label"])
+        was_loaded = loaded(job["Label"])
         approval = legacy_status(app, path)
         if approval not in {"enabled", "requires_approval", "not_registered", "not_found"}:
             raise ValueError("legacy approval status is unknown")
-        if loaded and approval != "enabled":
+        if was_loaded and approval != "enabled":
             raise ValueError("loaded legacy job has ambiguous approval; explicit review required")
         records.append({"slug": slug, "label": job["Label"], "path": str(path),
-                        "sha256": digest(path), "loaded": loaded, "approval": approval,
+                        "sha256": digest(path), "loaded": was_loaded, "approval": approval,
                         "destination_status": statuses[slug],
-                        "enabled": loaded and job["Label"] not in disabled and approval == "enabled"})
+                        "enabled": was_loaded and job["Label"] not in disabled and approval == "enabled"})
     root = migration_root()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     journal = Path(tempfile.mkdtemp(prefix="services-", dir=root))
@@ -152,7 +172,7 @@ def _rollback(journal: Path):
             continue
         if status == "enabled":
             control(app, "unregister", record["slug"])
-            if not install_host.wait_unloaded("live.jstack.automation." + record["slug"]):
+            if not wait_unloaded("live.jstack.automation." + record["slug"]):
                 raise ValueError("replacement has not stopped; refusing duplicate startup")
         path = Path(record["path"])
         if path.exists() and digest(path) != record["sha256"]:
@@ -163,7 +183,7 @@ def _rollback(journal: Path):
         if (record["enabled"] and status != "requires_approval" and
                 record["label"] not in disabled_labels() and
                 legacy_status(app, path) != "requires_approval" and
-                not install_host.is_loaded(record["label"])):
+                not loaded(record["label"])):
             result = install_host.bootstrap(record["label"], path)
             if result.returncode:
                 raise ValueError("legacy service could not be restored")
@@ -205,15 +225,15 @@ def _apply(journal: Path):
                 raise ValueError("legacy approval or definition changed during migration")
             value["attempted"].append(record["slug"])
             atomic_json(journal / "journal.json", value)
-            if install_host.is_loaded(record["label"]):
+            if loaded(record["label"]):
                 install_host._launchctl("bootout", f"{install_host._domain()}/{record['label']}")
-                if not install_host.wait_unloaded(record["label"]):
+                if not wait_unloaded(record["label"]):
                     raise ValueError("legacy job has not stopped")
             # A recoverable move, not deletion. No job can return at login.
             os.replace(path, journal / (record["slug"] + ".retired.plist"))
             if record["enabled"]:
                 result = control(app, "register", record["slug"])
-                if result["status"] != "enabled" or not install_host.is_loaded("live.jstack.automation." + record["slug"]):
+                if result["status"] != "enabled" or not loaded("live.jstack.automation." + record["slug"]):
                     raise ValueError("replacement needs approval or did not load")
         value["state"] = "migrated"
         atomic_json(journal / "journal.json", value)

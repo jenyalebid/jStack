@@ -165,7 +165,7 @@ def _prepare(request: dict, root: Path) -> Path:
         if evidence != request["provenance"][role]:
             raise ValueError("legacy code differs from reviewed provenance")
         approval = migration.legacy_status(Path(settings["services_app"]), path)
-        loaded = install_host.is_loaded(label)
+        loaded = migration.loaded(label)
         if approval not in {"enabled", "not_registered", "not_found", "requires_approval"} or loaded and approval != "enabled":
             raise ValueError("legacy approval is unobservable or ambiguous")
         records.append({"role": role, "label": label, "path": str(path), "sha256": file_hash(path),
@@ -238,7 +238,7 @@ def _rollback(journal: Path):
         owner, service, label = target(value["settings"], role)
         if current[role] == "enabled":
             control(owner, "unregister", service)
-        if not install_host.wait_unloaded(label):
+        if not migration.wait_unloaded(label):
             raise ValueError("replacement has not stopped")
     for record in reversed(value["files"]):
         path = Path(record["path"])
@@ -273,10 +273,10 @@ def _rollback(journal: Path):
                 continue
             if approval not in {"enabled", "not_registered", "not_found"}:
                 raise ValueError("legacy approval is unobservable during rollback")
-            if not install_host.is_loaded(record["label"]):
+            if not migration.loaded(record["label"]):
                 if install_host.bootstrap(record["label"], path).returncode:
                     raise ValueError("legacy job could not be restored")
-            if not install_host.is_loaded(record["label"]):
+            if not migration.loaded(record["label"]):
                 raise ValueError("restored legacy job is not loaded")
     value.update(state="rolled_back", stopped_originals=held)
     atomic_json(journal / "journal.json", value)
@@ -297,7 +297,7 @@ def apply(journal: Path):
         for record in value["records"]:
             if provenance(Path(record["path"])) != record["provenance"]:
                 raise ValueError("legacy source changed after preparation")
-            if install_host.is_loaded(record["label"]) != record["loaded"]:
+            if migration.loaded(record["label"]) != record["loaded"]:
                 raise ValueError("legacy loaded state changed after preparation")
         value["state"] = "applying"
         atomic_json(journal / "journal.json", value)
@@ -306,14 +306,14 @@ def apply(journal: Path):
                 path = Path(record["path"])
                 if (file_hash(path) != record["sha256"] or
                         migration.legacy_status(Path(value["settings"]["services_app"]), path) != record["approval"] or
-                        install_host.is_loaded(record["label"]) != record["loaded"] or
+                        migration.loaded(record["label"]) != record["loaded"] or
                         (record["label"] in migration.disabled_labels()) != record["disabled"]):
                     raise ValueError("legacy approval or definition changed during cutover")
                 value["attempted"].append(record["role"])
                 atomic_json(journal / "journal.json", value)
-                if install_host.is_loaded(record["label"]):
+                if migration.loaded(record["label"]):
                     install_host._launchctl("bootout", f"{install_host._domain()}/{record['label']}")
-                if not install_host.wait_unloaded(record["label"]):
+                if not migration.wait_unloaded(record["label"]):
                     raise ValueError("legacy job has not stopped")
                 os.replace(path, journal / (record["role"] + ".retired.plist"))
             for record in value["files"]:
@@ -351,7 +351,7 @@ def verify(value: dict):
         try:
             for role, wanted in enabled.items():
                 _, _, label = target(settings, role)
-                if install_host.is_loaded(label) != wanted:
+                if migration.loaded(label) != wanted:
                     raise OSError("service lifecycle has not settled")
                 if wanted and service_inventory.launch_state(install_host._domain(), label).get("state") != "running":
                     raise OSError("service process has not become running")

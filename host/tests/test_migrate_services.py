@@ -54,10 +54,34 @@ def lab(monkeypatch, tmp_path):
     monkeypatch.setattr(migration, "control", control)
     monkeypatch.setattr(install_host, "is_loaded", lambda label: label in loaded)
     monkeypatch.setattr(install_host, "wait_unloaded", lambda label: label not in loaded)
+    monkeypatch.setattr(migration, "loaded", lambda label: label in loaded)
+    monkeypatch.setattr(migration, "wait_unloaded", lambda label: label not in loaded)
     monkeypatch.setattr(install_host, "_launchctl", launchctl)
     monkeypatch.setattr(install_host, "bootstrap", bootstrap)
     return SimpleNamespace(app=app, catalog=catalog, path=path, loaded=loaded, statuses=statuses,
                            calls=calls, disabled=disabled)
+
+
+@pytest.mark.parametrize("off,on", [("true", "false"), ("disabled", "enabled")])
+def test_disabled_state_accepts_both_supported_launchctl_dialects(monkeypatch, off, on):
+    output = 'disabled services = {\n"old.off" => ' + off + '\n"old.on" => ' + on + '\n}'
+    monkeypatch.setattr(install_host, "_launchctl", lambda *args: SimpleNamespace(returncode=0, stdout=output))
+    assert migration.disabled_labels() == {"old.off"}
+
+
+@pytest.mark.parametrize("output", ["", 'disabled services = {"old.job" => unknown}'])
+def test_unknown_disabled_state_is_not_empty_approval(monkeypatch, output):
+    monkeypatch.setattr(install_host, "_launchctl", lambda *args: SimpleNamespace(returncode=0, stdout=output))
+    with pytest.raises(ValueError, match="cannot interpret"):
+        migration.disabled_labels()
+
+
+def test_unobservable_registration_cannot_authorize_cutover(monkeypatch):
+    monkeypatch.setattr(migration.service_inventory, "launch_state", lambda *args: {"status": "unobservable"})
+    with pytest.raises(ValueError, match="cannot observe"):
+        migration.loaded("old.job")
+    with pytest.raises(ValueError, match="cannot observe"):
+        migration.wait_unloaded("old.job")
 
 
 def test_exact_migration_and_reversible_rollback(lab):

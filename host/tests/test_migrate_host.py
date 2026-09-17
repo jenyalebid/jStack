@@ -79,6 +79,8 @@ def lab(tmp_path, monkeypatch):
     monkeypatch.setattr(migration, "control", control)
     monkeypatch.setattr(install_host, "is_loaded", lambda label: label in loaded)
     monkeypatch.setattr(install_host, "wait_unloaded", lambda label: label not in loaded)
+    monkeypatch.setattr(migration.migration, "loaded", lambda label: label in loaded)
+    monkeypatch.setattr(migration.migration, "wait_unloaded", lambda label: label not in loaded)
     monkeypatch.setattr(install_host, "_launchctl", launchctl)
     monkeypatch.setattr(install_host, "bootstrap", bootstrap)
     request = {"settings": settings, "jobs": jobs,
