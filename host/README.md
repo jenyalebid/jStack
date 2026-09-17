@@ -1,6 +1,6 @@
 # jStack Hub
 
-Current product contract (2026-09-16): [jStack terminology, single installation and release rules](https://github.com/jenyalebid/jStack/blob/main/product.md#core-contract).
+Current product contract (2026-09-16): [jStack terminology, single installation and release rules](../product.md#core-contract).
 Hub is the server/menu on each Mac; Parent Hub manages leaves; host is a
 technical machine term. The Plugin and jRemote client are independently usable.
 One Hub installation per OS; unique build number and source commit per build;
