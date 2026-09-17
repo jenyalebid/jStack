@@ -442,6 +442,12 @@ def install(*, port: int = DEFAULT_PORT, bind: str = DEFAULT_BIND,
     # whatever `sys.stdout` was at import, which is not the stream a caller
     # redirecting output is watching.
     out = out or sys.stdout
+    from . import app_services, service_settings
+    configuration = service_settings.read()
+    if configuration:
+        return app_services.repair(configuration, port=port, bind=bind, state_dir=state_dir, out=out)
+    if app_services.bundled():
+        raise ValueError("signed app installation settings are absent; use the signed installer, not a legacy LaunchAgent")
     if state_dir is not None:
         os.environ["JREMOTE_STATE_DIR"] = str(state_dir)
         hostenv.reset_profile()
@@ -566,6 +572,12 @@ def install(*, port: int = DEFAULT_PORT, bind: str = DEFAULT_BIND,
 
 def uninstall(*, label: str = LABEL, out=None) -> int:
     out = out or sys.stdout
+    from . import app_services, service_settings
+    configuration = service_settings.read()
+    if configuration:
+        return app_services.uninstall(configuration, out)
+    if app_services.bundled():
+        raise ValueError("signed installation settings are absent; refusing legacy service removal")
     _launchctl("bootout", f"{_domain()}/{label}")
     path = plist_path(label)
     existed = path.exists()
@@ -591,6 +603,10 @@ def status(*, port: int | None = None, label: str = LABEL, out=None) -> int:
     only *the host* if it says so.
     """
     out = out or sys.stdout
+    from . import app_services, service_settings
+    configuration = service_settings.read()
+    if configuration:
+        return app_services.status(configuration, port=port, out=out)
     path = plist_path(label)
     probed = port if port is not None else (installed_port(path) or DEFAULT_PORT)
     served = health(probed)
