@@ -15,10 +15,15 @@ A feature that needs a fact about one deployment adds a profile answer — never
 an import of a private module, never a literal.
 """
 
+import json
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 PKG = Path(__file__).resolve().parents[1] / "jstack_host"
+PLUGIN = Path(__file__).resolve().parents[2] / "plugins/jstack"
 
 
 def test_the_package_never_reaches_for_an_embedding_hosts_own_modules():
@@ -90,3 +95,65 @@ def test_no_module_resolves_a_path_by_counting_parents():
         "a module counts directory levels to find something — ask `hostenv` "
         "for it instead, so the answer moves when the package does:\n"
         + "\n".join(hits))
+
+
+# ── and neither does the process these tests run in ─────────────────────────
+
+def _scheduler_import_adds(env: dict) -> list[str]:
+    """What importing jStack's scheduler appends to `sys.path`, in a fresh
+    interpreter carrying `env`.
+
+    A subprocess because the question is what an import does to a process that
+    has not done it yet — asking in here would import a package this suite has
+    already imported and get an empty answer whatever the truth is. Its own
+    `env=`, never a mutation of this one, for the reason the whole section
+    exists.
+    """
+    probe = ("import json,sys;"
+             f"sys.path.insert(0, {str(PLUGIN)!r});"
+             "before=set(sys.path);"
+             "import scheduler;"
+             "print(json.dumps(sorted(set(sys.path)-before)))")
+    r = subprocess.run([sys.executable, "-c", probe], env=env,
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[-2000:]
+    return json.loads(r.stdout)
+
+
+def test_importing_the_scheduler_adopts_the_install_it_is_pointed_at(tmp_path):
+    """The loaded gun, fired deliberately, so the test below is not vacuous.
+
+    jStack's scheduler puts its install's `python_path` on `sys.path` as it
+    imports — a daemon has to be able to load the workspace resolver the
+    machine named, from any cwd, before anything asks for it. Correct there,
+    and a live grenade in a test process: `sys.path` is process-global and
+    nothing takes an entry back off it.
+    """
+    install = tmp_path / "sched"
+    (install / "config").mkdir(parents=True)
+    (install / "config" / "scheduler.json").write_text(
+        json.dumps({"python_path": [str(tmp_path / "elsewhere")]}))
+    (tmp_path / "elsewhere").mkdir()
+    env = dict(os.environ, SCHEDULER_HOME=str(install))
+    assert _scheduler_import_adds(env) == [str(tmp_path / "elsewhere")]
+
+
+def test_this_suite_runs_against_a_scheduler_it_was_never_installed_on():
+    """The 2026-09-16 failure, pinned: ten tests red in a full run and green
+    alone, in two files that name neither the scheduler nor a profile.
+
+    `test_codex_parity` imports the scheduler in-process, and on a machine
+    running a host the install's `python_path` is the embedding tree. Appending
+    it makes `jremote_host_profile` importable to the whole pytest process, so
+    the next `reset_profile()` — twenty of them, in eight files — re-resolves
+    `auto` to the machine's *live* profile and caches it there. Every later
+    test that reaches a profile answer backed by the embedding dashboard then
+    dies inside a tree this package is not allowed to know about.
+
+    So the suite's environment says the scheduler is not installed, and this is
+    what says it still does. Asserted through the real environment these tests
+    carry — a probe that built its own would be pinning its own fixture.
+    """
+    assert _scheduler_import_adds(dict(os.environ)) == [], (
+        "the test process adopted a machine's import root — every later "
+        "profile resolution in this suite now answers about that machine")
