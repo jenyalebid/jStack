@@ -104,6 +104,17 @@ def test_current_requires_verification_and_expired_inventory_is_unknown(tmp_path
     assert store.inventory("leaf", "Office", "test-1")["state"] == "unknown/offline"
 
 
+def test_parent_accepts_a_leaf_rollback_after_restart_during_download(tmp_path, release):
+    store = fleet.FleetStore(tmp_path / "jobs.sqlite")
+    job = store.queue("leaf", "cred", release[2], "click")
+    store.transition(job["id"], "leaf", "downloading")
+
+    recovered = store.transition(
+        job["id"], "leaf", "rolled_back", "authority lost during application")
+
+    assert recovered["state"] == "rolled_back"
+
+
 @pytest.fixture
 def rig(tmp_path, monkeypatch, app, release):
     state = tmp_path / "state"

@@ -19,7 +19,10 @@ ACTIVE = {"pending", "downloading", "applying", "verifying"}
 TERMINAL = {"current", "failed", "rolled_back", "cancelled"}
 TRANSITIONS = {
     "pending": {"downloading", "failed", "cancelled"},
-    "downloading": {"applying", "failed", "cancelled"},
+    # The leaf can cross into applying just as its parent restarts. Its local
+    # rollback is then the first durable state the parent hears after still
+    # holding "downloading"; accepting that report releases the stuck job.
+    "downloading": {"applying", "failed", "rolled_back", "cancelled"},
     "applying": {"verifying", "failed", "rolled_back"},
     "verifying": {"current", "failed", "rolled_back"},
 }
