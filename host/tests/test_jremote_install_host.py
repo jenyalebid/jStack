@@ -173,6 +173,28 @@ def test_an_explicit_state_dir_wins_over_the_inherited_one(monkeypatch, tmp_path
     assert env["JREMOTE_STATE_DIR"] == str(tmp_path / "asked")
 
 
+@pytest.mark.parametrize("explicit", [False, True])
+def test_session_environment_never_becomes_daemon_configuration(monkeypatch, tmp_path, explicit):
+    transient = {"JREMOTE_SID": "session", "JREMOTE_COMPOSE_DIR": "/tmp/session",
+                 "JREMOTE_PHONE_CLIENT": "1", "JREMOTE_TMUX_SOCK": "test-socket",
+                 "JREMOTE_PAYLOAD__": "payload"}
+    durable = {"JREMOTE_HOST_NAME": "Laptop", "JSTACK_ROOT": str(tmp_path / "root"),
+               "WG_ENDPOINT": "example.test:51820"}
+    for key, value in {**transient, **durable}.items():
+        monkeypatch.setenv(key, value)
+    rendered = install_host.render_plist(logs=tmp_path,
+        environment={**transient, **durable} if explicit else None)
+    env = plistlib.loads(rendered)["EnvironmentVariables"]
+    assert all(key not in env for key in transient)
+    assert all(env[key] == value for key, value in durable.items())
+    path = tmp_path / "old.plist"
+    path.write_bytes(plistlib.dumps({"EnvironmentVariables": {**transient, **durable}}))
+    assert install_host.installed_environment(path) == durable
+    embedded = {**transient, **durable, "PYTHONPATH": "/embedding", "APP_CONFIG": "/config"}
+    assert install_host.upgraded_environment(embedded) == {
+        **durable, "PYTHONPATH": "/embedding", "APP_CONFIG": "/config"}
+
+
 def test_the_state_dir_is_pinned_even_when_nobody_asked_for_one(monkeypatch, tmp_path):
     """The default is a resolution, and both sides must not do it twice.
 

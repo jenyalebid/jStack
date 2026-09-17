@@ -232,7 +232,8 @@ class MacBackend:
                 raise releases.ReleaseError("service identity changed since updater bootstrap")
             updated = dict(job)
             if kind == "host":
-                environment = dict(job.get("EnvironmentVariables", {}))
+                from .install_host import upgraded_environment
+                environment = upgraded_environment(job.get("EnvironmentVariables", {}))
                 environment["PYTHONPATH"] = pythonpath + (
                     os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else "")
                 updated["EnvironmentVariables"] = environment

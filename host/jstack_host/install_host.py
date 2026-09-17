@@ -96,14 +96,21 @@ def log_dir() -> Path:
 #: `local` while it held `10.66.0.1` and five peers, and `can_pair()` answered
 #: False on the machine that owns the peer table.
 MESH_VARS = ("WG_PEER_DIR", "WG_ENDPOINT")
+HOST_VARS = frozenset({
+    "JREMOTE_STATE_DIR", "JREMOTE_TOKEN_PATH", "JREMOTE_CREDENTIALS_DIR",
+    "JREMOTE_RELEASES_DIR", "JREMOTE_INSTANCE_ROOT", "JREMOTE_PROFILE_MODULE",
+    "JREMOTE_HOST_ID", "JREMOTE_HOST_NAME", "JREMOTE_HOST_PROFILE",
+    "JREMOTE_PEER_SCRIPT", "JREMOTE_CACHE_DIR", "JREMOTE_ATTENTION_DIR",
+    "JREMOTE_TURN_DIR", "JREMOTE_EMBED_MARKER", "JSTACK_ROOT",
+})
 
 
 def _carries(key: str) -> bool:
-    return key.startswith("JREMOTE_") or key in MESH_VARS
+    return key in HOST_VARS or key in MESH_VARS
 
 
 def carried_environment(source: dict[str, str] | None = None) -> dict[str, str]:
-    """The overrides the agent must run under — `JREMOTE_*` and the mesh pair.
+    """Durable host configuration only, never the installing session's state.
 
     Whatever the installer resolved the token and the state dir against, the
     agent has to resolve the same way — and a launchd job inherits none of the
@@ -114,6 +121,12 @@ def carried_environment(source: dict[str, str] | None = None) -> dict[str, str]:
     """
     env = source if source is not None else dict(os.environ)
     return {k: v for k, v in env.items() if _carries(k)}
+
+
+def upgraded_environment(source: dict[str, str]) -> dict[str, str]:
+    """Keep embedding configuration while removing session-only host values."""
+    return {**{key: value for key, value in source.items() if not key.startswith("JREMOTE_")},
+            **carried_environment(source)}
 
 
 def installed_environment(path: Path | None = None) -> dict[str, str]:
@@ -226,7 +239,7 @@ def render_plist(*, label: str = LABEL, port: int = DEFAULT_PORT,
     # a board it can never act on — which is exactly the 2026-07-09 outage,
     # six hand-copied PATHs that all missed the binary moving to ~/.local/bin.
     env = {"PATH": hostenv.spawn_path()}
-    env.update(carried_environment() if environment is None else environment)
+    env.update(carried_environment(environment))
     # Always pinned, not only when `--state-dir` asked for one. launchd builds
     # the job's HOME from the user record rather than from the shell that
     # installed it, so leaving this out means the installer and the host each
