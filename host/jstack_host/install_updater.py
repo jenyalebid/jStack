@@ -24,6 +24,28 @@ from .update_macos import atomic_bytes, bundle_info, client_distribution
 LABEL = "com.jremote.updater"
 
 
+def stage_runtime(package: Path, root: Path) -> Path:
+    """Keep the bootstrap's exact source identity beside its copied package."""
+    from . import sourcestamp
+    identity_path = package.parent / "release-identity.json"
+    identity = (json.loads(identity_path.read_text()) if identity_path.exists() else
+                {**sourcestamp.capture(), "package_sha256": sourcestamp.fingerprint(package)})
+    identity.setdefault("release", "")
+    identity_bytes = json.dumps(identity, sort_keys=True).encode()
+    stamp = hashlib.sha256(identity_bytes + b"".join(
+        p.read_bytes() for p in sorted(package.glob("*.py")))).hexdigest()[:16]
+    destination = root / "bootstrap" / stamp
+    if not destination.exists():
+        import tempfile
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=".stage-", dir=destination.parent))
+        shutil.copytree(package, staging / "jstack_host",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        atomic_json(staging / "release-identity.json", identity)
+        os.rename(staging, destination)
+    return destination
+
+
 def bootstrap(public_key: str, *, state_dir: Path | None = None, load=True,
               candidate_test=False) -> dict:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -77,10 +99,7 @@ def bootstrap(public_key: str, *, state_dir: Path | None = None, load=True,
     # Versioned stable bootstrap. Never overwrite imported supervisor modules
     # while an older process could still be recovering a transaction.
     package = Path(__file__).parent
-    stamp = hashlib.sha256(b"".join(p.read_bytes() for p in sorted(package.glob("*.py")))).hexdigest()[:16]
-    bootstrap_dir = root / "bootstrap" / stamp
-    if not bootstrap_dir.exists():
-        shutil.copytree(package, bootstrap_dir / "jstack_host", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    bootstrap_dir = stage_runtime(package, root)
     configuration["runtime_imports"] = [str(bootstrap_dir)]
     configuration["dispatcher"] = str(bootstrap_dir / "jstack_host/update_dispatcher.py")
     from . import releases as app_releases
