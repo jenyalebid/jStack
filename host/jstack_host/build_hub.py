@@ -59,11 +59,25 @@ def relocate(path: Path, source: Path, target: Path):
         command(["/usr/bin/install_name_tool", *changes, str(path)])
 
 
-def build(stack: Path, output: Path, version: str, config: dict | None = None, *, recovery=False, catalog=None) -> Path:
+def release_identity(source_sha: str, version: str, *, release_id=None, github_repo=None, build_number=None) -> dict:
+    from .release_manifest import identifier
+    from .release_channel import repository
+    if any(value is not None for value in (release_id, github_repo, build_number)):
+        if not release_id or not github_repo or type(build_number) is not int or build_number <= 0:
+            raise ValueError("release builds require release ID, GitHub origin and positive build number together")
+        return {"sha": source_sha, "release": identifier(release_id), "version": version,
+                "build": build_number, "github_repo": repository(github_repo)}
+    return {"sha": source_sha, "release": f"hub-{version}-{source_sha[:8]}", "version": version}
+
+
+def build(stack: Path, output: Path, version: str, config: dict | None = None, *, recovery=False, catalog=None,
+          release_id=None, github_repo=None, build_number=None) -> Path:
     # Build one immutable git snapshot. A clean-tree check alone does not
     # exclude untracked package files or concurrent changes during pip/build.
     command(["git", "-C", str(stack), "diff", "--quiet", "HEAD", "--", "host"])
     source_sha = command(["git", "-C", str(stack), "rev-parse", "HEAD"]).strip()
+    identity = release_identity(source_sha, version, release_id=release_id,
+                                github_repo=github_repo, build_number=build_number)
     with tempfile.TemporaryDirectory(prefix="jstack-source-") as temporary:
         root = Path(temporary)
         archive = root / "source.tar"
@@ -71,10 +85,10 @@ def build(stack: Path, output: Path, version: str, config: dict | None = None, *
         snapshot.mkdir()
         command(["git", "-C", str(stack), "archive", "--format=tar", "-o", str(archive), source_sha])
         command(["/usr/bin/tar", "-xf", str(archive), "-C", str(snapshot)])
-        return _build(snapshot, output, version, config, recovery=recovery, catalog=catalog, source_sha=source_sha)
+        return _build(snapshot, output, version, config, recovery=recovery, catalog=catalog, identity=identity)
 
 
-def _build(stack: Path, output: Path, version: str, config: dict | None, *, recovery, catalog, source_sha: str) -> Path:
+def _build(stack: Path, output: Path, version: str, config: dict | None, *, recovery, catalog, identity: dict) -> Path:
     if sys.version_info[:2] != (3, 12):
         raise ValueError("this runtime build requires the audited CPython 3.12 framework")
     source = Path(sys.base_prefix)
@@ -125,7 +139,7 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, reco
     shutil.copy2(stack / "host/macos/runtime_entry.py", resources / "runtime_entry.py")
     from .sourcestamp import fingerprint
     (packages / "release-identity.json").write_text(json.dumps({
-        "sha": source_sha, "release": f"hub-{version}-{source_sha[:8]}",
+        **identity,
         "package_sha256": fingerprint(packages / "jstack_host")}) + "\n")
     command(["xcrun", "clang", "-O2", "-Wall", "-Wextra", "-Werror", "-mmacosx-version-min=13.0",
              "-framework", "Security", "-framework", "CoreFoundation",
@@ -170,7 +184,7 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, reco
     (contents / "Info.plist").write_bytes(plistlib.dumps({
         "CFBundleIdentifier": bundle_id, "CFBundleExecutable": "JStackHub",
         "CFBundleName": app_name, "CFBundleDisplayName": app_name,
-        "CFBundlePackageType": "APPL", "CFBundleVersion": version,
+        "CFBundlePackageType": "APPL", "CFBundleVersion": str(identity.get("build", version)),
         "CFBundleShortVersionString": version, "LSUIElement": True,
         "LSMinimumSystemVersion": "13.0",
         "CFBundleURLTypes": [] if recovery else [{"CFBundleURLName": "jStack updates", "CFBundleURLSchemes": ["jstack"]}]}))
@@ -226,6 +240,9 @@ def main():
     parser.add_argument("--stack", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--release-id")
+    parser.add_argument("--github-repo")
+    parser.add_argument("--build-number", type=int)
     parser.add_argument("--signing-config", type=Path)
     parser.add_argument("--notarize", action="store_true")
     parser.add_argument("--recovery", action="store_true", help="build the separately installed, versioned updater")
@@ -235,7 +252,8 @@ def main():
     if args.notarize and not config:
         parser.error("--notarize requires --signing-config")
     catalog = json.loads(args.catalog.read_text()) if args.catalog else None
-    app = build(args.stack.resolve(), args.output.resolve(), args.version, config, recovery=args.recovery, catalog=catalog)
+    app = build(args.stack.resolve(), args.output.resolve(), args.version, config, recovery=args.recovery, catalog=catalog,
+                release_id=args.release_id, github_repo=args.github_repo, build_number=args.build_number)
     if args.notarize:
         notarize(app, args.output.resolve(), config)
     print(app)

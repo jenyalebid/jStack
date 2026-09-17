@@ -54,3 +54,21 @@ def test_macho_does_not_follow_symlinks(tmp_path):
     link.symlink_to(binary)
     assert build_hub.macho(binary)
     assert not build_hub.macho(link)
+
+
+def test_release_bundle_uses_the_manifest_identity():
+    identity = build_hub.release_identity("a" * 40, "0.70.0", release_id="77-aaaaaaaa",
+                                          github_repo="https://github.com/owner/repo.git", build_number=77)
+    assert identity == {"sha": "a" * 40, "release": "77-aaaaaaaa", "version": "0.70.0",
+                        "github_repo": "owner/repo", "build": 77}
+
+
+@pytest.mark.parametrize("arguments", [
+    {"release_id": "77-aaaaaaaa"},
+    {"release_id": "77-aaaaaaaa", "github_repo": "owner/repo", "build_number": 0},
+    {"release_id": "../escape", "github_repo": "owner/repo", "build_number": 77},
+    {"release_id": "77-aaaaaaaa", "github_repo": "https://foreign.invalid/repo", "build_number": 77},
+])
+def test_release_identity_rejects_incomplete_or_invalid_inputs(arguments):
+    with pytest.raises(ValueError):
+        build_hub.release_identity("a" * 40, "0.70.0", **arguments)
