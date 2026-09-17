@@ -89,7 +89,15 @@ func main() throws {
     let service = appService(plist)
     if action == "register" {
         // Approval revocation is not a registration failure to repair away.
-        if service.status == .notRegistered || service.status == .notFound { try service.register() }
+        if service.status == .notRegistered || service.status == .notFound {
+            do { try service.register() }
+            catch {
+                // Registering a new daemon can succeed in BTM but return
+                // launch-denied while waiting for the administrator's UI
+                // approval. Report that state; never retry to defeat it.
+                if service.status != .requiresApproval { throw error }
+            }
+        }
     } else {
         try service.unregister()
     }

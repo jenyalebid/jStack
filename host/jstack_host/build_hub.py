@@ -115,10 +115,12 @@ def build(stack: Path, output: Path, version: str, config: dict | None = None, *
         "sha": source_sha, "release": f"hub-{version}-{source_sha[:8]}",
         "package_sha256": fingerprint(packages / "jstack_host")}) + "\n")
     command(["xcrun", "clang", "-O2", "-Wall", "-Wextra", "-Werror", "-mmacosx-version-min=13.0",
+             "-framework", "Security", "-framework", "CoreFoundation",
              "-I" + str(source / "include/python3.12"), str(stack / "host/macos/Runtime.c"),
              str(source / "Python"), "-o", str(macos / "JStackRuntime")])
     shutil.copy2(macos / "JStackRuntime", macos / "JStackCLI")
     command(["xcrun", "clang", "-O2", "-Wall", "-Wextra", "-Werror", "-mmacosx-version-min=13.0",
+             "-framework", "Security", "-framework", "CoreFoundation",
              "-DJSTACK_PYTHON", "-I" + str(source / "include/python3.12"),
              str(stack / "host/macos/Runtime.c"), str(source / "Python"), "-o", str(macos / "JStackPython")])
     for name, relative in (("JStackHub", "host/macos/ServiceControl.swift"),
