@@ -466,6 +466,263 @@ assert st["auth_retries"] == 0, st
 assert "auth_last_fail_ms" not in st, st
 '
 
+# ── a retry knows it is a retry, and is withheld from a run that acted (#52) ──
+#
+# The failure these cover: `api_error` fires whenever the connection drops,
+# including on the LAST turn of a run that had already done everything it was
+# told to do. The retry arm re-sent the identical payload to a session with no
+# way to know a sibling had run, and it repeated every action. Observed
+# 2026-09-11: run cecd0cb9 booked a wake, died 100s later, and its retry booked
+# a second competing one. The same path re-runs a push, a publish, or a send.
+
+check "a transcript of pure reads names no action" '
+import json
+from pathlib import Path
+from scheduler import config, runner
+p = Path(config.STATE_DIR) / "t-reads.jsonl"
+p.parent.mkdir(parents=True, exist_ok=True)
+def tool(name, **inp):
+    return json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": name, "input": inp}]}})
+p.write_text("\n".join([
+    json.dumps({"type": "user", "message": {"content": "go"}}),
+    tool("Read", file_path="/x"),
+    tool("Grep", pattern="y"),
+    tool("TodoWrite", todos=[]),
+]))
+assert runner.first_action(p) is None, runner.first_action(p)
+'
+
+check "a transcript naming a publish, a push, or a subagent names the first one" '
+import json
+from pathlib import Path
+from scheduler import config, runner
+d = Path(config.STATE_DIR); d.mkdir(parents=True, exist_ok=True)
+def one(name, **inp):
+    return json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": name, "input": inp}]}})
+def check_first(tag, line, want):
+    p = d / f"t-{tag}.jsonl"
+    p.write_text(one("Read", file_path="/x") + "\n" + line)
+    got = runner.first_action(p)
+    assert got == want, (tag, got)
+# the MCP publish/send surface an install adds is unknown to this file, and is
+# exactly why the tool test is an allowlist rather than a denylist
+check_first("pub", one("mcp__meta-api__threads_publish", text="hi"),
+            "mcp__meta-api__threads_publish")
+check_first("task", one("Task", prompt="do it"), "Task")
+check_first("write", one("Write", file_path="/x"), "Write")
+check_first("fetch", one("WebFetch", url="https://x"), "WebFetch")
+check_first("push", one("Bash", command="git push origin main"),
+            "Bash: git push origin main")
+'
+
+check "shell calls never earn automatic replay from a command-name allowlist" '
+from scheduler.runner import is_read_only_bash as ro
+for c in ["git status", "git log --oneline -5", "git -C /r diff HEAD",
+          "git --no-pager show HEAD", "ls -la ~/x", "cat a | grep foo",
+          "rg -n pat . && wc -l a", "find . -name \"*.py\"", "sed -n 1,5p f",
+          "jq .a f.json", "ps aux | grep claude", "date; whoami", ""]:
+    assert not ro(c), c
+for c in ["git symbolic-ref HEAD refs/heads/other", "sort -o output input",
+          "sed \"w output\" input", "awk \"BEGIN {system(1)}\"",
+          "rg --pre helper pattern file", "git diff --output=out"]:
+    assert not ro(c), c
+for c in ["git push origin main", "git merge --no-ff x", "git commit -m x",
+          "git config user.name bob", "git stash", "git branch -d old",
+          "git tag v1", "git remote add o u", "echo hi > f", "cat a > b",
+          "curl -X POST https://x", "rm -rf /tmp/x", "sed -i \"\" s/a/b/ f",
+          "find . -name x -delete", "find . -exec rm {} ;", "ls $(rm -rf /)",
+          "ls `whoami`", "python3 s.py", "sleep 5 &", "ls \"unbalanced",
+          "tee out.txt", "env FOO=1 rm x", "xargs rm", "gh pr create",
+          "/bin/rm x", "./deploy.sh"]:
+    assert not ro(c), c
+'
+
+check "missing unreadable and malformed transcripts block replay" '
+from pathlib import Path
+from scheduler import config, runner
+assert runner.first_action(Path(config.STATE_DIR) / "never-written.jsonl") == "missing transcript"
+d = Path(config.STATE_DIR) / "t-dir.jsonl"     # a path that exists and will not read
+d.mkdir(parents=True, exist_ok=True)
+assert runner.first_action(d) == "unreadable transcript", runner.first_action(d)
+p = Path(config.STATE_DIR) / "malformed.jsonl"
+p.write_text("{partial")
+assert runner.first_action(p) == "malformed transcript"
+'
+
+check "native Codex tool calls block replay just like Claude actions" '
+import json
+from pathlib import Path
+from scheduler import config, runner
+p = Path(config.STATE_DIR) / "native.jsonl"
+for kind in ["function_call", "custom_tool_call", "local_shell_call", "unknown_call"]:
+    p.write_text(json.dumps({"type": "response_item", "payload": {"type": kind, "name": "exec_command"}}))
+    assert runner.first_action(p) == "exec_command", kind
+p.write_text(json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": []}}))
+assert runner.first_action(p) is None
+'
+
+# The engine checks below pin session_jsonl_path at a hermetic file: the real
+# derivation puts it under ~/.claude/projects, and a test has no business
+# writing there. The derivation itself is not under test here — what is, is that
+# the gate reads the dead run and acts on the answer.
+
+check "an api_error retry fires when the dead run only read, and carries the marker" '
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from scheduler import config, engine, runner
+NOW = datetime(2026, 9, 11, 23, 2, 51, tzinfo=timezone.utc)
+JOB = {"id": "retry-clean", "agent_id": "plain", "enabled": True,
+       "schedule": {"kind": "once"}}
+class FakeRun:
+    run_id, session_id, model, retry_of = "cecd0cb9", "s1", "opus", None
+    job, job_id = JOB, JOB["id"]
+    workspace = "/tmp/ws"
+    scheduled_for = NOW
+    scheduled_for_ms = spawned_at_ms = int(NOW.timestamp() * 1000)
+p = Path(config.STATE_DIR) / "clean.jsonl"
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps({"type": "assistant", "message": {"content": [
+    {"type": "tool_use", "name": "Read", "input": {"file_path": "/x"}}]}}))
+runner.session_jsonl_path = lambda ws, sid: p
+fired = []
+e = engine.Engine(now_fn=lambda: NOW)
+e._try_fire = lambda *a, **k: fired.append(k)
+e._on_run_finish(FakeRun(), status="api_error", exit_code=1, kill_reason=None, summary="")
+assert len(fired) == 1, fired
+assert fired[0]["retry_of"] == "cecd0cb9", fired[0]
+assert fired[0]["retry_reason"] == "api_error", fired[0]
+'
+
+check "an api_error retry is withheld when the dead run already acted" '
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from scheduler import config, engine, journal, runner
+NOW = datetime(2026, 9, 11, 23, 2, 51, tzinfo=timezone.utc)
+JOB = {"id": "retry-dirty", "agent_id": "plain", "enabled": True,
+       "schedule": {"kind": "once"}}
+class FakeRun:
+    run_id, session_id, model, retry_of = "cecd0cb9", "s1", "opus", None
+    job, job_id = JOB, JOB["id"]
+    workspace = "/tmp/ws"
+    scheduled_for = NOW
+    scheduled_for_ms = spawned_at_ms = int(NOW.timestamp() * 1000)
+p = Path(config.STATE_DIR) / "dirty.jsonl"
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps({"type": "assistant", "message": {"content": [
+    {"type": "tool_use", "name": "Bash",
+     "input": {"command": "git merge --no-ff issue-52 && git push"}}]}}))
+runner.session_jsonl_path = lambda ws, sid: p
+fired = []
+e = engine.Engine(now_fn=lambda: NOW)
+e._try_fire = lambda *a, **k: fired.append(k)
+e._on_run_finish(FakeRun(), status="api_error", exit_code=1, kill_reason=None, summary="")
+assert fired == [], fired                       # the merge is not re-run
+st = e.state["retry-dirty"]
+assert "not retried" in st["last_error"], st    # and the state says why
+assert "git merge" in st["last_error"], st
+rec = journal.read_history(job_id="retry-dirty")[0]
+assert rec["status"] == "api_error", rec
+assert rec["retryOf"] is None, rec
+'
+
+check "a withheld retry delivers a terminal failure instead of going silent" '
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from scheduler import config, engine, journal, runner, spawn
+NOW = datetime(2026, 9, 11, 23, 2, 51, tzinfo=timezone.utc)
+JOB = {"id": "retry-notify", "agent_id": "plain", "enabled": True,
+       "notify_on_failure": True, "schedule": {"kind": "recurring"}}
+class FakeRun:
+    run_id, session_id, model, retry_of = "cecd0cb9", "s1", "opus", None
+    job, job_id = JOB, JOB["id"]
+    workspace = "/tmp/ws"
+    scheduled_for = NOW
+    scheduled_for_ms = spawned_at_ms = int(NOW.timestamp() * 1000)
+p = Path(config.STATE_DIR) / "notify.jsonl"
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps({"type": "assistant", "message": {"content": [
+    {"type": "tool_use", "name": "mcp__meta-api__threads_publish",
+     "input": {"text": "hi"}}]}}))
+runner.session_jsonl_path = lambda ws, sid: p
+config._install = dict(config.install()); config._install["failure_notifier"] = "x:y"
+seen = []
+spawn._load_hook = lambda spec: (lambda payload: seen.append(payload))
+e = engine.Engine(now_fn=lambda: NOW)
+e._try_fire = lambda *a, **k: seen.append(("FIRED", k))
+e._on_run_finish(FakeRun(), status="api_error", exit_code=1, kill_reason=None, summary="")
+# the decision passes to a human: delivered once, and NOT as a spawn
+assert len(seen) == 1 and seen[0].get("job_id") == "retry-notify", seen
+rec = journal.read_history(job_id="retry-notify")[0]
+assert rec["deliveryStatus"] == "delivered", rec
+'
+
+check "a run that never got a session retries; one whose transcript cannot be located does not" '
+from datetime import datetime, timezone
+from scheduler import engine
+NOW = datetime(2026, 9, 11, 23, 2, 51, tzinfo=timezone.utc)
+JOB = {"id": "retry-nosession", "agent_id": "plain", "enabled": True}
+class NeverSpawned:            # died before Run.spawn set anything — the ttft case
+    run_id, session_id, workspace, model, retry_of = "r1", None, None, "opus", None
+    job, job_id = JOB, JOB["id"]
+    scheduled_for = NOW
+    scheduled_for_ms = spawned_at_ms = int(NOW.timestamp() * 1000)
+class Adopted(NeverSpawned):   # a session ran; a pre-`workspace` state entry lost where
+    session_id, workspace = "s1", None
+e = engine.Engine(now_fn=lambda: NOW)
+assert e._retry_blocker(NeverSpawned()) is None
+assert e._retry_blocker(Adopted()) == "transcript location unknown"
+'
+
+# ── and the marker actually arrives, through a real spawn ──
+#
+# Criterion: watch a retry carry it, not read the diff. This spawns the real
+# Run against a stub claude that dumps the argv it was invoked with, so what is
+# asserted is the message the session is handed.
+
+mkdir -p "$TMP/tools"
+cat > "$TMP/tools/claude" <<STUB
+#!/bin/sh
+printf '%s\n' "\$@" > "$TMP/claude-argv.txt"
+exit 0
+STUB
+chmod +x "$TMP/tools/claude"
+
+check "a real retry spawn hands the session the marker, ahead of the payload" '
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from scheduler import config, runner
+HOME = Path(os.environ["SCHEDULER_HOME"])
+JOB = {"id": "retry-spawn", "agent_id": "plain", "name": "Nightly publish",
+       "payload": {"message": "publish the queued post"},
+       "claude_bin": str(HOME / "tools" / "claude")}
+def spawn_message(**kw):
+    r = runner.Run(job=JOB, defaults=dict(config.BUILTIN_DEFAULTS),
+                   scheduled_for=datetime.now(timezone.utc),
+                   on_finish=lambda *a, **k: None, **kw).spawn()
+    r.proc.wait()
+    dump = (HOME / "claude-argv.txt").read_text()
+    return dump.split("\n-p\n", 1)[1]          # -p is last; the rest is the message
+
+first = spawn_message()
+assert first.startswith("[cron:retry-spawn Nightly publish] "), first
+assert "RETRY" not in first, first             # a first attempt is told nothing
+
+msg = spawn_message(retry_of="cecd0cb9", retry_reason="api_error")
+# the routing prefix still leads — thread classification matches on it
+assert msg.startswith("[cron:retry-spawn Nightly publish] "), msg
+assert "[RETRY of run cecd0cb9" in msg, msg
+assert "api_error" in msg, msg
+# and it lands BEFORE the instruction it qualifies, not after
+assert msg.index("[RETRY") < msg.index("publish the queued post"), msg
+assert msg.rstrip().endswith("publish the queued post"), msg
+'
+
 # ── failure delivery: a terminal non-ok finish reaches a human (#17) ──
 #
 # The outage that filed it: a daily job died two mornings running, every record
@@ -559,6 +816,7 @@ assert rec["deliveryStatus"] == "failed", rec
 
 check "a transient stall that will be retried does not deliver" '
 from datetime import datetime, timezone
+from pathlib import Path
 from scheduler import engine, config, spawn, journal
 NOW = datetime(2026, 9, 8, 6, 30, 5, tzinfo=timezone.utc)
 JOB = {"id": "notify-stall", "agent_id": "plain", "enabled": True,
@@ -567,6 +825,12 @@ class FakeRun:
     run_id, session_id, model, retry_of = "r1", "s1", "opus", None
     job, job_id = JOB, JOB["id"]
     scheduled_for = NOW
+    # A spawned run always has one (Run.spawn sets it first); without it the
+    # retry gate cannot locate the transcript and withholds the retry, which
+    # would make this a test of the wrong arm.
+    workspace = "/tmp/ws"
+    _jsonl = Path(config.STATE_DIR) / "no-actions.jsonl"
+    _jsonl.write_text("{\"type\":\"user\"}\n")
     scheduled_for_ms = spawned_at_ms = int(NOW.timestamp() * 1000)
 config._install = dict(config.install()); config._install["failure_notifier"] = "x:y"
 seen = []
