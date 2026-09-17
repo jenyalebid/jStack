@@ -42,7 +42,7 @@ be checked in the exact-artifact acceptance run.
   dependencies, and supported stop/start behavior.
 - Development servers and fixtures are opt-in project capabilities. A
   production install must not inherit a developer's unrelated startup jobs.
-- Preserve existing jRemote client bundle IDs, pairing identities, credentials
+- Preserve existing client bundle IDs, pairing identities, credentials
   and state. A new domain alone is not a reason to invalidate them.
 
 macOS determines its settings presentation. Acceptance measures the actual
