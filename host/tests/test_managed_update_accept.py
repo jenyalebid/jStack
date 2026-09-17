@@ -262,3 +262,78 @@ def test_candidate_installer_preserves_errors_and_uses_registered_menu(runner, c
     assert any("ProgramArguments" in command and "app.parent" in command for command in commands)
     assert not any("ditto -x -k" in command and "~/Applications" in command for command in commands)
     assert any("--no-app --no-menubar" in command for command in commands)
+
+
+def test_new_session_with_a_provider_but_no_reply_fails(runner, monkeypatch):
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+
+    class Guest:
+        def tool_call(self, action, *args, **kwargs):
+            if action == "spawn":
+                return {"session": "wanted"}
+            return {"session": "wanted", "holders": [{"pid": 1, "started": 1}]}
+
+    def no_reply(*args):
+        raise runner.AcceptanceFailure("provider login expired")
+
+    monkeypatch.setattr(runner, "send_to_session", no_reply)
+    with pytest.raises(runner.AcceptanceFailure, match="login expired"):
+        runner.new_session(Guest())
+
+
+def test_selected_journey_retains_existing_exact_artifact_receipts(
+        runner, candidate, tmp_path, monkeypatch):
+    receipts = tmp_path / "receipts"
+    run = acceptance.Run(receipts, candidate.manifest)
+    with run.journey("upgrade") as journey:
+        for check in acceptance.REQUIRED["upgrade"]:
+            journey.observe(check, "observed")
+    original = (receipts / "upgrade.json").read_bytes()
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"disposable": True, "vm_tool": "/bin/vm.sh", "hub": "hub",
+                                "leaves": ["leaf-a", "leaf-b"]}))
+    monkeypatch.setattr(runner, "Candidate", lambda *args: candidate)
+    fleet = build(runner, ScriptedFleet())
+    monkeypatch.setattr(fleet, "offer", lambda _: None)
+    monkeypatch.setattr(runner, "Fleet", lambda *args, **kwargs: fleet)
+    monkeypatch.setattr("sys.argv", ["accept", "--candidate", str(candidate.dir),
+                                     "--receipts", str(receipts), "--plan", str(plan),
+                                     "--only", "fleet"])
+    assert runner.main() == 1  # Other required journeys still missing.
+    assert (receipts / "upgrade.json").read_bytes() == original
+    assert acceptance.inspect(receipts, candidate.manifest)["upgrade"]["state"] == "passed"
+
+
+def test_staging_prior_restores_candidate_offer_on_update_failure(
+        runner, candidate, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    prior = tmp_path / "prior"
+    prior.mkdir()
+    (prior / "candidate.json").write_text(json.dumps({"manifest": {"release": PRIOR}}))
+    fleet = build(runner, ScriptedFleet(release=CANDIDATE), prior_candidate=str(prior))
+    fleet.candidate = candidate
+    offered = []
+    monkeypatch.setattr(runner, "Candidate", lambda *args: SimpleNamespace(release=PRIOR))
+    monkeypatch.setattr(fleet, "offer", lambda c: offered.append(c.release))
+
+    def failed(*args, **kwargs):
+        raise runner.AcceptanceFailure("update failed")
+
+    monkeypatch.setattr(fleet.hub, "wait_for", failed)
+    with pytest.raises(runner.AcceptanceFailure, match="update failed"):
+        runner.stage_prior(fleet, fleet.leaves[0])
+    assert offered == [PRIOR, candidate.release]
+
+
+def test_artifact_fault_is_restored_when_refusal_probe_fails(runner):
+    from types import SimpleNamespace
+    calls = []
+    class Hub:
+        def tool_call(self, action):
+            calls.append(action)
+        def queue(self, *args):
+            raise runner.AcceptanceFailure("hub disconnected")
+
+    with pytest.raises(runner.AcceptanceFailure, match="disconnected"):
+        runner.refused_release(SimpleNamespace(plan={}, hub=Hub()), None, "leaf")
+    assert calls == ["tamper", "restore-artifact"]

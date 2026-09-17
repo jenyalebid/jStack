@@ -48,6 +48,7 @@ class Candidate:
     def __init__(self, directory: Path, public_key: str):
         from jstack_host import acceptance, release_manifest
         self.dir = Path(directory)
+        self.public_key = public_key
         envelope = json.loads((self.dir / "candidate.json").read_text())
         self.manifest = release_manifest.verify(envelope, public_key, promoted=False)
         for item in self.manifest["components"].values():
@@ -173,6 +174,7 @@ class Fleet:
         self.prior = Path(plan["prior_candidate"]).expanduser() if plan.get("prior_candidate") else None
         self.cellular = plan.get("cellular")
         self._ids: dict[str, str] = {}
+        self.candidate: Candidate | None = None
 
     def machine(self, guest: Guest) -> str:
         if guest.name not in self._ids:
@@ -187,6 +189,7 @@ class Fleet:
             self.hub.copy(candidate.file(name), f"{remote}/{candidate.file(name).name}")
         self.hub.copy(candidate.dir / "candidate.json", remote + "/candidate.json")
         self.hub.tool_call("offer", "--candidate", remote)
+        self.candidate = candidate
 
 
 def request_id(prefix: str) -> str:
@@ -467,9 +470,19 @@ def stage_prior(fleet: Fleet, guest: Guest) -> dict:
     prior = json.loads((fleet.prior / "candidate.json").read_text())["manifest"]["release"]
     if state["release"] == prior:
         return state
-    expect(fleet.plan.get("stage_prior_command"),
-           "staging the previous release needs 'stage_prior_command' in the plan")
-    guest.sh(fleet.plan["stage_prior_command"], timeout=2400)
+    if fleet.plan.get("stage_prior_command"):
+        guest.sh(fleet.plan["stage_prior_command"], timeout=2400)
+    else:
+        target = fleet.candidate
+        expect(target is not None, "offer the candidate before staging a previous release")
+        previous = Candidate(fleet.prior, target.public_key)
+        machine = fleet.machine(guest)
+        try:
+            fleet.offer(previous)
+            fleet.hub.queue(machine, request_id("stage-prior"))
+            fleet.hub.wait_for("current", machine)
+        finally:
+            fleet.offer(target)
     time.sleep(SETTLE)
     state = guest.installed()
     expect(state["release"] == prior,
@@ -514,7 +527,9 @@ def new_session(guest: Guest) -> dict:
             break
     expect(proof.get("session") == session and len(proof.get("holders", [])) == 1,
            "the new session never acquired exactly one identified provider")
-    return {"session": session, "pid": proof["holders"][0]["pid"], "holders": proof["holders"]}
+    reply = send_to_session(guest, session)
+    return {"session": session, "pid": proof["holders"][0]["pid"],
+            "holders": proof["holders"], "reply": reply}
 
 
 def send_to_session(guest: Guest, session: str) -> dict:
@@ -551,9 +566,11 @@ def denied(fleet: Fleet, leaf: Guest) -> dict:
 
 def refused_release(fleet: Fleet, guest: Guest, machine: str) -> dict:
     """Bad bytes are refused before anything running is replaced."""
-    expect(fleet.plan.get("tamper_command"),
-           "proving refusal needs 'tamper_command' in the plan")
-    fleet.hub.sh(fleet.plan["tamper_command"], timeout=300)
+    if fleet.plan.get("tamper_command"):
+        expect(fleet.plan.get("restore_command"), "a custom artifact fault requires restoration")
+        fleet.hub.sh(fleet.plan["tamper_command"], timeout=300)
+    else:
+        fleet.hub.tool_call("tamper")
     try:
         job = fleet.hub.queue(machine, request_id("tampered"))["jobs"][0]
         row = fleet.hub.wait_for("failed", machine, timeout=900, poll=5)
@@ -562,7 +579,10 @@ def refused_release(fleet: Fleet, guest: Guest, machine: str) -> dict:
                f"a tampered artifact failed for the wrong reason: {detail}")
         return {"job": job["id"], "detail": detail}
     finally:
-        fleet.hub.sh(fleet.plan.get("restore_command", "true"), timeout=300)
+        if fleet.plan.get("tamper_command"):
+            fleet.hub.sh(fleet.plan["restore_command"], timeout=300)
+        else:
+            fleet.hub.tool_call("restore-artifact")
 
 
 def arm_fault(guest: Guest, fault: str) -> subprocess.Popen:
@@ -599,8 +619,8 @@ def main() -> int:
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--receipts", type=Path, required=True)
     parser.add_argument("--plan", type=Path, required=True)
-    parser.add_argument("--only", nargs="*", choices=sorted(JOURNEYS),
-                        help="run these journeys; the rest are recorded as unrun")
+    parser.add_argument("--only", nargs="+", choices=sorted(JOURNEYS),
+                        help="run these journeys, retaining previous receipts for the others")
     args = parser.parse_args()
     from jstack_host import acceptance
     trust = Path(__file__).resolve().parents[1] / "jstack_host/release-trust.json"
@@ -616,18 +636,20 @@ def main() -> int:
     for leaf in fleet.leaves:
         leaf.start()
     fleet.offer(candidate)
-    for name in sorted(JOURNEYS):
-        reason = unsupported(fleet, name)
+    for name in JOURNEYS:
         if args.only and name not in args.only:
-            reason = "not selected for this run"
+            continue
+        reason = unsupported(fleet, name)
         if reason:
             run.skip(name, reason)
             continue
         with run.journey(name) as journey:
             JOURNEYS[name](journey, fleet, candidate)
-    summary = run.summary()
+    state = acceptance.inspect(args.receipts, candidate.manifest)
+    summary = {"release": candidate.release,
+               "results": {name: row["state"] for name, row in state.items()}}
     print(json.dumps(summary, indent=2), flush=True)
-    return 0 if len(summary["passed"]) == len(JOURNEYS) else 1
+    return 0 if all(row["state"] == "passed" for row in state.values()) else 1
 
 
 if __name__ == "__main__":

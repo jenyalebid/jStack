@@ -15,7 +15,8 @@ import sys
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["hub", "offer", "queue", "inventory", "enrol",
-                                           "adopt", "grant", "spawn", "probe", "call", "revoke", "session-proof"])
+                                           "adopt", "grant", "spawn", "probe", "call", "revoke", "session-proof",
+                                           "tamper", "restore-artifact"])
     parser.add_argument("--session")
     parser.add_argument("--after", type=int, default=0)
     parser.add_argument("--candidate", type=Path)
@@ -52,6 +53,26 @@ def main():
     from jstack_host.store import get_store
     from jstack_host.update_supervisor import atomic_json
     import httpx
+    if args.action in {"tamper", "restore-artifact"}:
+        if config.get("managed") or (state / "parent.json").exists():
+            raise RuntimeError("artifact fault requires the disposable fixture hub")
+        feed = fleet_updates.feed_dir()
+        envelope = json.loads((feed / "latest.json").read_text())
+        manifest = release_manifest.verify(envelope, config["public_key"], promoted=False)
+        artifact = feed / manifest["release"] / manifest["components"]["client"]["file"]
+        backup = artifact.with_name(artifact.name + ".lab-original")
+        if args.action == "tamper":
+            if backup.exists():
+                raise RuntimeError("artifact already withheld; restore it first")
+            release_manifest.check_artifact(artifact, manifest["components"]["client"])
+            shutil.copy2(artifact, backup)
+            with artifact.open("ab") as stream:
+                stream.write(b"lab artifact corruption")
+        else:
+            release_manifest.check_artifact(backup, manifest["components"]["client"])
+            os.replace(backup, artifact)
+        print(json.dumps({"fixture_action": args.action, "release": manifest["release"]}))
+        return
     if args.action in {"enrol", "adopt", "grant"}:
         if args.record is None or not args.record.resolve().is_relative_to(Path.home()):
             parser.error("fixture operation requires a record file under the guest account")
