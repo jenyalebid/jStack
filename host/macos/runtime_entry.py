@@ -23,6 +23,7 @@ def main():
             os.environ[key] = str(value)
         if role == "host":
             arguments = ["--port", str(config["port"]), "--host", config.get("bind", "0.0.0.0"), *arguments]
+    os.environ["PATH"] = str(resources.parent / "MacOS") + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
     if role in ("host", "updater"):
         state = Path(os.environ.get("JREMOTE_STATE_DIR", str(Path.home() / ".local/state/jremote")))
         logs = state / "logs"

@@ -104,15 +104,31 @@ def build(stack: Path, output: Path, version: str, config: dict | None = None) -
     for metadata in packages.glob("jstack_host-*.dist-info/direct_url.json"):
         metadata.write_text(json.dumps({"url": "source:jstack-host", "dir_info": {}}) + "\n")
     shutil.copy2(stack / "host/macos/runtime_entry.py", resources / "runtime_entry.py")
-    if (stack / "host/release-identity.json").exists():
-        shutil.copy2(stack / "host/release-identity.json", resources / "release-identity.json")
+    from .sourcestamp import fingerprint
+    source_sha = command(["git", "-C", str(stack), "rev-parse", "HEAD"]).strip()
+    command(["git", "-C", str(stack), "diff", "--quiet", "HEAD", "--", "host"])
+    (packages / "release-identity.json").write_text(json.dumps({
+        "sha": source_sha, "release": f"hub-{version}-{source_sha[:8]}",
+        "package_sha256": fingerprint(packages / "jstack_host")}) + "\n")
     command(["xcrun", "clang", "-O2", "-Wall", "-Wextra", "-Werror", "-mmacosx-version-min=13.0",
              "-I" + str(source / "include/python3.12"), str(stack / "host/macos/Runtime.c"),
              str(source / "Python"), "-o", str(macos / "JStackRuntime")])
     shutil.copy2(macos / "JStackRuntime", macos / "JStackCLI")
+    command(["xcrun", "clang", "-O2", "-Wall", "-Wextra", "-Werror", "-mmacosx-version-min=13.0",
+             "-DJSTACK_PYTHON", "-I" + str(source / "include/python3.12"),
+             str(stack / "host/macos/Runtime.c"), str(source / "Python"), "-o", str(macos / "JStackPython")])
     for name, relative in (("JStackHub", "host/macos/ServiceControl.swift"),
                            ("JStackHostBar", "host/menubar/JStackHostBar.swift")):
         command(["xcrun", "swiftc", "-O", "-o", str(macos / name), str(stack / relative)], timeout=180)
+    from .bundle_tools import bundle
+    tmux = shutil.which("tmux")
+    if not tmux:
+        raise ValueError("tmux is required as a build input")
+    bundle(Path(tmux), macos / "tmux", contents / "Frameworks/Tools", resources / "Licenses")
+    python_license = source / "Resources/English.lproj/Documentation/license.html"
+    if not python_license.is_file():
+        raise ValueError("Python distribution license notice is required")
+    shutil.copy2(python_license, resources / "Licenses/Python-license.html")
     definitions = contents / "Library/LaunchAgents"
     definitions.mkdir(parents=True)
     for role in ROLES:
