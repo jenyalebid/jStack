@@ -1,4 +1,12 @@
-# jstack-host
+# jStack Hub
+
+Current product contract (2026-09-16): [jStack terminology, single installation and release rules](https://github.com/jenyalebid/jStack/blob/main/product.md#core-contract).
+Hub is the server/menu on each Mac; Parent Hub manages leaves; host is a
+technical machine term. The Plugin and jRemote client are independently usable.
+One Hub installation per OS; unique build number and source commit per build;
+complete verified changes on main; publication only on explicit request using
+the exact tested artifacts. Historical paths and API identifiers below remain
+implementation names, not alternative products or installation policies.
 
 The API a phone, an iPad or another Mac reaches this machine through. It serves
 your terminal sessions — what is running, what each one said, and a live PTY you
@@ -27,10 +35,10 @@ menubar/install.sh              # build and install it on its own
 menubar/install.sh --uninstall  # just the icon; the host stays
 ```
 
-One Swift file in `menubar/`, compiled on your machine into `~/Applications`
-and run by its own user LaunchAgent. Nothing is downloaded, so there is no
-signature to trust — what lands in your menu bar was built from the source
-beside it. It runs under its own agent rather than inside any client app,
+The source installer builds the menu from `menubar/` and runs it under its own
+user LaunchAgent. Managed release candidates package a Developer ID signed,
+notarized menu. Both are components of the same Hub installation. The menu
+runs under its own agent rather than inside any client app,
 because a status item dies with the process that made it: an indicator that
 only survives while some app is open is one that goes dark while the host it
 reports on is still serving.
@@ -49,17 +57,19 @@ jstack-host uninstall        remove the LaunchAgent (state and token stay)
 
 ## Security
 
-One bearer token, required on every route. `/api/health` is the only exception
-and reports nothing about the machine. The token is generated locally at
-install, `0600`, and never leaves it. Failed auth is rate-limited per client
-address.
+Authenticated routes use per-device credentials and revocation. Managed-leaf
+access derives from parent authority; local administration uses a separate
+internal credential. `/api/health` is the unauthenticated readiness probe.
+Keep credentials private and use the pairing flow to enroll clients.
 
 Binds `0.0.0.0` by default, because a host is reached over a tunnel or across a
 LAN and one bound to `127.0.0.1` is a host only this Mac can see. Nothing is
 exposed to the internet unless you put it there.
 
-No analytics, no crash reporting, no update ping. Updates are `git pull` in a
-checkout you own; nothing downloads code at runtime.
+Managed updates stage and verify signed artifacts, replace the existing Hub,
+and independently verify the running source after restart. Production fleet
+qualification is unfinished; see [managed updates](../docs/managed-updates.md).
+A source checkout update is not a published or installed product release.
 
 Markdown reads are fenced to `~/.claude`, the agent root and `~/Systems`, and
 the fence is checked after symlinks resolve.
@@ -93,6 +103,11 @@ macOS, Python 3.11+. `tmux` and an agent CLI on `PATH` for the session features 
 `jstack-host doctor` grades both, and the host runs without them.
 
 ## Development
+
+Use feature/release branches. Installation and update tests belong in a
+separate GUI macOS VM; do not run a competing Hub on an OS that already has
+one installed. A complete, verified change may merge to main; publication
+remains a separate explicitly requested action over tested artifacts.
 
 ```bash
 .venv/bin/python3 -m pip install -e '.[dev]'

@@ -1,5 +1,16 @@
 # Disposable update lab
 
+Current product contract (2026-09-16): [jStack terminology, single installation and release rules](https://github.com/jenyalebid/jStack/blob/main/product.md#core-contract).
+Hub is the server/menu on each Mac; Parent Hub manages leaves; host is a
+technical machine term. The Plugin and jRemote client are independently usable.
+One Hub installation per OS; unique build number and source commit per build;
+complete verified changes on main; publication only on explicit request using
+the exact tested artifacts. Historical paths and API identifiers below remain
+implementation names, not alternative products or installation policies.
+A disposable VM is a separate OS installation. Never install a second Hub
+beside the production Hub to run this lab. Receipts describe observed results,
+not an exemption from the product contract.
+
 These tools are diagnostic fixtures, **not production acceptance receipts**.
 They exercise signed candidates, real HTTP APIs, launchd, bundle replacement
 and the actual supervisor. They do not exercise real enrollment or cellular.

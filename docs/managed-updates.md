@@ -1,5 +1,34 @@
 # Managed releases and updates
 
+## Governing contract
+
+The [core product contract](../product.md#core-contract), approved 2026-09-16,
+is authoritative. Hub means the server and menu bar on each Mac. Parent Hub
+names an independent Hub managing leaves; host is a technical machine term.
+The Plugin and jRemote client are independently usable products.
+
+There is one installed Hub per OS. Develop on feature/release branches and
+test installations in separate macOS VMs. Main receives complete, verified
+functionality. Every build gets a new build number and its exact source commit,
+including rebuilds of the same source. Info displays version/build/source and
+observed running status in a native macOS form, with the jRemote icon/version,
+Open or Download, and actionable update state.
+
+Build, merge, publish and install are separate operations. Publish only when
+explicitly requested, promoting the exact tested artifacts without rebuilding.
+One manifest pins compatible Hub and client builds. One menu action updates
+the Hub and its hub-managed client; App Store and independently managed clients
+retain their channels. The parent can update itself and its leaves. All local
+entry points must resolve to the same active Hub installation.
+
+## Current implementation status
+
+The contract above is not yet fully shipped. Unique build allocation, unified
+installed identity, client distribution ownership, public release discovery
+and the revised native Info form require implementation and verification.
+Release qualification remains tracked by #72. A branch or passing unit suite
+does not establish production readiness.
+
 Status: implemented candidate under real-Mac acceptance (2026-09-16).
 Not promoted to the production feed. The product contract below remains the
 acceptance target; implemented code and observed proof are separate facts.
