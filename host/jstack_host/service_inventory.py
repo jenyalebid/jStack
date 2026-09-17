@@ -84,7 +84,7 @@ def signature(path: Path) -> dict:
             match = re.search(rf"^{key}=(.+)$", details.stderr, re.MULTILINE)
             if match:
                 values[key] = match[1]
-        verified = run(["/usr/bin/codesign", "--verify", "--strict", str(path)])
+        verified = run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(path)])
         return {"status": "valid" if verified.returncode == 0 else "invalid",
                 **values}
     except (OSError, subprocess.SubprocessError):
@@ -102,7 +102,7 @@ def launch_state(domain: str, label: str) -> dict:
                 else "unobservable"}
     observed = {"status": "loaded"}
     # Only top-level job fields: nested resource coalitions also have a state.
-    for key in ("state", "pid", "last exit code"):
+    for key in ("state", "pid", "last exit code", "parent bundle identifier", "parent bundle version", "program identifier"):
         match = re.search(rf"^\t{key} = ([^\n]+)$", result.stdout, re.MULTILINE)
         if match:
             observed[key.replace(" ", "_")] = match[1]
@@ -123,6 +123,18 @@ def inspect_job(path: Path, domain: str) -> dict:
         if not isinstance(argv, list) or any(not isinstance(a, str) for a in argv):
             raise ValueError("invalid arguments")
         program = job.get("Program") or (argv[0] if argv else None)
+        owner = None
+        if "BundleProgram" in job:
+            relative = job["BundleProgram"]
+            if (not isinstance(relative, str) or Path(relative).is_absolute() or
+                    len(path.parents) < 4 or path.parents[2].name != "Contents" or
+                    path.parents[3].suffix != ".app"):
+                raise ValueError("invalid app-owned executable")
+            owner = path.parents[3]
+            executable = (owner / relative).resolve()
+            if not executable.is_relative_to(owner.resolve()):
+                raise ValueError("app-owned executable escapes its bundle")
+            program = str(executable)
         if not isinstance(program, str) or not Path(program).is_absolute():
             raise ValueError("executable is not an absolute path")
     except (OSError, ValueError, plistlib.InvalidFileException):
@@ -136,6 +148,10 @@ def inspect_job(path: Path, domain: str) -> dict:
                          ("RunAtLoad", "KeepAlive", "StartInterval", "StartCalendarInterval")
                          if key in job},
                associated_bundles=job.get("AssociatedBundleIdentifiers", []))
+    if owner is not None:
+        row["owner_bundle"] = {"path": str(owner), "signature": signature(owner)}
+        if row["owner_bundle"]["signature"]["status"] != "valid":
+            row["findings"].append("owner_resource_seal_not_verified")
     # No argv dump: command lines and environment frequently contain tokens.
     # Script operands are evidence only; do not execute them or resolve -m by
     # importing a service into the inventory process.
@@ -165,6 +181,9 @@ def collect(locations: list[tuple[Path, str]] | None = None) -> dict:
         (Path.home() / "Library/LaunchAgents", f"gui/{os.getuid()}"),
         (Path("/Library/LaunchAgents"), f"gui/{os.getuid()}"),
         (Path("/Library/LaunchDaemons"), "system"),
+        (Path("/Applications/jStack Hub.app/Contents/Library/LaunchAgents"), f"gui/{os.getuid()}"),
+        (Path("/Applications/jStack Hub Services.app/Contents/Library/LaunchAgents"), f"gui/{os.getuid()}"),
+        (Path("/Library/PrivilegedHelperTools/jStack Network.app/Contents/Library/LaunchDaemons"), "system"),
     ]
     rows, errors = [], []
     for directory, domain in locations:
@@ -186,14 +205,35 @@ def collect(locations: list[tuple[Path, str]] | None = None) -> dict:
                 row["findings"].append("duplicate_launchd_label")
     return {"schema": 1, "services": rows, "errors": errors,
             "limits": ["Inventory is not a malware clearance or trusted baseline.",
-                       "Covers filesystem launch definitions, not every SMAppService registration.",
+                       "Includes installed jStack app definitions, not every third-party SMAppService registration.",
                        "Privacy grants and background-item approval are not inspected.",
                        "A valid signature is not proof of an approved publisher.",
                        "Interpreter modules, transitive code and child processes are not attested."]}
 
 
-def report(*, as_json: bool = False) -> int:
+def compare(before: dict, after: dict) -> dict:
+    """Report persistence/code drift without automatically trusting either side."""
+    fields = ("definition", "executable", "executable_file", "scripts", "signature", "owner_bundle", "run_as", "schedule")
+    old = {row["path"]: row for row in before["services"]}
+    new = {row["path"]: row for row in after["services"]}
+    changes = []
+    for path in sorted(old.keys() | new.keys()):
+        if path not in old or path not in new:
+            changes.append({"path": path, "change": "added" if path in new else "removed"})
+            continue
+        changed = [field for field in fields if old[path].get(field) != new[path].get(field)]
+        if changed:
+            changes.append({"path": path, "change": "modified", "fields": changed})
+    unknown = [row["path"] for row in after["services"] if
+               "unreadable_or_unsupported_definition" in row["findings"] or
+               "code_file_unreadable" in row["findings"] or "code_file_not_observed" in row["findings"]]
+    return {"changes": changes, "unobserved": unknown, "errors": after.get("errors", [])}
+
+
+def report(*, as_json: bool = False, baseline: Path | None = None) -> int:
     inventory = collect()
+    if baseline is not None:
+        inventory["comparison"] = compare(json.loads(baseline.read_text()), inventory)
     if as_json:
         print(json.dumps(inventory, indent=2))
     else:
@@ -207,4 +247,7 @@ def report(*, as_json: bool = False) -> int:
             print(f"Note: {limitation}")
         for error in inventory["errors"]:
             print(f"Unreadable: {error['path']} ({error['error']})")
-    return 1 if inventory["errors"] or any(r["findings"] for r in inventory["services"]) else 0
+        for change in inventory.get("comparison", {}).get("changes", []):
+            print(f"Drift: {change['path']} ({change['change']})")
+    return 1 if (inventory["errors"] or any(r["findings"] for r in inventory["services"]) or
+                 inventory.get("comparison", {}).get("changes")) else 0

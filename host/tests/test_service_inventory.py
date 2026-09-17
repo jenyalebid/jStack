@@ -108,3 +108,45 @@ def test_app_data_not_opened_or_codesigned(tmp_path, monkeypatch):
     assert "unobserved" in inventory.fingerprint(path)
     assert inventory.signature(path)["status"] == "unobservable"
     assert inventory.user_writable(path) is None
+
+
+def test_app_owned_definition_checks_the_whole_owner_seal(tmp_path, observed, monkeypatch):
+    app = tmp_path / "Hub.app"
+    definitions = app / "Contents/Library/LaunchAgents"
+    definitions.mkdir(parents=True)
+    executable = app / "Contents/MacOS/JStackRuntime"
+    executable.parent.mkdir()
+    executable.write_bytes(b"native fixture")
+    path = job(definitions, BundleProgram="Contents/MacOS/JStackRuntime", ProgramArguments=["JStackRuntime", "host"])
+    monkeypatch.setattr(inventory, "signature", lambda p: {"status": "invalid" if p == app else "valid"})
+    row = inventory.inspect_job(path, "gui/501")
+    assert row["executable"] == str(executable)
+    assert row["signature"]["status"] == "valid"
+    assert "owner_resource_seal_not_verified" in row["findings"]
+
+
+def test_app_owned_definition_cannot_escape_its_bundle(tmp_path, observed):
+    definitions = tmp_path / "Hub.app/Contents/Library/LaunchAgents"
+    definitions.mkdir(parents=True)
+    path = job(definitions, BundleProgram="../outside", ProgramArguments=["JStackRuntime"])
+    assert inventory.inspect_job(path, "gui/501")["findings"] == ["unreadable_or_unsupported_definition"]
+
+
+def test_baseline_comparison_catches_same_named_script_changes(tmp_path, observed):
+    script = tmp_path / "watch.py"
+    script.write_text("before")
+    job(tmp_path, ProgramArguments=["/bin/echo", str(script)])
+    before = inventory.collect([(tmp_path, "gui/501")])
+    script.write_text("after")
+    after = inventory.collect([(tmp_path, "gui/501")])
+    changes = inventory.compare(before, after)["changes"]
+    assert len(changes) == 1
+    assert changes[0]["fields"] == ["scripts"]
+
+
+def test_baseline_does_not_treat_a_pid_change_as_persistence_drift(tmp_path, observed):
+    job(tmp_path, ProgramArguments=["/bin/echo"])
+    before = inventory.collect([(tmp_path, "gui/501")])
+    after = inventory.collect([(tmp_path, "gui/501")])
+    after["services"][0]["launchd"]["pid"] = "999"
+    assert inventory.compare(before, after)["changes"] == []

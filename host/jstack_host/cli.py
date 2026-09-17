@@ -979,6 +979,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--services", action="store_true",
                    help="read-only startup service ownership and signature inventory")
     p.add_argument("--json", action="store_true", help="JSON service inventory (with --services)")
+    p.add_argument("--service-baseline", type=_path, help="compare services with an explicitly reviewed inventory JSON")
     p.set_defaults(fn=_cmd_doctor)
 
     p = sub.add_parser("serve", help="run the host in this terminal (no LaunchAgent)")
@@ -1135,7 +1136,12 @@ def _doctor() -> int:
 def _cmd_doctor(args) -> int:
     if args.services:
         from . import service_inventory
+        if args.service_baseline:
+            return service_inventory.report(as_json=args.json, baseline=args.service_baseline)
         return service_inventory.report(as_json=args.json)
+    if args.service_baseline:
+        print("--service-baseline requires --services", file=sys.stderr)
+        return 2
     if args.json:
         print("--json requires --services", file=sys.stderr)
         return 2
