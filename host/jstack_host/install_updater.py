@@ -24,6 +24,45 @@ from .update_macos import atomic_bytes, bundle_info, client_distribution
 LABEL = "com.jremote.updater"
 
 
+def repair_native(public_key: str, settings: dict, *, state_dir: Path | None,
+                  candidate_test: bool) -> dict:
+    """Observe an installed recovery owner without replacing trust or approval.
+
+    Initial provisioning and legacy cutover belong to the journaled installer.
+    Repeating the old bootstrap command must never recreate its LaunchAgent.
+    """
+    from . import app_services
+    from .update_app import control
+    state_value = settings["environment"].get("JREMOTE_STATE_DIR")
+    if not state_value or not Path(state_value).is_absolute():
+        raise ValueError("signed updater requires an explicit installed state directory")
+    state = Path(state_value)
+    if state_dir is not None and state_dir.resolve() != state.resolve():
+        raise ValueError("updater repair cannot change the installed host identity")
+    owner_value = settings.get("services_app")
+    if not owner_value or not Path(owner_value).is_absolute():
+        raise ValueError("signed recovery owner is absent; use the signed installer")
+    owner = Path(owner_value)
+    app_services.verify(owner, "live.jstack.hub.services")
+    config_path = state / "updates/config.json"
+    configuration = json.loads(config_path.read_text()) if config_path.exists() else {}
+    if configuration.get("public_key") != public_key:
+        raise ValueError("updater trust is absent or different; use explicit installer trust provisioning")
+    if (configuration.get("service_model") != "app" or
+            configuration.get("menubar_path") != settings["app"] or
+            configuration.get("local_url") != f"http://127.0.0.1:{settings['port']}" or
+            configuration.get("host_capability") != settings.get("host_capability") or
+            configuration.get("services_app") != str(owner)):
+        raise ValueError("updater does not match the signed installation; use the migration installer")
+    if bool(configuration.get("candidate_test", False)) != candidate_test:
+        raise ValueError("updater repair cannot change release-channel trust")
+    observed = control(owner, "status").get("updater")
+    if observed not in {"enabled", "requires_approval", "not_registered"}:
+        raise ValueError("cannot observe signed updater approval")
+    return {"machine": configuration["machine"], "state_dir": str(state),
+            "supervisor": str(owner), "status": observed}
+
+
 def stage_runtime(package: Path, root: Path) -> Path:
     """Keep the bootstrap's exact source identity beside its copied package."""
     from . import sourcestamp
@@ -50,6 +89,13 @@ def bootstrap(public_key: str, *, state_dir: Path | None = None, load=True,
               candidate_test=False) -> dict:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key, validate=True))
+    from . import app_services, service_settings
+    settings = service_settings.read()
+    if settings:
+        return repair_native(public_key, settings, state_dir=state_dir,
+                             candidate_test=candidate_test)
+    if app_services.bundled():
+        raise ValueError("signed installation settings are absent; use the signed installer")
     install_host.adopt_installed_environment()
     if state_dir is not None:
         os.environ["JREMOTE_STATE_DIR"] = str(state_dir)

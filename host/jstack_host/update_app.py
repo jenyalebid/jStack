@@ -42,15 +42,43 @@ class AppBackend(MacBackend):
             return transaction.get("services", {}).get("menu", "enabled") == "enabled"
         return record["was_running"]
 
+    def _host_required(self, job: dict) -> bool:
+        return job["transaction"]["services"]["host"] == "enabled"
+
     def verify(self, job: dict) -> bool:
         if not super().verify(job):
             return False
         try:
             observed = self._statuses(Path(self.config["menubar_path"]))
-            return all((observed[role] == "enabled") == (expected == "enabled")
-                       for role, expected in job["transaction"]["services"].items())
+            if any(observed[role] != expected
+                   for role, expected in job["transaction"]["services"].items()):
+                return False
+            if not self._host_required(job):
+                from .app_services import specification
+                from .install_host import is_loaded
+                _, _, label = specification(Path(self.config["menubar_path"]), self.config, "host")
+                if is_loaded(label):
+                    return False
+            return True
         except (OSError, ValueError, KeyError, subprocess.SubprocessError):
             return False
+
+    def observe(self, job: dict) -> dict:
+        result = super().observe(job)
+        try:
+            result["services"] = self._statuses(Path(self.config["menubar_path"]))
+            if job.get("transaction") and not self._host_required(job):
+                # Installed and stopped is distinct from a running release.
+                # Report completion only after checking artifacts and OFF now.
+                result["verified"] = (bool(job.get("verified")) and
+                                      job.get("state") in {"current", "verifying"} and self.verify(job))
+                if result["verified"]:
+                    result["release"] = job["release"]
+                result["host_running"] = False if result["verified"] else None
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            result["verified"] = False
+            result["services"] = {"error": "could not observe service approvals"}
+        return result
 
     def activate_runtime(self, job: dict) -> bool:
         # The recovery application's sealed modules must never be redirected
@@ -163,6 +191,12 @@ class AppBackend(MacBackend):
         # If interrupted between renames there may be no Hub at all. Recovery
         # still runs from its independent bundle and can put the old one back.
         current = self._statuses(app) if app.exists() else {}
+        if not app.exists() and self.config.get("host_capability"):
+            from .app_services import specification
+            owner, capability, _ = specification(app, self.config, "host")
+            current = {"host": control(owner, "status")[capability], "menu": "not_registered"}
+            if current["host"] not in {"enabled", "requires_approval", "not_registered"}:
+                raise releases.ReleaseError("cannot observe embedded owner during recovery")
         if current:
             self._stop_services(app, current)
         for kind, record in transaction["apps"].items():

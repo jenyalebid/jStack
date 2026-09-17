@@ -378,6 +378,26 @@ class MacBackend:
                 raise releases.ReleaseError("refusing to remove an unexpected recovery bundle")
             shutil.rmtree(backup)
 
+    def _host_required(self, job: dict) -> bool:
+        return True
+
+    def _verify_host(self, job: dict) -> bool:
+        token = Path(self.config["token_path"]).read_text().strip()
+        with httpx.Client(timeout=5, trust_env=False) as client:
+            base = self.config["local_url"] + "/api/jremote/v1"
+            headers = {"Authorization": "Bearer " + token}
+            response = client.get(base + "/host", headers=headers)
+            response.raise_for_status()
+            identity = response.json()
+            source = identity.get("source", {})
+            if (identity["host_id"] != self.config["machine"] or
+                    source.get("release") != job["release"] or source.get("dirty") or
+                    source.get("sha") != job["envelope"]["manifest"]["sources"]["stack"]):
+                return False
+            response = client.get(base + "/sessions/active", headers=headers)
+            response.raise_for_status()
+            return isinstance(response.json().get("sessions"), list)
+
     def verify(self, job: dict) -> bool:
         try:
             from . import update_plugins
@@ -385,22 +405,8 @@ class MacBackend:
             expected = job["envelope"]["manifest"]["components"]["stack"]["version"]
             if any(value["version"] != expected for value in plugins.values()):
                 return False
-            token = Path(self.config["token_path"]).read_text().strip()
-            with httpx.Client(timeout=5, trust_env=False) as client:
-                base = self.config["local_url"] + "/api/jremote/v1"
-                headers = {"Authorization": "Bearer " + token}
-                response = client.get(base + "/host", headers=headers)
-                response.raise_for_status()
-                identity = response.json()
-                source = identity.get("source", {})
-                if (identity["host_id"] != self.config["machine"] or
-                        source.get("release") != job["release"] or source.get("dirty") or
-                        source.get("sha") != job["envelope"]["manifest"]["sources"]["stack"]):
-                    return False
-                response = client.get(base + "/sessions/active", headers=headers)
-                response.raise_for_status()
-                if not isinstance(response.json().get("sessions"), list):
-                    return False
+            if self._host_required(job) and not self._verify_host(job):
+                return False
             for kind, app in job["transaction"]["apps"].items():
                 target = Path(app["target"])
                 self._check_app(target, job["envelope"]["manifest"]["components"][kind], kind)

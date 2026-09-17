@@ -1,6 +1,80 @@
 import json
+import base64
+
+import pytest
 
 from jstack_host import cli, install_updater, sourcestamp
+
+
+@pytest.fixture
+def native_updater(tmp_path, monkeypatch):
+    from jstack_host import app_services, service_settings, update_app
+    public = base64.b64encode(bytes(range(32))).decode()
+    state = tmp_path / "state"
+    settings = {"schema": 1, "app": str(tmp_path / "Hub.app"), "port": 9345,
+                "services_app": str(tmp_path / "Services.app"),
+                "environment": {"JREMOTE_STATE_DIR": str(state)}}
+    config = {"public_key": public, "service_model": "app", "machine": "existing-machine",
+              "menubar_path": settings["app"], "services_app": settings["services_app"],
+              "local_url": "http://127.0.0.1:9345", "client_managed": False}
+    path = state / "updates/config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(config))
+    monkeypatch.setattr(service_settings, "read", lambda: settings)
+    monkeypatch.setattr(app_services, "verify", lambda *args: None)
+    monkeypatch.setattr(update_app, "control", lambda *args: {"updater": "enabled"})
+    monkeypatch.setattr(install_updater.install_host, "adopt_installed_environment",
+                        lambda: pytest.fail("native repair must precede legacy bootstrap"))
+    return public, settings, path
+
+
+@pytest.mark.parametrize("status", ["enabled", "requires_approval", "not_registered"])
+def test_native_bootstrap_preserves_trust_distribution_and_disabled_choice(native_updater, monkeypatch, status):
+    from jstack_host import update_app
+    public, settings, path = native_updater
+    original = path.read_bytes()
+    calls = []
+
+    def control(*args):
+        calls.append(args)
+        return {"updater": status}
+
+    monkeypatch.setattr(update_app, "control", control)
+    result = install_updater.bootstrap(public)
+    assert result["status"] == status
+    assert result["machine"] == "existing-machine"
+    assert path.read_bytes() == original
+    assert len(calls) == 1 and calls[0][1:] == ("status",)
+
+
+@pytest.mark.parametrize("change", ["public_key", "service_model", "menubar_path", "local_url", "services_app"])
+def test_native_bootstrap_rejects_mismatched_installation(native_updater, change):
+    public, _, path = native_updater
+    config = json.loads(path.read_text())
+    config[change] = "different"
+    path.write_text(json.dumps(config))
+    original = path.read_bytes()
+    with pytest.raises(ValueError):
+        install_updater.bootstrap(public)
+    assert path.read_bytes() == original
+
+
+def test_native_bootstrap_cannot_retarget_state_or_channel(native_updater, tmp_path):
+    public, _, _ = native_updater
+    with pytest.raises(ValueError, match="identity"):
+        install_updater.bootstrap(public, state_dir=tmp_path / "other")
+    with pytest.raises(ValueError, match="trust"):
+        install_updater.bootstrap(public, candidate_test=True)
+
+
+def test_unconfigured_signed_updater_never_bootstraps_legacy(monkeypatch):
+    from jstack_host import app_services, service_settings
+    monkeypatch.setattr(service_settings, "read", lambda: {})
+    monkeypatch.setattr(app_services, "bundled", lambda: True)
+    monkeypatch.setattr(install_updater.install_host, "adopt_installed_environment",
+                        lambda: pytest.fail("legacy bootstrap is forbidden"))
+    with pytest.raises(ValueError, match="signed installer"):
+        install_updater.bootstrap(base64.b64encode(bytes(range(32))).decode())
 
 
 def test_bootstrap_preserves_release_identity_and_loaded_fingerprint(tmp_path, monkeypatch):
