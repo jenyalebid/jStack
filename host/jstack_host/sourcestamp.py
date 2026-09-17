@@ -76,6 +76,8 @@ def capture() -> dict:
                           dirty=data.get("package_sha256") != fingerprint(_PKG))
             if data.get("version"):
                 _stamp["version"] = data["version"]
+            if data.get("build"):
+                _stamp["build"] = data["build"]
     return dict(_stamp)
 
 

@@ -17,6 +17,23 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from jstack_host import acceptance, publish_release, release_manifest as releases
 
 
+def test_build_reservations_are_unique_and_survive_failed_builds(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    assert publish_release.allocate_build(tmp_path, 71) == 72
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        numbers = list(pool.map(lambda _: publish_release.allocate_build(tmp_path, 71), range(16)))
+    assert sorted(numbers) == list(range(73, 89))
+    assert publish_release.allocate_build(tmp_path, 71) == 89
+    assert publish_release.allocate_build(tmp_path, 100) == 101
+
+
+def test_corrupt_build_counter_refuses_identity_reuse(tmp_path):
+    (tmp_path / "build-number.json").write_text("broken")
+    with pytest.raises(ValueError):
+        publish_release.allocate_build(tmp_path, 71)
+
+
 @pytest.fixture
 def candidate(tmp_path):
     """A signed, unpromoted candidate and its artifacts on disk."""

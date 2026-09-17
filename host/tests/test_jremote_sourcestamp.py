@@ -8,6 +8,7 @@ bytes the process is not running), and `dirty` covers only the served package
 """
 
 import subprocess
+import json
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,18 @@ def test_the_stamp_names_the_loaded_commit(checkout):
     assert stamp["dirty"] is False
     assert Path(stamp["root"]).resolve() == repo.resolve()
     assert sourcestamp.describe(stamp) == stamp["sha"][:12]
+
+
+def test_packaged_identity_reports_build_and_exact_source(checkout):
+    _, pkg = checkout
+    identity = {"sha": "a" * 40, "release": "72-aaaaaaaa", "version": "0.69.3",
+                "build": 72, "package_sha256": sourcestamp.fingerprint(pkg)}
+    (pkg.parent / "release-identity.json").write_text(json.dumps(identity))
+    stamp = sourcestamp.capture()
+    assert stamp["build"] == 72
+    assert stamp["version"] == "0.69.3"
+    assert stamp["sha"] == "a" * 40
+    assert stamp["dirty"] is False
 
 
 def test_captured_once_the_tree_moving_on_does_not_move_the_stamp(checkout):

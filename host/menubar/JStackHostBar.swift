@@ -589,6 +589,12 @@ struct UpdateSource: Decodable {
     var dirty: Bool?
     var version: String?
     var release: String?
+    var build: Int?
+
+    var displayVersion: String {
+        guard let version else { return "Version not reported" }
+        return build.map { "\(version) (\($0))" } ?? version
+    }
 }
 
 struct UpdateObservation: Decodable {
@@ -1898,7 +1904,7 @@ final class StatusController: NSObject {
         infoWindow.render(HostInfoForm(
             machine: Machine.name,
             status: state.isUp ? (state.identity?.mode?.isManaged == true ? "Running · Managed Mac" : "Running") : "Not running",
-            version: source?.version ?? "Version not reported",
+            version: source?.displayVersion ?? "Version not reported",
             source: source?.sha,
             app: InfoAppSnapshot.read(),
             updateStatus: updateError != nil ? "Could not check for updates"
