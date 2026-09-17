@@ -185,3 +185,80 @@ def test_a_plan_that_is_not_marked_disposable_is_refused(runner, tmp_path, candi
     with pytest.raises(SystemExit) as exit_code:
         runner.main()
     assert exit_code.value.code == 2
+
+
+@pytest.mark.parametrize("role,text,holders,passes", [
+    ("assistant", "accepted abcdef12", [{"pid": 11, "started": 10}], True),
+    ("user", "accepted abcdef12", [{"pid": 11, "started": 10}], False),
+    ("assistant", "old output", [{"pid": 11, "started": 10}], False),
+    ("assistant", "accepted abcdef12", [{"pid": 11, "started": 99}], False),
+])
+def test_new_input_requires_fresh_assistant_output_from_same_process(
+        runner, monkeypatch, role, text, holders, passes):
+    from types import SimpleNamespace
+    monkeypatch.setattr(runner.uuid, "uuid4", lambda: SimpleNamespace(hex="abcdef12"))
+    ticks = iter([0, 1, 301])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+
+    class Guest:
+        def tool_call(self, *args):
+            if "--after" not in args:
+                return {"session": "sid", "cursor": 4, "holders": [{"pid": 11, "started": 10}]}
+            assert args[-1] == "4"
+            return {"session": "sid", "cursor": 5, "holders": holders,
+                    "messages": [{"role": role, "text": text}]}
+
+        def call(self, path, body, **kwargs):
+            assert path == "/sessions/sid/input"
+            return {"status": 200, "body": '{"ok":true}'}
+
+    if passes:
+        assert runner.send_to_session(Guest(), "sid")["marker"] == "abcdef12"
+    else:
+        with pytest.raises(runner.AcceptanceFailure):
+            runner.send_to_session(Guest(), "sid")
+
+
+def test_unrelated_process_cannot_prove_a_new_session(runner, monkeypatch):
+    ticks = iter([0, 1, 241])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+
+    class Guest:
+        def tool_call(self, action, *args, **kwargs):
+            if action == "spawn":
+                return {"session": "wanted"}
+            return {"session": "other", "holders": [{"pid": 1, "started": 1}]}
+
+    with pytest.raises(runner.AcceptanceFailure, match="identified provider"):
+        runner.new_session(Guest())
+
+
+def test_fresh_install_refuses_existing_menu_before_any_write(runner, candidate):
+    class Guest:
+        name = "fresh"
+        def sh(self, command):
+            assert "for p in" in command
+            return "/Applications/JStack Host.app"
+
+    with pytest.raises(runner.AcceptanceFailure, match="not pristine"):
+        runner.install_candidate(Guest(), candidate, fresh=True)
+
+
+def test_candidate_installer_preserves_errors_and_uses_registered_menu(runner, candidate, monkeypatch):
+    commands = []
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    class Guest:
+        name = "fresh"
+        def sh(self, command, **kwargs):
+            commands.append(command)
+            return ""
+        def copy(self, *args):
+            pass
+
+    runner.install_candidate(Guest(), candidate, fresh=True)
+    assert not any("| /usr/bin/tail" in command for command in commands)
+    assert any("ProgramArguments" in command and "app.parent" in command for command in commands)
+    assert not any("ditto -x -k" in command and "~/Applications" in command for command in commands)
+    assert any("--no-app --no-menubar" in command for command in commands)

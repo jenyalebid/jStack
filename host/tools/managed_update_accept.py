@@ -319,9 +319,11 @@ def session_survival(journey, fleet: Fleet, candidate: Candidate) -> None:
     session = new_session(guest)
     journey.observe("session_pid", {"session": session["session"], "pid": session["pid"]})
     update_to_candidate(fleet, guest, machine, candidate)
-    alive = guest.sh(f"/bin/ps -o pid= -p {int(session['pid'])} || true").strip()
-    expect(alive, f"session process {session['pid']} did not survive the update")
-    journey.observe("surviving_pid", {"pid": session["pid"], "after": alive})
+    after = guest.tool_call("session-proof", "--session", session["session"])
+    expect(after.get("session") == session["session"] and
+           after.get("holders") == session["holders"],
+           "the same session-bound provider process did not survive the update")
+    journey.observe("surviving_pid", {"session": session["session"], "holders": after["holders"]})
     reply = send_to_session(guest, session["session"])
     journey.observe("new_output", reply)
     state = guest.installed()
@@ -416,23 +418,44 @@ JOURNEYS = {"fresh_install": fresh_install, "upgrade": upgrade, "fleet": fleet_j
 def install_candidate(guest: Guest, candidate: Candidate, *, fresh: bool = False) -> None:
     """Install exact candidate bytes through the shipped installer, not a copy of it."""
     if fresh:
-        existing = guest.sh("/bin/ls -d ~/.local/state/jremote 2>/dev/null || true").strip()
+        existing = guest.sh("for p in ~/.local/state/jremote ~/jStack "
+                            "~/Library/LaunchAgents/com.jremote.host.plist "
+                            "~/Library/LaunchAgents/com.jremote.menubar.plist "
+                            "~/Library/LaunchAgents/com.jremote.updater.plist "
+                            "~/Library/'Application Support'/jStack/'JStack Host.app' "
+                            "~/Applications/'JStack Host.app' /Applications/'JStack Host.app' "
+                            "~/Applications/jRemote.app /Applications/jRemote.app; "
+                            "do [ ! -e \"$p\" ] || printf '%s\\n' \"$p\"; done").strip()
         expect(not existing, f"{guest.name} is not pristine: {existing}")
-    remote = f"{GUEST_HOME}/accept-install"
-    guest.sh(f"/bin/rm -rf {remote} && /bin/mkdir -p {remote}")
+    remote = f"{GUEST_HOME}/accept-install-{uuid.uuid4().hex}"
+    guest.sh(f"/bin/mkdir {remote}")
     for name in ("stack", "menubar", "client"):
         guest.copy(candidate.file(name), f"{remote}/{candidate.file(name).name}")
-    guest.sh(f"/bin/rm -rf ~/jStack && /bin/mkdir -p ~/jStack && "
+    guest.sh(f"/bin/mkdir ~/jStack && "
              f"/usr/bin/tar -xzf {remote}/{candidate.file('stack').name} -C ~/jStack", timeout=900)
     guest.sh("cd ~/jStack && JSTACK_CHECKOUT=$HOME/jStack /bin/bash install.sh --yes "
-             "--no-claude 2>&1 | /usr/bin/tail -n 40", timeout=2400)
-    guest.sh(f"/usr/bin/ditto -x -k {remote}/{candidate.file('menubar').name} ~/Applications",
-             timeout=600)
+             "--no-claude --no-app --no-menubar", timeout=2400)
+    guest.sh("/bin/bash ~/jStack/host/menubar/install.sh", timeout=600)
+    # Resolve the actual installed bundle from launchd, never make a second
+    # registration under Applications. Keep the old bundle outside the .app
+    # namespace for recovery, then relaunch the exact signed candidate.
+    replace_menu = (
+        "import pathlib,plistlib,subprocess; "
+        "p=pathlib.Path.home()/'Library/LaunchAgents/com.jremote.menubar.plist'; "
+        "job=plistlib.loads(p.read_bytes()); "
+        "app=next(x for x in pathlib.Path(job['ProgramArguments'][0]).parents if x.suffix=='.app'); "
+        "domain='gui/'+str(__import__('os').getuid()); "
+        "subprocess.run(['/bin/launchctl','bootout',domain+'/'+job['Label']],check=True); "
+        "app.rename(app.with_suffix('.source-backup')); "
+        f"subprocess.run(['/usr/bin/ditto','-x','-k',{str(remote + '/' + candidate.file('menubar').name)!r},str(app.parent)],check=True); "
+        "subprocess.run(['/bin/launchctl','bootstrap',domain,str(p)],check=True)"
+    )
+    guest.sh(f"{shlex.quote(GUEST_PYTHON)} -c {shlex.quote(replace_menu)}", timeout=600)
     guest.sh(f"/usr/bin/ditto -x -k {remote}/{candidate.file('client').name} /Applications",
              timeout=600)
-    guest.sh("/usr/bin/open -a /Applications/jRemote.app || true")
+    guest.sh("/usr/bin/open -a /Applications/jRemote.app")
     guest.sh(f"{shlex.quote(GUEST_PYTHON)} -m jstack_host.install_updater --candidate-test "
-             "2>&1 | /usr/bin/tail -n 20", timeout=600)
+             "", timeout=600)
     time.sleep(SETTLE)
 
 
@@ -483,24 +506,38 @@ def new_session(guest: Guest) -> dict:
     session = answer.get("session_id") or answer.get("session") or answer.get("id")
     expect(session, f"opening a session returned no identity: {answer}")
     deadline = time.monotonic() + 240
-    pid = ""
-    while time.monotonic() < deadline and not pid:
+    proof = {}
+    while time.monotonic() < deadline:
         time.sleep(SETTLE)
-        pid = guest.sh("/usr/bin/pgrep -f 'codex' | /usr/bin/head -n 1 || true").strip()
-    expect(pid, "the new session never started a provider process")
-    return {"session": session, "pid": int(pid.splitlines()[0])}
+        proof = guest.tool_call("session-proof", "--session", session)
+        if proof.get("session") == session and len(proof.get("holders", [])) == 1:
+            break
+    expect(proof.get("session") == session and len(proof.get("holders", [])) == 1,
+           "the new session never acquired exactly one identified provider")
+    return {"session": session, "pid": proof["holders"][0]["pid"], "holders": proof["holders"]}
 
 
 def send_to_session(guest: Guest, session: str) -> dict:
     """Input into the session that survived, and new output back out of it."""
     marker = uuid.uuid4().hex[:8]
-    answer = guest.call(f"/sessions/{session}/turn",
+    before = guest.tool_call("session-proof", "--session", session)
+    cursor = before["cursor"]
+    answer = guest.call(f"/sessions/{session}/input",
                         {"text": f"Reply with exactly: accepted {marker}"}, timeout=300)
     expect(answer["status"] == 200,
            f"the updated Mac refused new input: {answer['status']} {answer['body'][:200]}")
-    expect(marker in answer["body"] or len(answer["body"].strip()) > 0,
-           "the session produced no new output after the update")
-    return {"session": session, "marker": marker, "reply": answer["body"][-400:]}
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        proof = guest.tool_call("session-proof", "--session", session, "--after", str(cursor))
+        expect(proof.get("session") == session and proof["cursor"] >= cursor,
+               "session transcript identity or cursor changed")
+        expect(proof.get("holders") == before.get("holders") and len(proof.get("holders", [])) == 1,
+               "provider changed while checking resumed input")
+        for message in proof.get("messages", []):
+            if message.get("role") == "assistant" and marker in message.get("text", ""):
+                return {"session": session, "marker": marker, "reply": message["text"][-400:]}
+        time.sleep(SETTLE)
+    raise AcceptanceFailure("no new assistant reply contains the post-update marker")
 
 
 def denied(fleet: Fleet, leaf: Guest) -> dict:

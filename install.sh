@@ -543,6 +543,10 @@ if [ -d "$CHECKOUT/.git" ]; then
     else
         warn "left as-is at $(git -C "$CHECKOUT" log --oneline -1) — the tree has local changes or diverged"
     fi
+elif [ -f "$CHECKOUT/host/release-identity.json" ] && [ -f "$CHECKOUT/plugins/jstack/.claude-plugin/plugin.json" ]; then
+    # A publisher snapshot intentionally has no mutable git checkout. Keep
+    # those exact local bytes; never fetch main over a selected release.
+    ok "using the local release snapshot (no source checkout update)"
 elif [ -e "$CHECKOUT" ]; then
     die "$CHECKOUT exists and is not a git checkout — move it aside or pass --checkout DIR"
 else

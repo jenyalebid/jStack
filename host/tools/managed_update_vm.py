@@ -15,7 +15,9 @@ import sys
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["hub", "offer", "queue", "inventory", "enrol",
-                                           "adopt", "grant", "spawn", "probe", "call", "revoke"])
+                                           "adopt", "grant", "spawn", "probe", "call", "revoke", "session-proof"])
+    parser.add_argument("--session")
+    parser.add_argument("--after", type=int, default=0)
     parser.add_argument("--candidate", type=Path)
     parser.add_argument("--request", default="fixture-self-update")
     parser.add_argument("--target", default="self")
@@ -125,6 +127,24 @@ def main():
         return
     headers = {"Authorization": "Bearer " + Path(config["token_path"]).read_text().strip()}
     base = config["local_url"] + "/api/jremote/v1/updates"
+    if args.action == "session-proof":
+        import psutil
+        import re
+        from jstack_host import board
+        if not re.fullmatch(r"[a-f0-9-]{32,40}", args.session or ""):
+            parser.error("session-proof requires a session identity")
+        result = httpx.get(config["local_url"] + "/api/jremote/v1/sessions/" + args.session,
+                           headers=headers, timeout=args.timeout)
+        result.raise_for_status()
+        payload = result.json()
+        if payload.get("error"):
+            raise RuntimeError(payload["error"])
+        entries = payload.get("messages", [])
+        holders = [{"pid": pid, "started": psutil.Process(pid).create_time()}
+                   for pid in board.pids_holding(args.session)]
+        print(json.dumps({"session": args.session, "holders": holders,
+                          "cursor": len(entries), "messages": entries[args.after:]}))
+        return
     if args.action == "call":
         # One authenticated local request, answered with its status instead of
         # an exception: a refusal is an observation the caller needs to see.
