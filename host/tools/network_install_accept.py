@@ -24,7 +24,7 @@ def digest(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("prepare", "prepare-legacy", "prepare-existing", "legacy", "stage", "activate", "rollback", "uninstall", "verify", "verify-legacy"))
+    parser.add_argument("phase", choices=("prepare", "prepare-legacy", "prepare-existing", "legacy", "stage", "activate", "rollback", "uninstall", "verify", "verify-legacy", "acl"))
     parser.add_argument("--app", required=True, type=Path)
     parser.add_argument("--private-storage", required=True, type=Path)
     parser.add_argument("--case", default="initial")
@@ -106,7 +106,36 @@ def main():
     receipts.mkdir(parents=True, exist_ok=True)
     receipt = receipts / (args.phase + ".json")
     atomic_json(receipt, {"phase": args.phase, "passed": False, "transaction": request["transaction"]})
-    if args.phase == "legacy":
+    if args.phase == "acl":
+        import pwd
+        account = pwd.getpwuid(os.getuid()).pw_name
+        resource = installed / "Contents/Resources/services.json"
+        permission = f"user:{account} allow write"
+        run("sudo", "/bin/chmod", "+a", permission, str(resource))
+        try:
+            assert os.access(resource, os.W_OK), "fixture ACL did not grant write"
+            rejected = subprocess.run(["sudo", str(installed / "Contents/MacOS/JStackNetwork"), "--check"], capture_output=True).returncode != 0
+            assert rejected, "native runtime accepted writable ACL"
+        finally:
+            run("sudo", "/bin/chmod", "-a", permission, str(resource))
+        assert not os.access(resource, os.W_OK), "runtime ACL was not restored"
+        store = Path("/Library/PrivilegedHelperTools/.jstack-network")
+        before = run("sudo", "/bin/ls", "-1", str(store / "invocations"))
+        permission = f"user:{account} allow add_file,delete_child,search"
+        run("sudo", "/bin/chmod", "+a", permission, str(store))
+        try:
+            rejected = False
+            try:
+                approve(args.app, {"schema": 1, "action": "activate", "transaction": request["transaction"]}, root)
+            except ValueError:
+                rejected = True
+            assert rejected, "bootstrap accepted writable staging ACL"
+            assert before == run("sudo", "/bin/ls", "-1", str(store / "invocations")), "bootstrap reached executable staging"
+        finally:
+            run("sudo", "/bin/chmod", "-a", permission, str(store))
+        result = {"runtime_acl_rejected": True, "bootstrap_acl_rejected_before_copy": True,
+                  "test_acls_removed": True, "transaction": request["transaction"]}
+    elif args.phase == "legacy":
         assert request["legacy"] and not original.exists(), "refusing to replace a legacy definition"
         # This deliberately creates the old user-writable-code fixture. The
         # product installer never uses this legacy bootstrap path.
