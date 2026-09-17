@@ -56,7 +56,7 @@ usage: install.sh [options]
   --checkout DIR      where to clone jStack (default: ~/jStack)
   --no-scheduler      don't install the scheduler daemon (no recurring wakes)
   --no-claude         don't install Claude Code even if it is missing
-  --no-host           don't install the host (no remote access, no icon)
+  --no-host           use the client with another Hub; no local Hub or menu
   --no-menubar        install the host but not its menu bar icon
   --no-app            don't install the Mac app
   --help, -h          this
@@ -944,6 +944,14 @@ if [ "$HOST_INSTALLED" = "1" ] && [ "$APP_INSTALLED" = "1" ] && [ "$DRY_RUN" = "
         sed 's/^/  /' "$pair_log"
     fi
     rm -f "$pair_log"
+fi
+
+if [ "$WANT_HOST" = "0" ] && [ "$APP_INSTALLED" = "1" ] && [ "$DRY_RUN" = "0" ]; then
+    step "Connect jRemote to a Hub"
+    note "client installed; pairing required"
+    note "On the target Hub, choose Pair a Device."
+    note "In jRemote, choose Add a Mac and enter the Hub address and pairing code."
+    open -a jRemote || warn "open jRemote from Applications to finish pairing"
 fi
 
 # ── 11. the verdict ─────────────────────────────────────────────────────────
