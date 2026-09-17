@@ -24,12 +24,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=("prepare", "stage", "activate", "rollback", "uninstall", "verify"))
     parser.add_argument("--app", required=True, type=Path)
+    parser.add_argument("--private-storage", required=True, type=Path)
     parser.add_argument("--case", default="initial")
     args = parser.parse_args()
     assert re.fullmatch(r"[a-zA-Z0-9-]+", args.case), "invalid fixture case"
     assert run("/usr/sbin/sysctl", "-n", "hw.model").startswith("VirtualMac"), "VM only"
     assert os.getuid() != 0, "use the actual administrator prompt"
-    root = Path.home() / "Operations/Infrastructure/Credentials/network-installer-lab" / args.case
+    assert args.private_storage.is_absolute(), "private storage must be explicit and absolute"
+    root = args.private_storage / args.case
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     request_path = root / "stage.json"
     installed = Path("/Library/PrivilegedHelperTools/jStack Network.app")
