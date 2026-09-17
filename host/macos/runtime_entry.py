@@ -21,9 +21,11 @@ def main():
     # This runs before any host module binds state paths at import time.
     from jstack_host import service_settings
     config = service_settings.read() if role != "self-test" else {}
+    if role in ("host", "updater") and not config.get("environment", {}).get("JREMOTE_STATE_DIR"):
+        raise SystemExit("app-owned services require explicit installation state; refusing a second identity")
     if config:
         for key, value in config.get("environment", {}).items():
-            if not (key.startswith("JREMOTE_") or key in ("WG_PEER_DIR", "WG_ENDPOINT", "PATH")):
+            if not (key.startswith("JREMOTE_") or key in ("WG_PEER_DIR", "WG_ENDPOINT", "PATH", "JSTACK_ROOT")):
                 raise ValueError("unsupported service environment key")
             os.environ[key] = str(value)
         if role == "host":

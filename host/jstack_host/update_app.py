@@ -46,7 +46,7 @@ class AppBackend(MacBackend):
         if not super().verify(job):
             return False
         try:
-            observed = control(Path(self.config["menubar_path"]), "status")
+            observed = self._statuses(Path(self.config["menubar_path"]))
             return all((observed[role] == "enabled") == (expected == "enabled")
                        for role, expected in job["transaction"]["services"].items())
         except (OSError, ValueError, KeyError, subprocess.SubprocessError):
@@ -57,6 +57,14 @@ class AppBackend(MacBackend):
         # into a mutable source/dependency folder from a previous installer.
         return False
 
+    def _statuses(self, app: Path) -> dict:
+        observed = control(app, "status")
+        from .app_services import specification
+        owner, capability, _ = specification(app, self.config, "host")
+        if owner != app:
+            observed["host"] = control(owner, "status")[capability]
+        return observed
+
     def stage(self, manifest: dict, directory: Path) -> dict:
         from . import update_plugins
         stage = Path(tempfile.mkdtemp(prefix="app-stage-", dir=directory))
@@ -64,7 +72,7 @@ class AppBackend(MacBackend):
         stack.mkdir()
         safe_tar(directory / manifest["components"]["stack"]["file"], stack)
         app = Path(self.config["menubar_path"])
-        statuses = control(app, "status")
+        statuses = self._statuses(app)
         if set(statuses) != {"host", "menu"} or any(value not in {
                 "enabled", "requires_approval", "not_registered"} for value in statuses.values()):
             raise releases.ReleaseError("cannot observe current app service approvals")
@@ -101,21 +109,25 @@ class AppBackend(MacBackend):
 
     def _stop_services(self, app: Path, statuses: dict):
         from .install_host import wait_unloaded
+        from .app_services import specification
         for role in ("menu", "host"):
             if statuses[role] != "enabled":
                 continue
-            control(app, "unregister", role)
-            if not wait_unloaded(f"live.jstack.hub.{role}"):
+            owner, service, label = specification(app, self.config, role)
+            control(owner, "unregister", service)
+            if not wait_unloaded(label):
                 raise releases.ReleaseError(f"{role} service has not stopped")
 
     def _restore_services(self, app: Path, statuses: dict):
+        from .app_services import specification
         for role in ("host", "menu"):
             if statuses[role] != "enabled":
                 continue
-            current = control(app, "status")[role]
+            owner, service, _ = specification(app, self.config, role)
+            current = control(owner, "status")[service]
             if current == "requires_approval":
                 continue  # A later user denial takes precedence over the snapshot.
-            result = control(app, "register", role)
+            result = control(owner, "register", service)
             if result["status"] not in {"enabled", "requires_approval"}:
                 raise releases.ReleaseError(f"{role} service could not be restored")
 
@@ -123,7 +135,7 @@ class AppBackend(MacBackend):
         from . import update_plugins
         transaction = job["transaction"]
         app = Path(self.config["menubar_path"])
-        if control(app, "status") != transaction["services"]:
+        if self._statuses(app) != transaction["services"]:
             raise releases.ReleaseError("service approvals changed since staging")
         update_plugins.install(transaction["providers"], Path(transaction["stack"]))
         self._stop_services(app, transaction["services"])
@@ -150,7 +162,7 @@ class AppBackend(MacBackend):
         app = Path(self.config["menubar_path"])
         # If interrupted between renames there may be no Hub at all. Recovery
         # still runs from its independent bundle and can put the old one back.
-        current = control(app, "status") if app.exists() else {}
+        current = self._statuses(app) if app.exists() else {}
         if current:
             self._stop_services(app, current)
         for kind, record in transaction["apps"].items():

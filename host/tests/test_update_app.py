@@ -69,3 +69,18 @@ def test_disabled_menu_does_not_need_a_running_process(tmp_path):
     assert not backend._running_required("menubar", {}, {"services": {"menu": "requires_approval"}})
     assert backend._running_required("menubar", {}, {"services": {"menu": "enabled"}})
     assert backend.activate_runtime({"state": "current", "verified": True}) is False
+
+
+def test_embedded_host_stops_through_its_catalog_owner(monkeypatch, tmp_path):
+    from jstack_host import app_services
+    owner = tmp_path / "Services.app"
+    monkeypatch.setattr(app_services, "specification", lambda app, config, role:
+                        (owner, "dashboard", "live.jstack.automation.dashboard"))
+    calls = []
+    monkeypatch.setattr(update_app, "control", lambda *args: calls.append(args))
+    waited = []
+    monkeypatch.setattr(install_host, "wait_unloaded", lambda label: waited.append(label) or True)
+    backend = update_app.AppBackend(tmp_path, {})
+    backend._stop_services(tmp_path, {"host": "enabled", "menu": "not_registered"})
+    assert calls == [(owner, "unregister", "dashboard")]
+    assert waited == ["live.jstack.automation.dashboard"]

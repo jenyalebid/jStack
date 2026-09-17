@@ -9,8 +9,8 @@ import json
 from pathlib import Path
 import re
 
-TRIGGERS = {"KeepAlive", "RunAtLoad", "StartInterval", "StartCalendarInterval", "WatchPaths",
-            "ThrottleInterval", "ProcessType", "Nice", "ExitTimeOut", "AbandonProcessGroup"}
+TRIGGERS = {"KeepAlive", "RunAtLoad", "StartInterval", "StartCalendarInterval",
+            "ThrottleInterval", "ProcessType", "Nice", "ExitTimeOut", "AbandonProcessGroup", "LimitLoadToSessionType"}
 JOB_KEYS = TRIGGERS | {"Label", "Program", "ProgramArguments", "WorkingDirectory",
                        "EnvironmentVariables", "StandardOutPath", "StandardErrorPath"}
 
@@ -42,6 +42,37 @@ def validate(slug: str, job: dict):
         raise ValueError("invalid capability environment")
     if any("\x00" in arg for arg in argv):
         raise ValueError("invalid capability argument")
+    # Only public scheduling metadata goes into the notarized bundle. Paths,
+    # legacy identifiers, arguments and environment stay machine-local.
+    for key in ("RunAtLoad", "AbandonProcessGroup"):
+        if key in job and type(job[key]) is not bool:
+            raise ValueError("invalid boolean trigger")
+    for key in ("StartInterval", "ThrottleInterval", "ExitTimeOut", "Nice"):
+        if key in job and (type(job[key]) is not int or job[key] < (-20 if key == "Nice" else 0)):
+            raise ValueError("invalid numeric trigger")
+    if "ProcessType" in job and (not isinstance(job["ProcessType"], str) or job["ProcessType"] not in {"Standard", "Background", "Interactive", "Adaptive"}):
+        raise ValueError("invalid process type")
+    if "LimitLoadToSessionType" in job:
+        sessions = job["LimitLoadToSessionType"]
+        sessions = sessions if isinstance(sessions, list) else [sessions]
+        if not sessions or any(not isinstance(item, str) or item not in {"Aqua", "Background", "LoginWindow", "StandardIO", "System"} for item in sessions):
+            raise ValueError("invalid session type")
+    if "KeepAlive" in job and type(job["KeepAlive"]) is not bool:
+        keep = job["KeepAlive"]
+        if (not isinstance(keep, dict) or set(keep) - {"SuccessfulExit", "Crashed", "NetworkState"} or
+                any(type(value) is not bool for value in keep.values())):
+            raise ValueError("unsupported keepalive policy")
+    if "StartCalendarInterval" in job:
+        intervals = job["StartCalendarInterval"]
+        intervals = intervals if isinstance(intervals, list) else [intervals]
+        if not intervals:
+            raise ValueError("empty calendar trigger")
+        bounds = {"Minute": (0, 59), "Hour": (0, 23), "Day": (1, 31), "Weekday": (0, 7), "Month": (1, 12)}
+        for interval in intervals:
+            if (not isinstance(interval, dict) or not interval or set(interval) - bounds.keys() or
+                    any(type(value) is not int or not bounds[key][0] <= value <= bounds[key][1]
+                        for key, value in interval.items())):
+                raise ValueError("invalid calendar trigger")
 
 
 def definitions(catalog: dict) -> tuple[dict, dict]:
@@ -60,5 +91,5 @@ def definitions(catalog: dict) -> tuple[dict, dict]:
                           ProgramArguments=["JStackRuntime", "local", slug],
                           AssociatedBundleIdentifiers=["live.jstack.automation"])
         plists[label + ".plist"] = definition
-        manifest[slug] = {"plist": label + ".plist", "legacy_label": job["Label"], "job_sha256": digest(job)}
+        manifest[slug] = {"plist": label + ".plist", "job_sha256": digest(job)}
     return plists, manifest

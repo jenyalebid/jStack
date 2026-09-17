@@ -68,11 +68,25 @@ enum HostAgent {
     /// `environment()` below — that resolves by *reading this label's plist*,
     /// so sourcing the label from it would be circular.
     static let label: String = {
-        if appOwned { return "live.jstack.hub.host" }
+        if appOwned {
+            if let capability = serviceSettings()["host_capability"] as? String {
+                return "live.jstack.automation." + capability
+            }
+            return "live.jstack.hub.host"
+        }
         let env = ProcessInfo.processInfo.environment["JREMOTE_AGENT_LABEL"] ?? ""
         return env.isEmpty ? "com.jremote.host" : env
     }()
     static let defaultPort = 9090
+
+    static var serviceRole: String { serviceSettings()["host_capability"] as? String ?? "host" }
+    static var serviceController: URL {
+        if serviceSettings()["host_capability"] != nil,
+           let path = serviceSettings()["services_app"] as? String {
+            return URL(fileURLWithPath: path).appendingPathComponent("Contents/MacOS/JStackHub")
+        }
+        return Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/JStackHub")
+    }
 
     static var plistURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -1471,7 +1485,7 @@ enum HostControl {
 
     static func stop() {
         if HostAgent.appOwned {
-            run(Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/JStackHub").path, ["unregister", "host"])
+            _ = serviceAction("unregister")
             return
         }
         run("/bin/launchctl", ["bootout", "\(domain)/\(HostAgent.label)"])
@@ -1479,12 +1493,22 @@ enum HostControl {
 
     static func start() {
         if HostAgent.appOwned {
-            let answer = run(Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/JStackHub").path, ["register", "host"])
+            let answer = serviceAction("register")
             if answer.out.contains("requires_approval") { SMAppService.openSystemSettingsLoginItems() }
             return
         }
         run("/bin/launchctl", ["bootstrap", domain, HostAgent.plistURL.path])
         run("/bin/launchctl", ["kickstart", "-k", "\(domain)/\(HostAgent.label)"])
+    }
+
+    private static func serviceAction(_ action: String) -> (out: String, code: Int32) {
+        let controller = HostAgent.serviceController
+        let owner = controller.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let identifier = HostAgent.serviceSettings()["host_capability"] == nil ? "live.jstack.hub" : "live.jstack.hub.services"
+        let requirement = "=anchor apple generic and certificate leaf[subject.OU] = \"MZ95H77RQQ\" and identifier \"\(identifier)\""
+        let checked = run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R", requirement, owner.path])
+        guard checked.code == 0 else { return checked }
+        return run(controller.path, [action, HostAgent.serviceRole])
     }
 
     /// Where `jstack-host` is. The installer passes `--host-bin` on the command

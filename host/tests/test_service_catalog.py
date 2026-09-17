@@ -19,13 +19,17 @@ def test_catalog_keeps_launchd_triggers_without_exposing_arguments():
     assert record["RunAtLoad"] is True
     assert record["ProgramArguments"] == ["JStackRuntime", "local", "health"]
     assert "must-not-be-published" not in json.dumps([plists, manifest])
+    assert "old.example.health" not in json.dumps([plists, manifest])
     assert manifest["health"]["job_sha256"] == service_catalog.digest(definition)
 
 
 @pytest.mark.parametrize("changes", [{"UserName": "root"}, {"ProgramArguments": ["relative"]},
                                      {"WorkingDirectory": "relative"}, {"Sockets": {}},
                                      {"Label": None}, {"EnvironmentVariables": {"KEY": 3}},
-                                     {"StandardOutPath": "relative"}])
+                                     {"StandardOutPath": "relative"}, {"WatchPaths": ["/private/path"]},
+                                     {"KeepAlive": {"PathState": {"/private/path": True}}},
+                                     {"ProcessType": "private data"},
+                                     {"StartCalendarInterval": {"Hour": "private data"}}])
 def test_unknown_or_privileged_definitions_are_rejected(changes):
     with pytest.raises(ValueError):
         service_catalog.definitions({"health": job(**changes)})
@@ -57,3 +61,23 @@ def test_local_capabilities_refuse_root(monkeypatch, tmp_path):
     monkeypatch.setattr(local_service.os, "geteuid", lambda: 0)
     with pytest.raises(PermissionError):
         local_service.run(tmp_path, "health")
+
+
+def test_embedding_overlay_checks_hub_and_does_not_write_bytecode(monkeypatch, tmp_path):
+    from jstack_host import app_services, service_settings
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    app = tmp_path / "Hub.app"
+    (app / "Contents/Resources/packages").mkdir(parents=True)
+    definition = job(ProgramArguments=["/bin/sh", "-c", 'printf "%s\\n%s" "$PYTHONPATH" "$PYTHONDONTWRITEBYTECODE"'],
+                     EnvironmentVariables={"PYTHONPATH": "/approved/embedding"})
+    settings = tmp_path / ".local/state/jremote/automation-settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"health": definition}))
+    (tmp_path / "automation-catalog.json").write_text(json.dumps(service_catalog.definitions({"health": definition})[1]))
+    checked = []
+    monkeypatch.setattr(app_services, "verify", lambda path: checked.append(path))
+    monkeypatch.setattr(service_settings, "read", lambda: {"host_capability": "health", "app": str(app)})
+    assert local_service.run(tmp_path, "health") == 0
+    assert checked == [app]
+    output = (settings.parent / "logs/health.log").read_text()
+    assert output == str(app / "Contents/Resources/packages") + ":/approved/embedding\n1"
