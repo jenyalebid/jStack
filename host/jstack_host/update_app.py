@@ -101,9 +101,7 @@ class AppBackend(MacBackend):
         safe_tar(directory / manifest["components"]["stack"]["file"], stack)
         app = Path(self.config["menubar_path"])
         statuses = self._statuses(app)
-        if set(statuses) != {"host", "menu"} or any(value not in {
-                "enabled", "requires_approval", "not_registered"} for value in statuses.values()):
-            raise releases.ReleaseError("cannot observe current app service approvals")
+        self._validate_statuses(statuses)
         apps = {}
         for kind in ("menubar", "client"):
             if kind == "client" and client_distribution(Path(self.config["client_path"]), self.config) != "hub":
@@ -138,6 +136,7 @@ class AppBackend(MacBackend):
     def _stop_services(self, app: Path, statuses: dict):
         from .install_host import wait_unloaded
         from .app_services import specification
+        self._validate_statuses(statuses)
         for role in ("menu", "host"):
             if statuses[role] != "enabled":
                 continue
@@ -148,16 +147,25 @@ class AppBackend(MacBackend):
 
     def _restore_services(self, app: Path, statuses: dict):
         from .app_services import specification
+        self._validate_statuses(statuses)
         for role in ("host", "menu"):
             if statuses[role] != "enabled":
                 continue
             owner, service, _ = specification(app, self.config, role)
             current = control(owner, "status")[service]
+            if current not in {"enabled", "requires_approval", "not_registered"}:
+                raise releases.ReleaseError(f"cannot observe {role} service approval during recovery")
             if current == "requires_approval":
                 continue  # A later user denial takes precedence over the snapshot.
             result = control(owner, "register", service)
             if result["status"] not in {"enabled", "requires_approval"}:
                 raise releases.ReleaseError(f"{role} service could not be restored")
+
+    @staticmethod
+    def _validate_statuses(statuses: dict):
+        if set(statuses) != {"host", "menu"} or any(value not in {
+                "enabled", "requires_approval", "not_registered"} for value in statuses.values()):
+            raise releases.ReleaseError("cannot observe current app service approvals")
 
     def apply(self, job: dict):
         from . import update_plugins

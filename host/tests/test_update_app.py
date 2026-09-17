@@ -35,6 +35,34 @@ def test_apply_refuses_approval_race_before_stopping_anything(monkeypatch, tmp_p
         backend.apply({"transaction": {"services": {"host": "enabled", "menu": "enabled"}}})
 
 
+@pytest.mark.parametrize("status", ["unknown", "not_found", None])
+def test_recovery_never_registers_an_unobservable_service(monkeypatch, tmp_path, status):
+    calls = []
+
+    def control(app, action, role=None):
+        calls.append((action, role))
+        return {"host": status}
+
+    monkeypatch.setattr(update_app, "control", control)
+    backend = update_app.AppBackend(tmp_path, {})
+    with pytest.raises(ValueError, match="cannot observe"):
+        backend._restore_services(tmp_path, {"host": "enabled", "menu": "not_registered"})
+    assert calls == [("status", None)]
+
+
+@pytest.mark.parametrize("method", ["_stop_services", "_restore_services"])
+@pytest.mark.parametrize("statuses", [
+    {"host": "unknown", "menu": "enabled"},
+    {"host": "enabled"},
+    {"host": "enabled", "menu": "not_found"},
+])
+def test_incomplete_approval_snapshot_refuses_all_mutations(monkeypatch, tmp_path, method, statuses):
+    monkeypatch.setattr(update_app, "control", lambda *args: pytest.fail("must refuse before controls"))
+    backend = update_app.AppBackend(tmp_path, {})
+    with pytest.raises(ValueError, match="cannot observe"):
+        getattr(backend, method)(tmp_path, statuses)
+
+
 def test_stop_waits_for_the_real_job_to_disappear(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(update_app, "control", lambda *args: calls.append(args))
