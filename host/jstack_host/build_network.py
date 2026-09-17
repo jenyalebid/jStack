@@ -50,6 +50,9 @@ def build(stack: Path, source: Path, output: Path, version: str, config: dict | 
                 protection = Path(temporary) / "ProtectedPaths.swift"
                 protection.write_text(command(["git", "-C", str(stack), "show", f"{source_sha}:host/macos/ProtectedPaths.swift"]))
                 sources.append(str(protection))
+                addresses = Path(temporary) / "NetworkAddress.swift"
+                addresses.write_text(command(["git", "-C", str(stack), "show", f"{source_sha}:host/macos/NetworkAddress.swift"]))
+                sources.append(str(addresses))
             if filename == "Network.swift":
                 commands = Path(temporary) / "NetworkCommand.swift"
                 commands.write_text(command(["git", "-C", str(stack), "show", f"{source_sha}:host/macos/NetworkCommand.swift"]))

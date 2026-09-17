@@ -265,6 +265,7 @@ func restoreForwarding(_ value: Int, work: URL) throws {
 func stage(_ request: InstallRequest, at transaction: URL, work: URL) throws {
     guard !manager.fileExists(atPath: transaction.path), let source = request.candidate,
           source.hasPrefix("/"), let policy = request.policy, policy.owner != 0,
+          networkAddressPair(policy.address, policy.subnet),
           let jobs = request.legacy, Set(jobs.map(\.label)).count == jobs.count else { throw refuse("invalid or previously staged transaction") }
     for job in jobs { try checkLegacy(job, at: work, lifecycle: true) }
     if policy.active && jobs.contains(where: { !$0.loaded || $0.disabled }) {

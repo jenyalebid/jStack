@@ -116,20 +116,11 @@ func verifyBundle() throws {
     while let child = enumerator?.nextObject() as? URL { try rootProtected(child) }
 }
 
-func ipv4CIDR(_ value: String) -> Bool {
-    let parts = value.split(separator: "/", omittingEmptySubsequences: false)
-    guard parts.count == 2, let bits = Int(parts[1]), (1...32).contains(bits) else { return false }
-    let octets = parts[0].split(separator: ".", omittingEmptySubsequences: false)
-    return octets.count == 4 && octets.allSatisfy { item in
-        !item.isEmpty && item.allSatisfy(\.isNumber) && Int(item).map { (0...255).contains($0) } == true
-    }
-}
-
 func readPolicy() throws -> NetworkPolicy {
     try rootProtected(policyURL)
     let value = try JSONDecoder().decode(NetworkPolicy.self, from: Data(contentsOf: policyURL))
     guard value.configuration.hasPrefix("/"),
-          ipv4CIDR(value.address), ipv4CIDR(value.subnet),
+          networkAddressPair(value.address, value.subnet),
           value.nameFile.range(of: "^/var/run/wireguard/[a-zA-Z0-9.-]+$", options: .regularExpression) != nil else {
         throw NetworkFailure.invalid("invalid network policy")
     }

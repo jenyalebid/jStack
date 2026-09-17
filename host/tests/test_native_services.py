@@ -16,6 +16,7 @@ def test_native_service_compiles(tmp_path, filename, flags):
     sources = [str(source)]
     if filename in {"Network.swift", "NetworkInstall.swift"}:
         sources.append(str(source.parent / "ProtectedPaths.swift"))
+        sources.append(str(source.parent / "NetworkAddress.swift"))
     if filename == "Network.swift":
         sources.append(str(source.parent / "NetworkCommand.swift"))
     result = subprocess.run(["swiftc", *flags, "-O", "-o", str(tmp_path / "probe"), *sources],
