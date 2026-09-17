@@ -482,6 +482,12 @@ def revoke(device_id: str) -> bool:
     """Stamp the row and cut its live connections. False = nothing to do."""
     if not _store().revoke_device(device_id):
         return False
+    notify_revoked(device_id)
+    return True
+
+
+def notify_revoked(device_id: str) -> None:
+    """Wake streams after a revocation committed by this or another workflow."""
     with _watch_lock:
         waiting = list(_watchers.get(device_id, ()))
     for loop, event in waiting:
@@ -491,7 +497,6 @@ def revoke(device_id: str) -> bool:
         board_watch.poke()  # wakes the board SSE loops so they re-check now
     except Exception:  # noqa: BLE001 — a stream lingering a tick must not fail the revoke
         pass
-    return True
 
 
 async def wait_revoked(device_id: str) -> None:
