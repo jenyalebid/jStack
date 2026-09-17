@@ -310,11 +310,25 @@ class DefaultProfile:
         return ""
 
     def scheduler_dir(self) -> Path:
-        """jStack's scheduler home — `SCHEDULER_HOME`, else the plugin's own
-        default under `~/.claude/jstack`. `config/schedule.json` and
-        `state/scheduler/runs/` hang off it on every machine."""
+        """Legacy scheduler home; split directory accessors handle JSTACK_ROOT."""
         env = os.environ.get("SCHEDULER_HOME", "").strip()
-        return Path(env).expanduser() if env else HOME / ".claude" / "jstack" / "scheduler"
+        return Path(env).expanduser() if env else HOME / ".scheduler"
+
+    def scheduler_config_dir(self) -> Path:
+        if os.environ.get("SCHEDULER_CONFIG_DIR"):
+            return Path(os.environ["SCHEDULER_CONFIG_DIR"]).expanduser()
+        if "SCHEDULER_HOME" not in os.environ and os.environ.get("JSTACK_ROOT"):
+            return Path(os.environ.get("JSTACK_CONFIG_DIR") or
+                        str(Path(os.environ["JSTACK_ROOT"]).expanduser() / "Config")).expanduser()
+        return self.scheduler_dir() / "config"
+
+    def scheduler_state_dir(self) -> Path:
+        if os.environ.get("SCHEDULER_STATE_DIR"):
+            return Path(os.environ["SCHEDULER_STATE_DIR"]).expanduser()
+        if "SCHEDULER_HOME" not in os.environ and os.environ.get("JSTACK_ROOT"):
+            return Path(os.environ.get("JSTACK_STATE_DIR") or
+                        str(Path(os.environ["JSTACK_ROOT"]).expanduser() / "State")).expanduser() / "scheduler"
+        return self.scheduler_dir() / "state" / "scheduler"
 
     def spend_categories_path(self) -> Path:
         """Where a finer spend-category map may sit, in the state dir. The
@@ -685,6 +699,16 @@ def control_module() -> str:
 
 def scheduler_dir() -> Path:
     return profile().scheduler_dir()
+
+
+def scheduler_config_dir() -> Path:
+    fn = getattr(profile(), "scheduler_config_dir", None)
+    return fn() if fn else scheduler_dir() / "config"
+
+
+def scheduler_state_dir() -> Path:
+    fn = getattr(profile(), "scheduler_state_dir", None)
+    return fn() if fn else scheduler_dir() / "state" / "scheduler"
 
 
 def timeline_db() -> Path:

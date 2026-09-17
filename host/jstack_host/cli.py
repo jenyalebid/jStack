@@ -683,7 +683,8 @@ def _cmd_where(args) -> int:
     print(f"token        {hostenv.token_path()}")
     print(f"credentials  {hostenv.credentials_dir()}")
     print(f"agents       {hostenv.instance_root()}")
-    print(f"scheduler    {hostenv.scheduler_dir()}")
+    print(f"scheduler config {hostenv.scheduler_config_dir()}")
+    print(f"scheduler state  {hostenv.scheduler_state_dir()}")
     return 0
 
 

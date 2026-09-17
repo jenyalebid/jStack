@@ -163,3 +163,21 @@ def test_the_jstack_stores_resolve_from_their_own_overrides(root, tmp_path, monk
     assert hostenv.timeline_db() == tmp_path / "tl" / "timeline.db"
     assert hostenv.scheduler_dir() == tmp_path / "sched"
     assert hostenv.pings_db() is None
+
+
+def test_scheduler_split_paths_match_root_and_explicit_overrides(root, tmp_path, monkeypatch):
+    for name in ("SCHEDULER_HOME", "SCHEDULER_CONFIG_DIR", "SCHEDULER_STATE_DIR",
+                 "JSTACK_CONFIG_DIR", "JSTACK_STATE_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("JSTACK_ROOT", str(tmp_path / "stack-root"))
+    assert hostenv.scheduler_config_dir() == tmp_path / "stack-root/Config"
+    assert hostenv.scheduler_state_dir() == tmp_path / "stack-root/State/scheduler"
+    monkeypatch.setenv("JSTACK_STATE_DIR", str(tmp_path / "state"))
+    assert hostenv.scheduler_state_dir() == tmp_path / "state/scheduler"
+    monkeypatch.setenv("SCHEDULER_HOME", str(tmp_path / "legacy"))
+    assert hostenv.scheduler_config_dir() == tmp_path / "legacy/config"
+    assert hostenv.scheduler_state_dir() == tmp_path / "legacy/state/scheduler"
+    monkeypatch.setenv("SCHEDULER_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("SCHEDULER_STATE_DIR", str(tmp_path / "journal"))
+    assert hostenv.scheduler_config_dir() == tmp_path / "config"
+    assert hostenv.scheduler_state_dir() == tmp_path / "journal"

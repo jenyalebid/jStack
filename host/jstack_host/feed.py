@@ -617,7 +617,7 @@ def _job_labels() -> dict[str, dict]:
     """jobId → its registry entry. The registry holds only *current* jobs:
     a deleted job, and every `delete_after_run` one-shot by design, leaves run
     rows with nothing to join. Those render as unknown rather than blank."""
-    path = hostenv.scheduler_dir() / "config" / "schedule.json"
+    path = hostenv.scheduler_config_dir() / "schedule.json"
     try:
         raw = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
@@ -633,7 +633,7 @@ def _job_labels() -> dict[str, dict]:
 def index_runs(db: sqlite3.Connection, since_days: int = BACKFILL_DAYS) -> int:
     """Fold the scheduler's journal in — one append-only file per job, so the
     gate is the file's mtime and only recently-touched files are read."""
-    root = hostenv.scheduler_dir() / "state" / "scheduler" / "runs"
+    root = hostenv.scheduler_state_dir() / "runs"
     if not root.is_dir():
         return 0
     floor_epoch = time.time() - since_days * 86400

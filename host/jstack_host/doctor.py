@@ -182,8 +182,8 @@ def check_transcripts() -> dict:
 
 
 def check_scheduler() -> dict:
-    d = hostenv.scheduler_dir()
-    if not (d / "config" / "schedule.json").exists():
+    d = hostenv.scheduler_config_dir()
+    if not (d / "schedule.json").exists():
         return _check("scheduler", OK, f"no schedule at {d} yet — optional; "
                       "its journal feeds the Runs source of the Timeline")
     return _check("scheduler", OK, f"{d}")
