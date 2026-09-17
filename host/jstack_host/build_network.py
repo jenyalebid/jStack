@@ -40,6 +40,7 @@ def build(stack: Path, source: Path, output: Path, version: str, config: dict | 
     macos.mkdir(parents=True)
     resources.mkdir()
     for name, filename, flags in (("JStackHub", "ServiceControl.swift", []),
+                                   ("JStackNetworkInstaller", "NetworkInstall.swift", ["-parse-as-library"]),
                                    ("JStackNetwork", "Network.swift", ["-parse-as-library"])):
         with tempfile.TemporaryDirectory(prefix="jstack-native-") as temporary:
             native = Path(temporary) / filename
