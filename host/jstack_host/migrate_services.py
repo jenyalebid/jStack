@@ -42,8 +42,8 @@ def journal_settings(value: dict) -> Path:
 
 
 @contextmanager
-def exclusive():
-    root = migration_root()
+def exclusive(root: Path | None = None):
+    root = root or migration_root()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor = os.open(root / "migration.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:

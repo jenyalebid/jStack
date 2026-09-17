@@ -68,6 +68,8 @@ def main():
         from jstack_host.cli import main as run
     elif role == "install":
         from jstack_host.install_signed import main as run
+    elif role == "migrate":
+        from jstack_host.migrate_host import main as run
     elif role == "provision":
         from jstack_host.install_signed import provision as run
     elif role == "verify-install":
