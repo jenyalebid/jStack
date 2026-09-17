@@ -15,7 +15,8 @@ def main():
     assert subprocess.check_output(["/usr/sbin/sysctl", "-n", "hw.model"], text=True).startswith("VirtualMac")
     assert os.geteuid() != 0
     home = Path.home()
-    assert (home / "migration-receipts/rollback.json").exists(), "requires the restored released fixture"
+    rollback = home / "migration-receipts/rollback.json"
+    assert rollback.exists() and json.loads(rollback.read_text()).get("passed") is True, "requires the restored released fixture"
     from jstack_host import install_host
     path = install_host.plist_path()
     job = plistlib.loads(path.read_bytes())

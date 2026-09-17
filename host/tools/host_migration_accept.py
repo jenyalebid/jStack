@@ -21,7 +21,7 @@ def run(*args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=["baseline", "prepare", "apply", "verify", "rollback"])
+    parser.add_argument("phase", choices=["baseline", "legacy", "prepare", "apply", "verify", "rollback"])
     parser.add_argument("--embedded", action="store_true")
     args = parser.parse_args()
     assert run("/usr/sbin/sysctl", "-n", "hw.model").strip().startswith("VirtualMac")
@@ -41,6 +41,7 @@ def main():
     for component in manifest["components"].values():
         release_manifest.check_artifact(home / component["file"], component)
     receipt = {"phase": args.phase, "prior_release": manifest["release"]}
+    atomic_json(evidence / (args.phase + ".json"), {**receipt, "passed": False, "timestamp": time.time()})
     if args.phase == "baseline":
         assert not state.exists(), "baseline already provisioned"
         for app in (Path("/Applications/JStack Host.app"), Path("/Applications/jRemote.app")):
@@ -58,6 +59,14 @@ def main():
         bootstrap(public, state_dir=state, candidate_test=True)
         receipt["identity_hashes"] = {name: hashlib.sha256((state / name).read_bytes()).hexdigest()
                                       for name in ("host-id", "internal-token")}
+    elif args.phase == "legacy":
+        from jstack_host import service_settings
+        assert not service_settings.read()
+        for label in ("com.jremote.host", "com.jremote.menubar", "com.jremote.updater"):
+            assert install_host.is_loaded(label)
+        original = json.loads((evidence / "baseline.json").read_text())["identity_hashes"]
+        assert all(hashlib.sha256((state / name).read_bytes()).hexdigest() == digest for name, digest in original.items())
+        receipt["identity_preserved"] = True
     else:
         from jstack_host import migrate_host, service_settings
         root = home / "migration-private"
@@ -127,10 +136,10 @@ def main():
                 embedding = response.json()
                 assert embedding["profile"] == "embedding-lab"
                 assert embedding["state"] == str(state)
-                expected = str(home / "release76/host") if args.phase == "rollback" else "/Applications/jStack Hub.app/Contents/Resources/packages"
+                expected = str(home / "release76/host") if args.phase in {"legacy", "rollback"} else "/Applications/jStack Hub.app/Contents/Resources/packages"
                 assert embedding["package"].startswith(expected + "/")
                 receipt["embedding"] = embedding
-            if args.phase in {"baseline", "rollback"}:
+            if args.phase in {"baseline", "legacy", "rollback"}:
                 assert receipt["source"]["release"] == manifest["release"]
                 assert receipt["source"]["sha"] == manifest["sources"]["stack"]
     receipt.update(passed=True, timestamp=time.time())
