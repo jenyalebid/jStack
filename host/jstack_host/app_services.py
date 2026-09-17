@@ -3,6 +3,8 @@ from pathlib import Path
 import plistlib
 import json
 import re
+import hashlib
+import os
 
 from . import install_host
 from .update_app import control
@@ -67,10 +69,92 @@ def repair(configuration: dict, *, port: int, bind: str, state_dir: Path | None,
     return 0
 
 
-def uninstall(configuration: dict, out) -> int:
+def uninstall_all(configuration: dict, out) -> int:
+    """Remove every sealed user-service registration, retaining recovery data."""
+    if os.geteuid() == 0:
+        raise PermissionError("remove user registrations as the login user")
+    from . import service_settings
+    from .migrate_services import exclusive
+    from .update_supervisor import atomic_json
+    owners = [(Path(configuration["app"]), "live.jstack.hub"),
+              (Path(configuration["services_app"]), "live.jstack.hub.services")]
+    if owners[0][0].resolve() == owners[1][0].resolve():
+        raise ValueError("service owners must be independent bundles")
+    path = service_settings.path().with_name("uninstall-journal.json")
+    with exclusive():
+        records, identities = [], {}
+        for app, identifier in owners:
+            verify(app, identifier)
+            identities[str(app)] = hashlib.sha256((app / "Contents/_CodeSignature/CodeResources").read_bytes()).hexdigest()
+            catalog = json.loads((app / "Contents/Resources/services.json").read_text())
+            observed = control(app, "status")
+            if not isinstance(catalog, dict) or set(observed) != set(catalog):
+                raise ValueError("service ownership is unobservable")
+            required = {"host", "menu"} if identifier == "live.jstack.hub" else {"updater"}
+            if not required <= set(catalog):
+                raise ValueError("sealed service owner is incomplete")
+            for role, filename in catalog.items():
+                if (not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", role) or
+                        not isinstance(filename, str) or
+                        not re.fullmatch(r"live\.jstack\.[A-Za-z0-9_.-]+\.plist", filename)):
+                    raise ValueError("invalid sealed service definition")
+                definition = plistlib.loads((app / "Contents/Library/LaunchAgents" / filename).read_bytes())
+                label = filename.removesuffix(".plist")
+                if definition.get("Label") != label or observed[role] not in {
+                        "enabled", "requires_approval", "not_registered", "not_found"}:
+                    raise ValueError("service approval or definition is unobservable")
+                records.append({"app": str(app), "role": role, "label": label})
+        if len({r["label"] for r in records}) != len(records):
+            raise ValueError("service owners declare overlapping labels")
+        # Stop automatic update first, then the menu, then other capabilities.
+        records.sort(key=lambda r: (0 if r["role"] == "updater" else 1 if r["role"] == "menu" else 2, r["label"]))
+        if path.exists():
+            journal = json.loads(path.read_text())
+            if (journal.get("configuration") != configuration or journal.get("identities") != identities
+                    or journal.get("records") != records):
+                raise ValueError("service ownership changed during removal")
+        else:
+            journal = {"schema": 1, "configuration": configuration, "identities": identities,
+                       "records": records, "state": "removing", "attempted": [], "stopped": []}
+            atomic_json(path, journal)
+        # Re-observe even a completed journal: it is not evidence of current absence.
+        for record in records:
+            app, role, label = Path(record["app"]), record["role"], record["label"]
+            current = control(app, "status").get(role)
+            if current not in {"enabled", "requires_approval", "not_registered", "not_found"}:
+                raise ValueError("service approval became unobservable during removal")
+            if label not in journal["attempted"]:
+                journal["attempted"].append(label)
+            journal["state"] = "removing"
+            atomic_json(path, journal)
+            if current in {"enabled", "requires_approval"}:
+                control(app, "unregister", role)
+            if not install_host.wait_unloaded(label):
+                raise ValueError(f"{label} is still loaded")
+            if control(app, "status").get(role) not in {"not_registered", "not_found"}:
+                raise ValueError(f"{label} registration remains")
+            if label not in journal["stopped"]:
+                journal["stopped"].append(label)
+            atomic_json(path, journal)
+        for record in records:
+            if (control(Path(record["app"]), "status").get(record["role"]) not in {"not_registered", "not_found"}
+                    or not install_host.wait_unloaded(record["label"])):
+                raise ValueError("service ownership changed before removal completed")
+        journal["state"] = "unregistered"
+        atomic_json(path, journal)
+    print("All Hub and Services user registrations removed; bundles, Network and private data retained", file=out)
+    return 0
+
+
+def uninstall(configuration: dict, out, *, all_services: bool = False) -> int:
+    if all_services:
+        return uninstall_all(configuration, out)
     app = Path(configuration["app"])
     verify(app)
     statuses = observe(app, configuration)
+    if any(statuses.get(role) not in {"enabled", "requires_approval", "not_registered", "not_found"}
+           for role in ("menu", "host")):
+        raise ValueError("service approval is unobservable; refusing partial removal")
     for role in ("menu", "host"):
         owner, service, label = specification(app, configuration, role)
         if statuses[role] in {"enabled", "requires_approval"}:

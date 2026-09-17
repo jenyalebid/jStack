@@ -85,6 +85,20 @@ contains only scheduling metadata and definition digests. Migration records
 the chosen location and refuses to follow a changed location during apply or
 rollback; moving private configuration is a separate reviewed operation.
 
+### Removing user-service registrations
+
+`python -m jstack_host.install_host uninstall --all-services` explicitly
+unregisters the Hub and Services catalogs, including the updater and optional
+capabilities. Run it from an independent user Terminal. Both signatures,
+sealed definitions and approval observations are checked before any stop.
+The private `uninstall-journal.json` beside service settings records each
+attempt before unregister; repeating the command resumes after interruption
+and rechecks actual registration absence. A changed owner requires review.
+
+This command retains application bundles, Network, pairing and private data.
+It is the user-registration portion of product removal, not a full product
+uninstaller. Signed GUI-VM qualification of this new command remains pending.
+
 ### Existing host cutover
 
 The sealed runtime's `migrate prepare --request PATH --journal-root PATH`

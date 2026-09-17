@@ -570,12 +570,14 @@ def install(*, port: int = DEFAULT_PORT, bind: str = DEFAULT_BIND,
     return 0
 
 
-def uninstall(*, label: str = LABEL, out=None) -> int:
+def uninstall(*, label: str = LABEL, out=None, all_services: bool = False) -> int:
     out = out or sys.stdout
     from . import app_services, service_settings
     configuration = service_settings.read()
     if configuration:
-        return app_services.uninstall(configuration, out)
+        return app_services.uninstall(configuration, out, all_services=all_services)
+    if all_services:
+        raise ValueError("all-service removal requires signed installation settings")
     if app_services.bundled():
         raise ValueError("signed installation settings are absent; refusing legacy service removal")
     _launchctl("bootout", f"{_domain()}/{label}")
@@ -668,14 +670,18 @@ def main(argv: list[str] | None = None) -> int:
                     help="override where this host keeps its state")
     ap.add_argument("--force", action="store_true",
                     help="install even if the port is already answering")
+    ap.add_argument("--all-services", action="store_true",
+                    help="uninstall all signed Hub/Services user registrations; retain bundles and data")
     args = ap.parse_args(argv)
+    if args.all_services and args.action != "uninstall":
+        ap.error("--all-services requires uninstall")
 
     state = Path(args.state_dir).expanduser() if args.state_dir else None
     if args.action == "install":
         return install(port=args.port, bind=args.bind, label=args.label,
                        state_dir=state, force=args.force)
     if args.action == "uninstall":
-        return uninstall(label=args.label)
+        return uninstall(label=args.label, all_services=args.all_services)
     adopt_installed_environment(plist_path(args.label))
     if state is not None:
         os.environ["JREMOTE_STATE_DIR"] = str(state)

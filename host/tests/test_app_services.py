@@ -71,3 +71,82 @@ def test_embedding_host_uses_its_signed_capability_owner(monkeypatch, installed,
     installed["host_capability"] = "not-in-catalog"
     with pytest.raises(ValueError, match="sealed capability"):
         app_services.specification(Path(installed["app"]), installed, "host")
+
+
+@pytest.fixture
+def complete_install(installed, monkeypatch, tmp_path):
+    import plistlib
+    from pathlib import Path
+    from jstack_host import migrate_services
+    installed["services_app"] = str(tmp_path / "Services.app")
+    states, calls = {}, []
+    for key, definitions in (("app", {"host": "live.jstack.hub.host", "menu": "live.jstack.hub.menu"}),
+                             ("services_app", {"updater": "live.jstack.hub.updater", "worker": "live.jstack.automation.worker"})):
+        app = Path(installed[key])
+        for directory in ("Resources", "_CodeSignature", "Library/LaunchAgents"):
+            (app / "Contents" / directory).mkdir(parents=True)
+        (app / "Contents/_CodeSignature/CodeResources").write_bytes(key.encode())
+        (app / "Contents/Resources/services.json").write_text(json.dumps({r: label + ".plist" for r, label in definitions.items()}))
+        for label in definitions.values():
+            (app / "Contents/Library/LaunchAgents" / (label + ".plist")).write_bytes(plistlib.dumps({"Label": label}))
+        states[str(app)] = dict.fromkeys(definitions, "enabled")
+    path = tmp_path / "service-settings.json"
+    monkeypatch.setattr(service_settings, "path", lambda: path)
+    monkeypatch.setattr(migrate_services, "migration_root", lambda: tmp_path / "migrations")
+
+    def control(app, action, role=None):
+        if action == "status":
+            return dict(states[str(app)])
+        assert action == "unregister"
+        calls.append(role)
+        states[str(app)][role] = "not_registered"
+        return {"status": "not_registered"}
+
+    monkeypatch.setattr(app_services, "control", control)
+    monkeypatch.setattr(install_host, "wait_unloaded", lambda label: True)
+    return states, calls, path.with_name("uninstall-journal.json")
+
+
+def test_all_service_removal_resumes_after_unregister(installed, complete_install, monkeypatch):
+    states, calls, path = complete_install
+    states[installed["services_app"]]["worker"] = "requires_approval"
+    monkeypatch.setattr(install_host, "wait_unloaded", lambda label: False)
+    with pytest.raises(ValueError, match="still loaded"):
+        install_host.uninstall(all_services=True, out=io.StringIO())
+    journal = json.loads(path.read_text())
+    assert journal["attempted"] == ["live.jstack.hub.updater"] and journal["stopped"] == []
+    assert path.stat().st_mode & 0o777 == 0o600
+    monkeypatch.setattr(install_host, "wait_unloaded", lambda label: True)
+    assert install_host.uninstall(all_services=True, out=io.StringIO()) == 0
+    assert calls == ["updater", "menu", "worker", "host"]
+    assert json.loads(path.read_text())["state"] == "unregistered"
+    assert len(json.loads(path.read_text())["stopped"]) == 4
+    assert install_host.uninstall(all_services=True, out=io.StringIO()) == 0
+    assert len(calls) == 4
+
+
+def test_unknown_recovery_ownership_refuses_before_stopping_menu(installed, complete_install):
+    states, calls, path = complete_install
+    states[installed["services_app"]]["worker"] = "unknown"
+    with pytest.raises(ValueError, match="unobservable"):
+        install_host.uninstall(all_services=True, out=io.StringIO())
+    assert not calls and not path.exists()
+
+
+def test_changed_sealed_owner_refuses_resumed_removal(installed, complete_install, monkeypatch):
+    from pathlib import Path
+    _, calls, _ = complete_install
+    monkeypatch.setattr(install_host, "wait_unloaded", lambda label: False)
+    with pytest.raises(ValueError, match="still loaded"):
+        install_host.uninstall(all_services=True, out=io.StringIO())
+    (Path(installed["services_app"]) / "Contents/_CodeSignature/CodeResources").write_bytes(b"new signed owner")
+    with pytest.raises(ValueError, match="ownership changed"):
+        install_host.uninstall(all_services=True, out=io.StringIO())
+    assert calls == ["updater"]
+
+
+def test_unknown_host_refuses_basic_uninstall_before_menu(installed, monkeypatch):
+    monkeypatch.setattr(app_services, "control", lambda *args: {"menu": "enabled", "host": "unknown"})
+    monkeypatch.setattr(install_host, "wait_unloaded", lambda *args: pytest.fail("partial removal"))
+    with pytest.raises(ValueError, match="unobservable"):
+        install_host.uninstall(out=io.StringIO())
