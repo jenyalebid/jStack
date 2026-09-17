@@ -260,11 +260,18 @@ def _rollback(journal: Path):
             raise ValueError("legacy backup changed")
         if not path.exists():
             atomic_bytes(path, data, mode=0o600)
-        if (record["enabled"] and record["label"] not in migration.disabled_labels() and
-                migration.legacy_status(Path(value["settings"]["services_app"]), path) == "enabled" and
-                not install_host.is_loaded(record["label"])):
-            if install_host.bootstrap(record["label"], path).returncode:
-                raise ValueError("legacy job could not be restored")
+        if record["enabled"] and record["label"] not in migration.disabled_labels():
+            approval = migration.legacy_status(Path(value["settings"]["services_app"]), path)
+            if approval == "requires_approval":
+                held.append(record["role"])
+                continue
+            if approval not in {"enabled", "not_registered", "not_found"}:
+                raise ValueError("legacy approval is unobservable during rollback")
+            if not install_host.is_loaded(record["label"]):
+                if install_host.bootstrap(record["label"], path).returncode:
+                    raise ValueError("legacy job could not be restored")
+            if not install_host.is_loaded(record["label"]):
+                raise ValueError("restored legacy job is not loaded")
     value.update(state="rolled_back", stopped_originals=held)
     atomic_json(journal / "journal.json", value)
 

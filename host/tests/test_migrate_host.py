@@ -157,6 +157,26 @@ def test_failed_health_restores_the_exact_legacy_installation(lab, monkeypatch):
     assert lab.loaded == {job["Label"] for job in lab.request["jobs"].values()}
 
 
+@pytest.mark.parametrize("status", ["not_registered", "not_found"])
+def test_rollback_reloads_enabled_originals_after_os_forgets_registration(lab, monkeypatch, status):
+    journal = migration.prepare(lab.request, lab.root)
+    migration.apply(journal)
+    monkeypatch.setattr(migration.migration, "legacy_status", lambda *args: status)
+    migration.rollback(journal)
+    assert migration.load(journal)["state"] == "rolled_back"
+    assert lab.loaded == {job["Label"] for job in lab.request["jobs"].values()}
+
+
+def test_rollback_does_not_claim_completion_with_unknown_legacy_approval(lab, monkeypatch):
+    journal = migration.prepare(lab.request, lab.root)
+    migration.apply(journal)
+    monkeypatch.setattr(migration.migration, "legacy_status", lambda *args: "unknown")
+    with pytest.raises(ValueError, match="unobservable during rollback"):
+        migration.rollback(journal)
+    assert migration.load(journal)["state"] != "rolled_back"
+    assert not any(call[0] == "bootstrap" for call in lab.calls)
+
+
 @pytest.mark.parametrize("change", ["source", "trust", "endpoint", "state", "label"])
 def test_unreviewed_source_or_identity_is_rejected_before_stopping(lab, change):
     if change == "source":
