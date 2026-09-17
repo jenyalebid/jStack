@@ -59,6 +59,14 @@ COMPILED = [(label, re.compile(pat, flags)) for label, pat, flags in TERMS]
 # (repo-relative path, term label) → why this file may hold this term.
 # Narrow on purpose: the same term in any OTHER file still fails.
 ALLOW = {
+    ("README.md", "jremote"):
+        "public product overview identifies the independently installed client",
+    ("product.md", "jremote"):
+        "governing product contract names the client and its update ownership",
+    ("docs/managed-updates.md", "jremote"):
+        "release contract identifies which client distribution the Hub may update",
+    ("docs/managed-update-lab.md", "jremote"):
+        "release acceptance distinguishes the client from the Hub installation",
     ("plugins/jstack/githooks/pre-commit", "jandj"):
         "the commit-identity allowlist must name the accounts it allows; "
         "this is the public noreply address stamped on every commit anyway",
