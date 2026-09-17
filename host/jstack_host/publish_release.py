@@ -66,7 +66,8 @@ def sign_menu(stack: Path, output: Path, version: str, config: dict) -> Path:
              str(stack / "host/menubar/JStackHostBar.swift")], timeout=180)
     identity = json.loads((stack / "host/release-identity.json").read_text())
     info = {"CFBundleExecutable": "JStackHostBar", "CFBundleIdentifier": "com.jremote.menubar",
-            "CFBundleName": "JStack Host", "CFBundlePackageType": "APPL",
+            "CFBundleName": "jStack Hub", "CFBundleDisplayName": "jStack Hub",
+            "CFBundlePackageType": "APPL",
             "CFBundleShortVersionString": version, "CFBundleVersion": str(identity["build"]),
             "JStackSourceCommit": identity["sha"],
             "LSUIElement": True, "NSHighResolutionCapable": True,

@@ -34,6 +34,25 @@ def test_corrupt_build_counter_refuses_identity_reuse(tmp_path):
         publish_release.allocate_build(tmp_path, 71)
 
 
+def test_signed_menu_has_hub_name_and_exact_build_identity(tmp_path, monkeypatch):
+    import plistlib
+    stack = tmp_path / "stack"
+    (stack / "host").mkdir(parents=True)
+    (stack / "host/release-identity.json").write_text(json.dumps({"build": 72, "sha": "a" * 40}))
+    notary = tmp_path / "notary.json"
+    notary.write_text(json.dumps({"private_key_path": "/unused", "key_id": "test", "issuer_id": "test"}))
+    monkeypatch.setattr(publish_release, "command", lambda *a, **k: '{"status":"Accepted"}')
+    output = tmp_path / "output"
+    publish_release.sign_menu(stack, output, "0.69.3", {
+        "sign_keychain": "test", "sign_identity": "test", "notary_credentials": str(notary)})
+    # Preserve the single established bundle location; change its visible name.
+    info = plistlib.loads((output / "JStack Host.app/Contents/Info.plist").read_bytes())
+    assert info["CFBundleName"] == info["CFBundleDisplayName"] == "jStack Hub"
+    assert info["CFBundleIdentifier"] == "com.jremote.menubar"
+    assert info["CFBundleVersion"] == "72"
+    assert info["JStackSourceCommit"] == "a" * 40
+
+
 @pytest.fixture
 def candidate(tmp_path):
     """A signed, unpromoted candidate and its artifacts on disk."""

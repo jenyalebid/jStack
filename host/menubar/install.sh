@@ -178,7 +178,8 @@ cat > "$STAGE/Contents/Info.plist" <<EOF
 <dict>
     <key>CFBundleExecutable</key><string>JStackHostBar</string>
     <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
-    <key>CFBundleName</key><string>$APP_NAME</string>
+    <key>CFBundleName</key><string>jStack Hub</string>
+    <key>CFBundleDisplayName</key><string>jStack Hub</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>
     <key>CFBundleVersion</key><string>1</string>
