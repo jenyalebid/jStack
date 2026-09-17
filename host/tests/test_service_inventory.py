@@ -40,6 +40,37 @@ def test_same_name_changed_command_changes_definition(tmp_path, observed):
     assert before["definition"]["sha256"] != after["definition"]["sha256"]
 
 
+def test_module_inventory_detects_package_code_drift_without_importing(tmp_path, observed):
+    package = tmp_path / "dashboard"
+    package.mkdir()
+    (package / "__init__.py").write_text("raise RuntimeError('must not import')")
+    (package / "app.py").write_text("application = 1")
+    helper = package / "helpers.py"
+    helper.write_text("before")
+    job(tmp_path, ProgramArguments=["/usr/bin/python3", "-m", "dashboard.app"], WorkingDirectory=str(tmp_path))
+    before = inventory.collect([(tmp_path, "gui/501")])
+    helper.write_text("after")
+    after = inventory.collect([(tmp_path, "gui/501")])
+    assert inventory.compare(before, after)["changes"][0]["fields"] == ["module_source"]
+    assert before["services"][0]["module_source"]["entry"] == str(package / "app.py")
+
+
+@pytest.mark.parametrize("configuration", [{}, {"WorkingDirectory": "/no-such-source"},
+                                             {"WorkingDirectory": "/tmp", "EnvironmentVariables": {"PYTHONPATH": "relative"}}])
+def test_unresolved_module_is_unknown_not_an_approved_runtime(tmp_path, observed, configuration):
+    path = job(tmp_path, ProgramArguments=["/usr/bin/python3", "-m", "private_module"], **configuration)
+    row = inventory.inspect_job(path, "gui/501")
+    assert "code_file_not_observed" in row["findings"]
+    assert "unobserved" in row["module_source"]
+
+
+def test_module_search_does_not_descend_into_protected_app_data(tmp_path, observed, monkeypatch):
+    path = job(tmp_path, ProgramArguments=["/usr/bin/python3", "-m", "private_module"],
+               WorkingDirectory=str(tmp_path / "Library/Application Support/Other"))
+    monkeypatch.setattr(inventory.os, "walk", lambda *a, **k: pytest.fail("protected tree traversed"))
+    assert "unobserved" in inventory.inspect_job(path, "gui/501")["module_source"]
+
+
 def test_root_script_writability_is_independent_of_interpreter_signature(tmp_path, observed, monkeypatch):
     script = tmp_path / "network.sh"
     script.write_text("exit 0")

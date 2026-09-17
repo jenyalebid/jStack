@@ -109,6 +109,50 @@ def launch_state(domain: str, label: str) -> dict:
     return observed
 
 
+def module_source(job: dict, executable: Path, argv: list[str]) -> dict | None:
+    """Observe an explicit local Python module without importing service code.
+
+    This fingerprints the selected package, not its dependency closure. Unknown
+    interpreter search paths remain unknown instead of resolving in our process.
+    """
+    if not re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", executable.name) or "-m" not in argv:
+        return None
+    offset = argv.index("-m")
+    if offset != 1 or offset + 1 >= len(argv) or not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", argv[offset + 1]):
+        return {"unobserved": "unsupported Python module invocation"}
+    cwd = job.get("WorkingDirectory")
+    if not isinstance(cwd, str) or not Path(cwd).is_absolute():
+        return {"unobserved": "Python module working directory is not explicit"}
+    roots = [Path(cwd)]
+    search = job.get("EnvironmentVariables", {}).get("PYTHONPATH", "")
+    for item in search.split(os.pathsep) if search else []:
+        if not item or not Path(item).is_absolute():
+            return {"unobserved": "Python module search path is not explicit"}
+        roots.append(Path(item))
+    parts = argv[offset + 1].split(".")
+    for root in roots:
+        package = root / parts[0]
+        if app_data_path(package):
+            return {"unobserved": "module search includes app data"}
+        module = root.joinpath(*parts)
+        if not package.exists() and not package.with_suffix(".py").exists():
+            continue
+        entry = module.with_suffix(".py")
+        if not entry.is_file():
+            entry = module / "__main__.py"
+        if not entry.is_file() or (package.is_dir() and not (package / "__init__.py").is_file()):
+            return {"unobserved": "module resolution requires interpreter inspection"}
+        files = [package.with_suffix(".py")] if not package.is_dir() else []
+        if package.is_dir():
+            for directory, folders, names in os.walk(package, followlinks=False):
+                folders[:] = [name for name in folders if name != "__pycache__"]
+                if any((Path(directory) / name).is_symlink() or app_data_path(Path(directory) / name) for name in folders):
+                    return {"unobserved": "package contains linked or protected directories"}
+                files.extend(Path(directory) / name for name in names if Path(name).suffix in {".py", ".so", ".dylib"})
+        return {"entry": str(entry), "files": [{"path": str(item), **fingerprint(item)} for item in sorted(files)]}
+    return {"unobserved": "module is outside explicit local search paths"}
+
+
 def inspect_job(path: Path, domain: str) -> dict:
     row = {"path": str(path), "domain": domain,
            "definition": fingerprint(path), "findings": []}
@@ -158,6 +202,11 @@ def inspect_job(path: Path, domain: str) -> dict:
     scripts = [Path(a) for a in argv[1:]
                if Path(a).is_absolute() and Path(a).suffix in (".py", ".sh", ".js")]
     row["scripts"] = [{"path": str(p), **fingerprint(p)} for p in scripts]
+    module = module_source(job, executable, argv)
+    if module is not None:
+        row["module_source"] = module
+        if "unobserved" in module or any("error" in item or "unobserved" in item for item in module.get("files", [])):
+            row["findings"].append("code_file_not_observed")
     if row["run_as"] == "root":
         writable = [str(p) for p in (path, executable, *scripts) if user_writable(p)]
         row["user_writable_root_code"] = writable
@@ -213,7 +262,7 @@ def collect(locations: list[tuple[Path, str]] | None = None) -> dict:
 
 def compare(before: dict, after: dict) -> dict:
     """Report persistence/code drift without automatically trusting either side."""
-    fields = ("definition", "executable", "executable_file", "scripts", "signature", "owner_bundle", "run_as", "schedule")
+    fields = ("definition", "executable", "executable_file", "scripts", "module_source", "signature", "owner_bundle", "run_as", "schedule")
     old = {row["path"]: row for row in before["services"]}
     new = {row["path"]: row for row in after["services"]}
     changes = []
