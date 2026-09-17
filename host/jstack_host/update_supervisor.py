@@ -236,7 +236,11 @@ def main():
     root = args.state_dir / "updates"
     configuration = json.loads((root / "config.json").read_text())
     from .update_macos import MacBackend
-    Supervisor(root, configuration, MacBackend(root, configuration)).run(once=args.once)
+    backend = MacBackend
+    if configuration.get("service_model") == "app":
+        from .update_app import AppBackend
+        backend = AppBackend
+    Supervisor(root, configuration, backend(root, configuration)).run(once=args.once)
 
 
 if __name__ == "__main__":

@@ -59,13 +59,15 @@ def relocate(path: Path, source: Path, target: Path):
         command(["/usr/bin/install_name_tool", *changes, str(path)])
 
 
-def build(stack: Path, output: Path, version: str, config: dict | None = None) -> Path:
+def build(stack: Path, output: Path, version: str, config: dict | None = None, *, recovery=False) -> Path:
     if sys.version_info[:2] != (3, 12):
         raise ValueError("this runtime build requires the audited CPython 3.12 framework")
     source = Path(sys.base_prefix)
     if not (source / "Python").is_file():
         raise ValueError("a framework Python build is required")
-    app = output / "jStack Hub.app"
+    app_name = "jStack Updater" if recovery else "jStack Hub"
+    bundle_id = "live.jstack.updater" if recovery else "live.jstack.hub"
+    app = output / f"{app_name}.app"
     app.mkdir(parents=True, exist_ok=False)
     contents = app / "Contents"
     macos, resources = contents / "MacOS", contents / "Resources"
@@ -131,15 +133,17 @@ def build(stack: Path, output: Path, version: str, config: dict | None = None) -
     shutil.copy2(python_license, resources / "Licenses/Python-license.html")
     definitions = contents / "Library/LaunchAgents"
     definitions.mkdir(parents=True)
-    for role in ROLES:
-        (definitions / f"live.jstack.hub.{role}.plist").write_bytes(plistlib.dumps(service_plist(role)))
+    for role in (["updater"] if recovery else ["host", "menu"]):
+        definition = service_plist(role)
+        definition["AssociatedBundleIdentifiers"] = [bundle_id]
+        (definitions / f"live.jstack.hub.{role}.plist").write_bytes(plistlib.dumps(definition))
     (contents / "Info.plist").write_bytes(plistlib.dumps({
-        "CFBundleIdentifier": "live.jstack.hub", "CFBundleExecutable": "JStackHub",
-        "CFBundleName": "jStack Hub", "CFBundleDisplayName": "jStack Hub",
+        "CFBundleIdentifier": bundle_id, "CFBundleExecutable": "JStackHub",
+        "CFBundleName": app_name, "CFBundleDisplayName": app_name,
         "CFBundlePackageType": "APPL", "CFBundleVersion": version,
         "CFBundleShortVersionString": version, "LSUIElement": True,
         "LSMinimumSystemVersion": "13.0",
-        "CFBundleURLTypes": [{"CFBundleURLName": "jStack updates", "CFBundleURLSchemes": ["jstack"]}]}))
+        "CFBundleURLTypes": [] if recovery else [{"CFBundleURLName": "jStack updates", "CFBundleURLSchemes": ["jstack"]}]}))
     binaries = [path for path in contents.rglob("*") if macho(path)]
     for path in binaries:
         relocate(path, source, runtime)
@@ -172,11 +176,12 @@ def main():
     parser.add_argument("--version", required=True)
     parser.add_argument("--signing-config", type=Path)
     parser.add_argument("--notarize", action="store_true")
+    parser.add_argument("--recovery", action="store_true", help="build the separately installed, versioned updater")
     args = parser.parse_args()
     config = json.loads(args.signing_config.read_text()) if args.signing_config else None
     if args.notarize and not config:
         parser.error("--notarize requires --signing-config")
-    app = build(args.stack.resolve(), args.output.resolve(), args.version, config)
+    app = build(args.stack.resolve(), args.output.resolve(), args.version, config, recovery=args.recovery)
     if args.notarize:
         archive = args.output.resolve() / "hub-notary.zip"
         command(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(app), str(archive)])

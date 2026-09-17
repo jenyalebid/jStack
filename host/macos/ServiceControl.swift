@@ -4,9 +4,9 @@ import Darwin
 
 // Only these sealed, app-bundled definitions can be registered. Never accept a
 // caller-provided plist path, launchd domain, executable or root command.
-let services = ["host": "live.jstack.hub.host.plist",
-                "updater": "live.jstack.hub.updater.plist",
-                "menu": "live.jstack.hub.menu.plist"]
+let recovery = Bundle.main.bundleIdentifier == "live.jstack.updater"
+let services = recovery ? ["updater": "live.jstack.hub.updater.plist"] :
+    ["host": "live.jstack.hub.host.plist", "menu": "live.jstack.hub.menu.plist"]
 
 func emit(_ value: Any) throws {
     let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
@@ -29,9 +29,10 @@ func main() throws {
         userInfo: [NSLocalizedDescriptionKey: "User service control must not run as root"]) }
     let args = Array(CommandLine.arguments.dropFirst())
     guard let action = args.first else {
-        let menu = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/JStackHostBar")
+        let menu = Bundle.main.bundleURL.appendingPathComponent(recovery ? "Contents/MacOS/JStackRuntime" : "Contents/MacOS/JStackHostBar")
         let process = Process()
         process.executableURL = menu
+        if recovery { process.arguments = ["updater"] }
         try process.run()
         process.waitUntilExit()
         exit(process.terminationStatus)

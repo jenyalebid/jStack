@@ -118,6 +118,12 @@ class MacBackend:
     def __init__(self, root: Path, config: dict):
         self.root, self.config = root, config
 
+    def _app_running(self, kind: str, path: Path) -> list[int]:
+        return running(path)
+
+    def _running_required(self, kind: str, record: dict, transaction: dict) -> bool:
+        return kind == "menubar" or record["was_running"]
+
     def activate_runtime(self, job: dict) -> bool:
         """Move the next updater process only after the hub confirms this job."""
         if job.get("state") != "current" or not job.get("verified") or not self.config.get("dispatcher"):
@@ -362,7 +368,7 @@ class MacBackend:
             for kind, app in job["transaction"]["apps"].items():
                 target = Path(app["target"])
                 self._check_app(target, job["envelope"]["manifest"]["components"][kind], kind)
-                if (kind == "menubar" or app["was_running"]) and not running(target):
+                if self._running_required(kind, app, job["transaction"]) and not self._app_running(kind, target):
                     return False
             return True
         except (OSError, ValueError, httpx.HTTPError, KeyError, subprocess.SubprocessError):
@@ -375,7 +381,7 @@ class MacBackend:
             try:
                 target = Path(self.config[kind + "_path"])
                 components[kind] = {"installed": str(bundle_info(target)["CFBundleVersion"]),
-                                    "running_pids": running(target)}
+                                    "running_pids": self._app_running(kind, target)}
             except (OSError, ValueError, KeyError):
                 components[kind] = {"installed": None, "running_pids": []}
         source = {}
@@ -401,7 +407,8 @@ class MacBackend:
         verified = verified and all(isinstance(value, dict) and value.get("version") ==
                                     expected.get("stack", {}).get("version")
                                     for value in components["plugins"].values())
-        verified = verified and bool(components["menubar"]["running_pids"])
+        if self._running_required("menubar", {}, job.get("transaction", {})):
+            verified = verified and bool(components["menubar"]["running_pids"])
         return {"components": components, "host_source": source,
                 "updater_source": sourcestamp.capture(),
                 "release": source.get("release"),
