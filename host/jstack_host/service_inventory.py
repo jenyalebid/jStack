@@ -126,11 +126,11 @@ def inspect_job(path: Path, domain: str) -> dict:
         owner = None
         if "BundleProgram" in job:
             relative = job["BundleProgram"]
+            owner = next((parent for parent in path.parents if parent.suffix == ".app"), None)
             if (not isinstance(relative, str) or Path(relative).is_absolute() or
-                    len(path.parents) < 4 or path.parents[2].name != "Contents" or
-                    path.parents[3].suffix != ".app"):
+                    owner is None or path.parent.relative_to(owner) not in {
+                        Path("Contents/Library/LaunchAgents"), Path("Contents/Library/LaunchDaemons")}):
                 raise ValueError("invalid app-owned executable")
-            owner = path.parents[3]
             executable = (owner / relative).resolve()
             if not executable.is_relative_to(owner.resolve()):
                 raise ValueError("app-owned executable escapes its bundle")
