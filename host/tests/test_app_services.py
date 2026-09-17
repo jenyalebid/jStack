@@ -104,7 +104,7 @@ def complete_install(installed, monkeypatch, tmp_path):
 
     monkeypatch.setattr(app_services, "control", control)
     monkeypatch.setattr(install_host, "wait_unloaded", lambda label: True)
-    return states, calls, path.with_name("uninstall-journal.json")
+    return states, calls, tmp_path / "migrations/uninstall-journal.json"
 
 
 def test_all_service_removal_resumes_after_unregister(installed, complete_install, monkeypatch):
@@ -114,6 +114,7 @@ def test_all_service_removal_resumes_after_unregister(installed, complete_instal
     with pytest.raises(ValueError, match="still loaded"):
         install_host.uninstall(all_services=True, out=io.StringIO())
     journal = json.loads(path.read_text())
+    assert "configuration" not in journal and len(journal["configuration_sha256"]) == 64
     assert journal["attempted"] == ["live.jstack.hub.updater"] and journal["stopped"] == []
     assert path.stat().st_mode & 0o777 == 0o600
     monkeypatch.setattr(install_host, "wait_unloaded", lambda label: True)
@@ -150,3 +151,21 @@ def test_unknown_host_refuses_basic_uninstall_before_menu(installed, monkeypatch
     monkeypatch.setattr(install_host, "wait_unloaded", lambda *args: pytest.fail("partial removal"))
     with pytest.raises(ValueError, match="unobservable"):
         install_host.uninstall(out=io.StringIO())
+
+
+def test_private_settings_are_not_copied_to_removal_journal(installed, complete_install):
+    _, _, path = complete_install
+    installed["environment"]["FIXTURE_PRIVATE_VALUE"] = "private-fixture-value"
+    assert install_host.uninstall(all_services=True, out=io.StringIO()) == 0
+    assert "private-fixture-value" not in path.read_text()
+    installed["environment"]["FIXTURE_PRIVATE_VALUE"] = "changed-fixture-value"
+    with pytest.raises(ValueError, match="ownership changed"):
+        install_host.uninstall(all_services=True, out=io.StringIO())
+
+
+def test_old_removal_journal_is_not_silently_abandoned(installed, complete_install):
+    _, calls, path = complete_install
+    service_settings.path().with_name("uninstall-journal.json").write_text("{}")
+    with pytest.raises(ValueError, match="earlier removal journal"):
+        install_host.uninstall(all_services=True, out=io.StringIO())
+    assert not path.exists() and calls == []

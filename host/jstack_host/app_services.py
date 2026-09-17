@@ -74,14 +74,19 @@ def uninstall_all(configuration: dict, out) -> int:
     if os.geteuid() == 0:
         raise PermissionError("remove user registrations as the login user")
     from . import service_settings
-    from .migrate_services import exclusive
+    from .migrate_services import exclusive, migration_root
     from .update_supervisor import atomic_json
     owners = [(Path(configuration["app"]), "live.jstack.hub"),
               (Path(configuration["services_app"]), "live.jstack.hub.services")]
     if owners[0][0].resolve() == owners[1][0].resolve():
         raise ValueError("service owners must be independent bundles")
-    path = service_settings.path().with_name("uninstall-journal.json")
-    with exclusive():
+    root = migration_root()
+    path = root / "uninstall-journal.json"
+    previous_path = service_settings.path().with_name("uninstall-journal.json")
+    if previous_path != path and previous_path.exists():
+        raise ValueError("earlier removal journal requires recovery before changing its storage")
+    configuration_digest = hashlib.sha256(json.dumps(configuration, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    with exclusive(root):
         records, identities = [], {}
         for app, identifier in owners:
             verify(app, identifier)
@@ -110,11 +115,11 @@ def uninstall_all(configuration: dict, out) -> int:
         records.sort(key=lambda r: (0 if r["role"] == "updater" else 1 if r["role"] == "menu" else 2, r["label"]))
         if path.exists():
             journal = json.loads(path.read_text())
-            if (journal.get("configuration") != configuration or journal.get("identities") != identities
+            if (journal.get("configuration_sha256") != configuration_digest or journal.get("identities") != identities
                     or journal.get("records") != records):
                 raise ValueError("service ownership changed during removal")
         else:
-            journal = {"schema": 1, "configuration": configuration, "identities": identities,
+            journal = {"schema": 1, "configuration_sha256": configuration_digest, "identities": identities,
                        "records": records, "state": "removing", "attempted": [], "stopped": []}
             atomic_json(path, journal)
         # Re-observe even a completed journal: it is not evidence of current absence.

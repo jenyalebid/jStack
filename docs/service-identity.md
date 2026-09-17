@@ -91,13 +91,17 @@ rollback; moving private configuration is a separate reviewed operation.
 unregisters the Hub and Services catalogs, including the updater and optional
 capabilities. Run it from an independent user Terminal. Both signatures,
 sealed definitions and approval observations are checked before any stop.
-The private `uninstall-journal.json` beside service settings records each
+The private `uninstall-journal.json` inside the configured migration directory records each
 attempt before unregister; repeating the command resumes after interruption
-and rechecks actual registration absence. A changed owner requires review.
+and rechecks actual registration absence. It stores a settings digest, never
+the environment values. A changed owner or settings digest requires review.
 
 This command retains application bundles, Network, pairing and private data.
 It is the user-registration portion of product removal, not a full product
-uninstaller. Signed GUI-VM qualification of this new command remains pending.
+uninstaller. Candidate 16 passed core registration removal, identity retention,
+repeat removal and reboot on a fresh GUI VM with Gatekeeper enforced. The
+subsequent private-journal storage change and optional capabilities still
+require signed-artifact qualification.
 
 ### Existing host cutover
 
