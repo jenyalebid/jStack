@@ -1,22 +1,16 @@
 """Exercise an exact legacy user-job migration on a disposable GUI Mac."""
-import importlib.util
 import json
 import os
 from pathlib import Path
 import plistlib
 import subprocess
 
-from jstack_host import install_host
+from jstack_host import install_host, migrate_services as migration
 
 
 def main():
     model = subprocess.check_output(["/usr/sbin/sysctl", "-n", "hw.model"], text=True).strip()
     assert model.startswith("VirtualMac") and os.geteuid() != 0
-    # The migration under test is deliberately outside the already signed
-    # runtime candidate. Final release qualification must use a sealed copy.
-    spec = importlib.util.spec_from_file_location("jstack_host.migrate_services", "/Users/admin/migrate_services.py")
-    migration = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(migration)
     app = Path("/Applications/jStack Hub Services.app")
     catalog = json.loads(Path("/Users/admin/service-catalog.json").read_text())
     job = catalog["acceptance"]
