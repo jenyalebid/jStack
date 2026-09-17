@@ -566,13 +566,26 @@ def denied(fleet: Fleet, leaf: Guest) -> dict:
 
 def refused_release(fleet: Fleet, guest: Guest, machine: str) -> dict:
     """Bad bytes are refused before anything running is replaced."""
+    before = guest.installed()
     if fleet.plan.get("tamper_command"):
         expect(fleet.plan.get("restore_command"), "a custom artifact fault requires restoration")
         fleet.hub.sh(fleet.plan["tamper_command"], timeout=300)
     else:
         fleet.hub.tool_call("tamper")
     try:
-        job = fleet.hub.queue(machine, request_id("tampered"))["jobs"][0]
+        response = fleet.hub.call("/updates/queue", {
+            "target": machine, "request_id": request_id("tampered")})
+        if response["status"] == 503:
+            detail = response["body"]
+            expect(any(word in detail.lower() for word in ("signature", "artifact", "mismatch")),
+                   f"the hub refused for an unrelated reason: {detail}")
+            after = guest.installed()
+            expect(all(after[key] == before[key] for key in ("release", "sha", "client", "menubar")),
+                   "the rejected artifact changed the running installation")
+            return {"refused_by": "hub", "status": 503, "detail": detail,
+                    "unchanged_release": after["release"]}
+        expect(response["status"] == 200, f"unexpected queue response: {response}")
+        job = json.loads(response["body"])["jobs"][0]
         row = fleet.hub.wait_for("failed", machine, timeout=900, poll=5)
         detail = (row.get("job") or {}).get("detail", "")
         expect("signature" in detail or "artifact" in detail or "match" in detail,

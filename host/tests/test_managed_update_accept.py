@@ -331,9 +331,26 @@ def test_artifact_fault_is_restored_when_refusal_probe_fails(runner):
     class Hub:
         def tool_call(self, action):
             calls.append(action)
-        def queue(self, *args):
+        def call(self, *args):
             raise runner.AcceptanceFailure("hub disconnected")
 
     with pytest.raises(runner.AcceptanceFailure, match="disconnected"):
-        runner.refused_release(SimpleNamespace(plan={}, hub=Hub()), None, "leaf")
+        runner.refused_release(SimpleNamespace(plan={}, hub=Hub()),
+                               SimpleNamespace(installed=lambda: {"release": PRIOR}), "leaf")
     assert calls == ["tamper", "restore-artifact"]
+
+
+@pytest.mark.parametrize("detail,valid", [("artifact digest mismatch", True),
+                                         ("host unavailable", False)])
+def test_hub_refusal_requires_artifact_error_and_unchanged_installation(runner, detail, valid):
+    from types import SimpleNamespace
+    state = dict(release=PRIOR, sha="a" * 40, client="69", menubar="69")
+    guest = SimpleNamespace(installed=lambda: state)
+    hub = SimpleNamespace(tool_call=lambda _: None,
+                          call=lambda *args: {"status": 503, "body": detail})
+    fleet = SimpleNamespace(plan={}, hub=hub)
+    if valid:
+        assert runner.refused_release(fleet, guest, "leaf")["unchanged_release"] == PRIOR
+    else:
+        with pytest.raises(runner.AcceptanceFailure, match="unrelated"):
+            runner.refused_release(fleet, guest, "leaf")
