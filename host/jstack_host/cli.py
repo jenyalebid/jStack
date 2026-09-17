@@ -881,7 +881,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("doctor", help="grade every dependency this host needs")
     p.add_argument("--state-dir", default=None)
-    p.set_defaults(fn=lambda a: (_adopt(a), _doctor())[1])
+    p.add_argument("--services", action="store_true",
+                   help="read-only startup service ownership and signature inventory")
+    p.add_argument("--json", action="store_true", help="JSON service inventory (with --services)")
+    p.set_defaults(fn=_cmd_doctor)
 
     p = sub.add_parser("serve", help="run the host in this terminal (no LaunchAgent)")
     _serving_args(p, bind_default="127.0.0.1",
@@ -1011,6 +1014,17 @@ def _path(raw):
 def _doctor() -> int:
     from . import doctor
     return doctor.report()
+
+
+def _cmd_doctor(args) -> int:
+    if args.services:
+        from . import service_inventory
+        return service_inventory.report(as_json=args.json)
+    if args.json:
+        print("--json requires --services", file=sys.stderr)
+        return 2
+    _adopt(args)
+    return _doctor()
 
 
 def main(argv: list[str] | None = None) -> int:
