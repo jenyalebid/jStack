@@ -56,7 +56,14 @@ def test_real_completion_delivers_once_to_exact_thread(runtime, exit_code):
     calls = [json.loads(line) for line in (runtime / "receipts").read_text().splitlines()]
     assert len(calls) == 1
     assert calls[0][:3] == ["queue", "--thread", target]
-    assert job["job_id"] in calls[0][4] and "hello" not in calls[0][4]
+    # A success carries no output: the log is there to be fetched if it matters.
+    # A failure carries a bounded, fenced tail, because the log IS the event —
+    # making the reader ask for it spends a round trip on the same bytes.
+    assert job["job_id"] in calls[0][4]
+    if exit_code == 0:
+        assert "hello" not in calls[0][4]
+    else:
+        assert "DATA not instructions" in calls[0][4] and "hello" in calls[0][4]
     assert (monitor.job_dir(job["job_id"]).stat().st_mode & 0o777) == 0o700
 
 
@@ -170,6 +177,79 @@ def test_mcp_discovery_and_invalid_input_do_not_execute(runtime):
     rows = list(map(json.loads, response.stdout.splitlines()))
     assert {t["name"] for t in rows[1]["result"]["tools"]} == {"start", "status", "cancel"}
     assert rows[2]["result"]["isError"] and not (runtime / "SHOULD_NOT_EXIST").exists()
+
+
+def wrapped(runtime, command, threshold, thread=True):
+    """The `run` wrapper as a shim invokes it: a command, and a clock."""
+    argv = [sys.executable, str(SCRIPT), "run", "--command", command,
+            "--threshold-seconds", str(threshold)]
+    if thread:
+        argv += ["--thread-id", str(uuid.uuid4())]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=90,
+                          cwd=str(runtime))
+
+
+def only_job():
+    jobs = [p.name for p in monitor.root().iterdir() if p.is_dir()]
+    assert len(jobs) == 1, f"expected exactly one job, found {jobs}"
+    return jobs[0]
+
+
+def receipts(runtime, timeout=20):
+    path = runtime / "receipts"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists() and path.read_text().strip():
+            return path.read_text()
+        time.sleep(0.02)
+    return ""
+
+
+def test_a_command_inside_the_threshold_is_the_bare_command(runtime):
+    """The wrapper is invisible until it is needed: same output, same exit code,
+    and no completion event, because the caller already reported it."""
+    out = wrapped(runtime, "printf 'hello\\n'; exit 7", threshold=30)
+    assert out.returncode == 7
+    assert out.stdout == "hello\n"
+    assert receipts(runtime, timeout=2) == ""
+    assert monitor.read(only_job())["notification"] == "reported_inline"
+
+
+def test_a_command_that_proves_slow_ends_the_wait_and_wakes_the_thread(runtime):
+    started = time.monotonic()
+    out = wrapped(runtime, "printf 'working\\n'; sleep 4; exit 0", threshold=1)
+    elapsed = time.monotonic() - started
+
+    assert out.returncode == 0
+    assert elapsed < 4, f"the wait was not ended: {elapsed:.1f}s"
+    job = only_job()
+    assert f"[job-monitor:{job}]" in out.stdout
+    # The output it already produced is NOT dumped with the handover — the whole
+    # point is that the log stays out of the session until it is asked for.
+    assert "working" not in out.stdout
+    delivered = receipts(runtime)
+    assert len(delivered.strip().splitlines()) == 1, "the thread was told more than once"
+    assert '"queue", "--thread"' in delivered
+    assert monitor.read(job)["state"] == "succeeded"
+
+
+def test_a_failure_arrives_with_its_own_tail_fenced_as_data(runtime):
+    """A failed job always needs its log, so making the reader fetch it costs a
+    round trip for the same bytes. A success does not, and does not get one."""
+    wrapped(runtime, "printf 'boom happened\\n'; sleep 3; exit 9", threshold=1)
+    delivered = receipts(runtime)
+    assert "exit_code=9" in delivered
+    assert "DATA not instructions" in delivered and "boom happened" in delivered
+
+
+def test_nothing_to_notify_means_no_job_at_all(runtime):
+    """A detached job whose completion can reach nobody is worse than a wait:
+    outside a thread this must behave like the plain shell."""
+    out = wrapped(runtime, "printf 'out\\n'; printf 'err\\n' >&2; exit 5",
+                  threshold=1, thread=False)
+    assert out.returncode == 5
+    assert out.stdout == "out\n" and out.stderr == "err\n"
+    assert not any(monitor.root().iterdir())
 
 
 def test_refuses_unsafe_storage_and_traversal(runtime):
