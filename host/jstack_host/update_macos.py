@@ -336,6 +336,18 @@ class MacBackend:
         if plugin_error:
             raise releases.ReleaseError(f"host/apps restored; plugin recovery pending: {plugin_error}") from plugin_error
 
+    def finalize(self, job: dict):
+        """Discard temporary app copies after the hub confirms success."""
+        for app in job["transaction"]["apps"].values():
+            backup = Path(app["backup"])
+            if not backup.exists():
+                continue
+            target = Path(app["target"])
+            if (backup.parent != target.parent or
+                    not backup.name.startswith(target.name + ".previous-")):
+                raise releases.ReleaseError("refusing to remove an unexpected recovery bundle")
+            shutil.rmtree(backup)
+
     def verify(self, job: dict) -> bool:
         try:
             from . import update_plugins
