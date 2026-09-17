@@ -59,14 +59,16 @@ def relocate(path: Path, source: Path, target: Path):
         command(["/usr/bin/install_name_tool", *changes, str(path)])
 
 
-def build(stack: Path, output: Path, version: str, config: dict | None = None, *, recovery=False) -> Path:
+def build(stack: Path, output: Path, version: str, config: dict | None = None, *, recovery=False, catalog=None) -> Path:
     if sys.version_info[:2] != (3, 12):
         raise ValueError("this runtime build requires the audited CPython 3.12 framework")
     source = Path(sys.base_prefix)
     if not (source / "Python").is_file():
         raise ValueError("a framework Python build is required")
-    app_name = "jStack Updater" if recovery else "jStack Hub"
-    bundle_id = "live.jstack.updater" if recovery else "live.jstack.hub"
+    if catalog is not None and not recovery:
+        raise ValueError("optional local capabilities belong to the stable services bundle")
+    app_name = "jStack Hub Services" if recovery else "jStack Hub"
+    bundle_id = "live.jstack.hub.services" if recovery else "live.jstack.hub"
     app = output / f"{app_name}.app"
     app.mkdir(parents=True, exist_ok=False)
     contents = app / "Contents"
@@ -133,10 +135,23 @@ def build(stack: Path, output: Path, version: str, config: dict | None = None, *
     shutil.copy2(python_license, resources / "Licenses/Python-license.html")
     definitions = contents / "Library/LaunchAgents"
     definitions.mkdir(parents=True)
+    services = {}
     for role in (["updater"] if recovery else ["host", "menu"]):
         definition = service_plist(role)
         definition["AssociatedBundleIdentifiers"] = [bundle_id]
         (definitions / f"live.jstack.hub.{role}.plist").write_bytes(plistlib.dumps(definition))
+        services[role] = f"live.jstack.hub.{role}.plist"
+    if catalog is not None:
+        from .service_catalog import definitions as catalog_definitions
+        jobs, manifest = catalog_definitions(catalog)
+        if "updater" in manifest:
+            raise ValueError("updater is a reserved capability identifier")
+        for name, definition in jobs.items():
+            definition["AssociatedBundleIdentifiers"] = [bundle_id]
+            (definitions / name).write_bytes(plistlib.dumps(definition))
+        services.update({slug: item["plist"] for slug, item in manifest.items()})
+        (resources / "automation-catalog.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (resources / "services.json").write_text(json.dumps(services, indent=2) + "\n")
     (contents / "Info.plist").write_bytes(plistlib.dumps({
         "CFBundleIdentifier": bundle_id, "CFBundleExecutable": "JStackHub",
         "CFBundleName": app_name, "CFBundleDisplayName": app_name,
@@ -152,6 +167,12 @@ def build(stack: Path, output: Path, version: str, config: dict | None = None, *
     for path in contents.rglob("*"):
         if path.is_symlink() and not path.resolve().is_relative_to(contents.resolve()):
             raise ValueError(f"escaping runtime symlink: {path.relative_to(contents)}")
+    sign(app, config)
+    return app
+
+
+def sign(app: Path, config: dict | None):
+    binaries = [path for path in app.rglob("*") if macho(path)]
     signing = ["/usr/bin/codesign", "--force", "--options", "runtime"]
     if config:
         if config.get("sign_keychain_password_file"):
@@ -163,10 +184,26 @@ def build(stack: Path, output: Path, version: str, config: dict | None = None, *
         signing += ["--sign", "-"]
     for path in sorted(binaries, key=lambda p: len(p.parts), reverse=True):
         command([*signing, str(path)])
-    command([*signing, str(framework)])
+    for framework in sorted(app.rglob("*.framework"), key=lambda p: len(p.parts), reverse=True):
+        command([*signing, str(framework)])
     command([*signing, str(app)])
     command(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)])
-    return app
+
+
+def notarize(app: Path, output: Path, config: dict):
+    archive = output / "hub-notary.zip"
+    command(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(app), str(archive)])
+    credentials = json.loads(Path(config["notary_credentials"]).read_text())
+    result = json.loads(command(["xcrun", "notarytool", "submit", str(archive),
+        "--key", str(Path(credentials["private_key_path"]).expanduser()),
+        "--key-id", credentials["key_id"], "--issuer", credentials["issuer_id"],
+        "--wait", "--output-format", "json"], timeout=1200))
+    (output / "notary-result.json").write_text(json.dumps(result, indent=2) + "\n")
+    if result.get("status") != "Accepted":
+        raise ValueError("notarization was not accepted")
+    command(["xcrun", "stapler", "staple", str(app)])
+    command(["/usr/sbin/spctl", "--assess", "--type", "execute", str(app)])
+    command(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(app), str(output / "hub-notarized.zip")])
 
 
 def main():
@@ -177,26 +214,15 @@ def main():
     parser.add_argument("--signing-config", type=Path)
     parser.add_argument("--notarize", action="store_true")
     parser.add_argument("--recovery", action="store_true", help="build the separately installed, versioned updater")
+    parser.add_argument("--catalog", type=Path, help="private optional capability definitions; never publish this variant")
     args = parser.parse_args()
     config = json.loads(args.signing_config.read_text()) if args.signing_config else None
     if args.notarize and not config:
         parser.error("--notarize requires --signing-config")
-    app = build(args.stack.resolve(), args.output.resolve(), args.version, config, recovery=args.recovery)
+    catalog = json.loads(args.catalog.read_text()) if args.catalog else None
+    app = build(args.stack.resolve(), args.output.resolve(), args.version, config, recovery=args.recovery, catalog=catalog)
     if args.notarize:
-        archive = args.output.resolve() / "hub-notary.zip"
-        command(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(app), str(archive)])
-        credentials = json.loads(Path(config["notary_credentials"]).read_text())
-        result = json.loads(command(["xcrun", "notarytool", "submit", str(archive),
-            "--key", str(Path(credentials["private_key_path"]).expanduser()),
-            "--key-id", credentials["key_id"], "--issuer", credentials["issuer_id"],
-            "--wait", "--output-format", "json"], timeout=1200))
-        (args.output / "notary-result.json").write_text(json.dumps(result, indent=2) + "\n")
-        if result.get("status") != "Accepted":
-            raise ValueError("Hub notarization was not accepted")
-        command(["xcrun", "stapler", "staple", str(app)])
-        command(["/usr/sbin/spctl", "--assess", "--type", "execute", str(app)])
-        command(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(app),
-                 str(args.output.resolve() / "hub-notarized.zip")])
+        notarize(app, args.output.resolve(), config)
     print(app)
 
 

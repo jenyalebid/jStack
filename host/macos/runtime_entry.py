@@ -13,6 +13,11 @@ def main():
     if not cli and len(sys.argv) < 2:
         raise SystemExit("expected host, updater, cli or self-test")
     role, arguments = ("cli", sys.argv[1:]) if cli else (sys.argv[1], sys.argv[2:])
+    if role == "local":
+        if len(arguments) != 1:
+            raise SystemExit("local service requires exactly one catalog identifier")
+        from jstack_host.local_service import run
+        return run(resources, arguments[0])
     # This runs before any host module binds state paths at import time.
     from jstack_host import service_settings
     config = service_settings.read() if role != "self-test" else {}

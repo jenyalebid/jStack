@@ -4,9 +4,25 @@ import Darwin
 
 // Only these sealed, app-bundled definitions can be registered. Never accept a
 // caller-provided plist path, launchd domain, executable or root command.
-let recovery = Bundle.main.bundleIdentifier == "live.jstack.updater"
-let services = recovery ? ["updater": "live.jstack.hub.updater.plist"] :
-    ["host": "live.jstack.hub.host.plist", "menu": "live.jstack.hub.menu.plist"]
+let recovery = Bundle.main.bundleIdentifier == "live.jstack.hub.services"
+let privileged = Bundle.main.bundleIdentifier == "live.jstack.network"
+
+func appService(_ plist: String) -> SMAppService {
+    privileged ? SMAppService.daemon(plistName: plist) : SMAppService.agent(plistName: plist)
+}
+
+func serviceDefinitions() throws -> [String: String] {
+    let url = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/services.json")
+    let services = try JSONDecoder().decode([String: String].self, from: Data(contentsOf: url))
+    for (role, filename) in services {
+        guard role.range(of: "^[a-z][a-z0-9-]{0,63}$", options: .regularExpression) != nil,
+              filename.hasPrefix("live.jstack."), filename.hasSuffix(".plist"),
+              !filename.contains("/") else {
+            throw NSError(domain: "jStack", code: 78, userInfo: [NSLocalizedDescriptionKey: "Invalid sealed service catalog"])
+        }
+    }
+    return services
+}
 
 func emit(_ value: Any) throws {
     let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
@@ -28,7 +44,12 @@ func main() throws {
     guard geteuid() != 0 else { throw NSError(domain: "jStack", code: 77,
         userInfo: [NSLocalizedDescriptionKey: "User service control must not run as root"]) }
     let args = Array(CommandLine.arguments.dropFirst())
+    let services = try serviceDefinitions()
     guard let action = args.first else {
+        if recovery || privileged {
+            try emit(services.mapValues { statusName(appService($0).status) })
+            return
+        }
         let menu = Bundle.main.bundleURL.appendingPathComponent(recovery ? "Contents/MacOS/JStackRuntime" : "Contents/MacOS/JStackHostBar")
         let process = Process()
         process.executableURL = menu
@@ -40,7 +61,7 @@ func main() throws {
     if action == "status" && args.count == 1 {
         var result: [String: String] = [:]
         for (key, plist) in services {
-            result[key] = statusName(SMAppService.agent(plistName: plist).status)
+            result[key] = statusName(appService(plist).status)
         }
         try emit(result)
         return
@@ -65,7 +86,7 @@ func main() throws {
         throw NSError(domain: "jStack", code: 64, userInfo: [NSLocalizedDescriptionKey:
             "usage: JStackHub status | settings | register|unregister host|updater|menu"])
     }
-    let service = SMAppService.agent(plistName: plist)
+    let service = appService(plist)
     if action == "register" {
         // Approval revocation is not a registration failure to repair away.
         if service.status == .notRegistered || service.status == .notFound { try service.register() }

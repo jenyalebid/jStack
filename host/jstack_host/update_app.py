@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 
 from . import release_manifest as releases
-from .update_macos import MacBackend, bundle_info, command, safe_tar, stop_app, unpack_app
+from .update_macos import MacBackend, client_distribution, command, safe_tar, stop_app, unpack_app
 
 
 def control(app: Path, action: str, role: str | None = None) -> dict:
@@ -70,6 +70,8 @@ class AppBackend(MacBackend):
             raise releases.ReleaseError("cannot observe current app service approvals")
         apps = {}
         for kind in ("menubar", "client"):
+            if kind == "client" and client_distribution(Path(self.config["client_path"]), self.config) != "hub":
+                continue
             folder = stage / kind
             folder.mkdir()
             component = manifest["components"][kind]
@@ -138,8 +140,8 @@ class AppBackend(MacBackend):
                 os.replace(target, backup)
             os.replace(incoming, target)
         self._restore_services(app, transaction["services"])
-        client = transaction["apps"]["client"]
-        if client["was_running"]:
+        client = transaction["apps"].get("client")
+        if client and client["was_running"]:
             command(["/usr/bin/open", "-a", client["target"]])
 
     def rollback(self, job: dict):
@@ -168,7 +170,7 @@ class AppBackend(MacBackend):
             if status == "requires_approval":
                 desired[role] = status
         self._restore_services(app, desired)
-        client = transaction["apps"]["client"]
-        if client["was_running"]:
+        client = transaction["apps"].get("client")
+        if client and client["was_running"]:
             command(["/usr/bin/open", "-a", client["target"]])
         update_plugins.rollback(transaction["providers"], Path(transaction["stack"]))
