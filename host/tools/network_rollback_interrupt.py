@@ -35,11 +35,15 @@ def main():
     args.receipt.chmod(0o600)
     deadline = time.monotonic() + 120
     paused = None
+    tracked = None
     killed = False
     try:
         while time.monotonic() < deadline and paused is None:
-            for process in psutil.process_iter(["pid", "name"]):
-                if process.info["name"] != "Installer":
+            state = json.loads(journal.read_text())
+            assert state["state"] != "rolled_back", "rollback completed before interruption"
+            candidates = [tracked] if tracked is not None else psutil.process_iter(["pid", "name"])
+            for process in candidates:
+                if tracked is None and process.info["name"] != "Installer":
                     continue
                 try:
                     argv = process.cmdline()
@@ -52,15 +56,21 @@ def main():
                     approved = json.loads(request.read_text())
                     if approved != {"schema": 1, "action": "rollback", "transaction": args.transaction}:
                         continue
-                    subprocess.run(["/usr/bin/codesign", "--verify", "--strict", "-R",
-                                    '=anchor apple generic and certificate leaf[subject.OU] = "MZ95H77RQQ" and identifier "JStackNetworkInstaller"',
-                                    str(executable)], check=True, capture_output=True)
+                    if tracked is None:
+                        subprocess.run(["/usr/bin/codesign", "--verify", "--strict", "-R",
+                                        '=anchor apple generic and certificate leaf[subject.OU] = "MZ95H77RQQ" and identifier "JStackNetworkInstaller"',
+                                        str(executable)], check=True, capture_output=True)
+                        tracked = process
                     state = json.loads(journal.read_text())
                     if state.get("recoveryPhase") != "stopping":
                         continue
-                    for child in process.children():
+                    for child in process.children(recursive=True):
                         command = child.cmdline()
-                        if child.exe() == "/bin/launchctl" and "unregister" in command and command[-1] == "network":
+                        # launchctl asuser can exec sudo and then the native
+                        # controller before the observer samples the child.
+                        allowed = {"/bin/launchctl", "/usr/bin/sudo",
+                                   "/Library/PrivilegedHelperTools/jStack Network.app/Contents/MacOS/JStackHub"}
+                        if child.exe() in allowed and command[-2:] == ["unregister", "network"]:
                             process.send_signal(signal.SIGSTOP)
                             paused = process
                             break
