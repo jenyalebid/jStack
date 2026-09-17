@@ -54,9 +54,11 @@ def main():
         return
     request = json.loads(request_path.read_text())
     if args.phase == "verify":
-        name = Path(request["policy"]["nameFile"]).read_text().strip()
-        assert name.startswith("utun") and name[4:].isdigit()
-        assert "inet 10.199.76.1 " in run("/sbin/ifconfig", name)
+        interfaces = re.split(r"(?m)^(?=\S)", run("/sbin/ifconfig", "-a"))
+        matches = [item for item in interfaces if "inet 10.199.76.1 " in item]
+        assert len(matches) == 1, "expected one active fixture interface"
+        name = matches[0].split(":", 1)[0]
+        assert re.fullmatch(r"utun[0-9]+", name)
         observation = json.loads(run(str(installed / "Contents/MacOS/JStackHub"), "status"))
         assert observation["network"] == "enabled"
         assert digest(installed / "Contents/_CodeSignature/CodeResources") == request["candidateSeal"]
