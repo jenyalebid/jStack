@@ -93,8 +93,11 @@ Independent Services maintenance is available through the Hub's bundled Python:
 The transaction keeps both sealed owners and a settings digest in private
 migration storage, refuses catalog changes, and records intent before stops
 or bundle replacement. Interrupted application requires explicit rollback;
-OFF choices are retained. This is not automatic supervisor handoff and has
-not yet passed signed-artifact qualification.
+OFF choices are retained. Candidate 20 (`c636642`) passed signed OFF and
+enabled update/rollback cycles, a real kill after native updater unregister,
+explicit recovery to the original owner, and post-recovery reboot checks in
+the GUI VM. Identity and settings hashes were preserved. These are component
+receipts, not automatic supervisor handoff or full release qualification.
 
 The release publisher accepts explicit `native_services: true` for candidate
 builds. It builds both public owners from the publisher's committed snapshot,
