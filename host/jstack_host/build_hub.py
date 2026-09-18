@@ -180,6 +180,8 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, reco
             (definitions / name).write_bytes(plistlib.dumps(definition))
         services.update({slug: item["plist"] for slug, item in manifest.items()})
         (resources / "automation-catalog.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    elif recovery:
+        (resources / "automation-catalog.json").write_text("{}\n")
     (resources / "services.json").write_text(json.dumps(services, indent=2) + "\n")
     (contents / "Info.plist").write_bytes(plistlib.dumps({
         "CFBundleIdentifier": bundle_id, "CFBundleExecutable": "JStackHub",

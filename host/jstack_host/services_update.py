@@ -70,6 +70,18 @@ def observe(app: Path, roles: dict) -> dict:
     return states
 
 
+def automation_catalog(app: Path, roles: dict) -> bytes:
+    path = app / "Contents/Resources/automation-catalog.json"
+    if not path.exists() and set(roles) == {"updater"}:
+        # Public owners built before this file became unconditional contain
+        # no optional capabilities. Absence is not valid for private owners.
+        return b"{}"
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict) or set(value) != set(roles) - {"updater"}:
+        raise ValueError("recovery capability catalog is incomplete")
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
 def prepare(candidate: Path) -> Path:
     settings, owner = context()
     with exclusive():
@@ -81,9 +93,8 @@ def prepare(candidate: Path) -> Path:
         roles = catalog(owner)
         if catalog(candidate) != roles:
             raise ValueError("changing service ownership requires a separate migration")
-        for name in ("automation-catalog.json",):
-            if (owner / "Contents/Resources" / name).read_bytes() != (candidate / "Contents/Resources" / name).read_bytes():
-                raise ValueError("changing private capabilities requires a separate migration")
+        if automation_catalog(owner, roles) != automation_catalog(candidate, roles):
+            raise ValueError("changing private capabilities requires a separate migration")
         states = observe(owner, roles)
         directory = Path(tempfile.mkdtemp(prefix="services-update-", dir=root))
         if directory.stat().st_dev != owner.parent.stat().st_dev:

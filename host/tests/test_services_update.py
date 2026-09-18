@@ -120,6 +120,27 @@ def test_interrupted_replacement_rolls_back_from_durable_original(fixture, monke
 def test_changed_capability_catalog_requires_separate_migration(fixture):
     _, candidate, _, calls, _ = fixture
     (candidate / "Contents/Resources/automation-catalog.json").write_text('{}')
-    with pytest.raises(ValueError, match="private capabilities"):
+    with pytest.raises(ValueError, match="catalog is incomplete"):
+        update.prepare(candidate)
+    assert not calls
+
+
+def test_public_owner_without_optional_catalog_can_be_maintained(fixture):
+    owner, candidate, states, calls, _ = fixture
+    for app in (owner, candidate):
+        resources = app / "Contents/Resources"
+        (resources / "services.json").write_text(json.dumps({"updater": "live.jstack.hub.updater.plist"}))
+        (resources / "automation-catalog.json").unlink()
+    states.pop("worker")
+    journal = update.prepare(candidate)
+    update.apply(journal)
+    update.rollback(journal)
+    assert states == {"updater": "enabled"}
+
+
+def test_missing_private_catalog_is_not_treated_as_empty(fixture):
+    owner, candidate, states, calls, _ = fixture
+    (candidate / "Contents/Resources/automation-catalog.json").unlink()
+    with pytest.raises(FileNotFoundError):
         update.prepare(candidate)
     assert not calls
