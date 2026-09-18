@@ -31,6 +31,9 @@ def validate(value: dict) -> dict:
     for key in ("automation_settings", "migration_dir", "services_app"):
         if key in value and (not isinstance(value[key], str) or not Path(value[key]).is_absolute()):
             raise ValueError(f"{key} must be an absolute private data path")
+    if "network_transaction" in value and (not isinstance(value["network_transaction"], str)
+            or not re.fullmatch(r"[a-f0-9]{32}", value["network_transaction"])):
+        raise ValueError("network_transaction must identify a reviewed transaction")
     if "bind" in value and (not isinstance(value["bind"], str) or not value["bind"] or "\x00" in value["bind"]):
         raise ValueError("invalid service bind address")
     if "host_capability" in value:

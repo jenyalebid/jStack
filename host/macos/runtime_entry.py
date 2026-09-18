@@ -21,6 +21,10 @@ def main():
     # This runs before any host module binds state paths at import time.
     from jstack_host import service_settings
     config = service_settings.read() if role != "self-test" else {}
+    if role in ("host", "updater", "services-handoff", "local") and config:
+        from jstack_host import emergency_stop
+        if emergency_stop.active(config):
+            raise SystemExit("jStack emergency stop is active")
     if role in ("host", "updater", "services-handoff", "provision", "verify-install") and not config.get("environment", {}).get("JREMOTE_STATE_DIR"):
         raise SystemExit("app-owned services require explicit installation state; refusing a second identity")
     if config:

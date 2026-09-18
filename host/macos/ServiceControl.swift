@@ -40,6 +40,19 @@ func statusName(_ value: SMAppService.Status) -> String {
     }
 }
 
+func emergencyStopped() -> Bool {
+    let settings = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".local/state/jremote/service-settings.json")
+    guard let data = try? Data(contentsOf: settings),
+          let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let environment = value["environment"] as? [String: Any],
+          let state = environment["JREMOTE_STATE_DIR"] as? String else { return false }
+    let marker = URL(fileURLWithPath: state).appendingPathComponent("emergency-stop.json")
+    guard let markerData = try? Data(contentsOf: marker),
+          let record = try? JSONSerialization.jsonObject(with: markerData) as? [String: Any] else { return false }
+    return record["schema"] as? Int == 1 && record["active"] as? Bool == true
+}
+
 func main() throws {
     guard geteuid() != 0 else { throw NSError(domain: "jStack", code: 77,
         userInfo: [NSLocalizedDescriptionKey: "User service control must not run as root"]) }
@@ -88,6 +101,8 @@ func main() throws {
     }
     let service = appService(plist)
     if action == "register" {
+        guard !emergencyStopped() else { throw NSError(domain: "jStack", code: 77,
+            userInfo: [NSLocalizedDescriptionKey: "jStack emergency stop is active"]) }
         // Approval revocation is not a registration failure to repair away.
         if service.status == .notRegistered || service.status == .notFound {
             do { try service.register() }

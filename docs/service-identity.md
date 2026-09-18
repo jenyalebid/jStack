@@ -151,6 +151,27 @@ and post-reboot absence. Identity and private configuration were preserved;
 the journal used selected private storage without copying environment values.
 The main CLI forwarding added afterward requires final-artifact qualification.
 
+### Emergency stop
+
+The sealed Hub CLI exposes one explicit switch: `jstack-host emergency-stop`.
+It writes an active marker to the configured private state before changing
+runtime state. Both the embedded runtime and native SMAppService controller
+refuse subsequent service starts while that marker is active.
+
+The transaction removes an installed Network owner through its reviewed,
+administrator-approved native transaction, stops the product's dedicated tmux
+server, unregisters every Hub and Services role, and resets macOS privacy
+consent for the Hub, Services, Network, legacy menu and installed client bundle
+identities with `tccutil`. It preserves pairing, state and application bundles.
+Every step records durable progress and a repeated invocation uses the same
+shutdown identity. An installed Network owner without its exact protected
+transaction ID is reported before user services are changed.
+
+Reset means the apps must request permission again if they are deliberately
+started later. It does not edit the TCC database directly or affect unrelated
+applications. Restoring operation is a separate, explicit recovery action; an
+emergency stop never silently turns services or permissions back on.
+
 ### Existing host cutover
 
 The sealed runtime's `migrate prepare --request PATH --journal-root PATH`

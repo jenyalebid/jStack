@@ -61,6 +61,11 @@ def _cmd_updates_enable(args) -> int:
     return 0
 
 
+def _cmd_emergency_stop(args) -> int:
+    from . import emergency_stop
+    return emergency_stop.stop(out=sys.stdout)
+
+
 def _cmd_pair(args) -> int:
     """Mint an enrolment code, the way the app expects to be introduced.
 
@@ -944,6 +949,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--label", default=install_host.LABEL,
                     help=argparse.SUPPRESS)
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("emergency-stop", help="stop all jStack services and reset their macOS permissions")
+    p.set_defaults(fn=_cmd_emergency_stop)
 
     def _serving_args(p, *, bind_default, bind_help):
         p.add_argument("--port", type=int, default=install_host.DEFAULT_PORT)
