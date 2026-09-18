@@ -97,6 +97,17 @@ def test_module_inventory_detects_package_code_drift_without_importing(tmp_path,
     assert before["services"][0]["module_source"]["entry"] == str(package / "app.py")
 
 
+def test_module_inventory_resolves_namespace_package_from_explicit_working_directory(tmp_path, observed):
+    package = tmp_path / "dashboard"
+    package.mkdir()
+    (package / "app.py").write_text("application = 1")
+    path = job(tmp_path, ProgramArguments=["/usr/bin/python3", "-m", "dashboard.app"],
+               WorkingDirectory=str(tmp_path))
+    row = inventory.inspect_job(path, "gui/501")
+    assert row["module_source"]["entry"] == str(package / "app.py")
+    assert "code_file_not_observed" not in row["findings"]
+
+
 @pytest.mark.parametrize("configuration", [{}, {"WorkingDirectory": "/no-such-source"},
                                              {"WorkingDirectory": "/tmp", "EnvironmentVariables": {"PYTHONPATH": "relative"}}])
 def test_unresolved_module_is_unknown_not_an_approved_runtime(tmp_path, observed, configuration):

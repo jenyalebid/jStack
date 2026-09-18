@@ -141,7 +141,7 @@ def module_source(job: dict, executable: Path, argv: list[str]) -> dict | None:
         entry = module.with_suffix(".py")
         if not entry.is_file():
             entry = module / "__main__.py"
-        if not entry.is_file() or (package.is_dir() and not (package / "__init__.py").is_file()):
+        if not entry.is_file():
             return {"unobserved": "module resolution requires interpreter inspection"}
         files = [package.with_suffix(".py")] if not package.is_dir() else []
         if package.is_dir():
