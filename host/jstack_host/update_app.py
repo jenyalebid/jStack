@@ -242,6 +242,10 @@ class AppBackend(MacBackend):
                 raise releases.ReleaseError(f"cannot observe {role} service approval during recovery")
             if current == "requires_approval":
                 continue  # A later user denial takes precedence over the snapshot.
+            if current == "not_found":
+                # The restored bundle no longer seals this definition; a
+                # register call cannot succeed and must not be guessed at.
+                raise releases.ReleaseError(f"{role} service could not be restored")
             result = control(app, "register", role)
             if result["status"] not in {"enabled", "requires_approval"}:
                 raise releases.ReleaseError(f"{role} service could not be restored")

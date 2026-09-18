@@ -9,56 +9,54 @@ def test_disabled_services_are_never_registered_or_unregistered(monkeypatch, tmp
     calls = []
     monkeypatch.setattr(update_app, "control", lambda *args: calls.append(args))
     backend = update_app.AppBackend(tmp_path, {})
+    monkeypatch.setattr(backend, "_definitions", lambda app: {
+        "host": "live.jstack.hub.host", "menu": "live.jstack.hub.menu"})
     statuses = {"host": "requires_approval", "menu": "not_registered"}
     backend._stop_services(tmp_path, statuses)
     backend._restore_services(tmp_path, statuses)
     assert calls == []
 
 
-def test_native_release_uses_app_backend_compatibility(monkeypatch, tmp_path):
-    from jstack_host.update_macos import MacBackend
-    observed = []
-    monkeypatch.setattr(MacBackend, "compatible", lambda self, manifest: observed.append(manifest["schema"]))
-    update_app.AppBackend(tmp_path, {}).compatible({"schema": 2})
-    assert observed == [1]
+def test_superseded_native_schema_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="unsupported release schema"):
+        update_app.AppBackend(tmp_path, {}).compatible({"schema": 2})
 
 
-@pytest.mark.parametrize("request_state,expected", [
-    ("pending", "pending"), ("applying", "pending"), ("updated", "applied"),
-    ("rollback_pending", "rolling_back"), ("rolled_back", "rolled_back"),
-    ("failed", "untouched"), ("mismatch", "unknown"),
+@pytest.mark.parametrize("installed,expected", [
+    ("release", "applied"), ("different", "unknown"), (None, "unknown"),
 ])
-def test_native_owner_recovery_state_is_bound_to_transaction(monkeypatch, tmp_path, request_state, expected):
-    backend = update_app.AppBackend(tmp_path, {})
-    monkeypatch.setattr(backend, "_handoff", lambda _: {"id": "a" * 32, "state": request_state})
-    job = {"transaction": {"services_owner": {"source": "candidate"}, "services_handoff": "a" * 32}}
-    assert backend.recovery_status(job) == expected
-
-
-def test_native_owner_rollback_is_handed_to_hub_before_main_app(monkeypatch, tmp_path):
-    from jstack_host import services_handoff
-    backend = update_app.AppBackend(tmp_path, {"menubar_path": str(tmp_path / "Hub.app")})
-    monkeypatch.setattr(backend, "recovery_status", lambda _: "applied")
-    requests = []
-    monkeypatch.setattr(services_handoff, "request_rollback", lambda identity: requests.append(identity))
-    job = {"id": "job", "transaction": {"services_owner": {"source": "candidate"}, "services_handoff": "a" * 32}}
-    with pytest.raises(ValueError, match="independent Hub controller"):
-        backend.rollback(job)
-    assert requests == ["a" * 32]
-
-
-def test_finalization_unregisters_hub_maintenance_controller(monkeypatch, tmp_path):
+def test_recovery_state_is_judged_by_the_installed_artifact(monkeypatch, tmp_path, installed, expected):
     app = tmp_path / "Hub.app"
     backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
-    calls = []
 
-    def control(owner, action, role=None):
-        calls.append((owner, action, role))
-        return {"services-handoff": "enabled"} if action == "status" else {"status": "not_registered"}
+    def check(path, component, kind):
+        assert path == app and kind == "menubar"
+        if installed != "release":
+            raise ValueError("installed app differs from the release")
 
-    monkeypatch.setattr(update_app, "control", control)
-    backend.finalize({"transaction": {"services_owner": {"source": "candidate"}}})
-    assert calls == [(app, "status", None), (app, "unregister", "services-handoff")]
+    monkeypatch.setattr(backend, "_check_app", check)
+    transaction = {"apps": {"menubar": {"target": str(app)}},
+                   "manifest": {"components": {"menubar": {"version": "42"}}}}
+    if installed is None:
+        transaction["apps"] = {}
+    assert backend.recovery_status({"transaction": transaction}) == expected
+
+
+def test_finalization_discards_the_retained_backup_bundle(tmp_path):
+    app = tmp_path / "Hub.app"
+    backup = tmp_path / "Hub.app.previous-app-stage-x"
+    backup.mkdir()
+    (backup / "old-version").write_text("original")
+    backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
+    job = {"transaction": {"apps": {"menubar": {"target": str(app), "backup": str(backup)}}}}
+    backend.finalize(job)
+    assert not backup.exists()
+    stray = tmp_path / "Unrelated.app"
+    stray.mkdir()
+    job = {"transaction": {"apps": {"menubar": {"target": str(app), "backup": str(stray)}}}}
+    with pytest.raises(ValueError, match="unexpected recovery bundle"):
+        backend.finalize(job)
+    assert stray.exists()
 
 
 def test_revocation_after_snapshot_is_not_repaired_away(monkeypatch, tmp_path):
@@ -81,8 +79,11 @@ def test_apply_refuses_approval_race_before_stopping_anything(monkeypatch, tmp_p
         backend.apply({"transaction": {"services": {"host": "enabled", "menu": "enabled"}}})
 
 
-@pytest.mark.parametrize("status", ["unknown", "not_found", None])
-def test_recovery_never_registers_an_unobservable_service(monkeypatch, tmp_path, status):
+@pytest.mark.parametrize("status,message", [
+    ("unknown", "cannot observe"), (None, "cannot observe"),
+    ("not_found", "could not be restored"),
+])
+def test_recovery_never_registers_an_unobservable_service(monkeypatch, tmp_path, status, message):
     calls = []
 
     def control(app, action, role=None):
@@ -91,7 +92,7 @@ def test_recovery_never_registers_an_unobservable_service(monkeypatch, tmp_path,
 
     monkeypatch.setattr(update_app, "control", control)
     backend = update_app.AppBackend(tmp_path, {})
-    with pytest.raises(ValueError, match="cannot observe"):
+    with pytest.raises(ValueError, match=message):
         backend._restore_services(tmp_path, {"host": "enabled", "menu": "not_registered"})
     assert calls == [("status", None)]
 
@@ -100,7 +101,7 @@ def test_recovery_never_registers_an_unobservable_service(monkeypatch, tmp_path,
 @pytest.mark.parametrize("statuses", [
     {"host": "unknown", "menu": "enabled"},
     {"host": "enabled"},
-    {"host": "enabled", "menu": "not_found"},
+    {"menu": "enabled"},
 ])
 def test_incomplete_approval_snapshot_refuses_all_mutations(monkeypatch, tmp_path, method, statuses):
     monkeypatch.setattr(update_app, "control", lambda *args: pytest.fail("must refuse before controls"))
@@ -114,6 +115,8 @@ def test_stop_waits_for_the_real_job_to_disappear(monkeypatch, tmp_path):
     monkeypatch.setattr(update_app, "control", lambda *args: calls.append(args))
     monkeypatch.setattr(install_host, "wait_unloaded", lambda label: False)
     backend = update_app.AppBackend(tmp_path, {})
+    monkeypatch.setattr(backend, "_definitions", lambda app: {
+        "host": "live.jstack.hub.host", "menu": "live.jstack.hub.menu"})
     with pytest.raises(ValueError, match="has not stopped"):
         backend._stop_services(tmp_path, {"host": "enabled", "menu": "enabled"})
     assert calls == [(tmp_path, "unregister", "menu")]
@@ -125,6 +128,7 @@ def test_recovery_restores_an_app_missing_between_renames(monkeypatch, tmp_path)
     backup.mkdir()
     (backup / "old-version").write_text("original")
     backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
+    monkeypatch.setattr(backend, "_statuses", lambda _: {"host": "enabled", "menu": "not_registered"})
     restored = []
     monkeypatch.setattr(backend, "_restore_services", lambda *args: restored.append(args))
     monkeypatch.setattr(update_plugins, "rollback", lambda *args: None)
@@ -145,18 +149,18 @@ def test_disabled_menu_does_not_need_a_running_process(tmp_path):
     assert backend.activate_runtime({"state": "current", "verified": True}) is False
 
 
-def test_embedded_host_stops_through_its_catalog_owner(monkeypatch, tmp_path):
-    from jstack_host import app_services
-    owner = tmp_path / "Services.app"
-    monkeypatch.setattr(app_services, "specification", lambda app, config, role:
-                        (owner, "dashboard", "live.jstack.automation.dashboard"))
+def test_embedded_host_stops_through_the_hubs_own_catalog(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(update_app, "control", lambda *args: calls.append(args))
     waited = []
     monkeypatch.setattr(install_host, "wait_unloaded", lambda label: waited.append(label) or True)
-    backend = update_app.AppBackend(tmp_path, {})
-    backend._stop_services(tmp_path, {"host": "enabled", "menu": "not_registered"})
-    assert calls == [(owner, "unregister", "dashboard")]
+    backend = update_app.AppBackend(tmp_path, {"host_capability": "dashboard"})
+    monkeypatch.setattr(backend, "_definitions", lambda app: {
+        "host": "live.jstack.hub.host", "menu": "live.jstack.hub.menu",
+        "dashboard": "live.jstack.automation.dashboard"})
+    backend._stop_services(tmp_path, {"host": "not_registered", "menu": "not_registered",
+                                      "dashboard": "enabled"})
+    assert calls == [(tmp_path, "unregister", "dashboard")]
     assert waited == ["live.jstack.automation.dashboard"]
 
 
@@ -189,32 +193,30 @@ def test_enabled_host_still_requires_authenticated_api(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("status", ["enabled", "requires_approval"])
-def test_missing_main_app_recovery_observes_independent_embedded_owner(monkeypatch, tmp_path, status):
-    from jstack_host import app_services
-    app, backup, owner = tmp_path / "Hub.app", tmp_path / "Hub.app.previous", tmp_path / "Services.app"
+def test_missing_main_app_recovery_reobserves_after_restoring_the_bundle(monkeypatch, tmp_path, status):
+    app, backup = tmp_path / "Hub.app", tmp_path / "Hub.app.previous"
     backup.mkdir()
     (backup / "old-version").write_text("original")
     backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app), "host_capability": "dashboard"})
-    monkeypatch.setattr(app_services, "specification", lambda *args:
-                        (owner, "dashboard", "live.jstack.automation.dashboard"))
-    calls = []
+    observed = []
 
-    def control(*args):
-        calls.append(args)
-        assert not app.exists(), "observe and stop the embedded owner before restoring the app"
-        return {"dashboard": status}
+    def statuses(target):
+        observed.append(Path(target).exists())
+        return {"host": "not_registered", "menu": "not_registered", "dashboard": status}
 
-    monkeypatch.setattr(update_app, "control", control)
-    monkeypatch.setattr(install_host, "wait_unloaded", lambda _: True)
+    monkeypatch.setattr(backend, "_statuses", statuses)
     restored = []
     monkeypatch.setattr(backend, "_restore_services", lambda *args: restored.append(args))
     monkeypatch.setattr(update_plugins, "rollback", lambda *args: None)
-    transaction = {"services": {"host": "enabled", "menu": "not_registered"}, "providers": [],
-                   "stack": str(tmp_path), "apps": {"menubar": {"target": str(app), "backup": str(backup)}}}
+    transaction = {"services": {"host": "not_registered", "menu": "not_registered",
+                                "dashboard": "enabled"},
+                   "providers": [], "stack": str(tmp_path),
+                   "apps": {"menubar": {"target": str(app), "backup": str(backup)}}}
     backend.rollback({"id": "test", "transaction": transaction})
-    assert calls[0] == (owner, "status")
-    assert ((owner, "unregister", "dashboard") in calls) == (status == "enabled")
-    assert restored[0][1]["host"] == status
+    # Nothing is observable or stoppable until the bundle is back in place.
+    assert observed == [True]
+    # A denial recorded after the snapshot wins over the snapshot.
+    assert restored[0][1]["dashboard"] == status
     assert (app / "old-version").read_text() == "original"
 
 
