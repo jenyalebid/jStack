@@ -82,7 +82,9 @@ def automation_catalog(app: Path, roles: dict) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
-def prepare(candidate: Path) -> Path:
+def prepare(candidate: Path, *, transaction_name: str | None = None) -> Path:
+    if transaction_name is not None and not re.fullmatch(r"services-update-[0-9a-f]{32}", transaction_name):
+        raise ValueError("invalid Services transaction identifier")
     settings, owner = context()
     with exclusive():
         root = migration_root()
@@ -96,7 +98,11 @@ def prepare(candidate: Path) -> Path:
         if automation_catalog(owner, roles) != automation_catalog(candidate, roles):
             raise ValueError("changing private capabilities requires a separate migration")
         states = observe(owner, roles)
-        directory = Path(tempfile.mkdtemp(prefix="services-update-", dir=root))
+        if transaction_name is None:
+            directory = Path(tempfile.mkdtemp(prefix="services-update-", dir=root))
+        else:
+            directory = root / transaction_name
+            directory.mkdir(mode=0o700)
         if directory.stat().st_dev != owner.parent.stat().st_dev:
             raise ValueError("Services update storage must support atomic owner renames")
         previous, incoming = directory / "previous.app", directory / "candidate.app"

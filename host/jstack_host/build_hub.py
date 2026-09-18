@@ -19,6 +19,7 @@ from .update_macos import command
 
 ROLES = {"host": ("JStackRuntime", "host"),
          "updater": ("JStackRuntime", "updater"),
+         "services-handoff": ("JStackRuntime", "services-handoff"),
          "menu": ("JStackHostBar",)}
 MAGICS = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
 
@@ -165,7 +166,7 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, reco
     definitions = contents / "Library/LaunchAgents"
     definitions.mkdir(parents=True)
     services = {}
-    for role in (["updater"] if recovery else ["host", "menu"]):
+    for role in (["updater"] if recovery else ["host", "menu", "services-handoff"]):
         definition = service_plist(role)
         definition["AssociatedBundleIdentifiers"] = [bundle_id]
         (definitions / f"live.jstack.hub.{role}.plist").write_bytes(plistlib.dumps(definition))

@@ -21,10 +21,10 @@ def main():
     # This runs before any host module binds state paths at import time.
     from jstack_host import service_settings
     config = service_settings.read() if role != "self-test" else {}
-    if role in ("host", "updater", "provision", "verify-install") and not config.get("environment", {}).get("JREMOTE_STATE_DIR"):
+    if role in ("host", "updater", "services-handoff", "provision", "verify-install") and not config.get("environment", {}).get("JREMOTE_STATE_DIR"):
         raise SystemExit("app-owned services require explicit installation state; refusing a second identity")
     if config:
-        if role in ("host", "updater", "provision", "verify-install"):
+        if role in ("host", "updater", "services-handoff", "provision", "verify-install"):
             for key in tuple(os.environ):
                 if key.startswith("JREMOTE_"):
                     del os.environ[key]
@@ -35,7 +35,7 @@ def main():
         if role == "host":
             arguments = ["--port", str(config["port"]), "--host", config.get("bind", "0.0.0.0"), *arguments]
     os.environ["PATH"] = str(resources.parent / "MacOS") + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-    if role in ("host", "updater"):
+    if role in ("host", "updater", "services-handoff"):
         state = Path(os.environ.get("JREMOTE_STATE_DIR", str(Path.home() / ".local/state/jremote")))
         logs = state / "logs"
         logs.mkdir(parents=True, exist_ok=True)
@@ -66,6 +66,8 @@ def main():
         from jstack_host.update_supervisor import main as run
     elif role == "cli":
         from jstack_host.cli import main as run
+    elif role == "services-handoff":
+        from jstack_host.services_handoff import main as run
     elif role == "install":
         from jstack_host.install_signed import main as run
     elif role == "migrate":

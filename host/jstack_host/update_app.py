@@ -87,6 +87,9 @@ class AppBackend(MacBackend):
 
     def _statuses(self, app: Path) -> dict:
         observed = control(app, "status")
+        # The independent maintenance registration is not a host/menu choice.
+        # Its own controller observes it; full removal still enumerates it.
+        observed.pop("services-handoff", None)
         from .app_services import specification
         owner, capability, _ = specification(app, self.config, "host")
         if owner != app:
@@ -100,6 +103,8 @@ class AppBackend(MacBackend):
         stack.mkdir()
         safe_tar(directory / manifest["components"]["stack"]["file"], stack)
         app = Path(self.config["menubar_path"])
+        if control(app, "status").get("services-handoff") == "enabled":
+            raise releases.ReleaseError("Hub maintenance must be stopped before replacing its owner")
         statuses = self._statuses(app)
         self._validate_statuses(statuses)
         apps = {}
