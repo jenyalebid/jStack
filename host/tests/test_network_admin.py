@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import json
 from pathlib import Path
 import shlex
 import sys
@@ -94,6 +95,25 @@ def test_denied_administrator_approval_does_not_retry(monkeypatch, tmp_path):
     assert calls[0][0] == ["/usr/bin/osascript", "-"]
     assert "with administrator privileges" in calls[0][1]["input"]
     assert '\\"quoted\\"\\nexit 1' in calls[0][1]["input"]
+
+
+def test_activation_persists_protected_transaction_for_emergency_stop(monkeypatch, tmp_path):
+    from jstack_host import service_settings
+    request = {"schema": 1, "action": "activate", "transaction": "a" * 32}
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    settings_path = tmp_path / "service-settings.json"
+    settings = {"schema": 1, "app": str(tmp_path / "Hub.app"), "port": 9090,
+                "environment": {"JREMOTE_STATE_DIR": str(tmp_path / "state")}}
+    monkeypatch.setattr(admin.os, "geteuid", lambda: 501)
+    monkeypatch.setattr(admin, "bootstrap_script", lambda *args: "approved native fixture")
+    monkeypatch.setattr(admin.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        returncode=0, stderr="", stdout=json.dumps({"transaction": "a" * 32, "state": "active"})))
+    monkeypatch.setattr(service_settings, "read", lambda: dict(settings))
+    monkeypatch.setattr(service_settings, "path", lambda: settings_path)
+    assert admin.approve(tmp_path / "Network.app", request, private)["state"] == "active"
+    saved = json.loads(settings_path.read_text())
+    assert saved["network_transaction"] == "a" * 32
 
 
 def test_bootstrap_refuses_writable_root_ancestry(monkeypatch, tmp_path):

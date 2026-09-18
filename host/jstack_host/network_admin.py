@@ -159,7 +159,16 @@ def approve(app: Path, request: dict, private_storage: Path) -> dict:
     result = subprocess.run(["/usr/bin/osascript", "-"], input=source, capture_output=True, text=True, timeout=300)
     if result.returncode:
         raise ValueError("administrator approval or protected Network transaction failed: " + result.stderr[-1000:])
-    return json.loads(result.stdout)
+    answer = json.loads(result.stdout)
+    if request["action"] == "activate" and answer == {
+            "transaction": request["transaction"], "state": "active"}:
+        from . import service_settings
+        settings = service_settings.read()
+        if settings:
+            settings["network_transaction"] = request["transaction"]
+            service_settings.validate(settings)
+            atomic_json(service_settings.path(), settings)
+    return answer
 
 
 def main():
