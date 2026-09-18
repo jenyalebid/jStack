@@ -65,7 +65,7 @@ def catalog(app: Path) -> dict[str, str]:
 def observe(app: Path, roles: dict) -> dict:
     states = control(app, "status")
     if set(states) != set(roles) or any(state not in {
-            "enabled", "requires_approval", "not_registered"} for state in states.values()):
+            "enabled", "requires_approval", "not_registered", "not_found"} for state in states.values()):
         raise ValueError("recovery service approval is unobservable")
     return states
 

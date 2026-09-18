@@ -62,6 +62,15 @@ def test_update_and_rollback_preserve_off_and_private_settings(fixture):
     assert calls == [] and states["updater"] == "not_registered"
 
 
+def test_update_accepts_catalogued_capability_not_yet_known_to_service_management(fixture):
+    owner, candidate, states, calls, _ = fixture
+    states["worker"] = "not_found"
+    journal = update.prepare(candidate)
+    update.apply(journal)
+    assert states == {"updater": "enabled", "worker": "not_found"}
+    assert all(role != "worker" for _, role in calls)
+
+
 def test_denial_and_explicit_off_after_update_survive_rollback(fixture):
     owner, candidate, states, calls, _ = fixture
     journal = update.prepare(candidate)
