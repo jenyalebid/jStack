@@ -6,7 +6,6 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from jstack_host import build_hub, publish_release, release_channel, release_manifest as releases
-from jstack_host.update_app import AppBackend
 from jstack_host.update_macos import MacBackend
 
 
@@ -46,10 +45,9 @@ def test_owner_artifacts_cannot_share_a_download_filename():
         releases.validate(value, promoted=False)
 
 
-@pytest.mark.parametrize("backend", [MacBackend, AppBackend])
-def test_unimplemented_owner_update_refuses_before_any_platform_work(tmp_path, backend):
+def test_legacy_backend_refuses_native_owner_update_before_platform_work(tmp_path):
     with pytest.raises(ValueError, match="self-update"):
-        backend(tmp_path, {}).compatible(manifest())
+        MacBackend(tmp_path, {}).compatible(manifest())
 
 
 def test_native_publication_is_closed_even_with_complete_receipts(tmp_path, monkeypatch):
