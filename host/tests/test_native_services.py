@@ -7,28 +7,6 @@ import sys
 import pytest
 
 
-def test_automation_entitlement_is_limited_to_product_entrypoints(tmp_path, monkeypatch):
-    import plistlib
-    from jstack_host import build_hub
-    app = tmp_path / "Hub.app"
-    macos = app / "Contents/MacOS"
-    macos.mkdir(parents=True)
-    (app / "Contents/Resources").mkdir()
-    for name in ("JStackRuntime", "JStackHub", "JStackPython", "tmux"):
-        (macos / name).write_bytes(b"fixture")
-    monkeypatch.setattr(build_hub, "macho", lambda path: path.parent == macos and path.is_file())
-    commands = []
-    monkeypatch.setattr(build_hub, "command", lambda argv: commands.append(argv))
-    build_hub.sign(app, None)
-    grants = plistlib.loads((app / "Contents/Resources/automation-entitlements.plist").read_bytes())
-    assert grants == {"com.apple.security.automation.apple-events": True}
-    signatures = {Path(argv[-1]): argv for argv in commands if "--sign" in argv}
-    for target in (app, macos / "JStackRuntime", macos / "JStackHub", macos / "JStackPython"):
-        assert "--entitlements" in signatures[target]
-        assert "runtime" in signatures[target]
-    assert "--entitlements" not in signatures[macos / "tmux"]
-
-
 @pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("swiftc"), reason="requires macOS Swift toolchain")
 @pytest.mark.parametrize("filename,flags", [("Network.swift", ["-parse-as-library"]),
                                           ("NetworkInstall.swift", ["-parse-as-library"]),

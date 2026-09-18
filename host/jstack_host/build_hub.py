@@ -189,7 +189,6 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, reco
         "CFBundlePackageType": "APPL", "CFBundleVersion": str(identity.get("build", version)),
         "CFBundleShortVersionString": version, "LSUIElement": True,
         "LSMinimumSystemVersion": "13.0",
-        "NSAppleEventsUsageDescription": "jStack runs the app automation you request and manages your session windows.",
         "CFBundleURLTypes": [] if recovery else [{"CFBundleURLName": "jStack updates", "CFBundleURLSchemes": ["jstack"]}]}))
     binaries = [path for path in contents.rglob("*") if macho(path)]
     for path in binaries:
@@ -205,12 +204,6 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, reco
 
 def sign(app: Path, config: dict | None):
     binaries = [path for path in app.rglob("*") if macho(path)]
-    # Permission remains user-controlled. This entitlement only permits the
-    # named app to request Apple Events consent under hardened runtime.
-    entitlements = app / "Contents/Resources/automation-entitlements.plist"
-    entitlements.write_bytes(plistlib.dumps({"com.apple.security.automation.apple-events": True}))
-    automation = {app / "Contents/MacOS" / name for name in
-                  ("JStackRuntime", "JStackPython", "JStackCLI", "JStackHub", "JStackHostBar")}
     signing = ["/usr/bin/codesign", "--force", "--options", "runtime"]
     if config:
         if config.get("sign_keychain_password_file"):
@@ -221,11 +214,10 @@ def sign(app: Path, config: dict | None):
     else:
         signing += ["--sign", "-"]
     for path in sorted(binaries, key=lambda p: len(p.parts), reverse=True):
-        access = ["--entitlements", str(entitlements)] if path in automation else []
-        command([*signing, *access, str(path)])
+        command([*signing, str(path)])
     for framework in sorted(app.rglob("*.framework"), key=lambda p: len(p.parts), reverse=True):
         command([*signing, str(framework)])
-    command([*signing, "--entitlements", str(entitlements), str(app)])
+    command([*signing, str(app)])
     command(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)])
 
 
