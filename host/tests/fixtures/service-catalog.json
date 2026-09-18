@@ -1,0 +1,9 @@
+{
+  "acceptance": {
+    "Label": "live.jstack.acceptance.legacy",
+    "ProgramArguments": ["/bin/sleep", "300"],
+    "RunAtLoad": true,
+    "KeepAlive": true,
+    "ThrottleInterval": 10
+  }
+}

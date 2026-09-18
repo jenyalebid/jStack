@@ -15,7 +15,10 @@ import sys
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["hub", "offer", "queue", "inventory", "enrol",
-                                           "adopt", "grant", "spawn", "probe", "call", "revoke"])
+                                           "adopt", "grant", "spawn", "probe", "call", "revoke", "session-proof",
+                                           "tamper", "restore-artifact"])
+    parser.add_argument("--session")
+    parser.add_argument("--after", type=int, default=0)
     parser.add_argument("--candidate", type=Path)
     parser.add_argument("--request", default="fixture-self-update")
     parser.add_argument("--target", default="self")
@@ -50,6 +53,26 @@ def main():
     from jstack_host.store import get_store
     from jstack_host.update_supervisor import atomic_json
     import httpx
+    if args.action in {"tamper", "restore-artifact"}:
+        if config.get("managed") or (state / "parent.json").exists():
+            raise RuntimeError("artifact fault requires the disposable fixture hub")
+        feed = fleet_updates.feed_dir()
+        envelope = json.loads((feed / "latest.json").read_text())
+        manifest = release_manifest.verify(envelope, config["public_key"], promoted=False)
+        artifact = feed / manifest["release"] / manifest["components"]["client"]["file"]
+        backup = artifact.with_name(artifact.name + ".lab-original")
+        if args.action == "tamper":
+            if backup.exists():
+                raise RuntimeError("artifact already withheld; restore it first")
+            release_manifest.check_artifact(artifact, manifest["components"]["client"])
+            shutil.copy2(artifact, backup)
+            with artifact.open("ab") as stream:
+                stream.write(b"lab artifact corruption")
+        else:
+            release_manifest.check_artifact(backup, manifest["components"]["client"])
+            os.replace(backup, artifact)
+        print(json.dumps({"fixture_action": args.action, "release": manifest["release"]}))
+        return
     if args.action in {"enrol", "adopt", "grant"}:
         if args.record is None or not args.record.resolve().is_relative_to(Path.home()):
             parser.error("fixture operation requires a record file under the guest account")
@@ -125,6 +148,24 @@ def main():
         return
     headers = {"Authorization": "Bearer " + Path(config["token_path"]).read_text().strip()}
     base = config["local_url"] + "/api/jremote/v1/updates"
+    if args.action == "session-proof":
+        import psutil
+        import re
+        from jstack_host import board
+        if not re.fullmatch(r"[a-f0-9-]{32,40}", args.session or ""):
+            parser.error("session-proof requires a session identity")
+        result = httpx.get(config["local_url"] + "/api/jremote/v1/sessions/" + args.session,
+                           headers=headers, timeout=args.timeout)
+        result.raise_for_status()
+        payload = result.json()
+        if payload.get("error"):
+            raise RuntimeError(payload["error"])
+        entries = payload.get("messages", [])
+        holders = [{"pid": pid, "started": psutil.Process(pid).create_time()}
+                   for pid in board.pids_holding(args.session)]
+        print(json.dumps({"session": args.session, "holders": holders,
+                          "cursor": len(entries), "messages": entries[args.after:]}))
+        return
     if args.action == "call":
         # One authenticated local request, answered with its status instead of
         # an exception: a refusal is an observation the caller needs to see.
@@ -140,10 +181,14 @@ def main():
         row = get_store().host_row(args.machine or "")
         if row is None or not str(row["name"]).startswith("Update lab"):
             raise RuntimeError("only a machine this fixture enrolled may be revoked")
-        result = httpx.post(config["local_url"] + "/api/jremote/v1/devices/"
-                            + row["device_id"] + "/revoke", headers=headers, timeout=args.timeout)
-        result.raise_for_status()
-        print(json.dumps({"revoked": row["device_id"], "machine": args.machine}))
+        # This lab has HTTP relays, not a WireGuard mesh; the native device
+        # management route correctly refuses to call it a mesh-owning hub.
+        # Revoke the fixture credential through the shipped device store and
+        # test the updater's response. This is NOT menu/mesh acceptance.
+        if not devices.revoke(row["device_id"]):
+            raise RuntimeError("fixture credential is missing or already revoked")
+        print(json.dumps({"revoked": row["device_id"], "machine": args.machine,
+                          "method": "local fixture credential revocation"}))
         return
     if args.action == "spawn":
         if not args.agent or not args.agent.startswith("update-proof"):

@@ -41,6 +41,7 @@ class Supervisor:
         self.journal = root / "job.json"
         self.current = json.loads(self.journal.read_text()) if self.journal.exists() else {}
         self.last_error = ""
+        self.channel_error = ""
 
     def save(self, **changes):
         self.current.update(changes)
@@ -73,7 +74,7 @@ class Supervisor:
         if not token or not base:
             raise releases.ReleaseError("no update authority connection")
         observed = self.backend.observe(self.current)
-        observed.update(supervisor=1, updater_error=self.last_error)
+        observed.update(supervisor=1, updater_error=self.last_error or self.channel_error)
         atomic_json(self.root / "observed.json", observed)
         body = {"observation": observed}
         if self.current:
@@ -133,8 +134,25 @@ class Supervisor:
         # An apply interrupted by reboot/crash never starts from scratch over
         # a half-replaced installation. Recover its exact prior transaction.
         if self.current.get("state") == "applying":
-            self.backend.rollback(self.current)
-            self.save(state="rolled_back", detail="recovered interrupted application")
+            recover = getattr(self.backend, "recovery_status", None)
+            status = recover(self.current) if recover else "unknown"
+            if status == "applied":
+                self.save(state="verifying", verify_started=time.time())
+            elif status in {"pending", "rolling_back"}:
+                return
+            elif status == "rolled_back":
+                self.save(state="rolled_back", detail="independent owner rollback completed")
+            else:
+                self.backend.rollback(self.current)
+                self.save(state="rolled_back", detail="recovered interrupted application")
+        if self.current.get("state") == "verifying":
+            recover = getattr(self.backend, "recovery_status", None)
+            status = recover(self.current) if recover else "unknown"
+            if status == "rolling_back":
+                return
+            if status == "rolled_back":
+                self.backend.rollback(self.current)
+                self.save(state="rolled_back", detail="independent owner rollback completed")
         if (self.current.get("state") == "verifying" and
                 time.time() - self.current.get("verify_started", 0) > 180):
             # This runs before the network request: losing the parent (or
@@ -143,6 +161,17 @@ class Supervisor:
             self.save(state="rolled_back", detail="verification deadline expired")
         if self.current.get("state") == "current":
             self.finalize()
+        # Feed discovery is independent of recovery and fleet heartbeats.
+        # A public-channel outage must not strand a job already authorized.
+        try:
+            from .release_channel import refresh
+            refresh(self.root, self.config)
+            status_file = self.root / "channel.json"
+            status = json.loads(status_file.read_text()) if status_file.exists() else {}
+            self.channel_error = ("Release check failed: " + status.get("detail", "unknown error")
+                                  if status.get("status") == "failed" else "")
+        except Exception as exc:
+            self.channel_error = "Release check failed: " + str(exc)
         reply = self.heartbeat()
         job = reply.get("job")
         if (job and job.get("id") == self.current.get("id") and job.get("state") == "current"
@@ -248,7 +277,11 @@ def main():
     root = args.state_dir / "updates"
     configuration = json.loads((root / "config.json").read_text())
     from .update_macos import MacBackend
-    Supervisor(root, configuration, MacBackend(root, configuration)).run(once=args.once)
+    backend = MacBackend
+    if configuration.get("service_model") == "app":
+        from .update_app import AppBackend
+        backend = AppBackend
+    Supervisor(root, configuration, backend(root, configuration)).run(once=args.once)
 
 
 if __name__ == "__main__":

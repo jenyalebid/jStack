@@ -185,8 +185,11 @@ def wrapped(runtime, command, threshold, thread=True):
             "--threshold-seconds", str(threshold)]
     if thread:
         argv += ["--thread-id", str(uuid.uuid4())]
+    environment = dict(os.environ)
+    if not thread:
+        environment.pop("CODEX_THREAD_ID", None)
     return subprocess.run(argv, capture_output=True, text=True, timeout=90,
-                          cwd=str(runtime))
+                          cwd=str(runtime), env=environment)
 
 
 def only_job():

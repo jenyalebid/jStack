@@ -887,3 +887,32 @@ def test_pair_mints_on_a_host_that_has_only_device_rows(store, tmp_path,
                               state_dir=None, label=None)
     assert cli._cmd_pair(args) == 0
     assert "My laptop" in capsys.readouterr().out
+
+
+def test_internal_token_refuses_to_re_key_from_a_dir_no_host_serves(
+        store, tmp_path, monkeypatch):
+    """The second half of #45, and the one with a live credential behind it.
+
+    `internal_token()` re-keys the `host-internal` row whenever the plaintext
+    beside it is missing. A process that resolved the wrong state dir does that
+    into a store the real host never reads — the read-compare-write race
+    d9b432f fixed *within* one state dir, now available across two, with each
+    side re-keying what the other just wrote.
+
+    Reading is untouched: this refuses the mint, not the answer.
+    """
+    import json
+
+    from jstack_host import hostenv
+
+    served = tmp_path / "served"
+    marker = tmp_path / "embedded.json"
+    marker.write_text(json.dumps({"server": "the dashboard", "port": 9090,
+                                  "state_dir": str(served)}))
+    monkeypatch.setenv("JREMOTE_EMBED_MARKER", str(marker))
+
+    with pytest.raises(hostenv.SecondIdentity) as caught:
+        devices.internal_token()
+    assert str(served) in str(caught.value)
+    assert store.device(devices.INTERNAL_ID) is None, "it minted a row anyway"
+    assert not (tmp_path / "internal-token").exists(), "it wrote a secret anyway"

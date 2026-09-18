@@ -1,0 +1,1 @@
+[RETRY of run {retry_of}, which died with {reason}] A previous session received this instruction and may already have completed some of it. Before taking an outward action—push, publish, send, merge, scheduled wake, or file write—check current state and skip anything already completed. Do only what remains, and report what you found already done.

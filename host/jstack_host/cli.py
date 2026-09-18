@@ -32,6 +32,7 @@ LaunchAgent, beneath anything the shell set explicitly.
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 
 from . import hostenv, install_host, server
@@ -44,6 +45,32 @@ def _adopt(args) -> None:
         import os
         os.environ["JREMOTE_STATE_DIR"] = args.state_dir
         hostenv.reset_profile()
+
+
+def _cmd_updates_enable(args) -> int:
+    """Install the local supervisor that turns queued update jobs into work."""
+    _adopt(args)
+    import json
+    from pathlib import Path
+    from . import install_updater
+
+    trust = json.loads((Path(install_updater.__file__).parent
+                        / "release-trust.json").read_text())["public_key"]
+    result = install_updater.bootstrap(trust, state_dir=_path(args.state_dir))
+    print(json.dumps(result))
+    return 0
+
+
+def _cmd_emergency_stop(args) -> int:
+    from . import emergency_stop
+    return emergency_stop.stop(out=sys.stdout)
+
+
+def _cmd_services_update(args) -> int:
+    import json
+    from . import services_handoff
+    print(json.dumps(services_handoff.submit(args.candidate), sort_keys=True))
+    return 0
 
 
 def _cmd_pair(args) -> int:
@@ -496,15 +523,54 @@ def _cmd_adopt(args) -> int:
               "Otherwise run `install_hub.sh` to make this Mac a hub.",
               file=sys.stderr)
         return 1
-    # A carried file may need to install dependencies on a fresh Mac first.
-    # Give that normal path an hour; explicit shorter TTLs are still honored.
-    ttl = args.ttl if args.ttl is not None else (3600 if getattr(args, "offline", False) else ADOPT_TTL)
-    row = enrolment.mint_code(args.name, created_by="", ttl=ttl,
-                              kind=enrolment.KIND_HOST)
     port = getattr(args, "port", None) or addresses.DEFAULT_PORT
     found = addresses.reachable(port)
+    offline = getattr(args, "offline", False)
 
-    if getattr(args, "offline", False):
+    # Both refusals stand BEFORE the mint, and that placement is the point. A
+    # code is a one-shot credential: minting one and then explaining why it is
+    # useless leaves a live host code burning down in the table, and on the
+    # offline path it is worse than that — `_adopt_offline` writes the code
+    # into the machine's bundle on its way past, so a refusal printed
+    # afterwards would arrive over a JOIN.md that had already been rewritten.
+    if offline:
+        from . import presence
+        live = presence.live_on_mesh(args.name)
+        if live is not None:
+            where = f"{live['address']}:{live['port']}"
+            print(
+                f"{args.name} is already on this mesh — its peer is live and "
+                f"it answered at http://{where}.\nA Mac that holds the tunnel "
+                "redeems from where it stands, so the carried file is not "
+                "what\nit needs: it would rewrite that machine's bundle with a "
+                "fresh code and still\nleave you carrying a file to a Mac that "
+                "could have done it in one line.\n\nRun this instead:\n\n"
+                f"    jstack-host adopt {shlex.quote(args.name)}\n\n"
+                "and run the line it prints on that Mac. Nothing was minted "
+                "here.\n\nIf that Mac has genuinely lost the tunnel — "
+                "reinstalled, or its keys gone — take\nits peer out first "
+                f"(`{tunnel.PEER_SCRIPT} remove {live['peer']}`), and this "
+                "flow is\nthe right one again.", file=sys.stderr)
+            return 1
+    elif not any(a["kind"] in ("lan", "mesh") for a in found):
+        # Loopback only, and no mesh to fall back to: nothing another machine
+        # can redeem against exists. A real stop, not a prompt to guess — and
+        # the reason the address is resolved before the code rather than after.
+        print("this Mac has no address another machine can redeem against — "
+              "only loopback,\nand it runs no mesh. Nothing was minted: a code "
+              "with nowhere to send it is half\nan enrolment, and a command "
+              "printed around a blank reads as an instruction.\nPut this Mac "
+              "on a real network (`jstack-host where` prints what it has), "
+              "then\nadopt again.", file=sys.stderr)
+        return 1
+
+    # A carried file may need to install dependencies on a fresh Mac first.
+    # Give that normal path an hour; explicit shorter TTLs are still honored.
+    ttl = args.ttl if args.ttl is not None else (3600 if offline else ADOPT_TTL)
+    row = enrolment.mint_code(args.name, created_by="", ttl=ttl,
+                              kind=enrolment.KIND_HOST)
+
+    if offline:
         return _adopt_offline(args.name, row, port,
                               as_json=getattr(args, "json", False))
 
@@ -538,33 +604,28 @@ def _cmd_adopt(args) -> int:
     # `.local` still stays out: it needs the same LAN as the numeric address
     # while resolving less reliably on it, so it is never right when the
     # number is available and never available when it is not.
+    #
+    # Unconditional, because the case where there is neither address never
+    # reaches here any more — it is refused above, before the code exists.
     lan = next((a for a in found if a["kind"] == "lan"), None)
     mesh = next((a for a in found if a["kind"] == "mesh"), None)
-    if mesh or lan:
-        print("\nOn that Mac, with jStack installed:\n")
-        print(f"    jstack-host attach {row['code']} "
-              f"--parent {(mesh or lan)['url']}")
-        if mesh:
-            print("\nThat address is this hub on the mesh. It reaches here "
-                  "from anywhere in the world,\nand it is the answer for any "
-                  "Mac that has been on this mesh even once.")
-            if lan:
-                # Named, not printed as a command. A machine that has never
-                # held the tunnel has no route to 10.66 — the tunnel is what
-                # creates that route — so it does need a LAN address once.
-                # But that is a setup-in-person case, and putting its address
-                # beside the real one is what taught the reader to treat the
-                # first line as a guess and work down the list.
-                print("\nOnly a Mac that has NEVER been on this mesh needs a "
-                      "different address, and\nit has to be on this network "
-                      "for it — `jstack-host where` prints that one.")
-    else:
-        # Loopback only, and no mesh to fall back to: nothing another machine
-        # can redeem against exists. A real stop, not a prompt to guess.
-        print("\n  This Mac has no address another machine can redeem against "
-              "— only loopback,\n  and it runs no mesh. Put it on a real "
-              "network (check `jstack-host where`),\n  then mint a new code.")
-        return 1
+    print("\nOn that Mac, with jStack installed:\n")
+    print(f"    jstack-host attach {row['code']} "
+          f"--parent {(mesh or lan)['url']}")
+    if mesh:
+        print("\nThat address is this hub on the mesh. It reaches here "
+              "from anywhere in the world,\nand it is the answer for any "
+              "Mac that has been on this mesh even once.")
+        if lan:
+            # Named, not printed as a command. A machine that has never
+            # held the tunnel has no route to 10.66 — the tunnel is what
+            # creates that route — so it does need a LAN address once.
+            # But that is a setup-in-person case, and putting its address
+            # beside the real one is what taught the reader to treat the
+            # first line as a guess and work down the list.
+            print("\nOnly a Mac that has NEVER been on this mesh needs a "
+                  "different address, and\nit has to be on this network "
+                  "for it — `jstack-host where` prints that one.")
     print("\nThat Mac joins this mesh and hands back a grant, so every device "
           "already paired\nhere gets into it without a second code.")
     return 0
@@ -625,20 +686,33 @@ def _cmd_leaves(args) -> int:
     every device sees (the tile), and the grant is whether asking for access
     works. A machine with a tile and no grant is exactly the state that looks
     fine on a phone and fails when tapped, so it is printed, not inferred.
+
+    `--json` carries a third, `online`, and pays for it: the rows come from
+    `presence.roster`, which reads the peer table and probes the machines it
+    finds there. That is the split between the two outputs — the table is a
+    roster someone is reading, and JSON is what a program asks for when it is
+    about to make a decision off the answer. The menu bar's adopt dialog is
+    that program: it has to know which machines are already reachable before it
+    offers to write one a file to carry (#61). `online` is null where this Mac
+    could not read its own peer table, never false.
     """
     _adopt(args)
     from . import grants
     from .store import get_store
-    rows = get_store().list_hosts()
     holdings = {h["host_key"]: h for h in grants.holdings()}
+
+    def delegated(row: dict) -> bool:
+        held = holdings.get(row["key"])
+        return bool(held and held["revoked_at"] is None)
 
     if getattr(args, "json", False):
         import json
-        print(json.dumps([
-            {**r, "delegated": bool(holdings.get(r["key"], {}).get("revoked_at") is None
-                                    and r["key"] in holdings)}
-            for r in rows]))
+        from . import presence
+        print(json.dumps([{**r, "delegated": delegated(r)}
+                          for r in presence.roster()]))
         return 0
+
+    rows = get_store().list_hosts()
 
     if not rows:
         print("no machines adopted — `jstack-host adopt <name>` mints a code "
@@ -646,9 +720,7 @@ def _cmd_leaves(args) -> int:
         return 0
     print(f"{'MACHINE':<20} {'ADDRESS':<18} {'ACCESS':<10} ADOPTED")
     for r in rows:
-        held = holdings.get(r["key"])
-        access = ("delegated" if held and held["revoked_at"] is None
-                  else "pair-by-hand")
+        access = "delegated" if delegated(r) else "pair-by-hand"
         addr = f"{r['address'] or '—'}:{r['port']}" if r["address"] else "—"
         print(f"{(r['name'] or r['key'])[:19]:<20} {addr:<18} {access:<10} "
               f"{grants.stamp(r['enrolled_at'])}")
@@ -676,14 +748,23 @@ def _cmd_where(args) -> int:
     """
     _adopt(args)
     print(f"name         {hostenv.host_name()}")
-    print(f"host id      {hostenv.host_id()}")
+    # A refusal is the answer here, not a crash. `where` is the command someone
+    # pastes into a support question, and the one thing it must never do is
+    # invent — which is what it did before the refusal existed: minted an id
+    # into whatever dir it had resolved and printed it as this machine's. The
+    # message names both directories, so the paste carries its own diagnosis.
+    try:
+        print(f"host id      {hostenv.host_id()}")
+    except hostenv.SecondIdentity as exc:
+        print(f"host id      -- {exc}")
     print(f"profile      {hostenv.profile().name}")
     print(f"package      {hostenv.package_root()}")
     print(f"state        {hostenv.state_dir()}")
     print(f"token        {hostenv.token_path()}")
     print(f"credentials  {hostenv.credentials_dir()}")
     print(f"agents       {hostenv.instance_root()}")
-    print(f"scheduler    {hostenv.scheduler_dir()}")
+    print(f"scheduler config {hostenv.scheduler_config_dir()}")
+    print(f"scheduler state  {hostenv.scheduler_state_dir()}")
     return 0
 
 
@@ -841,6 +922,32 @@ def _cmd_version(args) -> int:
     return 0
 
 
+def _cmd_files(args) -> int:
+    import json
+    import os
+    from . import fileshare
+    try:
+        _adopt(args)
+        if getattr(args, "agents_root", None):
+            from pathlib import Path
+            root = Path(args.agents_root)
+            if not root.is_absolute() or root.name != "Agents" or root.is_symlink() or not root.is_dir():
+                raise fileshare.FileShareError("--agents-root must name an existing absolute Agents directory")
+            os.environ["JREMOTE_INSTANCE_ROOT"] = str(root)
+            hostenv.reset_profile()
+        if args.files_cmd == "status":
+            result = fileshare.status()
+        elif args.files_cmd == "setup":
+            result = fileshare.setup(apply=args.apply)
+        else:
+            result = fileshare.off(apply=args.apply)
+    except (fileshare.FileShareError, PermissionError) as e:
+        print(f"jstack-host files: {e}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("ready", result.get("status", {}).get("ready", True)) else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="jstack-host",
@@ -849,6 +956,13 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--label", default=install_host.LABEL,
                     help=argparse.SUPPRESS)
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("emergency-stop", help="stop all jStack services and reset their macOS permissions")
+    p.set_defaults(fn=_cmd_emergency_stop)
+
+    p = sub.add_parser("services-update", help="replace the signed Services owner through the Hub controller")
+    p.add_argument("candidate", type=_path)
+    p.set_defaults(fn=_cmd_services_update)
 
     def _serving_args(p, *, bind_default, bind_help):
         p.add_argument("--port", type=int, default=install_host.DEFAULT_PORT)
@@ -869,7 +983,11 @@ def build_parser() -> argparse.ArgumentParser:
         state_dir=_path(a.state_dir)))
 
     p = sub.add_parser("uninstall", help="remove the LaunchAgent (state and token stay)")
-    p.set_defaults(fn=lambda a: install_host.uninstall(label=a.label))
+    p.add_argument("--all-services", action="store_true",
+                   help="remove every signed Hub/Services user registration; "
+                        "retain bundles, Network, pairing and private data")
+    p.set_defaults(fn=lambda a: install_host.uninstall(
+        label=a.label, all_services=a.all_services))
 
     p = sub.add_parser("status", help="is the host installed, loaded and answering")
     # No default: the agent's own port is the answer, and a default here is
@@ -881,7 +999,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("doctor", help="grade every dependency this host needs")
     p.add_argument("--state-dir", default=None)
-    p.set_defaults(fn=lambda a: (_adopt(a), _doctor())[1])
+    p.add_argument("--services", action="store_true",
+                   help="read-only startup service ownership and signature inventory")
+    p.add_argument("--json", action="store_true", help="JSON service inventory (with --services)")
+    p.add_argument("--service-baseline", type=_path, help="compare services with an explicitly reviewed inventory JSON")
+    p.set_defaults(fn=_cmd_doctor)
 
     p = sub.add_parser("serve", help="run the host in this terminal (no LaunchAgent)")
     _serving_args(p, bind_default="127.0.0.1",
@@ -1000,6 +1122,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("version", help="the installed package version")
     p.set_defaults(fn=_cmd_version)
+
+    p = sub.add_parser("updates", help="set up managed software updates")
+    updates = p.add_subparsers(dest="updates_cmd", required=True)
+    up = updates.add_parser(
+        "enable", help="install and start the local update supervisor")
+    up.add_argument("--state-dir", default=None)
+    up.set_defaults(fn=_cmd_updates_enable)
+
+    p = sub.add_parser("files", help="declare and inspect selected-folder SMB access")
+    files = p.add_subparsers(dest="files_cmd", required=True)
+    fs = files.add_parser("status", help="compare declared and observed sharing state")
+    fs.set_defaults(fn=_cmd_files)
+    fs = files.add_parser("setup", help="print or apply the selected-folder setup")
+    fs.add_argument("--agents-root", help="absolute installed Agents directory (required under sudo)")
+    fs.add_argument("--apply", action="store_true",
+                    help="apply as root (default: print a dry run)")
+    fs.set_defaults(fn=_cmd_files)
+    fs = files.add_parser("off", help="print or remove all SMB share points")
+    fs.add_argument("--apply", action="store_true",
+                    help="remove as root (default: print a dry run)")
+    fs.set_defaults(fn=_cmd_files)
     return ap
 
 
@@ -1011,6 +1154,22 @@ def _path(raw):
 def _doctor() -> int:
     from . import doctor
     return doctor.report()
+
+
+def _cmd_doctor(args) -> int:
+    if args.services:
+        from . import service_inventory
+        if args.service_baseline:
+            return service_inventory.report(as_json=args.json, baseline=args.service_baseline)
+        return service_inventory.report(as_json=args.json)
+    if args.service_baseline:
+        print("--service-baseline requires --services", file=sys.stderr)
+        return 2
+    if args.json:
+        print("--json requires --services", file=sys.stderr)
+        return 2
+    _adopt(args)
+    return _doctor()
 
 
 def main(argv: list[str] | None = None) -> int:

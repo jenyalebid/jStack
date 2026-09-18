@@ -83,6 +83,23 @@ def bundle_info(path: Path) -> dict:
         return plistlib.load(stream)
 
 
+def client_distribution(path: Path, config: dict) -> str:
+    """Only hub-distributed bundles and previously enrolled clients are ours."""
+    if not path.exists():
+        return "missing"
+    if (path / "Contents/_MASReceipt/receipt").exists():
+        return "app_store"
+    info = bundle_info(path)
+    if info.get("JStackDistribution") == "hub":
+        return "hub"
+    # Old bootstrap explicitly enrolled the installed client. Do not extend
+    # that enrollment to a different bundle, or to any Store installation.
+    if (config.get("client_managed", True) and config.get("client_bundle_id")
+            and info.get("CFBundleIdentifier") == config["client_bundle_id"]):
+        return "hub"
+    return "external"
+
+
 def running(path: Path) -> list[int]:
     executable = str(path / "Contents/MacOS" / bundle_info(path)["CFBundleExecutable"])
     result = []
@@ -118,6 +135,12 @@ class MacBackend:
     def __init__(self, root: Path, config: dict):
         self.root, self.config = root, config
 
+    def _app_running(self, kind: str, path: Path) -> list[int]:
+        return running(path)
+
+    def _running_required(self, kind: str, record: dict, transaction: dict) -> bool:
+        return kind == "menubar" or record["was_running"]
+
     def activate_runtime(self, job: dict) -> bool:
         """Move the next updater process only after the hub confirms this job."""
         if job.get("state") != "current" or not job.get("verified") or not self.config.get("dispatcher"):
@@ -135,6 +158,8 @@ class MacBackend:
         return True
 
     def compatible(self, manifest: dict):
+        if manifest.get("schema", releases.SCHEMA) != releases.SCHEMA:
+            raise releases.ReleaseError("native owner updates require Services self-update support")
         compatibility = manifest["compatibility"]
         if platform.system() != "Darwin":
             raise releases.ReleaseError("this release requires macOS")
@@ -147,6 +172,10 @@ class MacBackend:
     def _check_app(self, path: Path, component: dict, kind: str):
         team = self.config["team_id"]
         identifier = self.config[kind + "_bundle_id"]
+        if kind == "client" and not identifier:
+            # A host bootstrapped without a client can later discover a signed
+            # direct-distribution app. Pin to that installed bundle identity.
+            identifier = bundle_info(Path(self.config["client_path"]))["CFBundleIdentifier"]
         command(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R",
                  f'=anchor apple generic and certificate leaf[subject.OU] = "{team}" and identifier "{identifier}"',
                  str(path)])
@@ -183,6 +212,8 @@ class MacBackend:
                 env={**os.environ, "PYTHONPATH": pythonpath})
         apps = {}
         for kind in ("menubar", "client"):
+            if kind == "client" and client_distribution(Path(self.config["client_path"]), self.config) != "hub":
+                continue
             folder = stage / kind
             folder.mkdir()
             component = manifest["components"][kind]
@@ -209,7 +240,8 @@ class MacBackend:
                 raise releases.ReleaseError("service identity changed since updater bootstrap")
             updated = dict(job)
             if kind == "host":
-                environment = dict(job.get("EnvironmentVariables", {}))
+                from .install_host import upgraded_environment
+                environment = upgraded_environment(job.get("EnvironmentVariables", {}))
                 environment["PYTHONPATH"] = pythonpath + (
                     os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else "")
                 updated["EnvironmentVariables"] = environment
@@ -287,8 +319,8 @@ class MacBackend:
             atomic_bytes(Path(launcher["target"]), Path(launcher["updated"]).read_bytes(), mode=0o755)
         self._load("host")
         self._load("menubar")
-        client = transaction["apps"]["client"]
-        if client["was_running"]:
+        client = transaction["apps"].get("client")
+        if client and client["was_running"]:
             command(["/usr/bin/open", "-a", client["target"]])
 
     def rollback(self, job: dict):
@@ -330,8 +362,8 @@ class MacBackend:
                 atomic_bytes(target, Path(launcher["original"]).read_bytes(), mode=launcher["mode"])
         self._load("host")
         self._load("menubar")
-        client = transaction["apps"]["client"]
-        if client["was_running"]:
+        client = transaction["apps"].get("client")
+        if client and client["was_running"]:
             command(["/usr/bin/open", "-a", client["target"]])
         if plugin_error:
             raise releases.ReleaseError(f"host/apps restored; plugin recovery pending: {plugin_error}") from plugin_error
@@ -348,6 +380,26 @@ class MacBackend:
                 raise releases.ReleaseError("refusing to remove an unexpected recovery bundle")
             shutil.rmtree(backup)
 
+    def _host_required(self, job: dict) -> bool:
+        return True
+
+    def _verify_host(self, job: dict) -> bool:
+        token = Path(self.config["token_path"]).read_text().strip()
+        with httpx.Client(timeout=5, trust_env=False) as client:
+            base = self.config["local_url"] + "/api/jremote/v1"
+            headers = {"Authorization": "Bearer " + token}
+            response = client.get(base + "/host", headers=headers)
+            response.raise_for_status()
+            identity = response.json()
+            source = identity.get("source", {})
+            if (identity["host_id"] != self.config["machine"] or
+                    source.get("release") != job["release"] or source.get("dirty") or
+                    source.get("sha") != job["envelope"]["manifest"]["sources"]["stack"]):
+                return False
+            response = client.get(base + "/sessions/active", headers=headers)
+            response.raise_for_status()
+            return isinstance(response.json().get("sessions"), list)
+
     def verify(self, job: dict) -> bool:
         try:
             from . import update_plugins
@@ -355,26 +407,12 @@ class MacBackend:
             expected = job["envelope"]["manifest"]["components"]["stack"]["version"]
             if any(value["version"] != expected for value in plugins.values()):
                 return False
-            token = Path(self.config["token_path"]).read_text().strip()
-            with httpx.Client(timeout=5, trust_env=False) as client:
-                base = self.config["local_url"] + "/api/jremote/v1"
-                headers = {"Authorization": "Bearer " + token}
-                response = client.get(base + "/host", headers=headers)
-                response.raise_for_status()
-                identity = response.json()
-                source = identity.get("source", {})
-                if (identity["host_id"] != self.config["machine"] or
-                        source.get("release") != job["release"] or source.get("dirty") or
-                        source.get("sha") != job["envelope"]["manifest"]["sources"]["stack"]):
-                    return False
-                response = client.get(base + "/sessions/active", headers=headers)
-                response.raise_for_status()
-                if not isinstance(response.json().get("sessions"), list):
-                    return False
+            if self._host_required(job) and not self._verify_host(job):
+                return False
             for kind, app in job["transaction"]["apps"].items():
                 target = Path(app["target"])
                 self._check_app(target, job["envelope"]["manifest"]["components"][kind], kind)
-                if (kind == "menubar" or app["was_running"]) and not running(target):
+                if self._running_required(kind, app, job["transaction"]) and not self._app_running(kind, target):
                     return False
             return True
         except (OSError, ValueError, httpx.HTTPError, KeyError, subprocess.SubprocessError):
@@ -386,8 +424,12 @@ class MacBackend:
         for kind in ("client", "menubar"):
             try:
                 target = Path(self.config[kind + "_path"])
-                components[kind] = {"installed": str(bundle_info(target)["CFBundleVersion"]),
-                                    "running_pids": running(target)}
+                info = bundle_info(target)
+                components[kind] = {"installed": str(info["CFBundleVersion"]),
+                                    "version": info.get("CFBundleShortVersionString"),
+                                    "running_pids": self._app_running(kind, target)}
+                if kind == "client":
+                    components[kind]["distribution"] = client_distribution(target, self.config)
             except (OSError, ValueError, KeyError):
                 components[kind] = {"installed": None, "running_pids": []}
         source = {}
@@ -404,7 +446,7 @@ class MacBackend:
         verified = (bool(job.get("verified")) and job.get("state") in {"current", "verifying"}
                     and source.get("release") == job.get("release") and not source.get("dirty")
                     and all(components[kind]["installed"] == expected.get(kind, {}).get("version")
-                            for kind in ("client", "menubar")))
+                            for kind in job.get("transaction", {}).get("apps", {"client": {}, "menubar": {}})))
         try:
             from . import update_plugins
             components["plugins"] = update_plugins.observed(update_plugins.discover())
@@ -413,7 +455,8 @@ class MacBackend:
         verified = verified and all(isinstance(value, dict) and value.get("version") ==
                                     expected.get("stack", {}).get("version")
                                     for value in components["plugins"].values())
-        verified = verified and bool(components["menubar"]["running_pids"])
+        if self._running_required("menubar", {}, job.get("transaction", {})):
+            verified = verified and bool(components["menubar"]["running_pids"])
         return {"components": components, "host_source": source,
                 "updater_source": sourcestamp.capture(),
                 "release": source.get("release"),

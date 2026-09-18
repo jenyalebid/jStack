@@ -185,3 +185,190 @@ def test_a_plan_that_is_not_marked_disposable_is_refused(runner, tmp_path, candi
     with pytest.raises(SystemExit) as exit_code:
         runner.main()
     assert exit_code.value.code == 2
+
+
+@pytest.mark.parametrize("role,text,holders,passes", [
+    ("assistant", "accepted abcdef12", [{"pid": 11, "started": 10}], True),
+    ("user", "accepted abcdef12", [{"pid": 11, "started": 10}], False),
+    ("assistant", "old output", [{"pid": 11, "started": 10}], False),
+    ("assistant", "accepted abcdef12", [{"pid": 11, "started": 99}], False),
+])
+def test_new_input_requires_fresh_assistant_output_from_same_process(
+        runner, monkeypatch, role, text, holders, passes):
+    from types import SimpleNamespace
+    monkeypatch.setattr(runner.uuid, "uuid4", lambda: SimpleNamespace(hex="abcdef12"))
+    ticks = iter([0, 1, 301])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+
+    class Guest:
+        def tool_call(self, *args):
+            if "--after" not in args:
+                return {"session": "sid", "cursor": 4, "holders": [{"pid": 11, "started": 10}]}
+            assert args[-1] == "4"
+            return {"session": "sid", "cursor": 5, "holders": holders,
+                    "messages": [{"role": role, "text": text}]}
+
+        def call(self, path, body, **kwargs):
+            assert path == "/sessions/sid/input"
+            return {"status": 200, "body": '{"ok":true}'}
+
+    if passes:
+        assert runner.send_to_session(Guest(), "sid")["marker"] == "abcdef12"
+    else:
+        with pytest.raises(runner.AcceptanceFailure):
+            runner.send_to_session(Guest(), "sid")
+
+
+def test_unrelated_process_cannot_prove_a_new_session(runner, monkeypatch):
+    ticks = iter([0, 1, 241])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+
+    class Guest:
+        def tool_call(self, action, *args, **kwargs):
+            if action == "spawn":
+                return {"session": "wanted"}
+            return {"session": "other", "holders": [{"pid": 1, "started": 1}]}
+
+    with pytest.raises(runner.AcceptanceFailure, match="identified provider"):
+        runner.new_session(Guest())
+
+
+def test_fresh_install_refuses_existing_menu_before_any_write(runner, candidate):
+    class Guest:
+        name = "fresh"
+        def sh(self, command):
+            assert "for p in" in command
+            return "/Applications/JStack Host.app"
+
+    with pytest.raises(runner.AcceptanceFailure, match="not pristine"):
+        runner.install_candidate(Guest(), candidate, fresh=True)
+
+
+def test_candidate_installer_preserves_errors_and_uses_registered_menu(runner, candidate, monkeypatch):
+    commands = []
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    class Guest:
+        name = "fresh"
+        def sh(self, command, **kwargs):
+            commands.append(command)
+            return ""
+        def copy(self, *args):
+            pass
+
+    runner.install_candidate(Guest(), candidate, fresh=True)
+    assert not any("| /usr/bin/tail" in command for command in commands)
+    assert any("ProgramArguments" in command and "app.parent" in command for command in commands)
+    assert not any("ditto -x -k" in command and "~/Applications" in command for command in commands)
+    assert any("--no-app --no-menubar" in command for command in commands)
+
+
+def test_new_session_with_a_provider_but_no_reply_fails(runner, monkeypatch):
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+
+    class Guest:
+        def tool_call(self, action, *args, **kwargs):
+            if action == "spawn":
+                return {"session": "wanted"}
+            return {"session": "wanted", "holders": [{"pid": 1, "started": 1}],
+                    "messages": [{"role": "assistant", "text": "/Users/admin/Agents/update-proof"}]}
+
+    def no_reply(*args):
+        raise runner.AcceptanceFailure("provider login expired")
+
+    monkeypatch.setattr(runner, "send_to_session", no_reply)
+    with pytest.raises(runner.AcceptanceFailure, match="login expired"):
+        runner.new_session(Guest())
+
+
+def test_selected_journey_retains_existing_exact_artifact_receipts(
+        runner, candidate, tmp_path, monkeypatch):
+    receipts = tmp_path / "receipts"
+    run = acceptance.Run(receipts, candidate.manifest)
+    with run.journey("upgrade") as journey:
+        for check in acceptance.REQUIRED["upgrade"]:
+            journey.observe(check, "observed")
+    original = (receipts / "upgrade.json").read_bytes()
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"disposable": True, "vm_tool": "/bin/vm.sh", "hub": "hub",
+                                "leaves": ["leaf-a", "leaf-b"]}))
+    monkeypatch.setattr(runner, "Candidate", lambda *args: candidate)
+    fleet = build(runner, ScriptedFleet())
+    monkeypatch.setattr(fleet, "offer", lambda _: None)
+    monkeypatch.setattr(runner, "Fleet", lambda *args, **kwargs: fleet)
+    monkeypatch.setattr("sys.argv", ["accept", "--candidate", str(candidate.dir),
+                                     "--receipts", str(receipts), "--plan", str(plan),
+                                     "--only", "fleet"])
+    assert runner.main() == 1  # Other required journeys still missing.
+    assert (receipts / "upgrade.json").read_bytes() == original
+    assert acceptance.inspect(receipts, candidate.manifest)["upgrade"]["state"] == "passed"
+
+
+def test_staging_prior_restores_candidate_offer_on_update_failure(
+        runner, candidate, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    prior = tmp_path / "prior"
+    prior.mkdir()
+    (prior / "candidate.json").write_text(json.dumps({"manifest": {"release": PRIOR}}))
+    fleet = build(runner, ScriptedFleet(release=CANDIDATE), prior_candidate=str(prior))
+    fleet.candidate = candidate
+    offered = []
+    monkeypatch.setattr(runner, "Candidate", lambda *args: SimpleNamespace(release=PRIOR))
+    monkeypatch.setattr(fleet, "offer", lambda c: offered.append(c.release))
+
+    def failed(*args, **kwargs):
+        raise runner.AcceptanceFailure("update failed")
+
+    monkeypatch.setattr(fleet.hub, "wait_for", failed)
+    with pytest.raises(runner.AcceptanceFailure, match="update failed"):
+        runner.stage_prior(fleet, fleet.leaves[0])
+    assert offered == [PRIOR, candidate.release]
+
+
+def test_artifact_fault_is_restored_when_refusal_probe_fails(runner):
+    from types import SimpleNamespace
+    calls = []
+    class Hub:
+        def tool_call(self, action):
+            calls.append(action)
+        def call(self, *args):
+            raise runner.AcceptanceFailure("hub disconnected")
+
+    with pytest.raises(runner.AcceptanceFailure, match="disconnected"):
+        runner.refused_release(SimpleNamespace(plan={}, hub=Hub()),
+                               SimpleNamespace(installed=lambda: {"release": PRIOR}), "leaf")
+    assert calls == ["tamper", "restore-artifact"]
+
+
+@pytest.mark.parametrize("detail,valid", [("artifact digest mismatch", True),
+                                         ("host unavailable", False)])
+def test_hub_refusal_requires_artifact_error_and_unchanged_installation(runner, detail, valid):
+    from types import SimpleNamespace
+    state = dict(release=PRIOR, sha="a" * 40, client="69", menubar="69")
+    guest = SimpleNamespace(installed=lambda: state)
+    hub = SimpleNamespace(tool_call=lambda _: None,
+                          call=lambda *args: {"status": 503, "body": detail})
+    fleet = SimpleNamespace(plan={}, hub=hub)
+    if valid:
+        assert runner.refused_release(fleet, guest, "leaf")["unchanged_release"] == PRIOR
+    else:
+        with pytest.raises(runner.AcceptanceFailure, match="unrelated"):
+            runner.refused_release(fleet, guest, "leaf")
+
+
+def test_revocation_failure_restores_the_fixture_supervisor(runner, monkeypatch):
+    from types import SimpleNamespace
+    commands = []
+    guest = SimpleNamespace(sh=lambda command: commands.append(command))
+    monkeypatch.setattr(runner, "stage_prior", lambda *args: {})
+
+    def fail(*args):
+        raise runner.AcceptanceFailure("credential revocation failed")
+
+    hub = SimpleNamespace(queue=lambda *args: {"jobs": [{"id": "queued"}]}, tool_call=fail)
+    fleet = SimpleNamespace(leaves=[guest], machine=lambda _: "leaf", hub=hub)
+    with pytest.raises(runner.AcceptanceFailure, match="revocation failed"):
+        runner.revocation(SimpleNamespace(observe=lambda *args: None), fleet, None)
+    assert "bootout" in commands[0]
+    assert "bootstrap" in commands[-1]

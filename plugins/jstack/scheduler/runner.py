@@ -249,6 +249,103 @@ def reached_stop_hook(jsonl_path: Path) -> bool:
     return False
 
 
+# ------------------------------------------------ what a dead run already did
+#
+# A retry re-sends the job's payload from the top, so it is only safe when the
+# attempt it replaces took no action worth repeating. `api_error` is raised
+# whenever the connection drops — including on the LAST turn of a run that had
+# already done everything it was told to do — so "it failed" says nothing about
+# whether it acted. The transcript does: a `tool_use` block is the only thing in
+# a session that reaches outside the model.
+#
+# ALLOWLIST, never a denylist, and the asymmetry is the whole reason. Wrongly
+# calling a run dirty costs one occurrence, loudly, with a human notified.
+# Wrongly calling it clean is the defect this exists to end — a second push,
+# publish or send, silently. A denylist scores every tool nobody enumerated as
+# clean, which is exactly backwards on the surface that matters most here: the
+# MCP publish/send tools an install adds long after this file ships.
+#
+# `Task` is absent on purpose — a subagent can do anything its parent could.
+# `WebFetch` too: it reaches an external party, which is the category under
+# review, and a run whose only action was a GET is not the case this arm exists
+# to save.
+_READ_ONLY_TOOLS = frozenset({
+    "Read", "Glob", "Grep", "LS", "NotebookRead", "WebSearch",
+    "TodoRead", "TodoWrite", "ExitPlanMode",
+})
+
+def is_read_only_bash(command: str) -> bool:
+    """No shell invocation is proven harmless by its command name alone."""
+    return False
+
+
+def first_action(jsonl_path: Path) -> "str|None":
+    """What in this session's transcript shows the run already acted — the first
+    tool call that is not provably read-only — or None when every call in it was
+    a read, or there were none at all.
+
+    Missing or malformed evidence blocks replay. Absence of a transcript is
+    not proof that a launched process never acted.
+
+    None is NOT proof of innocence and must not be read as such. The child writes
+    this file, so a connection death can lose its last buffered lines. That is
+    why the retry banner rides on every retry, not only the doubtful ones.
+    """
+    if not jsonl_path.exists():
+        return "missing transcript"
+    try:
+        lines = jsonl_path.read_text(errors="replace").splitlines()
+    except OSError:
+        return "unreadable transcript"
+    for line in lines:
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            return "malformed transcript"
+        if not isinstance(d, dict):
+            return "malformed transcript"
+        if d.get("type") == "response_item":
+            payload = d.get("payload")
+            if not isinstance(payload, dict):
+                return "malformed native record"
+            kind = payload.get("type", "")
+            if kind in {"function_call", "custom_tool_call", "local_shell_call"} or kind.endswith("_call"):
+                return payload.get("name") or kind
+            if kind not in {"message", "reasoning", "function_call_output", "custom_tool_call_output"}:
+                return "unknown native record"
+            continue
+        if d.get("type") != "assistant":
+            continue
+        for block in d.get("message", {}).get("content", []) or []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = block.get("name") or "an unnamed tool"
+            if name in _READ_ONLY_TOOLS:
+                continue
+            if name == "Bash":
+                cmd = str((block.get("input") or {}).get("command") or "").strip()
+                if is_read_only_bash(cmd):
+                    continue
+                return f"Bash: {cmd.splitlines()[0][:120]}" if cmd else "Bash"
+            return name
+    return None
+
+
+def retry_banner(retry_of: str, reason: str = "") -> str:
+    """The preamble a re-spawned run is given so it knows a sibling already ran.
+
+    Without this, a retry receives the message a FIRST attempt gets and has no
+    way to know it is a retry — `retry_of` was recorded on the run and in the
+    journal and reached nothing the session could read. Everything the session
+    needs to self-check is here: which run it replaces, what killed it, and the
+    instruction to establish current state before repeating any action. The
+    session is the only actor that can tell a booked cron from a pushed merge.
+    """
+    from hooks._prompts import load
+    return load("scheduler-retry.md").format(
+        retry_of=retry_of, reason=reason or "a transient fault").strip()
+
+
 def build_argv(claude_bin: str, model: str, session_id: str, message: str,
                resume_session_id: "str|None" = None,
                permission_mode: str = "bypassPermissions") -> list:
@@ -323,12 +420,14 @@ class Run:
     """One spawned claude run: process group owner + watchdog thread."""
 
     def __init__(self, job: dict, defaults: dict, scheduled_for: datetime,
-                 on_finish, retry_of: "str|None" = None):
+                 on_finish, retry_of: "str|None" = None,
+                 retry_reason: str = ""):
         self.job = job  # effective job dict (defaults already applied)
         self.defaults = defaults
         self.scheduled_for = scheduled_for
         self.on_finish = on_finish
         self.retry_of = retry_of
+        self.retry_reason = retry_reason
         self.run_id = uuid.uuid4().hex[:12]
         self.job_id = job["id"]
         self.model = job.get("model") or defaults.get("model", "opus")
@@ -361,8 +460,14 @@ class Run:
         self.session_id = fresh_session_id(self.workspace)
         self._jsonl = session_jsonl_path(self.workspace, self.session_id)
         # EXACT first-message shape — thread classification depends on the
-        # '[cron:' prefix.
-        message = f"[cron:{self.job_id} {self.job.get('name', '')}] {self.job['payload']['message']}"
+        # '[cron:' prefix, so it stays first and the retry banner goes after it,
+        # ahead of the payload. Ahead, not appended: the payload is an
+        # instruction, and a warning that arrives after the thing it qualifies
+        # is a warning the session has already acted past.
+        banner = (retry_banner(self.retry_of, self.retry_reason) + "\n\n"
+                  if self.retry_of else "")
+        message = (f"[cron:{self.job_id} {self.job.get('name', '')}] "
+                   f"{banner}{self.job['payload']['message']}")
         claude_bin = self.job.get("claude_bin") or self.defaults.get("claude_bin", "claude")
         # Install-owned: the marker env a run carries (autonomy gates, timeline
         # origin) and the tool dirs on its PATH.

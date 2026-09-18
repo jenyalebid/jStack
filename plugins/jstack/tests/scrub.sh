@@ -59,6 +59,8 @@ COMPILED = [(label, re.compile(pat, flags)) for label, pat, flags in TERMS]
 # (repo-relative path, term label) → why this file may hold this term.
 # Narrow on purpose: the same term in any OTHER file still fails.
 ALLOW = {
+    ("install.sh", "jremote"):
+        "public installer names the independently installed client and its pairing UI",
     ("README.md", "jremote"):
         "public product overview identifies the independently installed client",
     ("product.md", "jremote"):

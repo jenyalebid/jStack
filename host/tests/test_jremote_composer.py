@@ -167,15 +167,19 @@ def stand_in_for_the_shim(tmp_path, monkeypatch, prompt: Path) -> None:
 
     def fake_run(argv, **kw):
         park = tmp_path / "park" / "sid-1234.park"
+        ready = threading.Event()
 
         def shim():
             park.write_text(str(prompt) + "\n")
-            for _ in range(200):
+            ready.set()
+            deadline = time.monotonic() + composer.PARK_TIMEOUT + composer.RELEASE_TIMEOUT + 5
+            while time.monotonic() < deadline:
                 if (tmp_path / "park" / "sid-1234.release").exists():
                     park.unlink()
                     return
                 time.sleep(0.01)
         threading.Thread(target=shim, daemon=True).start()
+        assert ready.wait(timeout=10), "fixture shim failed to park"
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)

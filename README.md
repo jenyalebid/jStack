@@ -1,5 +1,11 @@
 # jStack
 
+### Client-only Mac
+
+Run `./install.sh --no-host` to use jRemote with another machine's Hub.
+On that Hub choose **Pair a Device**; in jRemote choose **Add a Mac** and
+enter its address and pairing code. A local Hub is not required.
+
 > **Beta — under construction. Not ready for release.**
 
 jStack Plugin provides Claude Code and Codex commands independently.

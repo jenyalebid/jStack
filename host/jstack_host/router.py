@@ -5,6 +5,7 @@ dashboard FastAPI app; see dashboard/app.py.
 """
 
 import asyncio
+import contextlib
 import ipaddress
 import json
 import re
@@ -13,7 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -24,7 +25,21 @@ from . import managed_access
 from .turns import stream_turn, TurnError
 from .messages import _blocks_to_segments, _flatten, _is_noise
 
-router = APIRouter(prefix="/api/jremote/v1", dependencies=[Depends(require_token)])
+@contextlib.asynccontextmanager
+async def _host_lifespan(_app: FastAPI):
+    """Package-owned background work shared by embedded and standalone hosts."""
+    from . import fileshare
+    task = asyncio.create_task(fileshare.audit_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+router = APIRouter(prefix="/api/jremote/v1", dependencies=[Depends(require_token)],
+                   lifespan=_host_lifespan)
 
 _SID_RE = re.compile(r"^[0-9a-f-]{32,40}$")
 
@@ -120,6 +135,11 @@ _FEATURES = {
     "control": hostenv.control_module(),
 }
 
+
+def _file_sharing_available() -> bool:
+    from . import fileshare
+    return fileshare.serves_files()
+
 def _tags_available() -> bool:
     from . import timeline
     return timeline.available()
@@ -150,7 +170,8 @@ def _usage_caps_available() -> bool:
 #: machine that owns the mesh has.
 _PROBED_FEATURES = {"tags": _tags_available,
                     "tunnel_pairing": _tunnel_pairing_available,
-                    "usage_caps": _usage_caps_available}
+                    "usage_caps": _usage_caps_available,
+                    "file_sharing": _file_sharing_available}
 
 
 def _probe(name: str) -> bool:
@@ -369,6 +390,16 @@ def get_context_file(path: str):
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except OSError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/files/share")
+def get_file_share():
+    """The host's observed SMB state; mutation remains a local root action."""
+    from . import fileshare
+    try:
+        return fileshare.status()
+    except fileshare.FileShareError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 

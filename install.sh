@@ -56,7 +56,7 @@ usage: install.sh [options]
   --checkout DIR      where to clone jStack (default: ~/jStack)
   --no-scheduler      don't install the scheduler daemon (no recurring wakes)
   --no-claude         don't install Claude Code even if it is missing
-  --no-host           don't install the host (no remote access, no icon)
+  --no-host           use the client with another Hub; no local Hub or menu
   --no-menubar        install the host but not its menu bar icon
   --no-app            don't install the Mac app
   --help, -h          this
@@ -543,6 +543,10 @@ if [ -d "$CHECKOUT/.git" ]; then
     else
         warn "left as-is at $(git -C "$CHECKOUT" log --oneline -1) — the tree has local changes or diverged"
     fi
+elif [ -f "$CHECKOUT/host/release-identity.json" ] && [ -f "$CHECKOUT/plugins/jstack/.claude-plugin/plugin.json" ]; then
+    # A publisher snapshot intentionally has no mutable git checkout. Keep
+    # those exact local bytes; never fetch main over a selected release.
+    ok "using the local release snapshot (no source checkout update)"
 elif [ -e "$CHECKOUT" ]; then
     die "$CHECKOUT exists and is not a git checkout — move it aside or pass --checkout DIR"
 else
@@ -946,9 +950,17 @@ if [ "$HOST_INSTALLED" = "1" ] && [ "$APP_INSTALLED" = "1" ] && [ "$DRY_RUN" = "
     rm -f "$pair_log"
 fi
 
+if [ "$WANT_HOST" = "0" ] && [ "$APP_INSTALLED" = "1" ] && [ "$DRY_RUN" = "0" ]; then
+    step "Connect jRemote to a Hub"
+    note "client installed; pairing required"
+    note "On the target Hub, choose Pair a Device."
+    note "In jRemote, choose Add a Mac and enter the Hub address and pairing code."
+    open -a jRemote || warn "open jRemote from Applications to finish pairing"
+fi
+
 # ── 11. the verdict ─────────────────────────────────────────────────────────
 
-if [ "$HOST_INSTALLED" = "1" ] && [ "$APP_INSTALLED" = "1" ] && [ "$WANT_MENUBAR" = "1" ]; then
+if [ "$HOST_INSTALLED" = "1" ] && [ "$WANT_MENUBAR" = "1" ]; then
     step "Managed updater"
     if [ "$DRY_RUN" = "1" ]; then
         would "bootstrap the restart-independent updater with the shipped release trust key"

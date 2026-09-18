@@ -1,0 +1,336 @@
+"""App-owned service updates, executed by a separately installed recovery app.
+
+State and pairing never move. No interpreter installation, legacy plist writes
+or ad-hoc signing are part of application or rollback.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import uuid
+
+from . import release_manifest as releases
+from .update_macos import MacBackend, client_distribution, command, safe_tar, stop_app, unpack_app
+
+
+def control(app: Path, action: str, role: str | None = None) -> dict:
+    import json
+    arguments = [str(app / "Contents/MacOS/JStackHub"), action]
+    if role is not None:
+        arguments.append(role)
+    return json.loads(command(arguments, timeout=30))
+
+
+class AppBackend(MacBackend):
+    def compatible(self, manifest: dict):
+        # Native releases add the independently replaced Services owner. The
+        # remaining platform constraints are identical to schema 1.
+        if manifest.get("schema") == releases.NATIVE_SCHEMA:
+            manifest = {**manifest, "schema": releases.SCHEMA}
+        return super().compatible(manifest)
+
+    def _app_running(self, kind: str, path: Path) -> list[int]:
+        if kind != "menubar":
+            return super()._app_running(kind, path)
+        import psutil
+        executable = str(path / "Contents/MacOS/JStackHostBar")
+        result = []
+        for pid in psutil.pids():
+            try:
+                if psutil.Process(pid).exe() == executable:
+                    result.append(pid)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        return result
+
+    def _running_required(self, kind: str, record: dict, transaction: dict) -> bool:
+        if kind == "menubar":
+            return transaction.get("services", {}).get("menu", "enabled") == "enabled"
+        return record["was_running"]
+
+    def _host_required(self, job: dict) -> bool:
+        return job["transaction"]["services"]["host"] == "enabled"
+
+    def verify(self, job: dict) -> bool:
+        if not super().verify(job):
+            return False
+        try:
+            transaction = job.get("transaction", {})
+            native = transaction.get("services_owner")
+            if native:
+                from . import services_handoff
+                request = self._handoff(transaction)
+                if request.get("state") != "updated":
+                    return False
+                if str(self._services_info(Path(native["target"]))["CFBundleVersion"]) != native["version"]:
+                    return False
+            observed = self._statuses(Path(self.config["menubar_path"]))
+            if any(observed[role] != expected
+                   for role, expected in job["transaction"]["services"].items()):
+                return False
+            if not self._host_required(job):
+                from .app_services import specification
+                from .install_host import is_loaded
+                _, _, label = specification(Path(self.config["menubar_path"]), self.config, "host")
+                if is_loaded(label):
+                    return False
+            return True
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            return False
+
+    def observe(self, job: dict) -> dict:
+        result = super().observe(job)
+        try:
+            result["services"] = self._statuses(Path(self.config["menubar_path"]))
+            if job.get("transaction") and not self._host_required(job):
+                # Installed and stopped is distinct from a running release.
+                # Report completion only after checking artifacts and OFF now.
+                result["verified"] = (bool(job.get("verified")) and
+                                      job.get("state") in {"current", "verifying"} and self.verify(job))
+                if result["verified"]:
+                    result["release"] = job["release"]
+                result["host_running"] = False if result["verified"] else None
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            result["verified"] = False
+            result["services"] = {"error": "could not observe service approvals"}
+        return result
+
+    def activate_runtime(self, job: dict) -> bool:
+        # The recovery application's sealed modules must never be redirected
+        # into a mutable source/dependency folder from a previous installer.
+        return False
+
+    def _services_info(self, app: Path) -> dict:
+        from .update_macos import bundle_info
+        component = {"version": str(bundle_info(app)["CFBundleVersion"])}
+        self._check_services(app, component)
+        return bundle_info(app)
+
+    def _check_services(self, app: Path, component: dict):
+        from .update_macos import bundle_info
+        command(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R",
+                 f'=anchor apple generic and certificate leaf[subject.OU] = "{self.config["team_id"]}" and identifier "live.jstack.hub.services"',
+                 str(app)])
+        command(["/usr/sbin/spctl", "--assess", "--type", "execute", str(app)])
+        if str(bundle_info(app)["CFBundleVersion"]) != component["version"]:
+            raise releases.ReleaseError("Services bundle version differs from release")
+
+    @staticmethod
+    def _handoff(transaction: dict) -> dict:
+        from . import services_handoff
+        path = services_handoff.request_path()
+        if not path.exists():
+            return {}
+        import json
+        value = json.loads(path.read_text())
+        return value if value.get("id") == transaction.get("services_handoff") else {"state": "mismatch"}
+
+    def recovery_status(self, job: dict) -> str:
+        transaction = job.get("transaction", {})
+        if not transaction.get("services_owner"):
+            return "unknown"
+        state = self._handoff(transaction).get("state")
+        if state in {"pending", "applying"}:
+            return "pending"
+        if state == "updated":
+            return "applied"
+        if state == "rollback_pending":
+            return "rolling_back"
+        if state == "rolled_back":
+            return "rolled_back"
+        if state in {None, "failed"}:
+            return "untouched"
+        return "unknown"
+
+    def _statuses(self, app: Path) -> dict:
+        observed = control(app, "status")
+        # The independent maintenance registration is not a host/menu choice.
+        # Its own controller observes it; full removal still enumerates it.
+        observed.pop("services-handoff", None)
+        from .app_services import specification
+        owner, capability, _ = specification(app, self.config, "host")
+        if owner != app:
+            observed["host"] = control(owner, "status")[capability]
+        return observed
+
+    def stage(self, manifest: dict, directory: Path) -> dict:
+        from . import update_plugins
+        stage = Path(tempfile.mkdtemp(prefix="app-stage-", dir=directory))
+        stack = stage / "stack"
+        stack.mkdir()
+        safe_tar(directory / manifest["components"]["stack"]["file"], stack)
+        app = Path(self.config["menubar_path"])
+        maintenance = control(app, "status").get("services-handoff")
+        if maintenance not in {"not_registered", "not_found"}:
+            raise releases.ReleaseError("Hub maintenance must be absent before replacing its owner")
+        statuses = self._statuses(app)
+        self._validate_statuses(statuses)
+        apps = {}
+        for kind in ("menubar", "client"):
+            if kind == "client" and client_distribution(Path(self.config["client_path"]), self.config) != "hub":
+                continue
+            folder = stage / kind
+            folder.mkdir()
+            component = manifest["components"][kind]
+            candidate = unpack_app(directory / component["file"], folder)
+            self._check_app(candidate, component, kind)
+            if kind == "menubar":
+                import json
+                from .sourcestamp import fingerprint
+                packages = candidate / "Contents/Resources/packages"
+                identity = json.loads((packages / "release-identity.json").read_text())
+                if (identity.get("sha") != manifest["sources"]["stack"] or
+                        identity.get("release") != manifest["release"] or
+                        identity.get("package_sha256") != fingerprint(packages / "jstack_host")):
+                    raise releases.ReleaseError("signed app source identity differs from release")
+            target = Path(self.config[kind + "_path"])
+            if not os.access(target.parent, os.W_OK):
+                raise releases.ReleaseError("app destination is not writable")
+            backup = target.with_name(target.name + ".previous-" + stage.name)
+            if backup.exists():
+                raise releases.ReleaseError("recovery destination already exists")
+            from .update_macos import running
+            apps[kind] = {"source": str(candidate), "target": str(target), "backup": str(backup),
+                          "existed": target.exists(), "was_running": bool(target.exists() and running(target))}
+        services_owner = None
+        if manifest["schema"] == releases.NATIVE_SCHEMA:
+            from . import service_settings
+            target = Path(service_settings.read()["services_app"])
+            folder = stage / "services"
+            folder.mkdir()
+            component = manifest["components"]["services"]
+            candidate = unpack_app(directory / component["file"], folder)
+            self._check_services(candidate, component)
+            services_owner = {"source": str(candidate), "target": str(target),
+                              "version": component["version"]}
+        return {"stage": str(stage), "stack": str(stack), "apps": apps, "services": statuses,
+                "services_owner": services_owner, "services_handoff": uuid.uuid4().hex if services_owner else None,
+                "release": manifest["release"], "manifest": manifest,
+                "providers": update_plugins.prepare()}
+
+    def _stop_services(self, app: Path, statuses: dict):
+        from .install_host import wait_unloaded
+        from .app_services import specification
+        self._validate_statuses(statuses)
+        for role in ("menu", "host"):
+            if statuses[role] != "enabled":
+                continue
+            owner, service, label = specification(app, self.config, role)
+            control(owner, "unregister", service)
+            if not wait_unloaded(label):
+                raise releases.ReleaseError(f"{role} service has not stopped")
+
+    def _restore_services(self, app: Path, statuses: dict):
+        from .app_services import specification
+        self._validate_statuses(statuses)
+        for role in ("host", "menu"):
+            if statuses[role] != "enabled":
+                continue
+            owner, service, _ = specification(app, self.config, role)
+            current = control(owner, "status")[service]
+            if current not in {"enabled", "requires_approval", "not_registered"}:
+                raise releases.ReleaseError(f"cannot observe {role} service approval during recovery")
+            if current == "requires_approval":
+                continue  # A later user denial takes precedence over the snapshot.
+            result = control(owner, "register", service)
+            if result["status"] not in {"enabled", "requires_approval"}:
+                raise releases.ReleaseError(f"{role} service could not be restored")
+
+    @staticmethod
+    def _validate_statuses(statuses: dict):
+        if set(statuses) != {"host", "menu"} or any(value not in {
+                "enabled", "requires_approval", "not_registered"} for value in statuses.values()):
+            raise releases.ReleaseError("cannot observe current app service approvals")
+
+    def apply(self, job: dict):
+        from . import update_plugins
+        transaction = job["transaction"]
+        app = Path(self.config["menubar_path"])
+        if self._statuses(app) != transaction["services"]:
+            raise releases.ReleaseError("service approvals changed since staging")
+        update_plugins.install(transaction["providers"], Path(transaction["stack"]))
+        self._stop_services(app, transaction["services"])
+        for kind, record in transaction["apps"].items():
+            target, backup = Path(record["target"]), Path(record["backup"])
+            if kind == "client":
+                stop_app(target)
+            incoming = target.with_name(target.name + ".incoming-" + transaction["release"])
+            if incoming.exists():
+                raise releases.ReleaseError("unfinished incoming app requires recovery")
+            command(["/usr/bin/ditto", record["source"], str(incoming)])
+            self._check_app(incoming, transaction["manifest"]["components"][kind], kind)
+            if target.exists():
+                os.replace(target, backup)
+            os.replace(incoming, target)
+        self._restore_services(app, transaction["services"])
+        client = transaction["apps"].get("client")
+        if client and client["was_running"]:
+            command(["/usr/bin/open", "-a", client["target"]])
+        if transaction.get("services_owner"):
+            from . import services_handoff
+            services_handoff.submit(Path(transaction["services_owner"]["source"]),
+                                    request_id=transaction["services_handoff"])
+
+    def rollback(self, job: dict):
+        from . import update_plugins
+        transaction = job["transaction"]
+        app = Path(self.config["menubar_path"])
+        if transaction.get("services_owner"):
+            from . import services_handoff
+            state = self.recovery_status(job)
+            if state in {"applied", "rolling_back"}:
+                services_handoff.request_rollback(transaction["services_handoff"])
+                raise releases.ReleaseError("Services rollback handed to the independent Hub controller")
+            if state == "pending":
+                raise releases.ReleaseError("Services replacement has not reached a recoverable outcome")
+            if state not in {"rolled_back", "untouched"}:
+                raise releases.ReleaseError("Services rollback state is unobservable")
+            current_handoff = control(app, "status").get("services-handoff")
+            if state == "rolled_back" or current_handoff in {"enabled", "requires_approval"}:
+                if current_handoff in {"enabled", "requires_approval"}:
+                    control(app, "unregister", "services-handoff")
+        # If interrupted between renames there may be no Hub at all. Recovery
+        # still runs from its independent bundle and can put the old one back.
+        current = self._statuses(app) if app.exists() else {}
+        if not app.exists() and self.config.get("host_capability"):
+            from .app_services import specification
+            owner, capability, _ = specification(app, self.config, "host")
+            current = {"host": control(owner, "status")[capability], "menu": "not_registered"}
+            if current["host"] not in {"enabled", "requires_approval", "not_registered"}:
+                raise releases.ReleaseError("cannot observe embedded owner during recovery")
+        if current:
+            self._stop_services(app, current)
+        for kind, record in transaction["apps"].items():
+            target, backup = Path(record["target"]), Path(record["backup"])
+            if not backup.exists():
+                continue
+            if kind == "client":
+                stop_app(target)
+            if target.exists():
+                failed = target.with_name(target.name + ".failed-" + job["id"])
+                if failed.exists():
+                    raise releases.ReleaseError("failed candidate archive already exists")
+                os.replace(target, failed)
+            os.replace(backup, target)
+        desired = dict(transaction["services"])
+        for role, status in current.items():
+            if status == "requires_approval":
+                desired[role] = status
+        self._restore_services(app, desired)
+        client = transaction["apps"].get("client")
+        if client and client["was_running"]:
+            command(["/usr/bin/open", "-a", client["target"]])
+        update_plugins.rollback(transaction["providers"], Path(transaction["stack"]))
+
+    def finalize(self, job: dict):
+        transaction = job.get("transaction", {})
+        if not transaction.get("services_owner"):
+            return
+        app = Path(self.config["menubar_path"])
+        state = control(app, "status").get("services-handoff")
+        if state in {"enabled", "requires_approval"}:
+            control(app, "unregister", "services-handoff")
+        elif state not in {"not_registered", "not_found"}:
+            raise releases.ReleaseError("maintenance service approval is unobservable at finalization")

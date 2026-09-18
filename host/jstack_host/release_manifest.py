@@ -13,6 +13,8 @@ from pathlib import Path
 
 SCHEMA = 1
 COMPONENTS = {"stack", "menubar", "client"}
+NATIVE_SCHEMA = 2
+NATIVE_COMPONENTS = COMPONENTS | {"services"}
 RECEIPTS = {"fresh_install", "upgrade", "fleet", "offline_catchup", "session_survival",
             "interruption", "rollback", "revocation", "cellular"}
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -39,12 +41,13 @@ def digest(path: Path) -> str:
 
 
 def validate(manifest: dict, *, promoted: bool = True) -> dict:
-    if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
+    if not isinstance(manifest, dict) or manifest.get("schema") not in {SCHEMA, NATIVE_SCHEMA}:
         raise ReleaseError("unsupported release schema")
     identifier(manifest.get("release"))
     components = manifest.get("components")
-    if not isinstance(components, dict) or set(components) != COMPONENTS:
-        raise ReleaseError("a release must include stack, menubar and client")
+    expected = NATIVE_COMPONENTS if manifest["schema"] == NATIVE_SCHEMA else COMPONENTS
+    if not isinstance(components, dict) or set(components) != expected:
+        raise ReleaseError("release components do not match its schema")
     for name, item in components.items():
         if not isinstance(item, dict):
             raise ReleaseError(f"invalid {name} artifact")
@@ -55,6 +58,8 @@ def validate(manifest: dict, *, promoted: bool = True) -> dict:
         size = item.get("bytes")
         if type(size) is not int or not 0 < size <= 4 * 1024**3:
             raise ReleaseError(f"invalid {name} size")
+    if len({item["file"] for item in components.values()}) != len(components):
+        raise ReleaseError("release artifacts require distinct filenames")
     compatibility = manifest.get("compatibility", {})
     if (compatibility.get("protocol") != 1 or compatibility.get("rollback") is not True
             or compatibility.get("platform") != "macos"

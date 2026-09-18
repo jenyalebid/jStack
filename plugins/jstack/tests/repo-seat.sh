@@ -101,7 +101,7 @@ check "(h) seat follows workspace, not a fixed chat" "delta/pm/ios" "$(seat "$CO
 git -C "$ROOT/Gamma/chat" init -q 2>/dev/null
 git -C "$ROOT/Gamma/chat" remote add origin "git@github.com:org/Gadget-iOS.git"
 
-"$LOG_EVENT" gamma/chat "widget sync fixed" --detail "the repo session wrote this" >/dev/null 2>&1
+"$LOG_EVENT" gamma/chat "widget sync fixed" --origin direct --detail "the repo session wrote this" >/dev/null 2>&1
 
 inject() { echo "{\"cwd\":\"$1\"}" | JSTACK_ASSUME_INTERACTIVE=1 python3 "$HOOK" 2>/dev/null; }
 case "$(inject "$ROOT/Gamma/chat")" in

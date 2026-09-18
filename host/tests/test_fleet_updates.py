@@ -34,6 +34,46 @@ def release():
     return key, base64.b64encode(key.public_key().public_bytes_raw()).decode(), envelope
 
 
+@pytest.mark.parametrize("corrupt_upload", [False, True])
+@pytest.mark.parametrize("existing", [None, "draft", "published"])
+def test_publication_checks_uploaded_bytes_before_exposing_release(tmp_path, release, monkeypatch, corrupt_upload, existing):
+    import shutil
+    import subprocess
+    from jstack_host import release_channel, update_macos
+    _, public, envelope = release
+    atomic_json(tmp_path / "manifest.json", envelope)
+    for item in envelope["manifest"]["components"].values():
+        (tmp_path / item["file"]).write_bytes(b"artifact")
+    monkeypatch.setattr(release_channel.subprocess, "run", lambda *a, **k:
+                        subprocess.CompletedProcess(a[0], 0,
+                            json.dumps({"draft": existing == "draft", "assets": [{"name": "manifest.json"}]}), "")
+                        if existing else subprocess.CompletedProcess(a[0], 1, "", "HTTP 404"))
+    calls = []
+    def command(argv, **kwargs):
+        calls.append(argv)
+        if argv[1:3] == ["release", "download"]:
+            from pathlib import Path
+            name = argv[argv.index("--pattern") + 1]
+            target = Path(argv[argv.index("--dir") + 1]) / name
+            shutil.copy2(tmp_path / name, target)
+            if corrupt_upload and name == "client.zip":
+                target.write_bytes(b"corrupt")
+        return ""
+    monkeypatch.setattr(update_macos, "command", command)
+    if corrupt_upload:
+        with pytest.raises(releases.ReleaseError):
+            release_channel.publish(tmp_path, "example/stack", public)
+        assert not any(c[1:3] == ["release", "edit"] for c in calls)
+    else:
+        release_channel.publish(tmp_path, "example/stack", public)
+        if existing == "published":
+            assert all(c[1:3] == ["release", "download"] for c in calls)
+        else:
+            assert calls[-1][1:3] == ["release", "edit"]
+        if existing is None:
+            assert calls[0][calls[0].index("--target") + 1] == "a" * 40
+
+
 def test_signature_rejects_payload_and_trust_key_substitution(release):
     key, public, envelope = release
     assert releases.verify(envelope, public)["release"] == "test-1"
@@ -45,6 +85,56 @@ def test_signature_rejects_payload_and_trust_key_substitution(release):
         releases.verify(envelope, public)
     with pytest.raises(releases.ReleaseError, match="signature"):
         releases.verify(releases.sign(envelope["manifest"], wrong.private_bytes_raw()), public)
+
+
+@pytest.mark.parametrize("invalid_artifact", [False, True])
+def test_public_channel_advances_only_after_complete_verified_download(tmp_path, release, invalid_artifact):
+    from jstack_host import release_channel
+    root = tmp_path / "updates"
+    feed = tmp_path / "feed"
+    previous = releases.sign({**release[2]["manifest"], "release": "previous"}, release[0].private_bytes_raw())
+    atomic_json(feed / "latest.json", previous)
+    tag = release_channel.TAG_PREFIX + "test-1"
+    calls = []
+
+    def transport(request):
+        calls.append(str(request.url))
+        if request.url.host == "api.github.com":
+            return httpx.Response(200, json=[
+                {"draft": True, "prerelease": False, "tag_name": tag + "-draft"},
+                {"draft": False, "prerelease": True, "tag_name": tag + "-preview"},
+                {"draft": False, "prerelease": False, "tag_name": "mac-71"},
+                {"draft": False, "prerelease": False, "tag_name": tag}])
+        if request.url.path.endswith("manifest.json"):
+            return httpx.Response(200, json=release[2])
+        return httpx.Response(200, content=b"tampered" if invalid_artifact else b"artifact")
+
+    config = {"github_repo": "example/stack", "feed_dir": str(feed), "public_key": release[1]}
+    with httpx.Client(transport=httpx.MockTransport(transport)) as client:
+        if invalid_artifact:
+            with pytest.raises(releases.ReleaseError):
+                release_channel.refresh(root, config, client=client, now=1000)
+            assert json.loads((feed / "latest.json").read_text()) == previous
+        else:
+            release_channel.refresh(root, config, client=client, now=1000)
+            assert json.loads((feed / "latest.json").read_text()) == release[2]
+            for component in release[2]["manifest"]["components"].values():
+                assert (feed / "test-1" / component["file"]).read_bytes() == b"artifact"
+        previous_calls = len(calls)
+        release_channel.refresh(root, config, client=client, now=1001)
+        assert len(calls) == previous_calls
+
+
+@pytest.mark.parametrize("excluded", ["managed", "candidate_test", "parent_record"])
+def test_public_channel_never_overrides_parent_or_candidate_feed(tmp_path, excluded):
+    from jstack_host import release_channel
+    config = {"github_repo": "example/stack"}
+    if excluded == "parent_record":
+        (tmp_path / "parent.json").write_text("{}")
+    else:
+        config[excluded] = True
+    release_channel.refresh(tmp_path / "updates", config)
+    assert not (tmp_path / "updates" / "channel.json").exists()
 
 
 @pytest.mark.parametrize("mutation", ["missing", "skipped", "stale", "wrong_digest", "failed"])
@@ -257,6 +347,32 @@ def test_crash_mid_apply_recovers_from_disk_before_accepting_work(tmp_path, rele
     restarted.tick()
     assert restarted.backend.events == ["rollback"]
     assert restarted.current["state"] == "rolled_back"
+
+
+@pytest.mark.parametrize("status,expected", [
+    ("pending", "applying"), ("applied", "verifying"), ("rolled_back", "rolled_back")])
+def test_independent_owner_recovery_controls_restart_outcome(tmp_path, release, status, expected):
+    backend = Backend()
+    backend.healthy = False
+    backend.recovery_status = lambda job: status
+    daemon, job = supervisor(tmp_path, release, backend)
+    daemon.current = {**job, "state": "applying", "transaction": {"native": True}}
+    daemon.save()
+    daemon.tick()
+    assert daemon.current["state"] == expected
+    assert ("rollback" in backend.events) is False
+
+
+def test_verification_waits_while_independent_owner_rolls_back(tmp_path, release):
+    backend = Backend()
+    backend.recovery_status = lambda job: "rolling_back"
+    daemon, job = supervisor(tmp_path, release, backend)
+    daemon.current = {**job, "state": "verifying", "verify_started": time.time() - 500,
+                      "transaction": {"native": True}}
+    daemon.save()
+    daemon.tick()
+    assert daemon.current["state"] == "verifying"
+    assert "rollback" not in backend.events
 
 
 def test_failed_verification_rolls_back(tmp_path, release):

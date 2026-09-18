@@ -29,6 +29,8 @@ import AppKit
 import CoreImage
 import Foundation
 import Network
+import ServiceManagement
+import SwiftUI
 
 // MARK: - Where the host is
 
@@ -41,6 +43,17 @@ import Network
 /// different, empty host — the same trap `jstack-host` avoids by adopting the
 /// installed environment before every read command.
 enum HostAgent {
+    static var appOwned: Bool { Bundle.main.bundleIdentifier == "live.jstack.hub" }
+
+    static func serviceSettings() -> [String: Any] {
+        guard appOwned else { return [:] }
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/jremote/service-settings.json")
+        guard let data = try? Data(contentsOf: path),
+              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              value["schema"] as? Int == 1 else { return [:] }
+        return value
+    }
     /// The LaunchAgent that owns the host's lifecycle.
     ///
     /// `com.jremote.host` is what `jstack-host install` writes, and on a
@@ -55,10 +68,25 @@ enum HostAgent {
     /// `environment()` below — that resolves by *reading this label's plist*,
     /// so sourcing the label from it would be circular.
     static let label: String = {
+        if appOwned {
+            if let capability = serviceSettings()["host_capability"] as? String {
+                return "live.jstack.automation." + capability
+            }
+            return "live.jstack.hub.host"
+        }
         let env = ProcessInfo.processInfo.environment["JREMOTE_AGENT_LABEL"] ?? ""
         return env.isEmpty ? "com.jremote.host" : env
     }()
     static let defaultPort = 9090
+
+    static var serviceRole: String { serviceSettings()["host_capability"] as? String ?? "host" }
+    static var serviceController: URL {
+        if serviceSettings()["host_capability"] != nil,
+           let path = serviceSettings()["services_app"] as? String {
+            return URL(fileURLWithPath: path).appendingPathComponent("Contents/MacOS/JStackHub")
+        }
+        return Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/JStackHub")
+    }
 
     static var plistURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -66,7 +94,8 @@ enum HostAgent {
     }
 
     static var isInstalled: Bool {
-        FileManager.default.fileExists(atPath: plistURL.path)
+        if appOwned { return !serviceSettings().isEmpty }
+        return FileManager.default.fileExists(atPath: plistURL.path)
     }
 
     private static func job() -> [String: Any]? {
@@ -117,6 +146,7 @@ enum HostAgent {
     /// otherwise the port the installed agent serves on — taken from the argv
     /// launchd execs, which is the same string the host is running with.
     static func port() -> Int {
+        if let port = serviceSettings()["port"] as? Int, (1...65535).contains(port) { return port }
         let mine = ProcessInfo.processInfo.arguments
         if let i = mine.firstIndex(of: "--port"), i + 1 < mine.count,
            let p = Int(mine[i + 1]) { return p }
@@ -139,6 +169,7 @@ enum HostAgent {
     /// of its own to read, and guessing `0.0.0.0` there would put "reachable
     /// from your LAN" under a machine's name on the evidence of nothing.
     static func bind() -> String? {
+        if appOwned { return serviceSettings()["bind"] as? String }
         let mine = ProcessInfo.processInfo.arguments
         if let i = mine.firstIndex(of: "--bind"), i + 1 < mine.count {
             return mine[i + 1]
@@ -186,6 +217,9 @@ enum HostAgent {
     /// what answers; run by hand against a second host, the export is.
     static func environment() -> [String: String] {
         var out: [String: String] = [:]
+        if let environment = serviceSettings()["environment"] as? [String: String] {
+            out = environment.filter { carries($0.key) }
+        }
         if let env = job()?["EnvironmentVariables"] as? [String: Any] {
             for (k, v) in env where carries(k) {
                 out[k] = String(describing: v)
@@ -459,6 +493,7 @@ struct HostIdentity: Decodable {
     var name: String?
     var profile: String?
     var features: [String: Bool]?
+    var source: UpdateSource?
 
     /// local / open / managed — the host's own verdict on how a device off
     /// this network reaches it, computed by `jstack_host.mode`. Nil where an
@@ -556,25 +591,49 @@ struct UpdateMachine: Decodable {
     var supervisor: Bool
     var job: UpdateJobStatus?
     var observed: UpdateObservation?
+    var contactStatus: String?
 
-    var canUpdate: Bool {
+    private var idleForUpdate: Bool {
         desired != nil && !["downloading", "applying", "verifying", "current", "pending",
                             "pending/offline"].contains(state)
     }
+    var canUpdate: Bool { supervisor && idleForUpdate }
+    var needsBootstrap: Bool {
+        !supervisor && desired != nil && !["downloading", "applying", "verifying", "current"]
+            .contains(state)
+    }
     var summary: String {
-        let status = state.replacingOccurrences(of: "_", with: " ")
-        return supervisor ? status : "\(status) — updater not yet observed"
+        if needsBootstrap { return "Updater setup required" }
+        switch state {
+        case "not_published", "unknown": return "No update published"
+        case "unknown/offline": return lastContact == nil ? "Not connected to updates" : "Offline"
+        case "pending/offline": return "Update queued · offline"
+        case "current": return "Up to date"
+        case "available": return "Update available"
+        case "rolled_back": return "Previous version restored"
+        default: return state.replacingOccurrences(of: "_", with: " ").capitalized
+        }
     }
 }
 
 struct UpdateComponent: Decodable {
     var installed: String?
     var runningPids: [Int]?
+    var version: String?
+    var distribution: String?
 }
 
 struct UpdateSource: Decodable {
     var sha: String?
     var dirty: Bool?
+    var version: String?
+    var release: String?
+    var build: Int?
+
+    var displayVersion: String {
+        guard let version else { return "Version not reported" }
+        return build.map { "\(version) (\($0))" } ?? version
+    }
 }
 
 struct UpdateObservation: Decodable {
@@ -588,7 +647,9 @@ struct UpdateInventory: Decodable {
 
     func localUpdate(hostID: String?) -> UpdateMachine? {
         guard release != nil, let hostID else { return nil }
-        return machines.first { $0.machine == hostID && $0.canUpdate }
+        return machines.first {
+            $0.machine == hostID && ($0.canUpdate || $0.needsBootstrap)
+        }
     }
 }
 
@@ -713,7 +774,7 @@ final class HostProbe {
     /// Where the token-bearing routes live. `/api/health` is not under it —
     /// the health probe is mounted on the app itself, precisely so it stays
     /// reachable without the version prefix or the token.
-    private static let apiPrefix = "/api/jremote/v1"
+    static let apiPrefix = "/api/jremote/v1"
 
     func poll(_ done: @escaping (HostState) -> Void) {
         var state = HostState()
@@ -1227,8 +1288,17 @@ struct MintedPairing {
     /// `.local` stays out of both branches: it needs the same LAN as the
     /// numeric address while resolving less reliably on it, so it is never
     /// right when the number is available and never available when it is not.
-    var attachCommand: String {
-        attachCommand(meshAddress ?? lanAddress ?? "http://<this-mac>:\(port)")
+    ///
+    /// Optional, and nil is the whole change here. This fell through to
+    /// `http://<this-mac>:\(port)` when neither address was found, which put a
+    /// placeholder inside a line whose entire purpose is to be copied to
+    /// another keyboard and run — and the one blank in it is the field the
+    /// operator cannot fill, because working out this hub's address from the
+    /// other Mac is the question the dialog exists to answer. A command with a
+    /// hole in it does not read as an error; it reads as an instruction.
+    var attachCommand: String? {
+        guard let parent = meshAddress ?? lanAddress else { return nil }
+        return attachCommand(parent)
     }
 
     /// "10 minutes", from seconds — the dialog says how long the code lives,
@@ -1236,6 +1306,100 @@ struct MintedPairing {
     var validFor: String {
         let mins = max(1, expiresIn / 60)
         return mins == 1 ? "1 minute" : "\(mins) minutes"
+    }
+}
+
+/// Which machines this hub adopted are answering it over the mesh right now —
+/// `jstack-host leaves --json`, read before the adopt dialog is drawn.
+///
+/// There are two ways to adopt a Mac and they are not alternatives. A Mac that
+/// can reach this hub redeems a code where it stands; a Mac that cannot has
+/// the tunnel carried to it in a file, because redeeming needs a route and the
+/// route is what redeeming hands back. Nothing steered between them, so the
+/// carried file was offered for machines with no use for it — the operator
+/// walked a file to a Mac that was already answering over the tunnel, and that
+/// Mac's bundle was rewritten with a fresh code on the way out (#61).
+///
+/// The question is asked of the hub, not guessed from the registry: a row
+/// survives the machine being wiped, and a wiped machine is exactly the one
+/// the carried file is for.
+struct MeshRoster {
+    /// Peer names whose machine is live *and answering*. Only `online == true`
+    /// lands here. Null — the hub could not read its own peer table — stays
+    /// out on purpose: a dialog that read "could not tell" as "already on the
+    /// mesh" would take the carried file away from the machine that needs it
+    /// most, and that machine has no other route in.
+    let live: Set<String>
+
+    static let empty = MeshRoster(live: [])
+
+    init(live: Set<String>) { self.live = live }
+
+    init?(json: String) {
+        struct Row: Decodable {
+            var peer: String?
+            var online: Bool?
+        }
+        // The whole output first, then its last line. `HostControl.run` folds
+        // stderr into stdout, so a warning printed ahead of the payload must
+        // not read as "this hub adopted nothing".
+        let whole = json.data(using: .utf8)
+        let tail = json.split(separator: "\n").last.flatMap { $0.data(using: .utf8) }
+        let rows = [whole, tail].compactMap { $0 }
+            .compactMap { try? JSONDecoder().decode([Row].self, from: $0) }
+        guard let first = rows.first else { return nil }
+        live = Set(first.filter { $0.online == true }
+                        .compactMap { $0.peer }
+                        .filter { !$0.isEmpty })
+    }
+
+    /// Is the machine the operator just named already on the mesh.
+    func holds(_ typed: String) -> Bool {
+        let peer = Self.peerName(typed)
+        return !peer.isEmpty && live.contains(peer)
+    }
+
+    /// `enrolment.peer_name`, in Swift — "Work Mac" → "work-mac".
+    ///
+    /// The second copy of a rule, which is worth saying out loud: the name the
+    /// operator types is a display name, the peer is a filename and a config
+    /// stanza key, and the hub derives one from the other at adoption. Matching
+    /// on the typed name instead would miss the machine whose row reads "Work
+    /// Mac" the moment someone types "work-mac", which is the same miss this
+    /// whole check exists to close. The hub still owns the rule — it emits the
+    /// peer name it actually holds, and this only has to slug the live keystroke
+    /// the same way to compare against it.
+    static func peerName(_ name: String) -> String {
+        let runs = name.lowercased().map { ch -> Character in
+            (ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9") ? ch : "-"
+        }
+        var collapsed = ""
+        for ch in runs where ch != "-" || collapsed.last != "-" {
+            collapsed.append(ch)
+        }
+        var slug = String(collapsed.drop(while: { $0 == "-" }))
+        while slug.last == "-" { slug.removeLast() }
+        slug = String(slug.prefix(31))
+        while slug.last == "-" { slug.removeLast() }
+        return slug
+    }
+}
+
+/// Reports every keystroke in an `NSTextField` to a closure.
+///
+/// Because the adopt dialog has to steer on a name that does not exist until
+/// the operator types it: the choice between the two routes and the name they
+/// apply to are on the same panel, so the offline button's state has to follow
+/// the field rather than be decided once when the panel opens.
+final class FieldWatcher: NSObject, NSTextFieldDelegate {
+    private let onChange: (String) -> Void
+
+    init(_ onChange: @escaping (String) -> Void) {
+        self.onChange = onChange
+    }
+
+    func controlTextDidChange(_ note: Notification) {
+        onChange((note.object as? NSTextField)?.stringValue ?? "")
     }
 }
 
@@ -1320,18 +1484,38 @@ enum HostControl {
     }
 
     static func stop() {
+        if HostAgent.appOwned {
+            _ = serviceAction("unregister")
+            return
+        }
         run("/bin/launchctl", ["bootout", "\(domain)/\(HostAgent.label)"])
     }
 
     static func start() {
+        if HostAgent.appOwned {
+            let answer = serviceAction("register")
+            if answer.out.contains("requires_approval") { SMAppService.openSystemSettingsLoginItems() }
+            return
+        }
         run("/bin/launchctl", ["bootstrap", domain, HostAgent.plistURL.path])
         run("/bin/launchctl", ["kickstart", "-k", "\(domain)/\(HostAgent.label)"])
+    }
+
+    private static func serviceAction(_ action: String) -> (out: String, code: Int32) {
+        let controller = HostAgent.serviceController
+        let owner = controller.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let identifier = HostAgent.serviceSettings()["host_capability"] == nil ? "live.jstack.hub" : "live.jstack.hub.services"
+        let requirement = "=anchor apple generic and certificate leaf[subject.OU] = \"MZ95H77RQQ\" and identifier \"\(identifier)\""
+        let checked = run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R", requirement, owner.path])
+        guard checked.code == 0 else { return checked }
+        return run(controller.path, [action, HostAgent.serviceRole])
     }
 
     /// Where `jstack-host` is. The installer passes `--host-bin` on the command
     /// line because it is the one thing that knows for certain; the search is
     /// the fallback for an app launched by hand.
     static var hostBinary: String? = {
+        if HostAgent.appOwned { return Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/JStackCLI").path }
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "--host-bin"), i + 1 < args.count,
            FileManager.default.isExecutableFile(atPath: args[i + 1]) {
@@ -1439,87 +1623,180 @@ enum MenuBarAgent {
 
 /// A reusable, nonmodal status window. Update actions retain their menu command
 /// so the window and deep link use the same authority and request handling.
-final class HostInfoWindow: NSWindow {
-    private final class TopAlignedStack: NSStackView {
-        override var isFlipped: Bool { true }
+struct InfoAppSnapshot {
+    var url: URL?
+    var icon: NSImage?
+    var version = "Not installed"
+    var status = "Download jRemote to use this Mac’s sessions."
+    var distribution = ""
+
+    static func read() -> Self {
+        guard let url = RemoteApp.url, let bundle = Bundle(url: url) else { return Self() }
+        let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+        let running = NSWorkspace.shared.runningApplications.contains { $0.bundleURL == url }
+        let store = FileManager.default.fileExists(atPath: url.appendingPathComponent("Contents/_MASReceipt/receipt").path)
+        let channel = bundle.object(forInfoDictionaryKey: "JStackDistribution") as? String
+        return Self(url: url, icon: NSWorkspace.shared.icon(forFile: url.path),
+                    version: "\(version) (\(build))", status: running ? "Running" : "Installed",
+                    distribution: store ? "App Store" : channel == "hub" ? "Managed by your hub" : "Separate installation")
     }
-    private let rows = TopAlignedStack()
-    private var lastContent: [String] = []
-    private final class CommandButton: NSButton {
-        let command: NSMenuItem
-        init(_ command: NSMenuItem) {
-            self.command = command
-            super.init(frame: .zero)
-            title = command.title
-            bezelStyle = .rounded
-            target = self
-            action = #selector(invoke)
-            isEnabled = command.isEnabled
-            setAccessibilityIdentifier(command.accessibilityIdentifier())
-        }
-        required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
-        @objc private func invoke() {
+}
+
+struct InfoCommand: View {
+    let command: NSMenuItem
+    var body: some View {
+        Button(command.title) {
             guard command.isEnabled, let action = command.action else { return }
             NSApp.sendAction(action, to: command.target, from: command)
         }
+        .disabled(!command.isEnabled)
+        .accessibilityIdentifier(command.accessibilityIdentifier())
     }
+}
 
+struct InfoHubSection: View {
+    let name: String
+    let status: String
+    let version: String
+    let source: String?
+    var body: some View {
+        Section {
+            LabeledContent("Mac", value: name)
+            LabeledContent("Status", value: status)
+            LabeledContent("Version", value: version)
+            if let source {
+                DisclosureGroup("Technical details") {
+                    LabeledContent("Source", value: source)
+                        .textSelection(.enabled)
+                }
+                .accessibilityIdentifier("info_hub_details")
+            }
+        } header: {
+            Label("jStack Hub", systemImage: "server.rack")
+                .font(.headline)
+        }
+    }
+}
+
+struct InfoClientSection: View {
+    let app: InfoAppSnapshot
+    let open: () -> Void
+    let download: () -> Void
+    var body: some View {
+        Section {
+            HStack(spacing: 12) {
+                if let icon = app.icon {
+                    Image(nsImage: icon).resizable().frame(width: 48, height: 48)
+                        .accessibilityHidden(true)
+                } else {
+                    Image(systemName: "terminal").font(.largeTitle)
+                        .frame(width: 48, height: 48).accessibilityHidden(true)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("jRemote").font(.headline)
+                    Text(app.version).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if app.url != nil {
+                    Button("Open", action: open).accessibilityIdentifier("info_open_client")
+                } else {
+                    Button("Download…", action: download).accessibilityIdentifier("info_download_client")
+                }
+            }
+            LabeledContent("Status", value: app.status)
+            if !app.distribution.isEmpty {
+                LabeledContent("Updates", value: app.distribution)
+            }
+        }
+    }
+}
+
+struct InfoMachineSection: View {
+    let machine: UpdateMachine
+    let command: NSMenuItem?
+    var body: some View {
+        Section(machine.name) {
+            LabeledContent("Updates", value: machine.summary)
+            if let version = machine.observed?.hostSource?.version {
+                LabeledContent("jStack", value: version)
+            }
+            if let client = machine.observed?.components?["client"], let build = client.installed {
+                LabeledContent("jRemote", value: client.version.map { "\($0) (\(build))" } ?? "Build \(build)")
+            }
+            if let contact = machine.lastContact {
+                LabeledContent("Last seen") {
+                    Text(Date(timeIntervalSince1970: contact), format: .dateTime.month().day().hour().minute())
+                }
+            }
+            if !machine.supervisor {
+                Text("Run the current installer on this Mac once to enable managed updates.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            if let detail = machine.job?.detail, !detail.isEmpty {
+                Text(detail).font(.callout).textSelection(.enabled)
+            }
+            if let command { InfoCommand(command: command) }
+        }
+    }
+}
+
+struct HostInfoForm: View {
+    let machine: String
+    let status: String
+    let version: String
+    let source: String?
+    let app: InfoAppSnapshot
+    let updateStatus: String
+    let error: String?
+    let localCommand: NSMenuItem?
+    let machines: [UpdateMachine]
+    let commands: [String: NSMenuItem]
+    let allCommand: NSMenuItem?
+    let open: () -> Void
+    let download: () -> Void
+
+    var body: some View {
+        Form {
+            InfoHubSection(name: machine, status: status, version: version, source: source)
+            InfoClientSection(app: app, open: open, download: download)
+            Section("Software Updates") {
+                LabeledContent("Status", value: updateStatus)
+                if let error {
+                    Text(error).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+                if let localCommand { InfoCommand(command: localCommand) }
+                if let allCommand { InfoCommand(command: allCommand) }
+            }
+            ForEach(machines, id: \.machine) { machine in
+                InfoMachineSection(machine: machine, command: commands[machine.machine])
+            }
+        }
+        .formStyle(.grouped)
+        .accessibilityIdentifier("host_info_form")
+    }
+}
+
+/// Keep a single hosting view alive across polls so focus and disclosures survive.
+final class HostInfoWindow: NSWindow {
+    private var hosting: NSHostingView<HostInfoForm>?
     init() {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 540, height: 440),
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
                    styleMask: [.titled, .closable, .resizable, .miniaturizable],
                    backing: .buffered, defer: false)
         title = "jStack Info"
         isReleasedWhenClosed = false
-        minSize = NSSize(width: 420, height: 280)
+        minSize = NSSize(width: 460, height: 400)
         setAccessibilityIdentifier("host_info_window")
-        let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-        contentView = scroll
-        rows.orientation = .vertical
-        rows.alignment = .leading
-        rows.spacing = 8
-        rows.setContentHuggingPriority(.required, for: .vertical)
-        rows.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
-        rows.translatesAutoresizingMaskIntoConstraints = false
-        scroll.documentView = rows
-        NSLayoutConstraint.activate([
-            rows.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
-            rows.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
-            rows.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
-        ])
         center()
     }
 
-    func render(machine: String, status: String, details: NSMenu) {
-        let content = [machine, status] + details.items.flatMap {
-            [$0.title, String($0.isEnabled), String($0.isSeparatorItem),
-             $0.accessibilityIdentifier(), $0.action.map(NSStringFromSelector) ?? ""]
-        }
-        guard content != lastContent else { return }
-        lastContent = content
-        for view in rows.arrangedSubviews { rows.removeArrangedSubview(view); view.removeFromSuperview() }
-        func label(_ text: String, heading: Bool = false) {
-            let field = NSTextField(wrappingLabelWithString: text)
-            field.font = NSFont.preferredFont(forTextStyle: heading ? .headline : .body)
-            field.isSelectable = true
-            field.setContentHuggingPriority(.required, for: .vertical)
-            rows.addArrangedSubview(field)
-            field.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -40).isActive = true
-        }
-        label(machine, heading: true)
-        label(status)
-        for item in details.items {
-            if item.isSeparatorItem {
-                let divider = NSBox()
-                divider.boxType = .separator
-                rows.addArrangedSubview(divider)
-                divider.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -40).isActive = true
-            } else if item.action != nil {
-                rows.addArrangedSubview(CommandButton(item))
-            } else {
-                label(item.title)
-            }
+    func render(_ form: HostInfoForm) {
+        if let hosting { hosting.rootView = form }
+        else {
+            let view = NSHostingView(rootView: form)
+            hosting = view
+            contentView = view
         }
     }
 }
@@ -1533,6 +1810,7 @@ final class StatusController: NSObject {
     private var updateInventory: UpdateInventory?
     private var updateError: String?
     private var updateRequestInFlight = false
+    private var updateActionStatus: String?
     private var menuIsOpen = false
     private var infoWindow: HostInfoWindow?
 
@@ -1714,6 +1992,7 @@ final class StatusController: NSObject {
         }
         submenu.addItem(Self.caption(inventory.release.map { "Available release: \($0)" }
                                        ?? "No release available"))
+        let localID = state.identity?.hostId
         for machine in inventory.machines {
             submenu.addItem(.separator())
             submenu.addItem(Self.caption("\(machine.name) — \(machine.summary)"))
@@ -1732,8 +2011,10 @@ final class StatusController: NSObject {
             if let detail = machine.job?.detail, !detail.isEmpty {
                 submenu.addItem(Self.caption(detail))
             }
-            if machine.canUpdate {
-                let update = Self.action("Update \(machine.name)", #selector(doUpdate), self)
+            let canRecoverHere = machine.machine == localID && machine.needsBootstrap
+            if machine.canUpdate || canRecoverHere {
+                let title = canRecoverHere ? "Enable Updates and Continue" : "Update \(machine.name)"
+                let update = Self.action(title, #selector(doUpdate), self)
                 update.setAccessibilityIdentifier("updates_tap_" + machine.machine)
                 update.representedObject = machine.machine
                 update.isEnabled = !updateRequestInFlight
@@ -1754,18 +2035,53 @@ final class StatusController: NSObject {
     @objc private func doUpdate(_ sender: NSMenuItem) {
         guard !updateRequestInFlight, let target = sender.representedObject as? String else { return }
         updateRequestInFlight = true
+        let localID = state.identity?.hostId
+        let local = updateInventory?.machines.first { $0.machine == localID }
+        if (target == "self" || target == localID), local?.needsBootstrap == true {
+            updateActionStatus = "Enabling managed updates…"
+            showUpdates()
+            guard let binary = HostControl.hostBinary else {
+                finishUpdate(false, "The installed jStack host command could not be found.")
+                return
+            }
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let result = HostControl.run(binary, ["updates", "enable"])
+                let detail = result.out.trimmingCharacters(in: .whitespacesAndNewlines)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if result.code == 0 {
+                        self.updateActionStatus = "Updater enabled · queueing update…"
+                        self.refreshInfoWindow()
+                        self.queueUpdate(target)
+                    } else {
+                        self.finishUpdate(false, detail.isEmpty
+                            ? "The update supervisor could not be installed." : detail)
+                    }
+                }
+            }
+            return
+        }
         showUpdates()
+        queueUpdate(target)
+    }
+
+    private func queueUpdate(_ target: String) {
         probe.update(target: target, requestID: UUID().uuidString) { [weak self] ok, detail in
             guard let self else { return }
-            self.updateRequestInFlight = false
-            if !ok {
-                let alert = NSAlert()
-                alert.messageText = "Update request needs attention"
-                alert.informativeText = detail
-                alert.runModal()
-            }
-            self.refresh()
+            self.finishUpdate(ok, detail)
         }
+    }
+
+    private func finishUpdate(_ ok: Bool, _ detail: String) {
+        updateRequestInFlight = false
+        updateActionStatus = nil
+        if !ok {
+            let alert = NSAlert()
+            alert.messageText = "Update request needs attention"
+            alert.informativeText = detail
+            alert.runModal()
+        }
+        refresh()
     }
 
     func showUpdates() {
@@ -1779,7 +2095,65 @@ final class StatusController: NSObject {
     @objc private func doInfo() { showUpdates() }
 
     private func refreshInfoWindow() {
-        infoWindow?.render(machine: Machine.name, status: state.headline, details: updateDetails())
+        guard let infoWindow else { return }
+        let local = updateInventory?.machines.first { $0.machine == state.identity?.hostId }
+        let source = state.identity?.source ?? local?.observed?.hostSource
+        let details = updateDetails()
+        var commands: [String: NSMenuItem] = [:]
+        for item in details.items where item.action != nil {
+            if let target = item.representedObject as? String { commands[target] = item }
+        }
+        let localID = state.identity?.hostId ?? ""
+        infoWindow.render(HostInfoForm(
+            machine: Machine.name,
+            status: state.isUp ? (state.identity?.mode?.isManaged == true ? "Running · Managed Mac" : "Running") : "Not running",
+            version: source?.displayVersion ?? "Version not reported",
+            source: source?.sha,
+            app: InfoAppSnapshot.read(),
+            updateStatus: updateActionStatus ?? (updateError != nil ? "Could not check for updates"
+                : local?.summary ?? (updateInventory == nil ? "Checking…" : "No update published")),
+            error: updateError ?? local?.job?.detail,
+            localCommand: commands[localID],
+            machines: updateInventory?.machines.filter { $0.machine != localID } ?? [],
+            commands: commands, allCommand: commands["all"],
+            open: { [weak self] in self?.doOpenApp() },
+            download: { [weak self] in self?.downloadClient() }))
+    }
+
+    private func downloadClient() {
+        guard let token = HostAgent.updaterToken(),
+              let url = URL(string: "http://127.0.0.1:\(HostAgent.port())\(HostProbe.apiPrefix)/app/mac/download")
+        else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "jRemote.zip"
+        panel.begin { [weak self] response in
+            guard response == .OK, let destination = panel.url else { return }
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            URLSession.shared.downloadTask(with: request) { temporary, response, error in
+                var failure = error?.localizedDescription
+                if let temporary, (response as? HTTPURLResponse)?.statusCode == 200 {
+                    do {
+                        // The save panel owns overwrite confirmation.
+                        let data = try Data(contentsOf: temporary)
+                        try data.write(to: destination, options: .atomic)
+                    } catch { failure = error.localizedDescription }
+                } else if failure == nil {
+                    failure = "This hub has no downloadable jRemote release. Check its release settings."
+                }
+                DispatchQueue.main.async {
+                    if let failure {
+                        let alert = NSAlert()
+                        alert.messageText = "Could not download jRemote"
+                        alert.informativeText = failure
+                        alert.runModal()
+                    } else {
+                        NSWorkspace.shared.activateFileViewerSelecting([destination])
+                    }
+                    self?.refresh()
+                }
+            }.resume()
+        }
     }
 
     /// The Active section. Rows are informational — a menu bar is where you
@@ -2547,6 +2921,14 @@ final class StatusController: NSObject {
         guard let binary = HostControl.hostBinary else { return }
         NSApp.activate(ignoringOtherApps: true)
 
+        // Asked before the panel is drawn, and that is the whole point. The
+        // carried file is wrong for a Mac already on this mesh, and the moment
+        // to act on that is while the route is still being *offered* — an
+        // alert cannot un-offer a button somebody has already pressed, and by
+        // then `adopt --offline` has rewritten that machine's bundle.
+        let roster = MeshRoster(json: HostControl.run(binary, ["leaves", "--json"]).out)
+            ?? .empty
+
         let ask = NSAlert()
         ask.messageText = "Adopt a Mac"
         ask.informativeText = "What should this hub call it?"
@@ -2558,11 +2940,35 @@ final class StatusController: NSObject {
         // gets a file instead: the tunnel travels to the machine.
         ask.addButton(withTitle: "Save a Joiner File…")
         ask.addButton(withTitle: "Cancel")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
         field.stringValue = "New Mac"
-        ask.accessoryView = field
+        let note = NSTextField(wrappingLabelWithString: Self.onMeshNote)
+        note.font = .systemFont(ofSize: 11)
+        note.textColor = .secondaryLabelColor
+        note.preferredMaxLayoutWidth = 280
+        let stack = NSStackView(views: [field, note])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        // Measured with the note in place and emptied afterwards: the panel is
+        // laid out once, so a frame sized around a blank label would clip the
+        // sentence the moment a typed name earns it.
+        stack.frame = NSRect(x: 0, y: 0, width: 280,
+                             height: stack.fittingSize.height)
+        note.stringValue = ""
+        ask.accessoryView = stack
         ask.window.initialFirstResponder = field
-        let choice = ask.runModal()
+
+        let offline = ask.buttons[1]
+        let steer = { (typed: String) in
+            let onMesh = roster.holds(typed)
+            offline.isEnabled = !onMesh
+            note.stringValue = onMesh ? Self.onMeshNote : ""
+        }
+        let watcher = FieldWatcher(steer)
+        field.delegate = watcher
+        steer(field.stringValue)
+        let choice = withExtendedLifetime(watcher) { ask.runModal() }
         guard choice == .alertFirstButtonReturn
                 || choice == .alertSecondButtonReturn else { return }
 
@@ -2615,20 +3021,42 @@ final class StatusController: NSObject {
                 + "address that reaches it from anywhere else. The code is "
                 + "good for \(minted.validFor)."
         } else {
+            // Nothing to run, so nothing is drawn to run. `adopt` refuses this
+            // case outright now — before it mints, so there is no live code
+            // burning down behind this panel — and a hub too old to refuse it
+            // reaches here instead, where the answer is the same: say what is
+            // missing, and offer no command at all rather than one with a hole
+            // where the address goes.
             shown.informativeText =
                 "This Mac has no address another machine can redeem against — "
                 + "only loopback, and it runs no mesh. Put it on a real "
                 + "network, then mint a new code."
         }
-        shown.accessoryView = Self.commandAccessory(minted.attachCommand)
+        if let command = minted.attachCommand {
+            shown.accessoryView = Self.commandAccessory(command)
+        }
         shown.addButton(withTitle: "Done")
-        shown.addButton(withTitle: "Copy Command")
-        if shown.runModal() == .alertSecondButtonReturn {
+        if minted.attachCommand != nil {
+            shown.addButton(withTitle: "Copy Command")
+        }
+        if shown.runModal() == .alertSecondButtonReturn,
+           let command = minted.attachCommand {
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(minted.attachCommand, forType: .string)
+            NSPasteboard.general.setString(command, forType: .string)
         }
         refresh()
     }
+
+    /// Why the carried file is greyed out, and what to press instead.
+    ///
+    /// Both halves matter. "Already on this mesh" alone leaves the operator
+    /// working out for themselves that the other button applies to them, and a
+    /// disabled control that does not say what to do instead is a dead end
+    /// wearing the clothes of a refusal.
+    private static let onMeshNote =
+        "That Mac is already on this mesh — it answers this hub over the "
+        + "tunnel, so it can redeem a code from where it stands. Use Get a "
+        + "Code. The joiner file is for a Mac that cannot reach here at all."
 
     /// Adopt a Mac this hub cannot reach — by handing over a file, not a code.
     ///

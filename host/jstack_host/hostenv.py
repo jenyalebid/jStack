@@ -310,11 +310,25 @@ class DefaultProfile:
         return ""
 
     def scheduler_dir(self) -> Path:
-        """jStack's scheduler home — `SCHEDULER_HOME`, else the plugin's own
-        default under `~/.claude/jstack`. `config/schedule.json` and
-        `state/scheduler/runs/` hang off it on every machine."""
+        """Legacy scheduler home; split directory accessors handle JSTACK_ROOT."""
         env = os.environ.get("SCHEDULER_HOME", "").strip()
-        return Path(env).expanduser() if env else HOME / ".claude" / "jstack" / "scheduler"
+        return Path(env).expanduser() if env else HOME / ".scheduler"
+
+    def scheduler_config_dir(self) -> Path:
+        if os.environ.get("SCHEDULER_CONFIG_DIR"):
+            return Path(os.environ["SCHEDULER_CONFIG_DIR"]).expanduser()
+        if "SCHEDULER_HOME" not in os.environ and os.environ.get("JSTACK_ROOT"):
+            return Path(os.environ.get("JSTACK_CONFIG_DIR") or
+                        str(Path(os.environ["JSTACK_ROOT"]).expanduser() / "Config")).expanduser()
+        return self.scheduler_dir() / "config"
+
+    def scheduler_state_dir(self) -> Path:
+        if os.environ.get("SCHEDULER_STATE_DIR"):
+            return Path(os.environ["SCHEDULER_STATE_DIR"]).expanduser()
+        if "SCHEDULER_HOME" not in os.environ and os.environ.get("JSTACK_ROOT"):
+            return Path(os.environ.get("JSTACK_STATE_DIR") or
+                        str(Path(os.environ["JSTACK_ROOT"]).expanduser() / "State")).expanduser() / "scheduler"
+        return self.scheduler_dir() / "state" / "scheduler"
 
     def spend_categories_path(self) -> Path:
         """Where a finer spend-category map may sit, in the state dir. The
@@ -687,6 +701,16 @@ def scheduler_dir() -> Path:
     return profile().scheduler_dir()
 
 
+def scheduler_config_dir() -> Path:
+    fn = getattr(profile(), "scheduler_config_dir", None)
+    return fn() if fn else scheduler_dir() / "config"
+
+
+def scheduler_state_dir() -> Path:
+    fn = getattr(profile(), "scheduler_state_dir", None)
+    return fn() if fn else scheduler_dir() / "state" / "scheduler"
+
+
 def timeline_db() -> Path:
     return profile().timeline_db()
 
@@ -846,6 +870,61 @@ def releases_dir() -> Path:
 
 # ── Who this host is ──
 
+class SecondIdentity(RuntimeError):
+    """Refused: a host identity was about to be minted into a state dir that
+    no host on this machine is serving."""
+
+
+def refuse_second_identity(state, what: str) -> None:
+    """Raise unless `state` is the state dir a host here actually serves.
+
+    MINTING IS THE ONE WRITE THAT CANNOT BE UNDONE BY GETTING THE PATH RIGHT
+    LATER. Everything else a stray process leaves in the wrong state dir is
+    junk: a feed it will re-derive, a cache it will rebuild, a lock nobody
+    holds. A `host-id` is a *claim*, and the app believes claims — it routes on
+    them, so a second id for one machine is read as a second machine at the
+    same address, every session on its board real and none of them the ones
+    asked for. Same for the internal token: `internal_token()` re-keys the
+    `host-internal` row whenever the plaintext beside it is missing, so a
+    process on the wrong dir mints into a store the real host never reads, and
+    d9b432f's read-compare-write race comes back across two directories
+    instead of within one (#45).
+
+    So the question is not "is there a file here" but "is anything serving
+    here", and the embed marker is the only thing on disk that answers it. A
+    host mounted into another server declares its own state dir in
+    `~/.local/state/jremote/embedded.json` precisely so a process that knows
+    nothing can find it (#34). A marker naming a *different* directory is that
+    host saying, in writing, that this is not where it lives.
+
+    NO MARKER MEANS NO OPINION, AND THAT IS DELIBERATE. A fresh standalone
+    host's very first call has to mint, and a machine that never embedded one
+    has nothing to disagree with. Refusing on absence would make a new install
+    unbootable to protect it from a second host it does not have. The refusal
+    fires only where the evidence is positive and specific: something declared
+    a state dir, and it is not this one.
+
+    Loud, not quiet. The alternative is to adopt the declared dir silently,
+    which repairs this caller and hides that it resolved wrong — and a process
+    that got here has a broken path, a missing `JREMOTE_STATE_DIR`, or an
+    `embed.adopt()` it never called. The whole of #34 was a command answering
+    confidently about a host that does not exist; answering confidently *as*
+    one is the same failure with a write behind it.
+    """
+    from . import embed  # local: embed imports this module
+
+    declared = str(embed.read().get("state_dir") or "")
+    if not declared:
+        return
+    if Path(declared).expanduser().resolve() == Path(state).resolve():
+        return
+    raise SecondIdentity(
+        f"refusing to mint {what} into {state}: the host on this machine "
+        f"serves {declared} (declared in {embed.marker_path()}). This process "
+        f"resolved the wrong state dir — call embed.adopt(), or set "
+        f"JREMOTE_STATE_DIR, before asking this host who it is.")
+
+
 def host_id() -> str:
     """A stable id for this host, minted once into its state dir.
 
@@ -862,17 +941,28 @@ def host_id() -> str:
 
     Minted at call time, never at import: this writes a file, and an import
     that writes is exactly what `state_dir()` refuses to be.
+
+    Reading is unconditional; *minting* is not. A dir that already holds an id
+    is answering for whoever put it there, and the answer is the same whoever
+    asks. Creating one is a claim about this machine, and `refuse_second_identity`
+    is where that claim has to survive a second host having already made it.
+    The check sits between the read and the mint for that reason — and before
+    `ensure_state_dir()`, so a refused call does not leave the directory it
+    refused to write in.
     """
     env = os.environ.get("JREMOTE_HOST_ID")
     if env:
         return env
-    path = ensure_state_dir() / "host-id"
+    state = state_dir()
+    path = state / "host-id"
     try:
         existing = path.read_text().strip()
         if existing:
             return existing
     except OSError:
         pass
+    refuse_second_identity(state, "host-id")
+    ensure_state_dir()
     minted = str(uuid.uuid4())
     path.write_text(minted)
     return minted

@@ -2,6 +2,22 @@
 
 ## Core contract
 
+The permanent product domain is **jstack.live** (chosen 2026-09-17).
+New product-owned macOS identifiers use the `live.jstack` namespace. The
+visible server product is **jStack Hub**. Domain ownership does not itself
+change Developer ID, grant privacy permissions, or migrate installed bundle
+identifiers. Existing client identities remain stable until an explicit,
+tested migration; the domain decision alone never renames an installed app.
+
+Background services must belong to the signed Hub installation, have named
+purposes and observable lifecycle controls, and use the smallest set of
+privilege boundaries needed. General-purpose interpreters are not acceptable
+as the product's user-facing background identity. Privileged services must
+not execute ordinary-user-writable code. Installation, update, repair and
+uninstall must account for every owned service and preserve the user's
+disabled settings. These are target requirements; the service migration is
+not yet deployed.
+
 Approved 2026-09-16. This section governs terminology, installation and
 releases. Historical plans do not override it. Implementation and deployment
 evidence are recorded separately in [managed updates](docs/managed-updates.md).
