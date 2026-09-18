@@ -102,6 +102,8 @@ def shell_config(text, plugin, path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path)
+    parser.add_argument("--job-monitor", action="store_true",
+                        help="Install the opt-in background shell job MCP server")
     args = parser.parse_args()
     checkout = Path(__file__).resolve().parents[2]
     plugin = checkout / "plugins/jstack"
@@ -140,6 +142,12 @@ def main():
             if entry not in post:
                 post.append(entry)
     hooks_file.write_text(json.dumps(hooks, indent=2) + "\n")
+    if args.job_monitor:
+        exists = subprocess.run(["codex", "mcp", "get", "job_monitor", "--json"],
+                                capture_output=True).returncode == 0
+        if not exists:
+            subprocess.run(["codex", "mcp", "add", "job_monitor", "--", sys.executable,
+                            str(checkout / "host/tools/job_monitor.py"), "mcp"], check=True)
     if any(name.startswith("swift-lsp@") and enabled
            for name, enabled in claude_settings.get("enabledPlugins", {}).items()):
         exists = subprocess.run(["codex", "mcp", "get", "swift-lsp", "--json"],

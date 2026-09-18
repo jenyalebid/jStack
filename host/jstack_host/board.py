@@ -1256,12 +1256,20 @@ def open_sessions() -> list[dict]:
             "emoji": cfg.get("emoji", ""),
             "preview": preview,
             "last_activity": datetime.fromtimestamp(mtime).isoformat() if mtime else "",
-            # Same two fields every other board builder carries. They were
+            # Same three fields every other board builder carries. They were
             # missing here, so the board's Open section — the one place a
             # just-spawned session shows before it has written anything — was
             # the one place the app could not tell a Codex row from a Claude
             # one. A row that cannot say which CLI it runs is a row the user has
             # to open to identify.
+            #
+            # `window_name` is the title the spawn pinned — `HF · <topic>` for a
+            # handoff. Dropping it here cost the caller the whole point of the
+            # command: the row was on the board under the provider's own
+            # auto-title, so the person who typed the handoff scanned for the
+            # title they named and did not find it. The preview says what the
+            # session is talking about; only this says what it was opened as.
+            "window_name": info.get("name", ""),
             "engine": info.get("engine", "claude"),
             "model": info.get("model", ""),
             "tags": tags.get(sid, []),

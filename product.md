@@ -43,9 +43,11 @@ evidence are recorded separately in [managed updates](docs/managed-updates.md).
 - Publish only when explicitly requested. Promote the exact tested artifacts,
   without rebuilding during publication. A release manifest pins compatible
   Hub and jRemote builds. A push or merge does not publish or deploy a release.
-- TestFlight and the Hub-managed Mac app are one jRemote release: both use the
-  same committed client source and build number, and neither is complete until
-  both channels are published.
+- A jRemote release is three artifacts from one committed client source under
+  one build number: the iOS TestFlight build, the macOS App Store (TestFlight)
+  build, and the Hub-managed Mac app. No subset is a release, and a channel
+  already holding that build is part of the release rather than an exemption
+  from it.
 - One menu action updates the existing Hub and its eligible client. A parent
   can update itself, one leaf or all eligible leaves. Verify the running build
   after restart; offline, failed and rolled-back targets remain explicit.
