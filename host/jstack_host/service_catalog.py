@@ -47,6 +47,8 @@ def validate(slug: str, job: dict):
     for key in ("RunAtLoad", "AbandonProcessGroup"):
         if key in job and type(job[key]) is not bool:
             raise ValueError("invalid boolean trigger")
+    if job.get("AbandonProcessGroup"):
+        raise ValueError("capabilities must retain launchd process-group cleanup")
     for key in ("StartInterval", "ThrottleInterval", "ExitTimeOut", "Nice"):
         if key in job and (type(job[key]) is not int or job[key] < (-20 if key == "Nice" else 0)):
             raise ValueError("invalid numeric trigger")

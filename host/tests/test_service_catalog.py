@@ -29,6 +29,7 @@ def test_catalog_keeps_launchd_triggers_without_exposing_arguments():
                                      {"StandardOutPath": "relative"}, {"WatchPaths": ["/private/path"]},
                                      {"KeepAlive": {"PathState": {"/private/path": True}}},
                                      {"ProcessType": "private data"},
+                                     {"AbandonProcessGroup": True},
                                      {"StartCalendarInterval": {"Hour": "private data"}}])
 def test_unknown_or_privileged_definitions_are_rejected(changes):
     with pytest.raises(ValueError):
