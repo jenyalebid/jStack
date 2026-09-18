@@ -56,7 +56,7 @@ def test_missing_retired_bundle_is_already_permission_free(installation, monkeyp
 
     def run(arguments, **kwargs):
         if arguments[0] == "/usr/bin/tccutil" and arguments[-1] == "com.jremote.menubar":
-            return SimpleNamespace(returncode=1, stdout="", stderr=(
+            return SimpleNamespace(returncode=64, stdout="", stderr=(
                 'tccutil: No such bundle identifier "com.jremote.menubar": '
                 "The operation couldn’t be completed. (OSStatus error -10814.)"))
         return original(arguments, **kwargs)

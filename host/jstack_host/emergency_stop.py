@@ -76,7 +76,7 @@ def _permissions(configuration: dict, journal: dict) -> None:
             identifiers.add(identifier)
     reset, absent = [], []
     for identifier in sorted(identifiers):
-        result = _run(["/usr/bin/tccutil", "reset", "All", identifier], accepted=(0, 1))
+        result = _run(["/usr/bin/tccutil", "reset", "All", identifier], accepted=(0, 64))
         if result.returncode == 0:
             reset.append(identifier)
         elif (f'No such bundle identifier "{identifier}"' in result.stderr and
