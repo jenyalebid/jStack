@@ -70,8 +70,9 @@ def main():
         assert repair.returncode == 1 and "requires_approval" in repair.stdout
         assert json.loads(run(cli, "updates", "enable"))["status"] == "requires_approval"
         result["installer"] = json.loads(run(*arguments))
-        assert result["installer"]["state"] == "approval_required"
-        assert result["installer"]["status"] == "requires_approval"
+        # Reinstallation over a completed journal is observation, never an
+        # implicit Start: the denial surfaces per service, not as a state.
+        assert set(result["installer"]["services"].values()) == {"requires_approval"}
         result["denied_approval_preserved"] = True
     else:
         for role in ("host", "menu"):
