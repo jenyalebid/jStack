@@ -32,6 +32,27 @@ def service_plist(role: str) -> dict:
             "AssociatedBundleIdentifiers": ["live.jstack.hub"]}
 
 
+def hub_info(version: str, identity: dict) -> dict:
+    """The one bundle the user grants to: its name, identity and purposes."""
+    return {
+        "CFBundleIdentifier": "live.jstack.hub", "CFBundleExecutable": "JStackHub",
+        "CFBundleName": "jStack Hub", "CFBundleDisplayName": "jStack Hub",
+        "CFBundlePackageType": "APPL", "CFBundleVersion": str(identity.get("build", version)),
+        "CFBundleShortVersionString": version, "LSUIElement": True,
+        "LSMinimumSystemVersion": "13.0",
+        "NSLocalNetworkUsageDescription":
+            "jStack Hub serves this machine's dashboard and reaches your paired machines on the local network.",
+        "NSAppleEventsUsageDescription":
+            "jStack Hub automations control local applications only when a job you configured requires it.",
+        "NSDesktopFolderUsageDescription":
+            "jStack Hub automations read and organize files here only when a job you configured requires it.",
+        "NSDocumentsFolderUsageDescription":
+            "jStack Hub automations read and organize files here only when a job you configured requires it.",
+        "NSDownloadsFolderUsageDescription":
+            "jStack Hub automations read and organize files here only when a job you configured requires it.",
+        "CFBundleURLTypes": [{"CFBundleURLName": "jStack updates", "CFBundleURLSchemes": ["jstack"]}]}
+
+
 def macho(path: Path) -> bool:
     if path.is_symlink() or not path.is_file():
         return False
@@ -94,8 +115,9 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
     source = Path(sys.base_prefix)
     if not (source / "Python").is_file():
         raise ValueError("a framework Python build is required")
-    app_name = "jStack Hub"
-    bundle_id = "live.jstack.hub"
+    info = hub_info(version, identity)
+    app_name = info["CFBundleName"]
+    bundle_id = info["CFBundleIdentifier"]
     app = output / f"{app_name}.app"
     app.mkdir(parents=True, exist_ok=False)
     contents = app / "Contents"
@@ -182,23 +204,7 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
     else:
         (resources / "automation-catalog.json").write_text("{}\n")
     (resources / "services.json").write_text(json.dumps(services, indent=2) + "\n")
-    (contents / "Info.plist").write_bytes(plistlib.dumps({
-        "CFBundleIdentifier": bundle_id, "CFBundleExecutable": "JStackHub",
-        "CFBundleName": app_name, "CFBundleDisplayName": app_name,
-        "CFBundlePackageType": "APPL", "CFBundleVersion": str(identity.get("build", version)),
-        "CFBundleShortVersionString": version, "LSUIElement": True,
-        "LSMinimumSystemVersion": "13.0",
-        "NSLocalNetworkUsageDescription":
-            "jStack Hub serves this machine's dashboard and reaches your paired machines on the local network.",
-        "NSAppleEventsUsageDescription":
-            "jStack Hub automations control local applications only when a job you configured requires it.",
-        "NSDesktopFolderUsageDescription":
-            "jStack Hub automations read and organize files here only when a job you configured requires it.",
-        "NSDocumentsFolderUsageDescription":
-            "jStack Hub automations read and organize files here only when a job you configured requires it.",
-        "NSDownloadsFolderUsageDescription":
-            "jStack Hub automations read and organize files here only when a job you configured requires it.",
-        "CFBundleURLTypes": [{"CFBundleURLName": "jStack updates", "CFBundleURLSchemes": ["jstack"]}]}))
+    (contents / "Info.plist").write_bytes(plistlib.dumps(info))
     binaries = [path for path in contents.rglob("*") if macho(path)]
     for path in binaries:
         relocate(path, source, runtime)

@@ -11,9 +11,9 @@ from jstack_host.update_macos import MacBackend
 
 def manifest():
     components = {name: {"file": name + ".zip", "version": "18", "bytes": 1,
-                         "sha256": "a" * 64} for name in releases.NATIVE_COMPONENTS}
+                         "sha256": "a" * 64} for name in releases.COMPONENTS}
     artifacts = hashlib.sha256(releases.canonical(components)).hexdigest()
-    return {"schema": 2, "release": "18-source", "components": components,
+    return {"schema": releases.SCHEMA, "release": "18-source", "components": components,
             "sources": {"stack": "a" * 40, "client": "b" * 40},
             "compatibility": {"protocol": 1, "rollback": True, "platform": "macos",
                               "architecture": "arm64", "minimum_os": "26.0"},
@@ -21,33 +21,35 @@ def manifest():
                                 "evidence_sha256": "b" * 64} for name in releases.RECEIPTS}}
 
 
-def test_native_receipts_bind_the_independent_recovery_artifact():
+def test_receipts_bind_the_exact_artifact_set():
     value = manifest()
     releases.validate(value)
-    value["components"]["services"]["sha256"] = "c" * 64
+    value["components"]["menubar"]["sha256"] = "c" * 64
     with pytest.raises(ValueError, match="receipt"):
         releases.validate(value)
 
 
-def test_native_format_cannot_be_misrepresented_as_legacy():
+def test_retired_services_owner_cannot_reenter_the_feed():
     value = manifest()
-    value["schema"] = 1
+    value["components"]["services"] = dict(value["components"]["menubar"], file="services.zip")
     with pytest.raises(ValueError, match="components"):
         releases.validate(value, promoted=False)
     del value["components"]["services"]
-    releases.validate(value, promoted=False)
+    value["schema"] = 2
+    with pytest.raises(ValueError, match="schema"):
+        releases.validate(value, promoted=False)
 
 
 def test_owner_artifacts_cannot_share_a_download_filename():
     value = manifest()
-    value["components"]["services"]["file"] = value["components"]["menubar"]["file"]
+    value["components"]["client"]["file"] = value["components"]["menubar"]["file"]
     with pytest.raises(ValueError, match="distinct"):
         releases.validate(value, promoted=False)
 
 
-def test_legacy_backend_refuses_native_owner_update_before_platform_work(tmp_path):
-    with pytest.raises(ValueError, match="self-update"):
-        MacBackend(tmp_path, {}).compatible(manifest())
+def test_legacy_backend_refuses_a_superseded_native_schema(tmp_path):
+    with pytest.raises(ValueError, match="schema"):
+        MacBackend(tmp_path, {}).compatible({**manifest(), "schema": 2})
 
 
 def test_qualified_native_release_reaches_publication_and_receipt_gates(tmp_path, monkeypatch):
@@ -69,29 +71,34 @@ def test_qualified_native_release_reaches_publication_and_receipt_gates(tmp_path
     assert not (tmp_path / "feed").exists()
 
 
-def test_publisher_binds_both_public_owners_to_its_release_identity(tmp_path, monkeypatch):
+def test_publisher_binds_the_public_hub_to_its_release_identity(tmp_path, monkeypatch):
     stack, output = tmp_path / "stack", tmp_path / "output"
     (stack / "host").mkdir(parents=True)
     output.mkdir()
     identity = {"release": "18-source", "github_repo": "example/stack", "build": 18}
     (stack / "host/release-identity.json").write_text(json.dumps(identity))
+    capabilities = {"dashboard": {"label": "live.jstack.automation.dashboard"}}
+    catalog = tmp_path / "automation-catalog.json"
+    catalog.write_text(json.dumps(capabilities))
     calls = []
 
     def build(source, destination, version, config, **kwargs):
         calls.append((source, version, kwargs))
         destination.mkdir()
-        return destination / "Owner.app"
+        return destination / "Hub.app"
 
     def notarize(app, destination, config):
         (destination / "hub-notarized.zip").write_bytes(destination.name.encode())
 
     monkeypatch.setattr(build_hub, "build", build)
     monkeypatch.setattr(build_hub, "notarize", notarize)
-    publish_release.sign_service_owners(stack, output, "0.70.0", {})
-    assert [c[2]["recovery"] for c in calls] == [False, True]
+    publish_release.sign_hub(stack, output, "0.70.0", {"local_catalog": str(catalog)})
+    # The public feed artifact carries an empty catalog; the publisher's own
+    # capability definitions reach only the machine-local variant.
+    assert [c[2]["catalog"] for c in calls] == [None, capabilities]
     for source, version, kwargs in calls:
         assert source == stack and version == "0.70.0"
         assert kwargs["release_id"] == identity["release"]
         assert kwargs["github_repo"] == identity["github_repo"]
-        assert kwargs["build_number"] == 18 and "catalog" not in kwargs
-    assert (output / "menubar-notarized.zip").read_bytes() != (output / "services-notarized.zip").read_bytes()
+        assert kwargs["build_number"] == 18
+    assert (output / "menubar-notarized.zip").read_bytes() != (output / "hub-catalog.zip").read_bytes()
