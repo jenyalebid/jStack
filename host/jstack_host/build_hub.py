@@ -19,7 +19,6 @@ from .update_macos import command
 
 ROLES = {"host": ("JStackRuntime", "host"),
          "updater": ("JStackRuntime", "updater"),
-         "services-handoff": ("JStackRuntime", "services-handoff"),
          "menu": ("JStackHostBar",)}
 MAGICS = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
 
@@ -71,7 +70,7 @@ def release_identity(source_sha: str, version: str, *, release_id=None, github_r
     return {"sha": source_sha, "release": f"hub-{version}-{source_sha[:8]}", "version": version}
 
 
-def build(stack: Path, output: Path, version: str, config: dict | None = None, *, recovery=False, catalog=None,
+def build(stack: Path, output: Path, version: str, config: dict | None = None, *, catalog=None,
           release_id=None, github_repo=None, build_number=None) -> Path:
     # Build one immutable git snapshot. A clean-tree check alone does not
     # exclude untracked package files or concurrent changes during pip/build.
@@ -86,19 +85,17 @@ def build(stack: Path, output: Path, version: str, config: dict | None = None, *
         snapshot.mkdir()
         command(["git", "-C", str(stack), "archive", "--format=tar", "-o", str(archive), source_sha])
         command(["/usr/bin/tar", "-xf", str(archive), "-C", str(snapshot)])
-        return _build(snapshot, output, version, config, recovery=recovery, catalog=catalog, identity=identity)
+        return _build(snapshot, output, version, config, catalog=catalog, identity=identity)
 
 
-def _build(stack: Path, output: Path, version: str, config: dict | None, *, recovery, catalog, identity: dict) -> Path:
+def _build(stack: Path, output: Path, version: str, config: dict | None, *, catalog, identity: dict) -> Path:
     if sys.version_info[:2] != (3, 12):
         raise ValueError("this runtime build requires the audited CPython 3.12 framework")
     source = Path(sys.base_prefix)
     if not (source / "Python").is_file():
         raise ValueError("a framework Python build is required")
-    if catalog is not None and not recovery:
-        raise ValueError("optional local capabilities belong to the stable services bundle")
-    app_name = "jStack Hub Services" if recovery else "jStack Hub"
-    bundle_id = "live.jstack.hub.services" if recovery else "live.jstack.hub"
+    app_name = "jStack Hub"
+    bundle_id = "live.jstack.hub"
     app = output / f"{app_name}.app"
     app.mkdir(parents=True, exist_ok=False)
     contents = app / "Contents"
@@ -166,7 +163,7 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, reco
     definitions = contents / "Library/LaunchAgents"
     definitions.mkdir(parents=True)
     services = {}
-    for role in (["updater"] if recovery else ["host", "menu", "services-handoff"]):
+    for role in ("host", "menu", "updater"):
         definition = service_plist(role)
         definition["AssociatedBundleIdentifiers"] = [bundle_id]
         (definitions / f"live.jstack.hub.{role}.plist").write_bytes(plistlib.dumps(definition))
@@ -174,14 +171,15 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, reco
     if catalog is not None:
         from .service_catalog import definitions as catalog_definitions
         jobs, manifest = catalog_definitions(catalog)
-        if "updater" in manifest:
-            raise ValueError("updater is a reserved capability identifier")
+        for reserved in ("host", "menu", "updater"):
+            if reserved in manifest:
+                raise ValueError(f"{reserved} is a reserved capability identifier")
         for name, definition in jobs.items():
             definition["AssociatedBundleIdentifiers"] = [bundle_id]
             (definitions / name).write_bytes(plistlib.dumps(definition))
         services.update({slug: item["plist"] for slug, item in manifest.items()})
         (resources / "automation-catalog.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    elif recovery:
+    else:
         (resources / "automation-catalog.json").write_text("{}\n")
     (resources / "services.json").write_text(json.dumps(services, indent=2) + "\n")
     (contents / "Info.plist").write_bytes(plistlib.dumps({
@@ -190,7 +188,17 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, reco
         "CFBundlePackageType": "APPL", "CFBundleVersion": str(identity.get("build", version)),
         "CFBundleShortVersionString": version, "LSUIElement": True,
         "LSMinimumSystemVersion": "13.0",
-        "CFBundleURLTypes": [] if recovery else [{"CFBundleURLName": "jStack updates", "CFBundleURLSchemes": ["jstack"]}]}))
+        "NSLocalNetworkUsageDescription":
+            "jStack Hub serves this machine's dashboard and reaches your paired machines on the local network.",
+        "NSAppleEventsUsageDescription":
+            "jStack Hub automations control local applications only when a job you configured requires it.",
+        "NSDesktopFolderUsageDescription":
+            "jStack Hub automations read and organize files here only when a job you configured requires it.",
+        "NSDocumentsFolderUsageDescription":
+            "jStack Hub automations read and organize files here only when a job you configured requires it.",
+        "NSDownloadsFolderUsageDescription":
+            "jStack Hub automations read and organize files here only when a job you configured requires it.",
+        "CFBundleURLTypes": [{"CFBundleURLName": "jStack updates", "CFBundleURLSchemes": ["jstack"]}]}))
     binaries = [path for path in contents.rglob("*") if macho(path)]
     for path in binaries:
         relocate(path, source, runtime)
@@ -248,14 +256,13 @@ def main():
     parser.add_argument("--build-number", type=int)
     parser.add_argument("--signing-config", type=Path)
     parser.add_argument("--notarize", action="store_true")
-    parser.add_argument("--recovery", action="store_true", help="build the separately installed, versioned updater")
     parser.add_argument("--catalog", type=Path, help="private optional capability definitions; never publish this variant")
     args = parser.parse_args()
     config = json.loads(args.signing_config.read_text()) if args.signing_config else None
     if args.notarize and not config:
         parser.error("--notarize requires --signing-config")
     catalog = json.loads(args.catalog.read_text()) if args.catalog else None
-    app = build(args.stack.resolve(), args.output.resolve(), args.version, config, recovery=args.recovery, catalog=catalog,
+    app = build(args.stack.resolve(), args.output.resolve(), args.version, config, catalog=catalog,
                 release_id=args.release_id, github_repo=args.github_repo, build_number=args.build_number)
     if args.notarize:
         notarize(app, args.output.resolve(), config)

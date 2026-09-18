@@ -246,6 +246,13 @@ class Supervisor:
             while True:
                 try:
                     self.tick()
+                    restart = getattr(self.backend, "restart_required", None)
+                    if not once and restart and restart(self.current):
+                        # The supervisor's own bundle was replaced and the job
+                        # is confirmed; exit so launchd relaunches this service
+                        # from the new bundle instead of running old code on.
+                        print("update: supervisor restarting from the replaced bundle", flush=True)
+                        return
                     activate = getattr(self.backend, "activate_runtime", None)
                     if not once and activate and activate(self.current):
                         import sys
@@ -279,6 +286,10 @@ def main():
     from .update_macos import MacBackend
     backend = MacBackend
     if configuration.get("service_model") == "app":
+        # This process replaces the bundle it imports from. Load the whole
+        # working set now, while sys.path still names this process's code.
+        from . import preload
+        preload.updater()
         from .update_app import AppBackend
         backend = AppBackend
     Supervisor(root, configuration, backend(root, configuration)).run(once=args.once)
