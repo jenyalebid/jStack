@@ -49,6 +49,26 @@ macOS determines its settings presentation. Acceptance measures the actual
 registered owners and names; do not promise a precise row count based only
 on an app name or AssociatedBundleIdentifiers metadata.
 
+### Permission attribution evidence
+
+Notarized Services fixture build 23, source `172136d`, ran an external
+`osascript` child through SMAppService on a fresh GUI VM with Gatekeeper and
+Developer ID policy enabled. A real Finder operation prompted as **jStack
+Hub Services**. Denial returned `-1743`; explicit approval permitted exactly
+one folder creation. `tccutil reset All live.jstack.hub.services` required
+fresh named consent, and denying again prevented a second creation. Native
+unregister removed the fixture registration. No privacy database was edited.
+
+The proposed additional Apple Events entitlement was unnecessary for this
+observed child-process path and was reverted after the experiment. Earlier
+fixtures that only requested an application's name did not exercise consent
+and are not privacy acceptance evidence.
+
+This proves that particular responsibility chain and targeted reset only.
+It does not prove every automation runtime or permission category, terminate
+detached agent processes, revoke the old generic-runtime grants, or provide
+a product-wide emergency switch. Those and production cutover remain #76.
+
 ### Fresh candidate installation
 
 After placing a matching signed/notarized Hub and Services pair at their
