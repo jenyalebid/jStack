@@ -10,6 +10,21 @@ from jstack_host import install_host, migrate_host as migration, service_setting
 verify_services = migration.verify
 
 
+def test_provenance_accepts_only_the_known_privacy_protected_legacy_menu(monkeypatch, tmp_path):
+    executable = tmp_path / "Library/Application Support/jStack/JStack Host.app/Contents/MacOS/JStackHostBar"
+    row = {"label": "com.jremote.menubar", "executable": str(executable),
+           "definition": {"sha256": "definition"},
+           "executable_file": {"unobserved": "app data path; requires a separate permission review"},
+           "signature": {"status": "unobservable", "reason": "app data path"}, "scripts": [],
+           "findings": ["executable_signature_not_verified", "code_file_not_observed"]}
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(migration.service_inventory, "inspect_job", lambda *args: row)
+    assert migration.provenance(tmp_path / "menu.plist")["executable_file"] == row["executable_file"]
+    row["label"] = "another.product"
+    with pytest.raises(ValueError, match="legacy source is unobserved"):
+        migration.provenance(tmp_path / "menu.plist")
+
+
 @pytest.fixture
 def lab(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)

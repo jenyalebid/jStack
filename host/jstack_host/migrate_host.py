@@ -49,12 +49,20 @@ def provenance(path: Path) -> dict:
     row = service_inventory.inspect_job(path, install_host._domain())
     fields = ("definition", "executable", "executable_file", "signature", "scripts")
     value = {key: row[key] for key in fields}
+    protected_menu = (row.get("label") == "com.jremote.menubar" and
+                      row.get("executable") == str(Path.home() / "Library/Application Support/jStack/"
+                                                   "JStack Host.app/Contents/MacOS/JStackHostBar") and
+                      value["executable_file"] == {
+                          "unobserved": "app data path; requires a separate permission review"} and
+                      value["signature"] == {"status": "unobservable", "reason": "app data path"} and
+                      value["scripts"] == [])
     if "code_file_not_observed" in row["findings"]:
-        raise ValueError("legacy source is unobserved; review module resolution before migration")
+        if not protected_menu:
+            raise ValueError("legacy source is unobserved; review module resolution before migration")
     if "module_source" in row:
         value["module_source"] = row["module_source"]
-    if any("error" in item or "unobserved" in item
-           for item in [value["definition"], value["executable_file"], *value["scripts"]]):
+    if (not protected_menu and any("error" in item or "unobserved" in item
+                                  for item in [value["definition"], value["executable_file"], *value["scripts"]])):
         raise ValueError("legacy code provenance is unobserved; review permissions before migration")
     return value
 
