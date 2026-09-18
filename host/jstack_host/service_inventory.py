@@ -78,7 +78,8 @@ def signature(path: Path) -> dict:
     try:
         details = run(["/usr/bin/codesign", "-dv", "--verbose=4", str(path)])
         if details.returncode:
-            return {"status": "unsigned_or_unreadable"}
+            return {"status": "unsigned" if "code object is not signed at all" in details.stderr
+                    else "unobservable"}
         values = {}
         for key in ("Identifier", "TeamIdentifier"):
             match = re.search(rf"^{key}=(.+)$", details.stderr, re.MULTILINE)
@@ -265,7 +266,7 @@ def collect(locations: list[tuple[Path, str]] | None = None) -> dict:
 
 def compare(before: dict, after: dict) -> dict:
     """Report persistence/code drift without automatically trusting either side."""
-    fields = ("definition", "executable", "executable_file", "scripts", "module_source", "signature", "owner_bundle", "run_as", "schedule")
+    fields = ("definition", "executable", "executable_file", "scripts", "module_source", "signature", "owner_bundle", "run_as", "schedule", "user_writable_root_code")
     old = {row["path"]: row for row in before["services"]}
     new = {row["path"]: row for row in after["services"]}
     changes = []

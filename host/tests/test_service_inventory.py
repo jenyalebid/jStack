@@ -64,6 +64,24 @@ def test_unobservable_signature_never_compares_as_healthy(tmp_path, observed, mo
     assert inventory.compare(current, current)["unobserved"] == [str(tmp_path / "service.plist")]
 
 
+@pytest.mark.parametrize("error,status", [
+    ("file: code object is not signed at all", "unsigned"),
+    ("file: Operation not permitted", "unobservable"),
+])
+def test_signature_failure_distinguishes_unsigned_from_unknown(tmp_path, monkeypatch, error, status):
+    monkeypatch.setattr(inventory, "run", lambda args: subprocess.CompletedProcess(args, 1, "", error))
+    assert inventory.signature(tmp_path / "program")["status"] == status
+
+
+def test_newly_writable_root_code_is_persistence_drift(tmp_path, observed, monkeypatch):
+    job(tmp_path, ProgramArguments=["/bin/echo"])
+    monkeypatch.setattr(inventory, "user_writable", lambda _: False)
+    before = inventory.collect([(tmp_path, "system")])
+    monkeypatch.setattr(inventory, "user_writable", lambda _: True)
+    changed = inventory.compare(before, inventory.collect([(tmp_path, "system")]))["changes"]
+    assert changed[0]["fields"] == ["user_writable_root_code"]
+
+
 def test_module_inventory_detects_package_code_drift_without_importing(tmp_path, observed):
     package = tmp_path / "dashboard"
     package.mkdir()
