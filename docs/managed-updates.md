@@ -34,6 +34,55 @@ Status: implemented candidate under real-Mac acceptance (2026-09-16).
 Not promoted to the production feed. The product contract below remains the
 acceptance target; implemented code and observed proof are separate facts.
 
+## Which source a machine's sessions read
+
+A Mac's agent sessions load jStack skills, hooks and commands from exactly one
+source, and which one is a property of the machine, not of this repository.
+
+`install.sh` registers the Claude marketplace at the checkout — a
+directory-source marketplace means the plugin runs FROM the checkout — so a
+source-installed Mac reads the checkout, and a commit on `main` reaches its
+next session.
+
+A managed plugin update moves that machine to the release. `update_plugins.py`
+rewrites every jStack source reference from the old root to the staged release
+root: the Claude marketplace entry and `settings.json`, the native
+`[marketplaces.jstack]` source and its `SessionStart` / `PreToolUse` hook
+command paths, the login shell files, and the `~/.claude/rules` and
+`~/.claude/commands` symlinks. `rollback` reverses the same set. Both are
+by design. A machine pointing at a release stack has taken an update; it has
+not drifted, and no one hand-edited it.
+
+The consequence is the part to keep in view. On an updated machine the
+checkout no longer feeds sessions, so a rule written into a skill on `main`
+binds nothing there until a release carrying it is built and applied. The
+words look shipped and change nothing. Neither pointer is recorded in version
+control, so the only way to learn which source a machine consumes is to read
+those files on that machine.
+
+While a release stack and `main` are both live — one consumed, one developed —
+`main` must carry every plugin change that release carries. The release is
+frozen and `main` moves, so the durable form is direction, not equality:
+
+```sh
+git merge-base --is-ancestor <release source commit> main
+diff -rq <release>/stack/plugins <checkout>/plugins   # main-ahead only
+```
+
+Every surviving difference must be `main` ahead. The manifest version bump
+that any shipped change requires is one such difference and is expected; byte
+equality with a frozen release is momentary, not the invariant. A difference
+where the *release* is ahead is the failure: that change runs on the machines
+and exists in no branch, and the next release built from `main` drops it
+without a word.
+
+Reconcile by landing the release's side on `main`. Never by editing a staged
+release in place: a promoted release is a fixed artifact, and a session layer
+edited away from its manifest is no longer what was qualified.
+
+Moving a running machine's pointers back to its checkout swings every open
+seat's plugin layer at once. It is a supervised step, not an incidental edit.
+
 ## What exists today
 
 - `release.sh` in either repository invokes the same publisher. It snapshots
