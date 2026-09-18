@@ -12,10 +12,9 @@ def native_updater(tmp_path, monkeypatch):
     public = base64.b64encode(bytes(range(32))).decode()
     state = tmp_path / "state"
     settings = {"schema": 1, "app": str(tmp_path / "Hub.app"), "port": 9345,
-                "services_app": str(tmp_path / "Services.app"),
                 "environment": {"JREMOTE_STATE_DIR": str(state)}}
     config = {"public_key": public, "service_model": "app", "machine": "existing-machine",
-              "menubar_path": settings["app"], "services_app": settings["services_app"],
+              "menubar_path": settings["app"],
               "local_url": "http://127.0.0.1:9345", "client_managed": False}
     path = state / "updates/config.json"
     path.parent.mkdir(parents=True)
@@ -47,7 +46,7 @@ def test_native_bootstrap_preserves_trust_distribution_and_disabled_choice(nativ
     assert len(calls) == 1 and calls[0][1:] == ("status",)
 
 
-@pytest.mark.parametrize("change", ["public_key", "service_model", "menubar_path", "local_url", "services_app"])
+@pytest.mark.parametrize("change", ["public_key", "service_model", "menubar_path", "local_url", "host_capability"])
 def test_native_bootstrap_rejects_mismatched_installation(native_updater, change):
     public, _, path = native_updater
     config = json.loads(path.read_text())

@@ -95,7 +95,7 @@ def install(app: Path, state: Path, *, port=9090, bind="0.0.0.0") -> dict:
                     raise ValueError("approval changed during installation")
                 journal["attempted"].append(role)
                 atomic_json(path, journal)
-                observed = control(owner, "register", role)["status"]
+                observed = control(app, "register", role)["status"]
             if observed != "enabled":
                 journal["state"] = "approval_required" if observed == "requires_approval" else "stopped"
                 atomic_json(path, journal)
