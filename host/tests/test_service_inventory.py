@@ -40,6 +40,30 @@ def test_same_name_changed_command_changes_definition(tmp_path, observed):
     assert before["definition"]["sha256"] != after["definition"]["sha256"]
 
 
+def test_definition_encoding_is_not_persistence_drift(tmp_path, observed):
+    path = job(tmp_path, ProgramArguments=["/bin/echo", "before"])
+    before = inventory.collect([(tmp_path, "gui/501")])
+    value = plistlib.loads(path.read_bytes())
+    path.write_bytes(plistlib.dumps(value, fmt=plistlib.FMT_BINARY, sort_keys=False))
+    assert inventory.compare(before, inventory.collect([(tmp_path, "gui/501")]))["changes"] == []
+
+
+def test_permission_change_is_persistence_drift(tmp_path, observed):
+    path = job(tmp_path, ProgramArguments=["/bin/echo"])
+    path.chmod(0o600)
+    before = inventory.collect([(tmp_path, "gui/501")])
+    path.chmod(0o666)
+    changes = inventory.compare(before, inventory.collect([(tmp_path, "gui/501")]))["changes"]
+    assert changes[0]["fields"] == ["definition"]
+
+
+def test_unobservable_signature_never_compares_as_healthy(tmp_path, observed, monkeypatch):
+    job(tmp_path, ProgramArguments=["/bin/echo"])
+    monkeypatch.setattr(inventory, "signature", lambda _: {"status": "unobservable"})
+    current = inventory.collect([(tmp_path, "gui/501")])
+    assert inventory.compare(current, current)["unobserved"] == [str(tmp_path / "service.plist")]
+
+
 def test_module_inventory_detects_package_code_drift_without_importing(tmp_path, observed):
     package = tmp_path / "dashboard"
     package.mkdir()

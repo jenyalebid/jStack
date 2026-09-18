@@ -40,7 +40,7 @@ def fingerprint(path: Path) -> dict:
             return {"error": "not a regular file"}
         with path.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
-        return {"sha256": digest, "uid": info.st_uid,
+        return {"sha256": digest, "uid": info.st_uid, "gid": info.st_gid,
                 "mode": oct(stat.S_IMODE(info.st_mode)),
                 "resolved_path": str(path.resolve())}
     except OSError as exc:
@@ -158,6 +158,9 @@ def inspect_job(path: Path, domain: str) -> dict:
            "definition": fingerprint(path), "findings": []}
     try:
         job = plistlib.loads(path.read_bytes())
+        # Compare semantic definitions, not XML/binary encoding or key order.
+        row["definition"]["sha256"] = hashlib.sha256(
+            plistlib.dumps(job, fmt=plistlib.FMT_BINARY, sort_keys=True)).hexdigest()
         if not isinstance(job, dict) or not isinstance(job.get("Label"), str):
             raise ValueError("missing label")
         label = job["Label"]
@@ -275,7 +278,9 @@ def compare(before: dict, after: dict) -> dict:
             changes.append({"path": path, "change": "modified", "fields": changed})
     unknown = [row["path"] for row in after["services"] if
                "unreadable_or_unsupported_definition" in row["findings"] or
-               "code_file_unreadable" in row["findings"] or "code_file_not_observed" in row["findings"]]
+               "code_file_unreadable" in row["findings"] or "code_file_not_observed" in row["findings"] or
+               "error" in row.get("definition", {}) or "unobserved" in row.get("definition", {}) or
+               row.get("signature", {}).get("status") == "unobservable"]
     return {"changes": changes, "unobserved": unknown, "errors": after.get("errors", [])}
 
 
