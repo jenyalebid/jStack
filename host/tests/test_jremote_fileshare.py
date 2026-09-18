@@ -278,9 +278,9 @@ def test_authenticated_status_route_and_feature_probe(tmp_path, monkeypatch):
     _machine(tmp_path, monkeypatch, actual=actual, account=True, acl=True)
     monkeypatch.setattr(router, "require_token", lambda: "device")
 
-    app = FastAPI()
-    app.include_router(router.router)
-    route = next(r for r in app.routes if r.path == "/api/jremote/v1/files/share")
+    # The router's own route table is stable across starlette versions;
+    # the app's list nests included routers from starlette 1.6.
+    route = next(r for r in router.router.routes if r.path == "/api/jremote/v1/files/share")
     assert route.endpoint()["ready"] is True
     assert router._probe("file_sharing") is True
 
