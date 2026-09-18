@@ -186,6 +186,14 @@ def test_handoff_runs_independently_and_preserves_off(handoff_fixture):
     assert not calls
 
 
+def test_completed_handoff_does_not_reenter_applying(handoff_fixture, monkeypatch):
+    (_, candidate, _, _, _), _ = handoff_fixture
+    handoff.submit(candidate)
+    assert handoff.reconcile()["state"] == "updated"
+    monkeypatch.setattr(update, "load", lambda _: pytest.fail("completed handoff reopened its transaction"))
+    assert handoff.reconcile()["state"] == "updated"
+
+
 def test_completed_handoff_can_request_exact_rollback(handoff_fixture):
     (owner, candidate, states, _, _), _ = handoff_fixture
     original = update.seal(owner)

@@ -50,6 +50,24 @@ def test_one_switch_stops_services_sessions_and_permissions(installation):
     assert "complete" in output.getvalue()
 
 
+def test_missing_retired_bundle_is_already_permission_free(installation, monkeypatch):
+    settings, _ = installation
+    original = stop.subprocess.run
+
+    def run(arguments, **kwargs):
+        if arguments[0] == "/usr/bin/tccutil" and arguments[-1] == "com.jremote.menubar":
+            return SimpleNamespace(returncode=1, stdout="", stderr=(
+                'tccutil: No such bundle identifier "com.jremote.menubar": '
+                "The operation couldn’t be completed. (OSStatus error -10814.)"))
+        return original(arguments, **kwargs)
+
+    monkeypatch.setattr(stop.subprocess, "run", run)
+    assert stop.stop(out=io.StringIO()) == 0
+    journal = json.loads(stop.path(settings).read_text())
+    assert journal["permissions_absent"] == ["com.jremote.menubar"]
+    assert "com.jremote.menubar" not in journal["permissions_reset"]
+
+
 def test_installed_network_requires_reviewed_transaction_before_partial_stop(installation, monkeypatch, tmp_path):
     settings, calls = installation
     network = tmp_path / "Network.app"

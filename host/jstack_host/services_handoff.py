@@ -86,9 +86,9 @@ def reconcile() -> dict | None:
                 or not isinstance(request.get("id"), str)
                 or len(request["id"]) != 32 or any(c not in "0123456789abcdef" for c in request["id"])):
             raise ValueError("invalid or changed Services handoff")
-        if request.get("state") in TERMINAL and request.get("state") != "updated":
+        if request.get("state") in TERMINAL:
             return request
-        if request.get("state") not in {"pending", "applying", "updated", "rollback_pending"}:
+        if request.get("state") not in {"pending", "applying", "rollback_pending"}:
             raise ValueError("unknown Services handoff state")
         name = "services-update-" + request["id"]
         journal = migration_root() / name / "journal.json"

@@ -74,9 +74,18 @@ def _permissions(configuration: dict, journal: dict) -> None:
         identifier = value.get("client_bundle_id")
         if isinstance(identifier, str) and identifier:
             identifiers.add(identifier)
+    reset, absent = [], []
     for identifier in sorted(identifiers):
-        _run(["/usr/bin/tccutil", "reset", "All", identifier])
-    journal["permissions_reset"] = sorted(identifiers)
+        result = _run(["/usr/bin/tccutil", "reset", "All", identifier], accepted=(0, 1))
+        if result.returncode == 0:
+            reset.append(identifier)
+        elif (f'No such bundle identifier "{identifier}"' in result.stderr and
+              "OSStatus error -10814" in result.stderr):
+            absent.append(identifier)
+        else:
+            raise ValueError(f"emergency stop permission reset failed: {identifier}: {result.stderr[-500:]}")
+    journal["permissions_reset"] = reset
+    journal["permissions_absent"] = absent
 
 
 def stop(*, out) -> int:
