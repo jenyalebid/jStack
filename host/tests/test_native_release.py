@@ -50,15 +50,21 @@ def test_legacy_backend_refuses_native_owner_update_before_platform_work(tmp_pat
         MacBackend(tmp_path, {}).compatible(manifest())
 
 
-def test_native_publication_is_closed_even_with_complete_receipts(tmp_path, monkeypatch):
+def test_qualified_native_release_reaches_publication_and_receipt_gates(tmp_path, monkeypatch):
     key = Ed25519PrivateKey.generate()
     envelope = releases.sign(manifest(), key.private_bytes_raw())
     for name in ("manifest.json", "candidate.json"):
         (tmp_path / name).write_text(json.dumps(envelope))
-    monkeypatch.setattr(release_channel.subprocess, "run", lambda *a, **k: pytest.fail("must not access publication"))
-    with pytest.raises(ValueError, match="self-update"):
+    def publication_reached(*args, **kwargs):
+        raise RuntimeError("publication reached")
+    def receipt_gate_reached(*args, **kwargs):
+        raise RuntimeError("receipt gate reached")
+    monkeypatch.setattr(release_channel.releases, "check_artifact", lambda *args: None)
+    monkeypatch.setattr(release_channel.subprocess, "run", publication_reached)
+    with pytest.raises(RuntimeError, match="publication reached"):
         release_channel.publish(tmp_path, "example/stack", base64.b64encode(key.public_key().public_bytes_raw()).decode())
-    with pytest.raises(ValueError, match="self-update"):
+    monkeypatch.setattr(publish_release.acceptance, "gate", receipt_gate_reached)
+    with pytest.raises(RuntimeError, match="receipt gate reached"):
         publish_release.promote(tmp_path, tmp_path / "receipts", tmp_path / "feed", key.private_bytes_raw())
     assert not (tmp_path / "feed").exists()
 

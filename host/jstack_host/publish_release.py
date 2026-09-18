@@ -259,8 +259,6 @@ def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -
 
 def promote(candidate: Path, receipts_dir: Path, feed: Path, private_key: bytes) -> dict:
     manifest = candidate_manifest(candidate, private_key)
-    if manifest["schema"] == releases.NATIVE_SCHEMA:
-        raise releases.ReleaseError("native owner publication requires qualified Services self-update")
     # One door. Every journey is a genuine pass over these exact artifacts, or
     # this raises and names the ones that are not.
     manifest["receipts"] = acceptance.gate(receipts_dir, manifest)

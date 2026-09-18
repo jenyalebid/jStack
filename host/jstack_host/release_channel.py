@@ -104,8 +104,6 @@ def publish(directory: Path, repo: str, public_key: str) -> None:
     repo = repository(repo)
     envelope = json.loads((directory / "manifest.json").read_text())
     manifest = releases.verify(envelope, public_key)
-    if manifest["schema"] == releases.NATIVE_SCHEMA:
-        raise releases.ReleaseError("native owner publication requires qualified Services self-update")
     tag = TAG_PREFIX + manifest["release"]
     assets = [directory / "manifest.json"]
     assets.extend(directory / item["file"] for item in manifest["components"].values())
