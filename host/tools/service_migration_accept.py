@@ -11,7 +11,7 @@ from jstack_host import install_host, migrate_services as migration
 def main():
     model = subprocess.check_output(["/usr/sbin/sysctl", "-n", "hw.model"], text=True).strip()
     assert model.startswith("VirtualMac") and os.geteuid() != 0
-    app = Path("/Applications/jStack Hub Services.app")
+    app = Path("/Applications/jStack Hub.app")
     catalog = json.loads(Path("/Users/admin/service-catalog.json").read_text())
     job = catalog["acceptance"]
     path = install_host.plist_path(job["Label"])

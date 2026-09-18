@@ -1,8 +1,10 @@
 """Fresh signed-installer evidence, only on a disposable GUI VirtualMac.
 
-Copy the matching notarized app pair to /Applications before the install
-phase. Reboot the guest through its GUI before the reboot phase. Receipts
-contain source identities and outcomes, never credentials or session contents.
+Copy the notarized jStack Hub app to /Applications before the install phase —
+the Hub is the single user-level owner (host, menu and updater are all its
+roles); the root-level Network app has its own admin flow and accept tool.
+Reboot the guest through its GUI before the reboot phase. Receipts contain
+source identities and outcomes, never credentials or session contents.
 """
 import argparse
 import hashlib
@@ -33,7 +35,6 @@ def main():
     if set(gatekeeper) != {"assessments enabled", "developer id enabled"}:
         raise SystemExit("REFUSED: installer acceptance requires Gatekeeper and Developer ID policy enabled before installation")
     app = Path("/Applications/jStack Hub.app")
-    services = Path("/Applications/jStack Hub Services.app")
     runtime = str(app / "Contents/MacOS/JStackRuntime")
     controller = str(app / "Contents/MacOS/JStackHub")
     state = Path.home() / ".local/state/signed-host"
@@ -41,11 +42,10 @@ def main():
     receipts = Path.home() / "signed-install-receipts"
     receipts.mkdir(exist_ok=True)
     result = {"phase": args.phase, "sources": {}, "gatekeeper": gatekeeper}
-    for owner in (app, services):
-        run("/usr/bin/codesign", "--verify", "--deep", "--strict", str(owner))
-        run("/usr/sbin/spctl", "--assess", "--type", "execute", str(owner))
-        result["sources"][owner.name] = json.loads((owner / "Contents/Resources/packages/release-identity.json").read_text())
-    arguments = (runtime, "install", "--app", str(app), "--services", str(services),
+    run("/usr/bin/codesign", "--verify", "--deep", "--strict", str(app))
+    run("/usr/sbin/spctl", "--assess", "--type", "execute", str(app))
+    result["sources"][app.name] = json.loads((app / "Contents/Resources/packages/release-identity.json").read_text())
+    arguments = (runtime, "install", "--app", str(app),
                  "--state-dir", str(state), "--port", "9391", "--bind", "127.0.0.1")
     if args.phase == "install":
         assert not settings.exists() and not state.exists(), "fixture is not fresh"
@@ -65,14 +65,13 @@ def main():
             assert int(re.search(r"sec = (\d+)", boot_time)[1]) > (receipts / "denied-repair.json").stat().st_mtime
             result["boot_time"] = boot_time.strip()
         assert set(json.loads(run(controller, "status")).values()) == {"requires_approval"}
-        recovery_controller = str(services / "Contents/MacOS/JStackHub")
-        assert json.loads(run(recovery_controller, "status"))["updater"] == "requires_approval"
         cli = str(app / "Contents/MacOS/JStackCLI")
         repair = subprocess.run([cli, "install"], text=True, capture_output=True, timeout=30)
         assert repair.returncode == 1 and "requires_approval" in repair.stdout
         assert json.loads(run(cli, "updates", "enable"))["status"] == "requires_approval"
         result["installer"] = json.loads(run(*arguments))
-        assert set(result["installer"]["services"].values()) == {"requires_approval"}
+        assert result["installer"]["state"] == "approval_required"
+        assert result["installer"]["status"] == "requires_approval"
         result["denied_approval_preserved"] = True
     else:
         for role in ("host", "menu"):

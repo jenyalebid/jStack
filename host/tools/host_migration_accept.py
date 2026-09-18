@@ -73,8 +73,7 @@ def main():
         if args.phase == "prepare":
             jobs = {role: plistlib.loads(install_host.plist_path(label).read_bytes()) for role, label in {
                 "host": "com.jremote.host", "updater": "com.jremote.updater", "menu": "com.jremote.menubar"}.items()}
-            settings = {"schema": 1, "app": "/Applications/jStack Hub.app",
-                        "services_app": "/Applications/jStack Hub Services.app", "port": 9392,
+            settings = {"schema": 1, "app": "/Applications/jStack Hub.app", "port": 9392,
                         "bind": "127.0.0.1", "migration_dir": str(root),
                         "environment": install_host.carried_environment(jobs["host"]["EnvironmentVariables"])}
             if args.embedded:
