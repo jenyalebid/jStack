@@ -172,6 +172,22 @@ started later. It does not edit the TCC database directly or affect unrelated
 applications. Restoring operation is a separate, explicit recovery action; an
 emergency stop never silently turns services or permissions back on.
 
+### Automatic Services update handoff
+
+Schema 2 fleet releases stage the signed Services artifact with Hub and the
+client. After Hub replacement, the Services updater writes a durable request
+and starts the Hub-owned `services-handoff` SMAppService. That controller can
+stop and replace Services without terminating itself. The replacement updater
+then resumes the same fleet journal, verifies the exact Services version and
+finishes the release. The controller is unregistered only after fleet
+confirmation is durable.
+
+If replacement or verification is interrupted, the restarted updater reads
+the handoff outcome instead of blindly applying again. Rollback runs in the
+opposite ownership order: the Hub controller restores Services first; the
+restored updater then restores Hub and the client. Disabled or newly denied
+roles remain off throughout both directions.
+
 ### Existing host cutover
 
 The sealed runtime's `migrate prepare --request PATH --journal-root PATH`

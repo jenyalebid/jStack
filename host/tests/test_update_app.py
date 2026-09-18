@@ -15,6 +15,52 @@ def test_disabled_services_are_never_registered_or_unregistered(monkeypatch, tmp
     assert calls == []
 
 
+def test_native_release_uses_app_backend_compatibility(monkeypatch, tmp_path):
+    from jstack_host.update_macos import MacBackend
+    observed = []
+    monkeypatch.setattr(MacBackend, "compatible", lambda self, manifest: observed.append(manifest["schema"]))
+    update_app.AppBackend(tmp_path, {}).compatible({"schema": 2})
+    assert observed == [1]
+
+
+@pytest.mark.parametrize("request_state,expected", [
+    ("pending", "pending"), ("applying", "pending"), ("updated", "applied"),
+    ("rollback_pending", "rolling_back"), ("rolled_back", "rolled_back"),
+    ("failed", "untouched"), ("mismatch", "unknown"),
+])
+def test_native_owner_recovery_state_is_bound_to_transaction(monkeypatch, tmp_path, request_state, expected):
+    backend = update_app.AppBackend(tmp_path, {})
+    monkeypatch.setattr(backend, "_handoff", lambda _: {"id": "a" * 32, "state": request_state})
+    job = {"transaction": {"services_owner": {"source": "candidate"}, "services_handoff": "a" * 32}}
+    assert backend.recovery_status(job) == expected
+
+
+def test_native_owner_rollback_is_handed_to_hub_before_main_app(monkeypatch, tmp_path):
+    from jstack_host import services_handoff
+    backend = update_app.AppBackend(tmp_path, {"menubar_path": str(tmp_path / "Hub.app")})
+    monkeypatch.setattr(backend, "recovery_status", lambda _: "applied")
+    requests = []
+    monkeypatch.setattr(services_handoff, "request_rollback", lambda identity: requests.append(identity))
+    job = {"id": "job", "transaction": {"services_owner": {"source": "candidate"}, "services_handoff": "a" * 32}}
+    with pytest.raises(ValueError, match="independent Hub controller"):
+        backend.rollback(job)
+    assert requests == ["a" * 32]
+
+
+def test_finalization_unregisters_hub_maintenance_controller(monkeypatch, tmp_path):
+    app = tmp_path / "Hub.app"
+    backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
+    calls = []
+
+    def control(owner, action, role=None):
+        calls.append((owner, action, role))
+        return {"services-handoff": "enabled"} if action == "status" else {"status": "not_registered"}
+
+    monkeypatch.setattr(update_app, "control", control)
+    backend.finalize({"transaction": {"services_owner": {"source": "candidate"}}})
+    assert calls == [(app, "status", None), (app, "unregister", "services-handoff")]
+
+
 def test_revocation_after_snapshot_is_not_repaired_away(monkeypatch, tmp_path):
     calls = []
 

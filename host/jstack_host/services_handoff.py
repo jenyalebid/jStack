@@ -24,13 +24,13 @@ def request_path() -> Path:
     return migration_root() / "services-handoff.json"
 
 
-def submit(candidate: Path) -> dict:
+def submit(candidate: Path, *, request_id: str | None = None) -> dict:
     """Queue an explicit update; never enable a denied maintenance service."""
     settings = service_settings.read()
     hub = Path(settings["app"])
     app_services.verify(hub)
     state = control(hub, "status").get(ROLE)
-    if state not in {"enabled", "not_registered"}:
+    if state not in {"enabled", "not_registered", "not_found"}:
         raise ValueError("independent maintenance service is unavailable or denied")
     candidate = candidate.resolve(strict=True)
     candidate_seal = services_update.seal(candidate)
@@ -38,11 +38,14 @@ def submit(candidate: Path) -> dict:
         path = request_path()
         if path.exists() and json.loads(path.read_text()).get("state") not in TERMINAL:
             raise ValueError("unfinished Services handoff requires recovery")
-        request = {"schema": 1, "id": uuid.uuid4().hex, "state": "pending",
+        request_id = request_id or uuid.uuid4().hex
+        if len(request_id) != 32 or any(c not in "0123456789abcdef" for c in request_id):
+            raise ValueError("invalid Services handoff identity")
+        request = {"schema": 1, "id": request_id, "state": "pending",
                    "candidate": str(candidate), "candidate_seal": candidate_seal,
                    "settings": services_update.digest(settings)}
         atomic_json(path, request)
-        if state == "not_registered":
+        if state in {"not_registered", "not_found"}:
             try:
                 result = control(hub, "register", ROLE)
                 if result.get("status") != "enabled":
@@ -51,6 +54,23 @@ def submit(candidate: Path) -> dict:
                 request.update(state="failed", detail="maintenance service did not become enabled")
                 atomic_json(path, request)
                 raise
+        return request
+
+
+def request_rollback(request_id: str) -> dict:
+    settings = service_settings.read()
+    hub = Path(settings["app"])
+    state = control(hub, "status").get(ROLE)
+    if state != "enabled":
+        raise ValueError("independent maintenance service is not running")
+    with exclusive(migration_root() / "handoff-lock"):
+        path = request_path()
+        request = json.loads(path.read_text())
+        if request.get("id") != request_id or request.get("state") not in {"updated", "rollback_pending", "rolled_back"}:
+            raise ValueError("Services rollback does not match its completed handoff")
+        if request["state"] != "rolled_back":
+            request["state"] = "rollback_pending"
+            atomic_json(path, request)
         return request
 
 
@@ -66,9 +86,9 @@ def reconcile() -> dict | None:
                 or not isinstance(request.get("id"), str)
                 or len(request["id"]) != 32 or any(c not in "0123456789abcdef" for c in request["id"])):
             raise ValueError("invalid or changed Services handoff")
-        if request.get("state") in TERMINAL:
+        if request.get("state") in TERMINAL and request.get("state") != "updated":
             return request
-        if request.get("state") not in {"pending", "applying"}:
+        if request.get("state") not in {"pending", "applying", "updated", "rollback_pending"}:
             raise ValueError("unknown Services handoff state")
         name = "services-update-" + request["id"]
         journal = migration_root() / name / "journal.json"
@@ -83,9 +103,13 @@ def reconcile() -> dict | None:
             value, _ = services_update.load(journal)
             if value["candidate_seal"] != request["candidate_seal"]:
                 raise ValueError("handoff does not match the prepared candidate")
-            request["state"] = "applying"
-            atomic_json(path, request)
-            if value["state"] == "prepared":
+            action = request["state"]
+            if action != "rollback_pending":
+                request["state"] = "applying"
+                atomic_json(path, request)
+            if action == "rollback_pending":
+                services_update.rollback(journal)
+            elif value["state"] == "prepared":
                 services_update.apply(journal)
             elif value["state"] not in {"updated", "rolled_back"}:
                 services_update.rollback(journal)

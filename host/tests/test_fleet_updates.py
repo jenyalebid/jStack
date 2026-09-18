@@ -349,6 +349,32 @@ def test_crash_mid_apply_recovers_from_disk_before_accepting_work(tmp_path, rele
     assert restarted.current["state"] == "rolled_back"
 
 
+@pytest.mark.parametrize("status,expected", [
+    ("pending", "applying"), ("applied", "verifying"), ("rolled_back", "rolled_back")])
+def test_independent_owner_recovery_controls_restart_outcome(tmp_path, release, status, expected):
+    backend = Backend()
+    backend.healthy = False
+    backend.recovery_status = lambda job: status
+    daemon, job = supervisor(tmp_path, release, backend)
+    daemon.current = {**job, "state": "applying", "transaction": {"native": True}}
+    daemon.save()
+    daemon.tick()
+    assert daemon.current["state"] == expected
+    assert ("rollback" in backend.events) is False
+
+
+def test_verification_waits_while_independent_owner_rolls_back(tmp_path, release):
+    backend = Backend()
+    backend.recovery_status = lambda job: "rolling_back"
+    daemon, job = supervisor(tmp_path, release, backend)
+    daemon.current = {**job, "state": "verifying", "verify_started": time.time() - 500,
+                      "transaction": {"native": True}}
+    daemon.save()
+    daemon.tick()
+    assert daemon.current["state"] == "verifying"
+    assert "rollback" not in backend.events
+
+
 def test_failed_verification_rolls_back(tmp_path, release):
     daemon, job = supervisor(tmp_path, release)
     daemon.tick()

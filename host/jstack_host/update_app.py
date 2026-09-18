@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import uuid
 
 from . import release_manifest as releases
 from .update_macos import MacBackend, client_distribution, command, safe_tar, stop_app, unpack_app
@@ -23,6 +24,13 @@ def control(app: Path, action: str, role: str | None = None) -> dict:
 
 
 class AppBackend(MacBackend):
+    def compatible(self, manifest: dict):
+        # Native releases add the independently replaced Services owner. The
+        # remaining platform constraints are identical to schema 1.
+        if manifest.get("schema") == releases.NATIVE_SCHEMA:
+            manifest = {**manifest, "schema": releases.SCHEMA}
+        return super().compatible(manifest)
+
     def _app_running(self, kind: str, path: Path) -> list[int]:
         if kind != "menubar":
             return super()._app_running(kind, path)
@@ -49,6 +57,15 @@ class AppBackend(MacBackend):
         if not super().verify(job):
             return False
         try:
+            transaction = job.get("transaction", {})
+            native = transaction.get("services_owner")
+            if native:
+                from . import services_handoff
+                request = self._handoff(transaction)
+                if request.get("state") != "updated":
+                    return False
+                if str(self._services_info(Path(native["target"]))["CFBundleVersion"]) != native["version"]:
+                    return False
             observed = self._statuses(Path(self.config["menubar_path"]))
             if any(observed[role] != expected
                    for role, expected in job["transaction"]["services"].items()):
@@ -85,6 +102,48 @@ class AppBackend(MacBackend):
         # into a mutable source/dependency folder from a previous installer.
         return False
 
+    def _services_info(self, app: Path) -> dict:
+        from .update_macos import bundle_info
+        component = {"version": str(bundle_info(app)["CFBundleVersion"])}
+        self._check_services(app, component)
+        return bundle_info(app)
+
+    def _check_services(self, app: Path, component: dict):
+        from .update_macos import bundle_info
+        command(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R",
+                 f'=anchor apple generic and certificate leaf[subject.OU] = "{self.config["team_id"]}" and identifier "live.jstack.hub.services"',
+                 str(app)])
+        command(["/usr/sbin/spctl", "--assess", "--type", "execute", str(app)])
+        if str(bundle_info(app)["CFBundleVersion"]) != component["version"]:
+            raise releases.ReleaseError("Services bundle version differs from release")
+
+    @staticmethod
+    def _handoff(transaction: dict) -> dict:
+        from . import services_handoff
+        path = services_handoff.request_path()
+        if not path.exists():
+            return {}
+        import json
+        value = json.loads(path.read_text())
+        return value if value.get("id") == transaction.get("services_handoff") else {"state": "mismatch"}
+
+    def recovery_status(self, job: dict) -> str:
+        transaction = job.get("transaction", {})
+        if not transaction.get("services_owner"):
+            return "unknown"
+        state = self._handoff(transaction).get("state")
+        if state in {"pending", "applying"}:
+            return "pending"
+        if state == "updated":
+            return "applied"
+        if state == "rollback_pending":
+            return "rolling_back"
+        if state == "rolled_back":
+            return "rolled_back"
+        if state in {None, "failed"}:
+            return "untouched"
+        return "unknown"
+
     def _statuses(self, app: Path) -> dict:
         observed = control(app, "status")
         # The independent maintenance registration is not a host/menu choice.
@@ -103,8 +162,9 @@ class AppBackend(MacBackend):
         stack.mkdir()
         safe_tar(directory / manifest["components"]["stack"]["file"], stack)
         app = Path(self.config["menubar_path"])
-        if control(app, "status").get("services-handoff") == "enabled":
-            raise releases.ReleaseError("Hub maintenance must be stopped before replacing its owner")
+        maintenance = control(app, "status").get("services-handoff")
+        if maintenance not in {"not_registered", "not_found"}:
+            raise releases.ReleaseError("Hub maintenance must be absent before replacing its owner")
         statuses = self._statuses(app)
         self._validate_statuses(statuses)
         apps = {}
@@ -134,7 +194,19 @@ class AppBackend(MacBackend):
             from .update_macos import running
             apps[kind] = {"source": str(candidate), "target": str(target), "backup": str(backup),
                           "existed": target.exists(), "was_running": bool(target.exists() and running(target))}
+        services_owner = None
+        if manifest["schema"] == releases.NATIVE_SCHEMA:
+            from . import service_settings
+            target = Path(service_settings.read()["services_app"])
+            folder = stage / "services"
+            folder.mkdir()
+            component = manifest["components"]["services"]
+            candidate = unpack_app(directory / component["file"], folder)
+            self._check_services(candidate, component)
+            services_owner = {"source": str(candidate), "target": str(target),
+                              "version": component["version"]}
         return {"stage": str(stage), "stack": str(stack), "apps": apps, "services": statuses,
+                "services_owner": services_owner, "services_handoff": uuid.uuid4().hex if services_owner else None,
                 "release": manifest["release"], "manifest": manifest,
                 "providers": update_plugins.prepare()}
 
@@ -196,11 +268,29 @@ class AppBackend(MacBackend):
         client = transaction["apps"].get("client")
         if client and client["was_running"]:
             command(["/usr/bin/open", "-a", client["target"]])
+        if transaction.get("services_owner"):
+            from . import services_handoff
+            services_handoff.submit(Path(transaction["services_owner"]["source"]),
+                                    request_id=transaction["services_handoff"])
 
     def rollback(self, job: dict):
         from . import update_plugins
         transaction = job["transaction"]
         app = Path(self.config["menubar_path"])
+        if transaction.get("services_owner"):
+            from . import services_handoff
+            state = self.recovery_status(job)
+            if state in {"applied", "rolling_back"}:
+                services_handoff.request_rollback(transaction["services_handoff"])
+                raise releases.ReleaseError("Services rollback handed to the independent Hub controller")
+            if state == "pending":
+                raise releases.ReleaseError("Services replacement has not reached a recoverable outcome")
+            if state not in {"rolled_back", "untouched"}:
+                raise releases.ReleaseError("Services rollback state is unobservable")
+            current_handoff = control(app, "status").get("services-handoff")
+            if state == "rolled_back" or current_handoff in {"enabled", "requires_approval"}:
+                if current_handoff in {"enabled", "requires_approval"}:
+                    control(app, "unregister", "services-handoff")
         # If interrupted between renames there may be no Hub at all. Recovery
         # still runs from its independent bundle and can put the old one back.
         current = self._statuses(app) if app.exists() else {}
@@ -233,3 +323,14 @@ class AppBackend(MacBackend):
         if client and client["was_running"]:
             command(["/usr/bin/open", "-a", client["target"]])
         update_plugins.rollback(transaction["providers"], Path(transaction["stack"]))
+
+    def finalize(self, job: dict):
+        transaction = job.get("transaction", {})
+        if not transaction.get("services_owner"):
+            return
+        app = Path(self.config["menubar_path"])
+        state = control(app, "status").get("services-handoff")
+        if state in {"enabled", "requires_approval"}:
+            control(app, "unregister", "services-handoff")
+        elif state not in {"not_registered", "not_found"}:
+            raise releases.ReleaseError("maintenance service approval is unobservable at finalization")

@@ -150,11 +150,13 @@ def test_missing_private_catalog_is_not_treated_as_empty(fixture):
 def handoff_fixture(fixture, monkeypatch):
     monkeypatch.setattr(handoff.app_services, "verify", lambda _: None)
     registrations = []
+    controller = {"state": "not_registered"}
 
     def control(app, action, role=None):
         if action == "status":
-            return {handoff.ROLE: "not_registered"}
+            return {handoff.ROLE: controller["state"]}
         registrations.append(role)
+        controller["state"] = "enabled"
         return {"status": "enabled"}
 
     monkeypatch.setattr(handoff, "control", control)
@@ -173,6 +175,27 @@ def test_handoff_runs_independently_and_preserves_off(handoff_fixture):
     calls.clear()
     assert handoff.reconcile()["id"] == request["id"]
     assert not calls
+
+
+def test_completed_handoff_can_request_exact_rollback(handoff_fixture):
+    (owner, candidate, states, _, _), _ = handoff_fixture
+    original = update.seal(owner)
+    request = handoff.submit(candidate, request_id="b" * 32)
+    assert request["id"] == "b" * 32
+    assert handoff.reconcile()["state"] == "updated"
+    assert handoff.request_rollback(request["id"])["state"] == "rollback_pending"
+    assert handoff.reconcile()["state"] == "rolled_back"
+    assert update.seal(owner) == original
+    assert states == {"updater": "enabled", "worker": "not_registered"}
+
+
+def test_handoff_rollback_requires_matching_identity(handoff_fixture):
+    (_, candidate, _, _, _), _ = handoff_fixture
+    request = handoff.submit(candidate)
+    handoff.reconcile()
+    with pytest.raises(ValueError, match="does not match"):
+        handoff.request_rollback("0" * 32)
+    assert json.loads(handoff.request_path().read_text())["id"] == request["id"]
 
 
 def test_handoff_recovers_killed_worker_after_unregister(handoff_fixture, monkeypatch):
@@ -216,7 +239,7 @@ def test_handoff_never_overwrites_active_request(handoff_fixture):
     assert len(registrations) == 1
 
 
-@pytest.mark.parametrize("state", ["requires_approval", "unknown", "not_found", None])
+@pytest.mark.parametrize("state", ["requires_approval", "unknown", None])
 def test_handoff_respects_denied_or_unobservable_controller(handoff_fixture, monkeypatch, state):
     (_, candidate, _, calls, _), _ = handoff_fixture
     monkeypatch.setattr(handoff, "control", lambda *args: {handoff.ROLE: state})

@@ -134,8 +134,25 @@ class Supervisor:
         # An apply interrupted by reboot/crash never starts from scratch over
         # a half-replaced installation. Recover its exact prior transaction.
         if self.current.get("state") == "applying":
-            self.backend.rollback(self.current)
-            self.save(state="rolled_back", detail="recovered interrupted application")
+            recover = getattr(self.backend, "recovery_status", None)
+            status = recover(self.current) if recover else "unknown"
+            if status == "applied":
+                self.save(state="verifying", verify_started=time.time())
+            elif status in {"pending", "rolling_back"}:
+                return
+            elif status == "rolled_back":
+                self.save(state="rolled_back", detail="independent owner rollback completed")
+            else:
+                self.backend.rollback(self.current)
+                self.save(state="rolled_back", detail="recovered interrupted application")
+        if self.current.get("state") == "verifying":
+            recover = getattr(self.backend, "recovery_status", None)
+            status = recover(self.current) if recover else "unknown"
+            if status == "rolling_back":
+                return
+            if status == "rolled_back":
+                self.backend.rollback(self.current)
+                self.save(state="rolled_back", detail="independent owner rollback completed")
         if (self.current.get("state") == "verifying" and
                 time.time() - self.current.get("verify_started", 0) > 180):
             # This runs before the network request: losing the parent (or
