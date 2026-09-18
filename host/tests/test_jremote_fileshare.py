@@ -228,8 +228,8 @@ def test_acl_accepts_macos_directory_rights_normalization(tmp_path, monkeypatch)
 def test_audit_alerts_once_per_distinct_unsafe_state(monkeypatch):
     alerts = []
     states = [
-        {"unexpected": [{"name": "home", "path": "/Users/me"}]},
-        {"unexpected": [{"name": "home", "path": "/Users/me"}]},
+        {"unexpected": [{"name": "home", "path": "/Users/x"}]},
+        {"unexpected": [{"name": "home", "path": "/Users/x"}]},
         {"unexpected": []},
     ]
     monkeypatch.setattr(fileshare, "status", lambda: states.pop(0))
@@ -241,7 +241,7 @@ def test_audit_alerts_once_per_distinct_unsafe_state(monkeypatch):
     fileshare.audit_once()
 
     assert len(alerts) == 1
-    assert "home=/Users/me" in alerts[0]
+    assert "home=/Users/x" in alerts[0]
 
 
 def test_secure_configuration_is_not_ready_until_service_is_loaded(tmp_path, monkeypatch):
@@ -288,7 +288,7 @@ def test_authenticated_status_route_and_feature_probe(tmp_path, monkeypatch):
 def test_doctor_fails_an_enabled_server_with_undeclared_shares(monkeypatch):
     monkeypatch.setattr(fileshare, "status", lambda: {
         "available": True, "configured": False, "ready": False,
-        "unexpected": [{"name": "home", "path": "/Users/me"}],
+        "unexpected": [{"name": "home", "path": "/Users/x"}],
         "service_enabled": True,
     })
     result = doctor.check_file_sharing()
