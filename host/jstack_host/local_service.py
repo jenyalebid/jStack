@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import time
 
 from . import service_catalog, service_settings
 
@@ -48,9 +49,30 @@ def run(resources: Path, slug: str) -> int:
             cwd=job.get("WorkingDirectory", str(Path.home())), env=environment,
             stdout=streams[0], stderr=streams[1])
 
+        stopping = False
+
         def forward(signum, _frame):
+            nonlocal stopping
+            if stopping:
+                return
+            stopping = True
             if process.poll() is None:
                 process.send_signal(signum)
+            deadline = time.monotonic() + 5
+            while process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            # launchd signals the runtime, not every descendant. A child such
+            # as uvicorn may accept SIGTERM and then wait forever on an SSE
+            # connection; launchd eventually kills only this supervisor and
+            # leaves that child reparented to pid 1. The runtime is the group
+            # leader in a sealed service, so finish the whole group. Refuse to
+            # kill an interactive caller if this function is invoked directly.
+            if os.getpgrp() == os.getpid():
+                os.killpg(os.getpgrp(), signal.SIGKILL)
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            raise SystemExit(128 + signum)
 
         for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             handlers[signum] = signal.getsignal(signum)
