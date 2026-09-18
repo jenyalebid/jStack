@@ -87,6 +87,15 @@ rollback; moving private configuration is a separate reviewed operation.
 
 ### Native release candidates
 
+Independent Services maintenance is available through the Hub's bundled Python:
+`-m jstack_host.services_update prepare /path/to/candidate.app`, followed by
+`apply JOURNAL` or `rollback JOURNAL`. Run from a user Terminal outside Services.
+The transaction keeps both sealed owners and a settings digest in private
+migration storage, refuses catalog changes, and records intent before stops
+or bundle replacement. Interrupted application requires explicit rollback;
+OFF choices are retained. This is not automatic supervisor handoff and has
+not yet passed signed-artifact qualification.
+
 The release publisher accepts explicit `native_services: true` for candidate
 builds. It builds both public owners from the publisher's committed snapshot,
 release ID, origin and build number, with no private capability catalog.
