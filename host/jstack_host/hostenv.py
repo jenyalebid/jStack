@@ -904,6 +904,16 @@ def refuse_second_identity(state, what: str) -> None:
     fires only where the evidence is positive and specific: something declared
     a state dir, and it is not this one.
 
+    AN EXPLICIT `JREMOTE_STATE_DIR` NAMING THIS DIR IS CONSENT, NOT CONFUSION.
+    Setting it is the remedy this refusal's own message prescribes, and
+    `state_dir()` documents it as how a second host on this same Mac — a test,
+    a second instance — gets its own state beside the embedded one. A process
+    that set the variable and is minting into the very directory it names has
+    already answered "is anything serving here": it is, deliberately, this
+    process. The refusal still fires when the variable and the mint target
+    disagree — that is a process resolving one dir and writing another — and
+    when the variable is unset, where the marker is the only voice.
+
     Loud, not quiet. The alternative is to adopt the declared dir silently,
     which repairs this caller and hides that it resolved wrong — and a process
     that got here has a broken path, a missing `JREMOTE_STATE_DIR`, or an
@@ -911,6 +921,9 @@ def refuse_second_identity(state, what: str) -> None:
     confidently about a host that does not exist; answering confidently *as*
     one is the same failure with a write behind it.
     """
+    env = os.environ.get("JREMOTE_STATE_DIR")
+    if env and Path(env).expanduser().resolve() == Path(state).resolve():
+        return
     from . import embed  # local: embed imports this module
 
     declared = str(embed.read().get("state_dir") or "")

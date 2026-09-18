@@ -337,18 +337,41 @@ def test_host_id_refuses_to_mint_beside_a_host_that_declared_elsewhere(
     second `host-id` for one Mac. The app routes on that id, so it reads a
     second host at the same address: every session on its board real, none of
     them the ones asked for.
+
+    `JREMOTE_STATE_DIR` is deliberately absent: the stray got here by
+    *resolving*, not by being told. A process that set the variable itself is
+    the next test.
     """
     stray, served = tmp_path / "stray", tmp_path / "served"
     _declare(tmp_path / "embedded.json", served)
     monkeypatch.setenv("JREMOTE_EMBED_MARKER", str(tmp_path / "embedded.json"))
-    monkeypatch.setenv("JREMOTE_STATE_DIR", str(stray))
+    monkeypatch.delenv("JREMOTE_STATE_DIR", raising=False)
     monkeypatch.delenv("JREMOTE_HOST_ID", raising=False)
+    monkeypatch.setattr(hostenv, "state_dir", lambda: stray)
 
     with pytest.raises(hostenv.SecondIdentity) as caught:
         hostenv.host_id()
     assert str(served) in str(caught.value), "the refusal must name the real dir"
     assert not (stray / "host-id").exists(), "it minted anyway"
     assert not stray.exists(), "a refused call left the directory behind"
+
+
+def test_an_explicit_state_dir_is_consent_to_be_a_second_host(
+        monkeypatch, tmp_path):
+    """`JREMOTE_STATE_DIR` is the remedy the refusal's own message prescribes,
+    and `state_dir()` documents it as how a second host on this same Mac — a
+    test, a second instance — gets its own state. A process minting into the
+    very dir it explicitly named is not a stray, even beside an embedded host
+    that declared elsewhere; refusing it would make the documented second host
+    unbootable on exactly the machines that have a first one."""
+    second, served = tmp_path / "second", tmp_path / "served"
+    _declare(tmp_path / "embedded.json", served)
+    monkeypatch.setenv("JREMOTE_EMBED_MARKER", str(tmp_path / "embedded.json"))
+    monkeypatch.setenv("JREMOTE_STATE_DIR", str(second))
+    monkeypatch.delenv("JREMOTE_HOST_ID", raising=False)
+
+    minted = hostenv.host_id()
+    assert minted and hostenv.host_id() == minted, "the id must be stable"
 
 
 def test_host_id_still_answers_from_the_dir_the_marker_names(
