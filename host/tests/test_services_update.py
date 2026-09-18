@@ -5,7 +5,7 @@ import shutil
 
 import pytest
 
-from jstack_host import service_settings, services_update as update, services_handoff as handoff
+from jstack_host import cli, service_settings, services_update as update, services_handoff as handoff
 
 
 @pytest.fixture
@@ -253,6 +253,17 @@ def test_named_transaction_refuses_path_traversal(fixture):
     with pytest.raises(ValueError, match="identifier"):
         update.prepare(candidate, transaction_name="../elsewhere")
     assert not calls
+
+
+def test_signed_cli_submits_services_candidate(monkeypatch, tmp_path, capsys):
+    candidate = tmp_path / "Candidate.app"
+    candidate.mkdir()
+    calls = []
+    monkeypatch.setattr(handoff, "submit", lambda path: calls.append(path) or {"state": "pending"})
+    args = cli.build_parser().parse_args(["services-update", str(candidate)])
+    assert args.fn(args) == 0
+    assert calls == [candidate]
+    assert json.loads(capsys.readouterr().out) == {"state": "pending"}
 
 
 def test_handoff_registration_failure_cancels_request(handoff_fixture, monkeypatch):
