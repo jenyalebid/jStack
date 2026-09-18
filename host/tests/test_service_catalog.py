@@ -1,5 +1,10 @@
 import json
+import os
 from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
 
 import pytest
 
@@ -75,6 +80,52 @@ def test_local_capability_reads_selected_private_configuration(monkeypatch, tmp_
     (tmp_path / "automation-catalog.json").write_text(json.dumps(service_catalog.definitions({"health": definition})[1]))
     assert local_service.run(tmp_path, "health") == 0
     assert not (tmp_path / ".local/state/jremote/automation-settings.json").exists()
+
+
+def test_local_capability_shutdown_reaps_a_term_ignoring_child_group(tmp_path):
+    definition = job(
+        ProgramArguments=["/bin/sh", "-c", "trap '' TERM; while :; do sleep 1; done"],
+        StandardOutPath=str(tmp_path / "out"),
+        StandardErrorPath=str(tmp_path / "err"),
+    )
+    settings = tmp_path / "automation.json"
+    settings.write_text(json.dumps({"health": definition}))
+    resources = tmp_path / "resources"
+    resources.mkdir()
+    (resources / "automation-catalog.json").write_text(json.dumps(
+        service_catalog.definitions({"health": definition})[1]))
+    script = (
+        "from jstack_host import local_service,service_settings;"
+        f"service_settings.read=lambda:{{'automation_settings':{str(settings)!r}}};"
+        f"raise SystemExit(local_service.run(Path({str(resources)!r}),'health'))"
+    )
+    script = "from pathlib import Path;" + script
+    runtime = subprocess.Popen(
+        [sys.executable, "-c", script],
+        start_new_session=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+    )
+    try:
+        deadline = time.monotonic() + 5
+        child = None
+        while time.monotonic() < deadline:
+            found = subprocess.run(
+                ["pgrep", "-P", str(runtime.pid)], capture_output=True, text=True,
+            ).stdout.splitlines()
+            if found:
+                child = int(found[0])
+                break
+            time.sleep(0.05)
+        assert child is not None
+        runtime.send_signal(signal.SIGTERM)
+        assert runtime.wait(timeout=10) == -signal.SIGKILL
+        with pytest.raises(ProcessLookupError):
+            os.killpg(runtime.pid, 0)
+    finally:
+        try:
+            os.killpg(runtime.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def test_embedding_overlay_checks_hub_and_does_not_write_bytecode(monkeypatch, tmp_path):
