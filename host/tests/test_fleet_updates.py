@@ -363,6 +363,36 @@ def test_independent_owner_recovery_controls_restart_outcome(tmp_path, release, 
     assert ("rollback" in backend.events) is False
 
 
+def test_root_watchdog_marker_settles_a_stalled_apply_without_a_second_swap(tmp_path, release):
+    backend = Backend()
+    backend.recovery_status = lambda job: "applied"
+    daemon, job = supervisor(tmp_path, release, backend)
+    daemon.current = {**job, "state": "applying", "transaction": {"native": True}}
+    daemon.save()
+    (daemon.root / "recovery.json").write_text(json.dumps(
+        {"schema": 1, "restored": "Hub.app.previous-stage"}))
+    daemon.tick()
+    assert daemon.current["state"] == "rolled_back"
+    assert daemon.current["detail"] == "root watchdog restored the retained hub backup"
+    assert backend.events == ["rollback"]
+
+
+def test_a_past_recovery_marker_never_settles_a_new_stall(tmp_path, release):
+    import os
+    backend = Backend()
+    backend.healthy = False
+    backend.recovery_status = lambda job: "applied"
+    daemon, job = supervisor(tmp_path, release, backend)
+    marker = daemon.root / "recovery.json"
+    marker.write_text("{}")
+    os.utime(marker, (time.time() - 3600,) * 2)
+    daemon.current = {**job, "state": "applying", "transaction": {"native": True}}
+    daemon.save()
+    daemon.tick()
+    assert daemon.current["state"] == "verifying"
+    assert "rollback" not in backend.events
+
+
 def test_verification_waits_while_independent_owner_rolls_back(tmp_path, release):
     backend = Backend()
     backend.recovery_status = lambda job: "rolling_back"

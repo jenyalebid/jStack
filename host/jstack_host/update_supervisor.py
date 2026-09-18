@@ -130,9 +130,28 @@ class Supervisor:
             os.replace(partial, target)
         return directory
 
+    def _root_recovered(self) -> bool:
+        """The Network watchdog's report that it already swapped the Hub back.
+
+        Its marker is written only after this journal went stale mid-apply, so
+        newer-than-journal means the restore addressed this exact stall. The
+        comparison mirrors the watchdog's own re-fire guard.
+        """
+        marker = self.root / "recovery.json"
+        try:
+            return marker.stat().st_mtime >= self.journal.stat().st_mtime
+        except OSError:
+            return False
+
     def tick(self) -> None:
         # An apply interrupted by reboot/crash never starts from scratch over
         # a half-replaced installation. Recover its exact prior transaction.
+        if self.current.get("state") in {"applying", "verifying"} and self._root_recovered():
+            # The bundle swap already happened under root; rollback finishes
+            # the rest of the transaction (services, client, plugins) and
+            # skips the app whose backup the watchdog consumed.
+            self.backend.rollback(self.current)
+            self.save(state="rolled_back", detail="root watchdog restored the retained hub backup")
         if self.current.get("state") == "applying":
             recover = getattr(self.backend, "recovery_status", None)
             status = recover(self.current) if recover else "unknown"
