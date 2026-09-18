@@ -81,11 +81,7 @@ enum HostAgent {
 
     static var serviceRole: String { serviceSettings()["host_capability"] as? String ?? "host" }
     static var serviceController: URL {
-        if serviceSettings()["host_capability"] != nil,
-           let path = serviceSettings()["services_app"] as? String {
-            return URL(fileURLWithPath: path).appendingPathComponent("Contents/MacOS/JStackHub")
-        }
-        return Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/JStackHub")
+        Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/JStackHub")
     }
 
     static var plistURL: URL {
@@ -1504,8 +1500,7 @@ enum HostControl {
     private static func serviceAction(_ action: String) -> (out: String, code: Int32) {
         let controller = HostAgent.serviceController
         let owner = controller.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let identifier = HostAgent.serviceSettings()["host_capability"] == nil ? "live.jstack.hub" : "live.jstack.hub.services"
-        let requirement = "=anchor apple generic and certificate leaf[subject.OU] = \"MZ95H77RQQ\" and identifier \"\(identifier)\""
+        let requirement = "=anchor apple generic and certificate leaf[subject.OU] = \"MZ95H77RQQ\" and identifier \"live.jstack.hub\""
         let checked = run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R", requirement, owner.path])
         guard checked.code == 0 else { return checked }
         return run(controller.path, [action, HostAgent.serviceRole])

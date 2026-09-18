@@ -15,7 +15,7 @@ def bundled() -> bool:
     for parent in Path(__file__).resolve().parents:
         if parent.suffix == ".app":
             info = plistlib.loads((parent / "Contents/Info.plist").read_bytes())
-            return info.get("CFBundleIdentifier") in {"live.jstack.hub", "live.jstack.hub.services"}
+            return info.get("CFBundleIdentifier") == "live.jstack.hub"
     return False
 
 
@@ -30,21 +30,17 @@ def specification(app: Path, configuration: dict, role: str) -> tuple[Path, str,
         return app, role, "live.jstack.hub." + role
     if not isinstance(capability, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", capability):
         raise ValueError("invalid embedding host capability")
-    services = Path(configuration["services_app"])
-    if not services.is_absolute():
-        raise ValueError("services owner must be an absolute bundle path")
-    verify(services, "live.jstack.hub.services")
-    manifest = json.loads((services / "Contents/Resources/automation-catalog.json").read_text())
+    manifest = json.loads((app / "Contents/Resources/automation-catalog.json").read_text())
     if capability not in manifest:
         raise ValueError("embedding host is not in the sealed capability catalog")
-    return services, capability, "live.jstack.automation." + capability
+    return app, capability, "live.jstack.automation." + capability
 
 
 def observe(app: Path, configuration: dict) -> dict:
     statuses = control(app, "status")
-    owner, capability, _ = specification(app, configuration, "host")
-    if owner != app:
-        statuses["host"] = control(owner, "status")[capability]
+    _, capability, _ = specification(app, configuration, "host")
+    if capability != "host":
+        statuses["host"] = statuses[capability]
     return statuses
 
 
@@ -76,10 +72,7 @@ def uninstall_all(configuration: dict, out) -> int:
     from . import service_settings
     from .migrate_services import exclusive, migration_root
     from .update_supervisor import atomic_json
-    owners = [(Path(configuration["app"]), "live.jstack.hub"),
-              (Path(configuration["services_app"]), "live.jstack.hub.services")]
-    if owners[0][0].resolve() == owners[1][0].resolve():
-        raise ValueError("service owners must be independent bundles")
+    owners = [(Path(configuration["app"]), "live.jstack.hub")]
     root = migration_root()
     path = root / "uninstall-journal.json"
     previous_path = service_settings.path().with_name("uninstall-journal.json")
@@ -95,8 +88,7 @@ def uninstall_all(configuration: dict, out) -> int:
             observed = control(app, "status")
             if not isinstance(catalog, dict) or set(observed) != set(catalog):
                 raise ValueError("service ownership is unobservable")
-            required = {"host", "menu"} if identifier == "live.jstack.hub" else {"updater"}
-            if not required <= set(catalog):
+            if not {"host", "menu", "updater"} <= set(catalog):
                 raise ValueError("sealed service owner is incomplete")
             for role, filename in catalog.items():
                 if (not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", role) or
@@ -147,7 +139,7 @@ def uninstall_all(configuration: dict, out) -> int:
                 raise ValueError("service ownership changed before removal completed")
         journal["state"] = "unregistered"
         atomic_json(path, journal)
-    print("All Hub and Services user registrations removed; bundles, Network and private data retained", file=out)
+    print("All Hub user registrations removed; bundle, Network and private data retained", file=out)
     return 0
 
 

@@ -39,11 +39,8 @@ def repair_native(public_key: str, settings: dict, *, state_dir: Path | None,
     state = Path(state_value)
     if state_dir is not None and state_dir.resolve() != state.resolve():
         raise ValueError("updater repair cannot change the installed host identity")
-    owner_value = settings.get("services_app")
-    if not owner_value or not Path(owner_value).is_absolute():
-        raise ValueError("signed recovery owner is absent; use the signed installer")
-    owner = Path(owner_value)
-    app_services.verify(owner, "live.jstack.hub.services")
+    owner = Path(settings["app"])
+    app_services.verify(owner)
     config_path = state / "updates/config.json"
     configuration = json.loads(config_path.read_text()) if config_path.exists() else {}
     if configuration.get("public_key") != public_key:
@@ -51,8 +48,7 @@ def repair_native(public_key: str, settings: dict, *, state_dir: Path | None,
     if (configuration.get("service_model") != "app" or
             configuration.get("menubar_path") != settings["app"] or
             configuration.get("local_url") != f"http://127.0.0.1:{settings['port']}" or
-            configuration.get("host_capability") != settings.get("host_capability") or
-            configuration.get("services_app") != str(owner)):
+            configuration.get("host_capability") != settings.get("host_capability")):
         raise ValueError("updater does not match the signed installation; use the migration installer")
     if bool(configuration.get("candidate_test", False)) != candidate_test:
         raise ValueError("updater repair cannot change release-channel trust")

@@ -10,6 +10,8 @@ import uuid
 from . import app_services, network_admin, service_settings
 from .update_supervisor import atomic_json
 
+# hub.services no longer ships; its TCC grants may survive on migrated
+# machines, so the stop still resets that identity.
 BUNDLE_IDS = {"live.jstack.hub", "live.jstack.hub.services", "live.jstack.network",
               "com.jremote.menubar"}
 NETWORK_APP = Path("/Library/PrivilegedHelperTools/jStack Network.app")
@@ -95,7 +97,6 @@ def stop(*, out) -> int:
     if not configuration:
         raise ValueError("signed installation settings are absent")
     app_services.verify(Path(configuration["app"]), "live.jstack.hub")
-    app_services.verify(Path(configuration["services_app"]), "live.jstack.hub.services")
     target = path(configuration)
     if target.exists():
         journal = json.loads(target.read_text())

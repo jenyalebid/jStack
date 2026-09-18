@@ -28,7 +28,7 @@ def validate(value: dict) -> dict:
     state = value["environment"].get("JREMOTE_STATE_DIR")
     if state is not None and not Path(state).is_absolute():
         raise ValueError("service state directory must be absolute")
-    for key in ("automation_settings", "migration_dir", "services_app"):
+    for key in ("automation_settings", "migration_dir"):
         if key in value and (not isinstance(value[key], str) or not Path(value[key]).is_absolute()):
             raise ValueError(f"{key} must be an absolute private data path")
     if "network_transaction" in value and (not isinstance(value["network_transaction"], str)
@@ -37,9 +37,8 @@ def validate(value: dict) -> dict:
     if "bind" in value and (not isinstance(value["bind"], str) or not value["bind"] or "\x00" in value["bind"]):
         raise ValueError("invalid service bind address")
     if "host_capability" in value:
-        capability, services = value["host_capability"], value.get("services_app")
-        if (not isinstance(capability, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", capability) or
-                not isinstance(services, str) or not Path(services).is_absolute()):
+        capability = value["host_capability"]
+        if not isinstance(capability, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", capability):
             raise ValueError("invalid embedding service binding")
     return value
 
