@@ -119,6 +119,8 @@ Defaults to `bypassPermissions`, and that default is not a convenience. A schedu
 
 **Locked jobs** (`locked: true`) cannot be removed or rescheduled by an automated session — `rm` refuses without `--force`. Since rescheduling is remove-plus-add, this makes a human-set time something an autonomous run physically cannot move.
 
+**Subjects** (`--subject` on `add-once` / `add-recurring`) — a job's `name` says what a booking is called; its `subject` says what it covers. A second **enabled** job with the same `(agent_id, subject)` is refused with **exit 3**, whatever its schedule, so a one-shot cannot shadow a recurrence already covering the same surface and vice versa. Only the subject can catch this: two agents arranging coverage of one thing produce names that never collide, since a one-shot named for its fire time and a recurrence named for its purpose are different strings however identical the work. The scan runs inside the registry lock, in the same `mutate` that appends the job — check-then-add would leave open the window the guard exists to close. Comparison is case-folded with whitespace collapsed; a job with no subject claims nothing.
+
 ## Test
 
 `tests/scheduler.sh` — runs the real package against a hermetic temp `SCHEDULER_HOME`, including a real daemon boot. Never touches a live registry, state dir, or running daemon.

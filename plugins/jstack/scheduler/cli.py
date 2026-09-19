@@ -91,6 +91,81 @@ def _base_job(agent: str, name: str, message: str, timeout_seconds: "int|None",
     return job
 
 
+# --------------------------------------------------------------- subjects
+#
+# A job's `name` identifies the BOOKING; its `subject` identifies the WORK the
+# booking covers. Two sessions that independently arrange coverage for one
+# surface produce two bookings whose names cannot collide — a one-shot named
+# for its fire time and a recurrence named for its purpose are different
+# strings however identical the work — so a name-keyed dedupe catches a literal
+# double-submit and nothing else. Keying on the subject is what makes a
+# one-shot unable to shadow a recurrence already covering the same surface.
+
+SUBJECT_COLLISION_EXIT = 3
+
+
+def norm_subject(subject: "str|None") -> str:
+    """Comparison form of a subject: whitespace-collapsed, case-folded.
+
+    Near-miss spellings of one surface ('Meta token leak' / 'meta  token leak')
+    are the same claim, and a dedupe they slip past is not a dedupe.
+    """
+    return " ".join((subject or "").split()).casefold()
+
+
+class _SubjectClaimed(Exception):
+    """(agent, subject) is already covered — raised inside the registry lock."""
+
+
+def _add_job(job: dict) -> "dict|None":
+    """Append `job` under the registry lock. Returns the colliding job, or None.
+
+    The collision check runs INSIDE registry.mutate rather than before it. A
+    subject is a claim on coverage, and check-then-append leaves open exactly
+    the window this guard exists to close: two sessions both read a registry
+    that does not yet cover the surface, and both write. Under the lock the
+    later writer sees the earlier one.
+    """
+    subject = norm_subject(job.get("subject"))
+    collision: dict = {}
+
+    def _do(reg):
+        if subject:
+            for j in reg.get("jobs", []):
+                if (j.get("agent_id") == job["agent_id"]
+                        and j.get("enabled", True)
+                        and norm_subject(j.get("subject")) == subject):
+                    collision.update(j)
+                    raise _SubjectClaimed()
+        reg.setdefault("jobs", []).append(job)
+
+    try:
+        registry.mutate(_do)
+    except _SubjectClaimed:
+        return collision
+    return None
+
+
+def _refuse_collision(job: dict, existing: dict) -> "None":
+    """Report a refused booking and exit non-zero. Nothing was written.
+
+    Stderr only, in every output mode: the caller relays this text to whoever
+    tried to book, and a JSON body beside it would bury the one line that
+    matters — which job already owns the surface.
+    """
+    sched = existing.get("schedule") or {}
+    how = sched.get("rrule") or f"once {sched.get('dtstart', '?')}"
+    print(
+        f"refused: {job['agent_id']} already covers subject "
+        f"{job.get('subject')!r} — nothing booked.\n"
+        f"  covered by {existing.get('id', '')[:8]} ({existing.get('name', '')}) "
+        f"· {how} · next {_next_fire_str(existing)}\n"
+        f"  correct that job instead, or book under a different --subject.",
+        file=sys.stderr,
+    )
+    raise SystemExit(SUBJECT_COLLISION_EXIT)
+
+
 def cmd_add_once(args) -> None:
     try:
         dt = datetime.strptime(args.at, "%Y-%m-%d %H:%M")
@@ -99,6 +174,8 @@ def cmd_add_once(args) -> None:
               f"got {args.at!r}")
     name = args.name or f"{args.agent} wake {args.at} {_tz_label(dt)}"
     job = _base_job(args.agent, name, args.message, args.timeout_seconds, args.workspace)
+    if getattr(args, "subject", None):
+        job["subject"] = args.subject
     if args.category:
         job["category"] = args.category
     if getattr(args, "engine", None):
@@ -115,7 +192,9 @@ def cmd_add_once(args) -> None:
     }
     if getattr(args, "locked", False):
         job["locked"] = True
-    registry.mutate(lambda reg: reg["jobs"].append(job))
+    existing = _add_job(job)
+    if existing:
+        _refuse_collision(job, existing)
     _emit(args, job, f"added once job {job['id']} — fires {args.at} {_tz_label(dt)}")
 
 
@@ -135,6 +214,8 @@ def cmd_add_recurring(args) -> None:
         rrule = args.rrule
         dtstart = datetime.now(LOCAL_TZ).replace(hour=hh, minute=mm, second=0, microsecond=0)
     job = _base_job(args.agent, args.name, args.message, args.timeout_seconds, args.workspace)
+    if getattr(args, "subject", None):
+        job["subject"] = args.subject
     if args.category:
         job["category"] = args.category
     if getattr(args, "engine", None):
@@ -148,7 +229,9 @@ def cmd_add_recurring(args) -> None:
         "rrule": rrule,
         "delete_after_run": False,
     }
-    registry.mutate(lambda reg: reg["jobs"].append(job))
+    existing = _add_job(job)
+    if existing:
+        _refuse_collision(job, existing)
     nxt = occurrences.next_fires(job, 1)
     when = nxt[0].strftime("%Y-%m-%d %H:%M %Z") if nxt else "never"
     _emit(args, job, f"added recurring job {job['id']} — rrule {rrule}, next {when}")
@@ -353,6 +436,13 @@ def cmd_feed_token(args) -> None:
 # ------------------------------------------------------------------ parser
 
 
+_SUBJECT_HELP = (
+    "the surface this job covers. A second enabled job with the same "
+    f"(agent, subject) is refused (exit {SUBJECT_COLLISION_EXIT}) whatever its "
+    "fire time, so a one-shot cannot shadow a recurrence already covering it"
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="scheduler.cli", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -363,6 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
     ao.add_argument("--message", required=True)
     ao.add_argument("--name")
     ao.add_argument("--timeout-seconds", type=int)
+    ao.add_argument("--subject", help=_SUBJECT_HELP)
     ao.add_argument("--delete-after-run", action="store_true")
     ao.add_argument("--category", help="run-category (schedule.json categories map) for model/timeout resolution")
     ao.add_argument("--engine", choices=("claude", "codex"))
@@ -384,6 +475,7 @@ def build_parser() -> argparse.ArgumentParser:
     ar.add_argument("--message", required=True)
     ar.add_argument("--name", required=True)
     ar.add_argument("--timeout-seconds", type=int)
+    ar.add_argument("--subject", help=_SUBJECT_HELP)
     ar.add_argument("--category", help="run-category (schedule.json categories map) for model/timeout resolution")
     ar.add_argument("--engine", choices=("claude", "codex"))
     ar.add_argument("--codex-model", help="native model override; otherwise use the Codex configuration")

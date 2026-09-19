@@ -148,6 +148,9 @@ def validate_registry(reg: dict) -> None:
         lk = job.get("locked")
         if lk is not None and not isinstance(lk, bool):
             raise ValueError(f"{where}: locked must be a boolean or null")
+        subj = job.get("subject")
+        if subj is not None and (not isinstance(subj, str) or not subj.strip()):
+            raise ValueError(f"{where}: subject must be a non-empty string or null")
         cat = job.get("category")
         if cat is not None:
             if not isinstance(cat, str):
