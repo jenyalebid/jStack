@@ -32,12 +32,12 @@ def lab(tmp_path, monkeypatch):
     state.mkdir()
     (state / "host-id").write_text("existing-machine")
     (state / "updates").mkdir()
-    app, services = tmp_path / "Hub.app", tmp_path / "Services.app"
+    app = tmp_path / "Hub.app"
     trust = app / "Contents/Resources/packages/jstack_host/release-trust.json"
     trust.parent.mkdir(parents=True)
     trust.write_text(json.dumps({"public_key": "existing-public-key"}))
     root = tmp_path / "private/migrations"
-    settings = {"schema": 1, "app": str(app), "services_app": str(services), "migration_dir": str(root),
+    settings = {"schema": 1, "app": str(app), "migration_dir": str(root),
                 "port": 9432, "bind": "127.0.0.1", "environment": {
                     "JREMOTE_STATE_DIR": str(state), "JREMOTE_HOST_PROFILE": "default"}}
     old = {"machine": "existing-machine", "team_id": "MZ95H77RQQ", "local_url": "http://127.0.0.1:9432",
@@ -59,7 +59,7 @@ def lab(tmp_path, monkeypatch):
     loaded = {job["Label"] for job in jobs.values()}
     statuses = {role: "not_registered" for role in migration.ROLES}
     disabled, calls = set(), []
-    monkeypatch.setattr(migration, "verified_pair", lambda _: {"sha": "a" * 40, "release": "new-release"})
+    monkeypatch.setattr(migration, "verified_hub", lambda _: {"sha": "a" * 40, "release": "new-release"})
     monkeypatch.setattr(migration, "provenance", lambda path: {"sha256": migration.file_hash(path)})
     monkeypatch.setattr(migration.embed, "read", lambda: {})
     monkeypatch.setattr(migration.migration, "disabled_labels", lambda: disabled)

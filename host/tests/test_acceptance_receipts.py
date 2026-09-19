@@ -34,23 +34,19 @@ def test_corrupt_build_counter_refuses_identity_reuse(tmp_path):
         publish_release.allocate_build(tmp_path, 71)
 
 
-def test_signed_menu_has_hub_name_and_exact_build_identity(tmp_path, monkeypatch):
-    import plistlib
-    stack = tmp_path / "stack"
-    (stack / "host").mkdir(parents=True)
-    (stack / "host/release-identity.json").write_text(json.dumps({"build": 72, "sha": "a" * 40}))
-    notary = tmp_path / "notary.json"
-    notary.write_text(json.dumps({"private_key_path": "/unused", "key_id": "test", "issuer_id": "test"}))
-    monkeypatch.setattr(publish_release, "command", lambda *a, **k: '{"status":"Accepted"}')
-    output = tmp_path / "output"
-    publish_release.sign_menu(stack, output, "0.69.3", {
-        "sign_keychain": "test", "sign_identity": "test", "notary_credentials": str(notary)})
-    # Preserve the single established bundle location; change its visible name.
-    info = plistlib.loads((output / "JStack Host.app/Contents/Info.plist").read_bytes())
+def test_signed_hub_has_hub_name_and_exact_build_identity():
+    from jstack_host import build_hub
+    # Every privacy grant hangs off this one signed identity; the consent
+    # dialogs name jStack Hub and each prompted access carries its purpose.
+    info = build_hub.hub_info("0.69.3", {"build": 72, "sha": "a" * 40})
     assert info["CFBundleName"] == info["CFBundleDisplayName"] == "jStack Hub"
-    assert info["CFBundleIdentifier"] == "com.jremote.menubar"
+    assert info["CFBundleIdentifier"] == "live.jstack.hub"
     assert info["CFBundleVersion"] == "72"
-    assert info["JStackSourceCommit"] == "a" * 40
+    assert info["CFBundleShortVersionString"] == "0.69.3"
+    for key, purpose in info.items():
+        if key.startswith("NS") and key.endswith("UsageDescription"):
+            assert purpose.startswith("jStack Hub ")
+    assert build_hub.hub_info("0.69.3", {"sha": "a" * 40})["CFBundleVersion"] == "0.69.3"
 
 
 @pytest.fixture

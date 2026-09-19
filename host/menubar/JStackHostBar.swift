@@ -81,11 +81,7 @@ enum HostAgent {
 
     static var serviceRole: String { serviceSettings()["host_capability"] as? String ?? "host" }
     static var serviceController: URL {
-        if serviceSettings()["host_capability"] != nil,
-           let path = serviceSettings()["services_app"] as? String {
-            return URL(fileURLWithPath: path).appendingPathComponent("Contents/MacOS/JStackHub")
-        }
-        return Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/JStackHub")
+        Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/JStackHub")
     }
 
     static var plistURL: URL {
@@ -1504,8 +1500,7 @@ enum HostControl {
     private static func serviceAction(_ action: String) -> (out: String, code: Int32) {
         let controller = HostAgent.serviceController
         let owner = controller.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let identifier = HostAgent.serviceSettings()["host_capability"] == nil ? "live.jstack.hub" : "live.jstack.hub.services"
-        let requirement = "=anchor apple generic and certificate leaf[subject.OU] = \"MZ95H77RQQ\" and identifier \"\(identifier)\""
+        let requirement = "=anchor apple generic and certificate leaf[subject.OU] = \"MZ95H77RQQ\" and identifier \"live.jstack.hub\""
         let checked = run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R", requirement, owner.path])
         guard checked.code == 0 else { return checked }
         return run(controller.path, [action, HostAgent.serviceRole])
@@ -1547,7 +1542,32 @@ enum HostControl {
     }()
 }
 
-/// Whether a LaunchAgent brings itself up at login, and flipping that.
+/// Signed startup is registration state, not a writable RunAtLoad flag.
+/// Changes belong in macOS Login Items: unregistering here would immediately
+/// stop the host (or this menu), not merely change its next-login behavior.
+enum SignedLogin {
+    static func status(_ role: String) -> SMAppService.Status? {
+        let url = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/services.json")
+        guard let data = try? Data(contentsOf: url),
+              let catalog = try? JSONDecoder().decode([String: String].self, from: data),
+              let plist = catalog[role], plist.hasPrefix("live.jstack."),
+              plist.hasSuffix(".plist"), !plist.contains("/") else { return nil }
+        return SMAppService.agent(plistName: plist).status
+    }
+
+    static func description(_ status: SMAppService.Status?) -> String {
+        guard let status else { return "Unknown" }
+        switch status {
+        case .enabled: return "Enabled"
+        case .notRegistered: return "Not registered"
+        case .requiresApproval: return "Approval required"
+        case .notFound: return "Service not found"
+        @unknown default: return "Unknown"
+        }
+    }
+}
+
+/// Legacy LaunchAgents only: whether one brings itself up at login.
 ///
 /// There is no permission to grant here and no API to ask. A *user* LaunchAgent
 /// in `~/Library/LaunchAgents` is loaded at login by launchd with no prompt and
@@ -1616,7 +1636,8 @@ enum LoginAgent {
 /// `install.sh` writes into both the bundle and the plist. Read rather than
 /// repeated, so the two cannot drift apart.
 enum MenuBarAgent {
-    static let label = Bundle.main.bundleIdentifier ?? "com.jremote.menubar"
+    static let label = HostAgent.appOwned ? "live.jstack.hub.menu"
+        : (Bundle.main.bundleIdentifier ?? "com.jremote.menubar")
 }
 
 // MARK: - The menu bar
@@ -2231,7 +2252,15 @@ final class StatusController: NSObject {
         // submenu already is — a Settings item next to it would be a second
         // door onto the same room.
         sub.addItem(.separator())
-        if HostAgent.isInstalled {
+        if HostAgent.appOwned {
+            sub.addItem(Self.caption("Hub at Login: " + SignedLogin.description(SignedLogin.status(HostAgent.serviceRole))))
+            sub.addItem(Self.caption("Menu Bar at Login: " + SignedLogin.description(SignedLogin.status("menu"))))
+            let settings = Self.action("Login Items Settings…", #selector(doOpenLoginSettings), self,
+                                       symbol: "gearshape")
+            settings.setAccessibilityIdentifier("hub_open_login_settings")
+            settings.toolTip = "macOS manages signed background services. Disabling them can stop running services immediately."
+            sub.addItem(settings)
+        } else if HostAgent.isInstalled {
             let hub = Self.check("Start Hub at Login",
                                  on: LoginAgent.startsAtLogin(HostAgent.label),
                                  #selector(doToggleHubLogin), self)
@@ -2247,7 +2276,7 @@ final class StatusController: NSObject {
             }
             sub.addItem(hub)
         }
-        if LoginAgent.exists(MenuBarAgent.label) {
+        if !HostAgent.appOwned && LoginAgent.exists(MenuBarAgent.label) {
             let bar = Self.check("Start Menu Bar at Login",
                                  on: LoginAgent.startsAtLogin(MenuBarAgent.label),
                                  #selector(doToggleBarLogin), self)
@@ -3296,6 +3325,10 @@ final class StatusController: NSObject {
 
     // MARK: Settings
 
+    @objc private func doOpenLoginSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+
     @objc private func doToggleHubLogin(_ sender: NSMenuItem) {
         setLogin(HostAgent.label, sender, what: "the hub")
     }
@@ -3310,6 +3343,10 @@ final class StatusController: NSObject {
     /// the plist on the next open and simply appear not to have been clicked,
     /// which is indistinguishable from a menu that ignores you.
     private func setLogin(_ label: String, _ sender: NSMenuItem, what: String) {
+        guard !HostAgent.appOwned else {
+            doOpenLoginSettings()
+            return
+        }
         let wanted = sender.state != .on
         guard LoginAgent.setStartsAtLogin(label, wanted) else {
             let failed = NSAlert()
@@ -3344,8 +3381,9 @@ final class StatusController: NSObject {
             "hub        \(state.headline)",
             "agent      \(HostAgent.label)"
                 + (HostAgent.isInstalled ? "" : " (no plist)"),
-            "login      hub \(HostAgent.isInstalled && LoginAgent.startsAtLogin(HostAgent.label) ? "yes" : "no")"
-                + ", menu bar \(LoginAgent.startsAtLogin(MenuBarAgent.label) ? "yes" : "no")",
+            HostAgent.appOwned
+                ? "login      hub \(SignedLogin.description(SignedLogin.status(HostAgent.serviceRole))), menu bar \(SignedLogin.description(SignedLogin.status("menu")))"
+                : "login      hub \(HostAgent.isInstalled && LoginAgent.startsAtLogin(HostAgent.label) ? "yes" : "no"), menu bar \(LoginAgent.startsAtLogin(MenuBarAgent.label) ? "yes" : "no")",
             "bind       \(HostAgent.bind() ?? "not recorded")",
             "state      \(HostAgent.stateDir().path)",
             "token      \(HostAgent.tokenPath().path)"

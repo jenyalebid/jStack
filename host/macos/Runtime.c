@@ -20,7 +20,7 @@ static int verify_bundle(const char *macos) {
     OSStatus status = SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code);
     if (status == errSecSuccess) status = SecRequirementCreateWithString(
         CFSTR("anchor apple generic and certificate leaf[subject.OU] = \"MZ95H77RQQ\" and "
-              "(identifier \"live.jstack.hub\" or identifier \"live.jstack.hub.services\")"),
+              "identifier \"live.jstack.hub\""),
         kSecCSDefaultFlags, &requirement);
     if (status == errSecSuccess) status = SecStaticCodeCheckValidity(code,
         kSecCSCheckAllArchitectures | kSecCSCheckNestedCode | kSecCSStrictValidate, requirement);

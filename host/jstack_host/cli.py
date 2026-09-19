@@ -66,13 +66,6 @@ def _cmd_emergency_stop(args) -> int:
     return emergency_stop.stop(out=sys.stdout)
 
 
-def _cmd_services_update(args) -> int:
-    import json
-    from . import services_handoff
-    print(json.dumps(services_handoff.submit(args.candidate), sort_keys=True))
-    return 0
-
-
 def _cmd_pair(args) -> int:
     """Mint an enrolment code, the way the app expects to be introduced.
 
@@ -959,10 +952,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("emergency-stop", help="stop all jStack services and reset their macOS permissions")
     p.set_defaults(fn=_cmd_emergency_stop)
-
-    p = sub.add_parser("services-update", help="replace the signed Services owner through the Hub controller")
-    p.add_argument("candidate", type=_path)
-    p.set_defaults(fn=_cmd_services_update)
 
     def _serving_args(p, *, bind_default, bind_help):
         p.add_argument("--port", type=int, default=install_host.DEFAULT_PORT)

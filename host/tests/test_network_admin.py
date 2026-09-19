@@ -18,6 +18,7 @@ def plan():
             "policy": {"owner": 501, "configuration": "/private/network.conf",
                        "address": "10.66.0.1/24", "subnet": "10.66.0.0/24",
                        "nameFile": "/var/run/wireguard/network.name", "forwarding": True, "active": True},
+            "recovery": {"bundle": "/Applications/jStack Hub.app", "state": "/Users/x/state"},
             "legacy": [{"label": "example.network", "sha256": "d" * 64, "mode": 0o644, "group": 0, "loaded": True,
                         "disabled": False, "sources": [{"path": "/private/network.sh", "sha256": "e" * 64, "owner": 501}]}]}
 
@@ -33,6 +34,11 @@ def plan():
     lambda p: p["legacy"].append(copy.deepcopy(p["legacy"][0])),
     lambda p: p.update(candidateSeal="unsigned"),
     lambda p: p.update(command="/bin/sh"),
+    lambda p: p.pop("recovery"),
+    lambda p: p["recovery"].pop("state"),
+    lambda p: p["recovery"].update(bundle="Applications/jStack Hub.app"),
+    lambda p: p["recovery"].update(bundle="/Library/jstack-hub"),
+    lambda p: p["recovery"].update(state="state"),
 ])
 def test_malformed_or_off_plan_is_rejected_before_approval(change, monkeypatch, tmp_path):
     request = plan()
