@@ -496,6 +496,24 @@
           },
           "subsystems": [],
           "notes": "Companion to file-issue, and a different act: file-issue answers where a NEW finding goes (an intake column, by repo linkage); this answers where work-in-progress is visible (a work board, named by config). Adding is idempotent, so a re-fired event does not duplicate the card. Sessions never place their own cards - a host card engine shells to this binary on GitHub events. Which board is a property of the operation, not of the repo: one board tracks work across every repo, a Projects v2 board accepts items from any repo, and resolving it from the repo owner instead made every out-of-org repo unplaceable because a personal account has no board of its own. Only the board's identity is configured - a node id that does not change; its title and its columns are still read live for the same reason file-issue reads linkage live, because a local board->column table is a second copy of a fact GitHub owns."
+        },
+        {
+          "id": "issue-worktree",
+          "kind": "subsystem",
+          "name": "Worktree Interlock",
+          "description": "Takes the worktree for an issue, or refuses to work beside a session that already holds it. Tries the create form first and treats its failure as the signal that somebody has been here, then scans the live process table for an owner before calling it a resume.",
+          "code": [
+            "bin/issue-worktree"
+          ],
+          "config": [],
+          "docs": [],
+          "test": {
+            "type": "script",
+            "path": "tests/issue-worktree.sh",
+            "description": "Drives the real binary against real processes and real worktrees, not stubs - a stubbed process table would only prove a fixture parses. Fake sessions are made with exec -a so argv[0] really is claude and cwd is a real directory lsof can be asked about, and the fixture must use a two-command script because bash exec-optimizes a single one and the process silently stops resembling a session. A fresh issue creates the tree; a live owner is refused with its pid and start time and nothing is created; an owner with NO ref in argv but standing in the worktree is still refused, which is the --resume shape argv alone cannot see; a session does not refuse itself through its own ancestor; #420 does not match #42; a non-agent process carrying the ref is not an owner; a dead owner resumes with a receipt saying what was checked; and an unreadable process table refuses rather than reporting a clear machine."
+          },
+          "subsystems": [],
+          "notes": "The branch is issue-<N> and the worktree is {seat}/pad/issue-<N>, both derived from the number, so two dispatches on one issue land in one checkout by construction rather than by accident. The skill used to print both worktree commands and let the session pick between them, which spent the only available signal on a guess: the create form fails when the branch or path already exists, and a session reading that as a resume throws the detection away. Ownership is decided from what is running, never from a record - a registry row can outlive its process or be reaped out from under it. Two observables, either sufficient: the issue ref in argv, and cwd inside the worktree. The second is not redundant, because a session that adopted its issue from a comment on another issue carries no ref in argv at all. Identity is argv[0]'s basename, the same rule the host process scan uses, since 'claude' as a substring also matches unrelated tooling; the ref is matched with a digit boundary so #420 is not #42; and self plus every ancestor is excluded, without which every dispatch refuses itself and the skill can never run. Fails closed: an unreadable scan reports occupied, because a look that failed must not answer as a look that found nothing."
         }
       ]
     },

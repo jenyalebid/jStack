@@ -1,0 +1,321 @@
+#!/usr/bin/env bash
+# jStack adapter — take the worktree for an issue, or refuse to work beside a
+# session that already owns it.
+#
+# Contract:
+#   issue-worktree --repo <owner/name> --issue <N> --path <dir>
+#                  [--repo-root <dir>] [--json]
+#
+# Exit 0 = the worktree at --path is yours to work in; the last stdout line
+# says how you got it. Exit 3 = somebody else is already on this issue and
+# nothing was created.
+#
+# WHY THIS IS A BINARY AND NOT A PARAGRAPH IN THE SKILL. `/jstack:issue` used
+# to print both worktree commands and let the session pick:
+#
+#     git worktree add "$WT" -b issue-<N>    # first time
+#     git worktree add "$WT" issue-<N>       # resume
+#
+# Choosing between them is the whole interlock, and it was spent on a guess.
+# The create form FAILS when the branch or the path already exists — that
+# failure is the machine telling you somebody has been here — and a session
+# that reads "resume" off its own expectations throws the signal away. Two
+# sessions then land in one checkout by design: the branch is `issue-<N>` and
+# the worktree is `{seat}/pad/issue-<N>`, both deterministic, so the second
+# dispatch computes its way into the first one's tree.
+#
+# That is not a tidiness problem. Where the work carries a destructive step —
+# an in-place rewrite of a set of files both sessions are reading — the two
+# interleave their reads and writes, and a rewrite that preserves each file's
+# length corrupts quietly: every size and geometry check still passes while the
+# contents are gone. The near-miss that prompted this was caught only because
+# somebody ran `ps` on a hunch. This binary is that hunch, made unskippable.
+#
+# HOW IT DECIDES
+#
+#   create succeeds            -> `created`. Nobody had this branch or path.
+#                                 This session made it, so this session owns it.
+#   create fails               -> the signal. Scan for a live owner:
+#     live owner found         -> `REFUSED`, exit 3, pid and start time named.
+#     none found               -> `resumed`, and the receipt says what was
+#                                 checked, so "resumed" is never silent.
+#
+# WHAT COUNTS AS A LIVE OWNER — argv is not enough, and that is not a guess.
+# A session started `--resume <sid>` carries NO issue reference in its argv at
+# all: it adopts its issue from a comment on a different one, so the number
+# never reaches its command line. A scan that only reads argv answers "no live
+# owner" for exactly that process, and that is the shape the near-miss took. So
+# two observables, either of which is enough:
+#
+#   1. the issue ref in argv   — `owner/repo#N`, `repo#N`, or the board-row
+#                                form `repo - #N` that rides in `--name`.
+#   2. cwd inside the worktree — catches the adopted-issue shape above, which
+#                                argv cannot see. A session working an issue is
+#                                standing in its worktree; that is observable
+#                                now, and needs no record anyone has to keep.
+#
+# Both are readings of what is running, never of what was written down. A
+# registry row can outlive its process or be reaped out from under it; a pid
+# is exactly as alive as the thing it describes.
+#
+# THREE WAYS A NAIVE SCAN GETS THIS WRONG, all confirmed on a live machine:
+#
+#   - It matches ITSELF. The scanning session's own argv is
+#     `... --name widget - #42 -p /jstack:issue acme/widget#42`, and
+#     on a resume its own cwd is the worktree. Unguarded, every session refuses
+#     itself and the skill never runs. Self and every ancestor are excluded.
+#   - It matches on a bare number. `116` hits pid 116 (`softwareupdated`), and
+#     `#116` hits `#1160`. The ref is matched with a digit boundary.
+#   - It matches on the substring "claude". `JStackRuntime local claude-max-api`
+#     and the node proxy both contain it. Identity is argv[0]'s basename, the
+#     same rule the host's process scan uses to decide what is a session.
+#
+# WHICH WAY IT FAILS. A false refusal costs a session that stops and names a
+# pid a human can look at and dismiss. A false pass costs two writers in one
+# checkout, which is how this issue was filed. So an unreadable cwd, an
+# unparseable scan, or a `ps` that will not run all read as OCCUPIED, never as
+# clear — a look that failed must not answer as a look that found nothing.
+#
+# Last stdout line is machine-parseable:
+#   WORKTREE state=<created|resumed> path=<dir> branch=<issue-N>
+#   WORKTREE state=refused branch=<issue-N> owner=<pid> since=<start>
+set -uo pipefail
+
+REPO="" ISSUE="" WT_PATH="" REPO_ROOT="" JSON=0
+
+die() { echo "issue-worktree: $*" >&2; exit 64; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo)      REPO="${2:-}"; shift 2 ;;
+    --issue)     ISSUE="${2:-}"; shift 2 ;;
+    --path)      WT_PATH="${2:-}"; shift 2 ;;
+    --repo-root) REPO_ROOT="${2:-}"; shift 2 ;;
+    --json)      JSON=1; shift ;;
+    -h|--help)   sed -n '2,/^set -uo/p' "$0" | sed '$d'; exit 0 ;;
+    *)           die "unknown argument '$1'" ;;
+  esac
+done
+
+[[ -n "$REPO"  ]] || die "--repo <owner/name> is required"
+[[ "$REPO" == */* ]] || die "--repo must be owner/name, got '$REPO'"
+[[ "$ISSUE" =~ ^[0-9]+$ ]] || die "--issue must be a number, got '${ISSUE:-}'"
+[[ -n "$WT_PATH" ]] || die "--path <dir> is required"
+
+REPO_NAME="${REPO##*/}"
+REPO_OWNER="${REPO%%/*}"
+BRANCH="issue-${ISSUE}"
+
+command -v git >/dev/null 2>&1 || { echo "issue-worktree: git not on PATH" >&2; exit 5; }
+
+if [[ -z "$REPO_ROOT" ]]; then
+  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$REPO_ROOT" ]] || die "--repo-root <dir> is required outside a git checkout"
+fi
+[[ -d "$REPO_ROOT" ]] || die "--repo-root '$REPO_ROOT' is not a directory"
+
+# Absolute, so the cwd containment test below compares like with like. The
+# path need not exist yet, so only its parent is resolved.
+abspath() {
+  local p="$1" dir base
+  dir="$(dirname "$p")"; base="$(basename "$p")"
+  if [[ -d "$p" ]]; then (cd "$p" && pwd -P)
+  elif [[ -d "$dir" ]]; then echo "$(cd "$dir" && pwd -P)/$base"
+  else echo "$p"; fi
+}
+WT_ABS="$(abspath "$WT_PATH")"
+
+# ── who is this process, and who made it ────────────────────────────────────
+# Walk to pid 1. A sibling session can never be an ancestor of this one, so
+# nothing real is lost by excluding the whole line — while failing to exclude
+# it makes every session refuse itself.
+own_pids() {
+  local p=$$ guard=0 out=""
+  while [[ -n "$p" && "$p" -gt 1 && $guard -lt 64 ]]; do
+    out+=" $p"
+    p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ "$p" =~ ^[0-9]+$ ]] || break
+    guard=$((guard + 1))
+  done
+  echo "$out "
+}
+
+# ── the scan ────────────────────────────────────────────────────────────────
+# Lowercased on both sides: awk has no portable case-insensitive match, and a
+# repo's case is not a thing to be strict about when the cost of missing is a
+# second writer.
+lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+ere_escape() { printf '%s' "$1" | sed 's/[][\.^$*+?(){}|]/\\&/g'; }
+
+RE_NAME="$(ere_escape "$(lc "$REPO_NAME")")"
+RE_OWNER="$(ere_escape "$(lc "$REPO_OWNER")")"
+BOUND_L='(^|[^a-z0-9_.-])'
+BOUND_R='($|[^0-9])'
+# `owner/repo#N` and the bare `repo#N` it is usually written as.
+RE_REF="${BOUND_L}(${RE_OWNER}/)?${RE_NAME}#${ISSUE}${BOUND_R}"
+# `repo - #N` — the board row title, which rides in the session's --name.
+RE_ROW="${BOUND_L}${RE_NAME}[[:space:]]+-[[:space:]]+#${ISSUE}${BOUND_R}"
+
+OWN="$(own_pids)"
+
+# A scan that cannot run must not read as an empty machine.
+PS_OUT="$(ps -axo pid=,lstart=,command= 2>/dev/null)" || PS_OUT=""
+if [[ -z "$PS_OUT" ]]; then
+  echo "issue-worktree: cannot read the process table — refusing rather than" >&2
+  echo "                assuming nobody is working $REPO#$ISSUE" >&2
+  echo "WORKTREE state=refused branch=$BRANCH owner=unknown since=unknown"
+  exit 3
+fi
+
+# Emits one line per agent-CLI process that is not this one:
+#   <pid>\t<start>\t<argv|check>\t<cmd>
+# `argv` = the ref is in its command line. `check` = it is a session, but the
+# ref is not in argv; its cwd still has to be looked at.
+CANDIDATES="$(printf '%s\n' "$PS_OUT" | awk -v own="$OWN" -v re_ref="$RE_REF" -v re_row="$RE_ROW" '
+{
+  pid = $1
+  if (pid !~ /^[0-9]+$/) next
+  if (index(own, " " pid " ") > 0) next
+  start = $2 " " $3 " " $4 " " $5 " " $6
+  cmd = ""
+  for (i = 7; i <= NF; i++) cmd = cmd $i (i < NF ? " " : "")
+  if (cmd == "") next
+
+  # Identity is argv[0], never a substring of the whole line.
+  a0 = cmd; sub(/ .*$/, "", a0)
+  n = split(a0, seg, "/"); base = seg[n]
+  if (base != "claude" && base != "claude.exe" && base != "codex" && base != "codex.exe") next
+
+  lcmd = tolower(cmd)
+  if (lcmd ~ re_ref || lcmd ~ re_row) print pid "\t" start "\targv\t" cmd
+  else print pid "\t" start "\tcheck\t" cmd
+}')"
+
+# cwd is asked only of processes already known to be sessions — a handful, so
+# one lsof each is a rounding error next to the collision it prevents.
+proc_cwd() {
+  lsof -a -p "$1" -d cwd -Fn 2>/dev/null | awk '/^n/ { sub(/^n/, ""); print; exit }'
+}
+
+OWNERS=""
+if [[ -n "$CANDIDATES" ]]; then
+  while IFS=$'\t' read -r pid start why cmd; do
+    [[ -n "${pid:-}" ]] || continue
+    if [[ "$why" == "argv" ]]; then
+      OWNERS+="$pid"$'\t'"$start"$'\t'"the issue ref is in its command line"$'\t'"$cmd"$'\n'
+      continue
+    fi
+    cwd="$(proc_cwd "$pid" || true)"
+    [[ -n "$cwd" ]] || continue   # a session that will not say where it stands
+    if [[ "$cwd" == "$WT_ABS" || "$cwd" == "$WT_ABS"/* ]]; then
+      OWNERS+="$pid"$'\t'"$start"$'\t'"it is standing in $cwd"$'\t'"$cmd"$'\n'
+    fi
+  done <<< "$CANDIDATES"
+fi
+
+# Where the branch is already checked out, if it is. Named in the refusal so
+# the human reading it does not have to go and find the tree.
+branch_worktree() {
+  git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | awk -v want="refs/heads/$BRANCH" '
+    /^worktree /   { wt = substr($0, 10) }
+    /^branch /     { if (substr($0, 8) == want) { print wt; exit } }'
+}
+
+emit_json_owners() {
+  printf '%s' "$OWNERS" | awk -F'\t' 'NF >= 2 {
+    gsub(/"/, "\\\"", $4)
+    printf "%s{\"pid\":%s,\"since\":\"%s\",\"why\":\"%s\",\"cmd\":\"%s\"}", (n++ ? "," : ""), $1, $2, $3, $4
+  }'
+}
+
+refuse() {
+  local holder; holder="$(branch_worktree || true)"
+  local first_pid first_since
+  first_pid="$(printf '%s' "$OWNERS" | head -1 | cut -f1)"
+  first_since="$(printf '%s' "$OWNERS" | head -1 | cut -f2)"
+
+  {
+    echo "issue-worktree: REFUSED — $REPO#$ISSUE is already being worked."
+    echo
+    printf '%s' "$OWNERS" | while IFS=$'\t' read -r pid start why cmd; do
+      [[ -n "${pid:-}" ]] || continue
+      echo "  pid $pid  started $start"
+      echo "      $why"
+      echo "      $cmd"
+    done
+    echo
+    [[ -n "$holder" ]] && echo "  branch $BRANCH is checked out at $holder"
+    echo "  Nothing was created. Two sessions in one worktree is the failure"
+    echo "  this refuses."
+    echo
+    echo "  If that process is NOT working this issue, say so on the issue and"
+    echo "  name the pid. Do not work beside it on a hunch."
+  } >&2
+
+  if [[ "$JSON" == "1" ]]; then
+    printf '{"state":"refused","branch":"%s","path":"%s","holder":"%s","owners":[' \
+      "$BRANCH" "$WT_ABS" "$holder"
+    emit_json_owners
+    printf ']}\n'
+  fi
+  echo "WORKTREE state=refused branch=$BRANCH owner=${first_pid:-unknown} since=${first_since:-unknown}"
+  exit 3
+}
+
+succeed() {
+  local state="$1" note="${2:-}"
+  if [[ "$JSON" == "1" ]]; then
+    printf '{"state":"%s","branch":"%s","path":"%s","note":"%s"}\n' \
+      "$state" "$BRANCH" "$WT_ABS" "$note"
+  else
+    [[ -n "$note" ]] && echo "issue-worktree: $note"
+  fi
+  echo "WORKTREE state=$state path=$WT_ABS branch=$BRANCH"
+  exit 0
+}
+
+# ── the branch point ────────────────────────────────────────────────────────
+# The create form is tried FIRST, always, and its failure is the whole signal.
+# Asking "does this look like a resume?" before trying is how the signal got
+# thrown away in the first place.
+CREATE_ERR="$(git -C "$REPO_ROOT" worktree add "$WT_ABS" -b "$BRANCH" 2>&1)"
+CREATE_RC=$?
+
+if [[ $CREATE_RC -eq 0 ]]; then
+  succeed created "created $WT_ABS on a new branch $BRANCH"
+fi
+
+# Something was already here. Before treating that as a resume, find out
+# whether it is still somebody's.
+BRANCH_EXISTS=0
+git -C "$REPO_ROOT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null 2>&1 && BRANCH_EXISTS=1
+
+if [[ $BRANCH_EXISTS -eq 0 && ! -e "$WT_ABS" ]]; then
+  # Neither the branch nor the path exists, so this is not a pre-existing
+  # worktree at all — it is git failing for its own reasons, and pretending
+  # otherwise would turn a broken repo into a phantom owner.
+  echo "issue-worktree: could not create the worktree, and nothing pre-exists:" >&2
+  echo "$CREATE_ERR" >&2
+  exit 5
+fi
+
+[[ -n "$OWNERS" ]] && refuse
+
+# Nobody live. This is a genuine resume — a dead session's tree, or one this
+# seat made earlier. Attach to it if it is not already a registered worktree.
+HOLDER="$(branch_worktree || true)"
+if [[ -z "$HOLDER" ]]; then
+  ATTACH_ERR="$(git -C "$REPO_ROOT" worktree add "$WT_ABS" "$BRANCH" 2>&1)"
+  if [[ $? -ne 0 ]]; then
+    echo "issue-worktree: $BRANCH exists but could not be checked out at $WT_ABS:" >&2
+    echo "$ATTACH_ERR" >&2
+    exit 5
+  fi
+elif [[ "$(abspath "$HOLDER")" != "$WT_ABS" ]]; then
+  # The branch is checked out somewhere else and nobody is holding it. Work
+  # there rather than fighting git for a second checkout of one branch.
+  succeed resumed "branch $BRANCH was already checked out at $HOLDER — work there, not $WT_ABS"
+fi
+
+n_seen="$(printf '%s\n' "$CANDIDATES" | grep -c . || true)"
+succeed resumed "$BRANCH pre-existed and no live session holds it (checked $n_seen other session(s) by argv and cwd) — resuming $WT_ABS"
