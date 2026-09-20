@@ -58,12 +58,31 @@ def pytest_sessionfinish(session, exitstatus):
     shutil.rmtree(_STATE_DIR, ignore_errors=True)
 
 
+@pytest.fixture(scope="session")
+def shipped_security_alert():
+    """`hostenv.security_alert` as the package ships it, read before the sink
+    below replaces it — the only handle a test has on the real function.
+
+    Every other test wants the sink; the one test that has to prove the
+    *shipped* path refuses to deliver cannot use it, and by the time any test
+    body runs the module attribute is already the sink. Ordering is not
+    incidental: `_isolated_security_alerts` takes this as an argument so it
+    cannot be set up first.
+    """
+    from jstack_host import hostenv
+
+    return hostenv.security_alert
+
+
 @pytest.fixture(scope="session", autouse=True)
-def _isolated_security_alerts():
+def _isolated_security_alerts(shipped_security_alert):
     """Test alerts stay in memory, never in the machine's real notifier.
 
     Session scope also covers delayed alert threads between test fixtures.
     Tests can still replace this sink to assert their exact alert payload.
+
+    Belt to `hostenv.in_test_process`'s braces: that guard is the one a stale
+    checkout cannot opt out of, this one keeps the payloads inspectable.
     """
     from jstack_host import hostenv
 

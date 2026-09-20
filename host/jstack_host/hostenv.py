@@ -47,6 +47,7 @@ import json
 import os
 import re
 import socket
+import sys
 import uuid
 from pathlib import Path
 
@@ -719,11 +720,41 @@ def pings_db() -> Path | None:
     return profile().pings_db()
 
 
+def in_test_process() -> bool:
+    """Whether this interpreter is a test run rather than a serving host.
+
+    Two signals because neither alone covers the window. `PYTEST_CURRENT_TEST`
+    is the documented marker, but pytest sets it per *test* and deletes it when
+    that test ends — and this package raises alarms from daemon threads
+    (`auth._gate`, `enrolment`), so a lockout tripped in a test's last
+    microseconds can reach the send after the variable is gone. `pytest` in
+    `sys.modules` is the process-lifetime half: true from the first import to
+    interpreter exit, which is the window that actually needs covering.
+
+    A serving host imports neither, so this is False everywhere it matters.
+    """
+    return bool(os.environ.get("PYTEST_CURRENT_TEST")) or "pytest" in sys.modules
+
+
 def security_alert(body: str) -> None:
     """Raise a security alarm the way this host can — the profile's own
     channel where one exists, the server log anywhere else. Failure is
     swallowed loudly: the
-    alert path must never take down the request that tripped it."""
+    alert path must never take down the request that tripped it.
+
+    **A test process never alarms a person.** Suites drive this path with
+    synthetic lockouts by design, and on a host whose profile alerts over a
+    messaging channel every one of those fixtures pages a human — the
+    embedding host that found this had taken 100 of them over twelve days. A
+    conftest fixture that swaps the sink is opt-in per checkout: it fixes the
+    tree it lands in and leaves every stale worktree and staged copy still
+    wired to the live channel. The refusal belongs here, where no checkout can
+    opt out of it.
+    """
+    if in_test_process():
+        print(f"jremote SECURITY (test process, not delivered): {body}",
+              flush=True)
+        return
     try:
         profile().security_alert(body)
     except Exception as e:  # noqa: BLE001
