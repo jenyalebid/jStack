@@ -38,7 +38,7 @@ def validate_request(request: dict) -> None:
         if set(request) != common:
             raise ValueError("recovery must use the protected staged request")
         return
-    if action != "stage" or set(request) != common | {"candidate", "candidateSeal", "candidateBinary", "policy", "legacy"}:
+    if action != "stage" or set(request) != common | {"candidate", "candidateSeal", "candidateBinary", "policy", "recovery", "legacy"}:
         raise ValueError("invalid Network staging request")
     if not isinstance(request["candidate"], str) or not Path(request["candidate"]).is_absolute():
         raise ValueError("candidate must be absolute")
@@ -58,6 +58,13 @@ def validate_request(request: dict) -> None:
         raise ValueError("Network address and subnet differ")
     if not Path(policy["configuration"]).is_absolute() or not re.fullmatch(r"/var/run/wireguard/[a-zA-Z0-9.-]+", policy["nameFile"]):
         raise ValueError("invalid Network data paths")
+    recovery = request["recovery"]
+    if not isinstance(recovery, dict) or set(recovery) != {"bundle", "state"}:
+        raise ValueError("invalid hub recovery fields")
+    if not isinstance(recovery["bundle"], str) or not Path(recovery["bundle"]).is_absolute() or not recovery["bundle"].endswith(".app"):
+        raise ValueError("hub recovery requires an absolute bundle path")
+    if not isinstance(recovery["state"], str) or not Path(recovery["state"]).is_absolute():
+        raise ValueError("hub recovery requires an absolute state directory")
     if not isinstance(request["legacy"], list):
         raise ValueError("legacy review must be an explicit list")
     labels = set()

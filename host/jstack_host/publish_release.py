@@ -5,11 +5,8 @@ import argparse
 import base64
 import copy
 import fcntl
-import hashlib
-import io
 import json
 import os
-import plistlib
 import shutil
 import subprocess
 import sys
@@ -19,7 +16,7 @@ import time
 from pathlib import Path
 
 from . import acceptance, release_manifest as releases
-from .update_macos import command, safe_tar
+from .update_macos import command
 from .update_supervisor import atomic_json
 
 
@@ -49,60 +46,27 @@ def allocate_build(candidates: Path, minimum: int) -> int:
         return number
 
 
-def sign_menu(stack: Path, output: Path, version: str, config: dict) -> Path:
-    password_path = config.get("sign_keychain_password_file")
-    if password_path:
-        command(["/usr/bin/security", "unlock-keychain", "-p", Path(password_path).read_text().strip(),
-                 config["sign_keychain"]])
-        command(["/usr/bin/security", "set-keychain-settings", config["sign_keychain"]])
-        state = subprocess.run(["/usr/bin/security", "show-keychain-info", config["sign_keychain"]],
-                               capture_output=True, text=True, timeout=15)
-        if state.returncode or "no-timeout" not in state.stdout + state.stderr:
-            raise releases.ReleaseError("signing keychain is not unlocked with no timeout")
-    app = output / "JStack Host.app"
-    binary = app / "Contents/MacOS/JStackHostBar"
-    binary.parent.mkdir(parents=True)
-    command(["xcrun", "swiftc", "-O", "-o", str(binary),
-             str(stack / "host/menubar/JStackHostBar.swift")], timeout=180)
-    identity = json.loads((stack / "host/release-identity.json").read_text())
-    info = {"CFBundleExecutable": "JStackHostBar", "CFBundleIdentifier": "com.jremote.menubar",
-            "CFBundleName": "jStack Hub", "CFBundleDisplayName": "jStack Hub",
-            "CFBundlePackageType": "APPL",
-            "CFBundleShortVersionString": version, "CFBundleVersion": str(identity["build"]),
-            "JStackSourceCommit": identity["sha"],
-            "LSUIElement": True, "NSHighResolutionCapable": True,
-            "CFBundleURLTypes": [{"CFBundleURLName": "jStack updates", "CFBundleURLSchemes": ["jstack"]}]}
-    (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
-    command(["/usr/bin/codesign", "--force", "--timestamp", "--options", "runtime",
-             "--keychain", config["sign_keychain"], "--sign", config["sign_identity"], str(app)])
-    archive = output / "menubar.zip"
-    command(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(app), str(archive)])
-    credentials = json.loads(Path(config["notary_credentials"]).read_text())
-    # Same Developer ID / notarytool / stapler pipeline as the client release.
-    notary = command(["xcrun", "notarytool", "submit", str(archive), "--key", str(Path(credentials["private_key_path"]).expanduser()),
-                      "--key-id", credentials["key_id"], "--issuer", credentials["issuer_id"],
-                      "--wait", "--output-format", "json"], timeout=1200)
-    if json.loads(notary).get("status") != "Accepted":
-        raise releases.ReleaseError("menu bar notarization was not accepted")
-    command(["xcrun", "stapler", "staple", str(app)])
-    command(["/usr/sbin/spctl", "--assess", "--type", "execute", str(app)])
-    # Re-archive the stapled bundle, not the unstapled notary upload.
-    final = output / "menubar-notarized.zip"
-    command(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(app), str(final)])
-    return final
+def sign_hub(stack: Path, output: Path, version: str, config: dict) -> None:
+    """Build the public, catalog-free Hub with the publisher's exact identity.
 
-
-def sign_service_owners(stack: Path, output: Path, version: str, config: dict) -> None:
-    """Build public, catalog-free owners with the publisher's exact identity."""
+    Private capability definitions never leave the machine that runs them, so
+    the published artifact carries an empty catalog. A publisher whose own Hub
+    embeds capabilities configures `local_catalog`; the equal-identity variant
+    built from it is stored machine-locally by promote(), never in the feed.
+    """
     from . import build_hub
     identity = json.loads((stack / "host/release-identity.json").read_text())
-    for kind, recovery in (("menubar", False), ("services", True)):
-        destination = output / (kind + "-build")
-        app = build_hub.build(stack, destination, version, config, recovery=recovery,
-                             release_id=identity["release"], github_repo=identity["github_repo"],
-                             build_number=identity["build"])
+    variants = [("menubar-notarized.zip", None)]
+    catalog_path = config.get("local_catalog")
+    if catalog_path:
+        variants.append(("hub-catalog.zip", json.loads(Path(catalog_path).read_text())))
+    for name, catalog in variants:
+        destination = output / (name.removesuffix(".zip") + "-build")
+        app = build_hub.build(stack, destination, version, config, catalog=catalog,
+                              release_id=identity["release"], github_repo=identity["github_repo"],
+                              build_number=identity["build"])
         build_hub.notarize(app, destination, config)
-        shutil.copy2(destination / "hub-notarized.zip", output / (kind + "-notarized.zip"))
+        shutil.copy2(destination / "hub-notarized.zip", output / name)
 
 
 def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
@@ -141,16 +105,8 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
         for path in sorted(stack.iterdir()):
             if path.name != ".git":
                 bundle.add(path, arcname=path.name)
-    native_services = config.get("native_services", False)
-    if type(native_services) is not bool:
-        raise releases.ReleaseError("native_services must be an explicit boolean")
-    atomic_json(work / "owner-format.json", {"schema": 2 if native_services else 1})
-    if native_services:
-        print("Building, signing and notarizing Hub and Services", flush=True)
-        sign_service_owners(stack, output, version, config)
-    else:
-        print("Building, signing and notarizing menu bar", flush=True)
-        sign_menu(stack, output, version, config)
+    print("Building, signing and notarizing the Hub", flush=True)
+    sign_hub(stack, output, version, config)
     app_output = work / "client-output"
     if reuse_client is not None:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -198,13 +154,9 @@ def seal(work: Path, config: dict, notes: str) -> Path:
     releases.check_artifact(app, app_manifest)
     destination = output / app.name
     shutil.copy2(app, destination)
-    format_path = work / "owner-format.json"
-    schema = json.loads(format_path.read_text())["schema"] if format_path.exists() else 1
-    if schema not in {1, 2}:
-        raise releases.ReleaseError("unsupported owner format")
-    if (output / "services-notarized.zip").exists() != (schema == releases.NATIVE_SCHEMA):
-        raise releases.ReleaseError("owner format and recovery artifact disagree")
-    manifest = {"schema": schema, "release": release_id, "notes": notes,
+    if config.get("local_catalog") and not (output / "hub-catalog.zip").is_file():
+        raise releases.ReleaseError("configured private capability variant was not built for this candidate")
+    manifest = {"schema": releases.SCHEMA, "release": release_id, "notes": notes,
                 "build": identity.get("build"),
                 "channel": {"github_repo": identity.get("github_repo")},
                 "sources": {"stack": stack_sha, "client": client_sha},
@@ -216,8 +168,6 @@ def seal(work: Path, config: dict, notes: str) -> Path:
                                   "architecture": "arm64", "minimum_os": "26.0"},
                 "mobile": {"source": client_sha, "status": "not_distributed"},
                 "receipts": {}}
-    if schema == releases.NATIVE_SCHEMA:
-        manifest["components"]["services"] = component(output / "services-notarized.zip", str(identity["build"]))
     private_key = base64.b64decode(Path(config["private_key"]).read_text().strip(), validate=True)
     atomic_json(output / "candidate.json", releases.sign(manifest, private_key, promoted=False))
     return output
@@ -257,7 +207,8 @@ def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -
     return state
 
 
-def promote(candidate: Path, receipts_dir: Path, feed: Path, private_key: bytes) -> dict:
+def promote(candidate: Path, receipts_dir: Path, feed: Path, private_key: bytes,
+            *, local_components: str | None = None) -> dict:
     manifest = candidate_manifest(candidate, private_key)
     # One door. Every journey is a genuine pass over these exact artifacts, or
     # this raises and names the ones that are not.
@@ -277,6 +228,19 @@ def promote(candidate: Path, receipts_dir: Path, feed: Path, private_key: bytes)
         shutil.copytree(receipts_dir, staging / "receipts")
         atomic_json(staging / "manifest.json", envelope)
         os.rename(staging, destination)
+    variant = candidate / "hub-catalog.zip"
+    if variant.is_file():
+        # This machine's own updater refuses the catalog-free public artifact;
+        # its equal-identity variant must be in place before the feed offers
+        # the release. Machine-local storage only — never the published feed.
+        if not local_components:
+            raise releases.ReleaseError(
+                "candidate carries a private capability variant; configure local_components")
+        store = Path(local_components) / manifest["release"]
+        store.mkdir(parents=True, exist_ok=True)
+        target = store / variant.name
+        if not target.exists() or releases.digest(target) != releases.digest(variant):
+            shutil.copy2(variant, target)
     # Single publication point. Every referenced artifact and evidence receipt
     # already exists, and the prior release directory remains untouched.
     atomic_json(feed / "latest.json", envelope)
@@ -343,7 +307,8 @@ def ship(config: dict, candidate: Path, receipts: Path, private_key: bytes,
     trusts, so an interrupted or partial acceptance run stops here.
     """
     qualify(config, candidate, receipts, private_key)
-    envelope = promote(candidate, receipts, Path(config["feed_dir"]), private_key)
+    envelope = promote(candidate, receipts, Path(config["feed_dir"]), private_key,
+                       local_components=config.get("local_components"))
     release = envelope["manifest"]["release"]
     result = {"promoted": release}
     github_repo = config.get("github_repo") or envelope["manifest"].get("channel", {}).get("github_repo")
@@ -415,7 +380,8 @@ def main():
         print(json.dumps(ship(config, args.candidate, args.receipts, private,
                               deploy_after=args.deploy), indent=2))
     else:
-        result = promote(args.candidate, args.receipts, Path(config["feed_dir"]), private)
+        result = promote(args.candidate, args.receipts, Path(config["feed_dir"]), private,
+                         local_components=config.get("local_components"))
         print(json.dumps({"promoted": result["manifest"]["release"]}))
 
 

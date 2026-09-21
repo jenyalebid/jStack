@@ -4,7 +4,6 @@ import Darwin
 
 // Only these sealed, app-bundled definitions can be registered. Never accept a
 // caller-provided plist path, launchd domain, executable or root command.
-let recovery = Bundle.main.bundleIdentifier == "live.jstack.hub.services"
 let privileged = Bundle.main.bundleIdentifier == "live.jstack.network"
 
 func appService(_ plist: String) -> SMAppService {
@@ -59,14 +58,13 @@ func main() throws {
     let args = Array(CommandLine.arguments.dropFirst())
     let services = try serviceDefinitions()
     guard let action = args.first else {
-        if recovery || privileged {
+        if privileged {
             try emit(services.mapValues { statusName(appService($0).status) })
             return
         }
-        let menu = Bundle.main.bundleURL.appendingPathComponent(recovery ? "Contents/MacOS/JStackRuntime" : "Contents/MacOS/JStackHostBar")
+        let menu = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/JStackHostBar")
         let process = Process()
         process.executableURL = menu
-        if recovery { process.arguments = ["updater"] }
         try process.run()
         process.waitUntilExit()
         exit(process.terminationStatus)

@@ -11,6 +11,7 @@ let manager = FileManager.default
 let store = URL(fileURLWithPath: "/Library/PrivilegedHelperTools/.jstack-network")
 let destination = URL(fileURLWithPath: "/Library/PrivilegedHelperTools/jStack Network.app")
 let policyPath = URL(fileURLWithPath: "/Library/Preferences/live.jstack.network.json")
+let hubPolicyPath = URL(fileURLWithPath: "/Library/Preferences/live.jstack.hub.recovery.json")
 
 struct CodePin: Codable {
     let path: String
@@ -35,6 +36,16 @@ struct InstallPolicy: Codable, Equatable {
     let forwarding: Bool
     var active: Bool
 }
+struct HubRecovery: Codable, Equatable {
+    let bundle: String
+    let state: String
+}
+// The exact shape HubRecovery.swift reads back from hubPolicyPath.
+struct HubRecoveryPolicy: Encodable {
+    let owner: UInt32
+    let bundle: String
+    let state: String
+}
 struct InstallRequest: Codable {
     let schema: Int
     let action: String
@@ -43,6 +54,7 @@ struct InstallRequest: Codable {
     let candidateSeal: String?
     let candidateBinary: String?
     let policy: InstallPolicy?
+    let recovery: HubRecovery?
     let legacy: [LegacyJob]?
 }
 struct Journal: Codable {
@@ -55,6 +67,7 @@ struct Journal: Codable {
     var restoreActive: Bool?
     let previousApproval: String?
     var recoveryPhase: String?
+    var previousHubPolicy: String?
 }
 
 func refuse(_ reason: String) -> InstallFailure { .refused(reason) }
@@ -266,6 +279,8 @@ func stage(_ request: InstallRequest, at transaction: URL, work: URL) throws {
     guard !manager.fileExists(atPath: transaction.path), let source = request.candidate,
           source.hasPrefix("/"), let policy = request.policy, policy.owner != 0,
           networkAddressPair(policy.address, policy.subnet),
+          let recovery = request.recovery, recovery.bundle.hasPrefix("/"),
+          recovery.bundle.hasSuffix(".app"), recovery.state.hasPrefix("/"),
           let jobs = request.legacy, Set(jobs.map(\.label)).count == jobs.count else { throw refuse("invalid or previously staged transaction") }
     for job in jobs { try checkLegacy(job, at: work, lifecycle: true) }
     if policy.active && jobs.contains(where: { !$0.loaded || $0.disabled }) {
@@ -285,6 +300,8 @@ func stage(_ request: InstallRequest, at transaction: URL, work: URL) throws {
     let previousApproval = hadApp ? try userControl(policy.owner, action: "status", work: work) : nil
     let previous = manager.fileExists(atPath: policyPath.path) ? try Data(contentsOf: policyPath) : nil
     if previous != nil { try protected(policyPath) }
+    let previousHub = manager.fileExists(atPath: hubPolicyPath.path) ? try Data(contentsOf: hubPolicyPath) : nil
+    if previousHub != nil { try protected(hubPolicyPath) }
     if hadApp {
         guard jobs.isEmpty, let previous else { throw refuse("existing Network installation is incomplete") }
         var old = try JSONDecoder().decode(InstallPolicy.self, from: previous)
@@ -296,7 +313,7 @@ func stage(_ request: InstallRequest, at transaction: URL, work: URL) throws {
     let forwarding = try run("/usr/sbin/sysctl", ["-n", "net.inet.ip.forwarding"], at: work)
     guard forwarding.0 == 0, let wasForwarding = Int(forwarding.1.trimmingCharacters(in: .whitespacesAndNewlines)),
           [0, 1].contains(wasForwarding) else { throw refuse("forwarding state is unobservable") }
-    var journal = Journal(state: "staging", request: request, previousPolicy: previous?.base64EncodedString(), previousApp: hadApp, retired: [], forwardingBefore: wasForwarding, previousApproval: previousApproval)
+    var journal = Journal(state: "staging", request: request, previousPolicy: previous?.base64EncodedString(), previousApp: hadApp, retired: [], forwardingBefore: wasForwarding, previousApproval: previousApproval, previousHubPolicy: previousHub?.base64EncodedString())
     let journalPath = transaction.appendingPathComponent("journal.json")
     try write(journal, to: journalPath)
     if hadApp {
@@ -383,6 +400,12 @@ func activate(_ request: InstallRequest, at transaction: URL, work: URL) throws 
     journal.state = "activating"
     try write(journal, to: path)
     try write(policy, to: policyPath)
+    if let recovery = journal.request.recovery {
+        // Arm the hub watchdog only at cutover, under the same admin consent
+        // that authorized this transaction. A transaction staged by an older
+        // installer carries no recovery grant and arms nothing.
+        try write(HubRecoveryPolicy(owner: policy.owner, bundle: recovery.bundle, state: recovery.state), to: hubPolicyPath)
+    }
     if policy.active {
         let deadline = Date().addingTimeInterval(30)
         var healthy = false
@@ -452,6 +475,9 @@ func rollback(at transaction: URL, work: URL, uninstall: Bool = false) throws {
         if manager.fileExists(atPath: policyPath.path) {
             try manager.moveItem(at: policyPath, to: transaction.appendingPathComponent("uninstalled-policy.json"))
         }
+        if manager.fileExists(atPath: hubPolicyPath.path) {
+            try manager.moveItem(at: hubPolicyPath, to: transaction.appendingPathComponent("uninstalled-hub-policy.json"))
+        }
     } else {
         if journal.previousApp {
             let previous = transaction.appendingPathComponent("previous.app")
@@ -470,6 +496,17 @@ func rollback(at transaction: URL, work: URL, uninstall: Bool = false) throws {
                 try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: policyPath.path)
             }
         } else if manager.fileExists(atPath: policyPath.path) { try manager.removeItem(at: policyPath) }
+        if journal.request.recovery != nil {
+            // This transaction armed the hub watchdog at cutover; put back
+            // exactly the authority that existed before it. A journal without
+            // a recovery grant never touched the file and must not disarm it.
+            if let encoded = journal.previousHubPolicy, let data = Data(base64Encoded: encoded) {
+                try data.write(to: hubPolicyPath, options: .atomic)
+                try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: hubPolicyPath.path)
+            } else if manager.fileExists(atPath: hubPolicyPath.path) {
+                try manager.removeItem(at: hubPolicyPath)
+            }
+        }
         for job in jobs where journal.retired.contains(job.label) {
             let backup = transaction.appendingPathComponent(job.label + ".original.plist")
             guard try hashFile(backup) == job.sha256 else { throw refuse("legacy backup changed") }

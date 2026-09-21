@@ -50,27 +50,27 @@ def test_signed_bundle_cannot_fall_back_to_legacy_install(monkeypatch):
         install_host.install(out=io.StringIO())
 
 
-def test_embedding_host_uses_its_signed_capability_owner(monkeypatch, installed, tmp_path):
+def test_embedding_host_resolves_through_the_hubs_sealed_catalog(monkeypatch, installed, tmp_path):
     from pathlib import Path
-    owner = tmp_path / "Services.app"
-    resources = owner / "Contents/Resources"
+    app = Path(installed["app"])
+    resources = app / "Contents/Resources"
     resources.mkdir(parents=True)
     (resources / "automation-catalog.json").write_text(json.dumps({"dashboard": {"job_sha256": "fixture"}}))
-    installed.update(host_capability="dashboard", services_app=str(owner))
-    expected = (owner, "dashboard", "live.jstack.automation.dashboard")
-    assert app_services.specification(Path(installed["app"]), installed, "host") == expected
+    installed["host_capability"] = "dashboard"
+    expected = (app, "dashboard", "live.jstack.automation.dashboard")
+    assert app_services.specification(app, installed, "host") == expected
     calls = []
 
-    def control(app, action, role=None):
-        calls.append((app, action, role))
-        return {"dashboard": "enabled"} if app == owner else {"host": "not_registered", "menu": "enabled"}
+    def control(owner, action, role=None):
+        calls.append((owner, action, role))
+        return {"host": "not_registered", "menu": "enabled", "dashboard": "enabled"}
 
     monkeypatch.setattr(app_services, "control", control)
-    assert app_services.observe(Path(installed["app"]), installed)["host"] == "enabled"
-    assert calls[-1] == (owner, "status", None)
+    assert app_services.observe(app, installed)["host"] == "enabled"
+    assert calls == [(app, "status", None)]
     installed["host_capability"] = "not-in-catalog"
     with pytest.raises(ValueError, match="sealed capability"):
-        app_services.specification(Path(installed["app"]), installed, "host")
+        app_services.specification(app, installed, "host")
 
 
 @pytest.fixture
@@ -78,18 +78,17 @@ def complete_install(installed, monkeypatch, tmp_path):
     import plistlib
     from pathlib import Path
     from jstack_host import migrate_services
-    installed["services_app"] = str(tmp_path / "Services.app")
-    states, calls = {}, []
-    for key, definitions in (("app", {"host": "live.jstack.hub.host", "menu": "live.jstack.hub.menu"}),
-                             ("services_app", {"updater": "live.jstack.hub.updater", "worker": "live.jstack.automation.worker"})):
-        app = Path(installed[key])
-        for directory in ("Resources", "_CodeSignature", "Library/LaunchAgents"):
-            (app / "Contents" / directory).mkdir(parents=True)
-        (app / "Contents/_CodeSignature/CodeResources").write_bytes(key.encode())
-        (app / "Contents/Resources/services.json").write_text(json.dumps({r: label + ".plist" for r, label in definitions.items()}))
-        for label in definitions.values():
-            (app / "Contents/Library/LaunchAgents" / (label + ".plist")).write_bytes(plistlib.dumps({"Label": label}))
-        states[str(app)] = dict.fromkeys(definitions, "enabled")
+    definitions = {"host": "live.jstack.hub.host", "menu": "live.jstack.hub.menu",
+                   "updater": "live.jstack.hub.updater", "worker": "live.jstack.automation.worker"}
+    app = Path(installed["app"])
+    for directory in ("Resources", "_CodeSignature", "Library/LaunchAgents"):
+        (app / "Contents" / directory).mkdir(parents=True)
+    (app / "Contents/_CodeSignature/CodeResources").write_bytes(b"hub")
+    (app / "Contents/Resources/services.json").write_text(
+        json.dumps({role: label + ".plist" for role, label in definitions.items()}))
+    for label in definitions.values():
+        (app / "Contents/Library/LaunchAgents" / (label + ".plist")).write_bytes(plistlib.dumps({"Label": label}))
+    states, calls = {str(app): dict.fromkeys(definitions, "enabled")}, []
     path = tmp_path / "service-settings.json"
     monkeypatch.setattr(service_settings, "path", lambda: path)
     monkeypatch.setattr(migrate_services, "migration_root", lambda: tmp_path / "migrations")
@@ -109,7 +108,7 @@ def complete_install(installed, monkeypatch, tmp_path):
 
 def test_all_service_removal_resumes_after_unregister(installed, complete_install, monkeypatch):
     states, calls, path = complete_install
-    states[installed["services_app"]]["worker"] = "requires_approval"
+    states[installed["app"]]["worker"] = "requires_approval"
     monkeypatch.setattr(install_host, "wait_unloaded", lambda label: False)
     with pytest.raises(ValueError, match="still loaded"):
         install_host.uninstall(all_services=True, out=io.StringIO())
@@ -128,7 +127,7 @@ def test_all_service_removal_resumes_after_unregister(installed, complete_instal
 
 def test_unknown_recovery_ownership_refuses_before_stopping_menu(installed, complete_install):
     states, calls, path = complete_install
-    states[installed["services_app"]]["worker"] = "unknown"
+    states[installed["app"]]["worker"] = "unknown"
     with pytest.raises(ValueError, match="unobservable"):
         install_host.uninstall(all_services=True, out=io.StringIO())
     assert not calls and not path.exists()
@@ -140,7 +139,7 @@ def test_changed_sealed_owner_refuses_resumed_removal(installed, complete_instal
     monkeypatch.setattr(install_host, "wait_unloaded", lambda label: False)
     with pytest.raises(ValueError, match="still loaded"):
         install_host.uninstall(all_services=True, out=io.StringIO())
-    (Path(installed["services_app"]) / "Contents/_CodeSignature/CodeResources").write_bytes(b"new signed owner")
+    (Path(installed["app"]) / "Contents/_CodeSignature/CodeResources").write_bytes(b"new signed owner")
     with pytest.raises(ValueError, match="ownership changed"):
         install_host.uninstall(all_services=True, out=io.StringIO())
     assert calls == ["updater"]

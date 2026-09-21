@@ -130,9 +130,28 @@ class Supervisor:
             os.replace(partial, target)
         return directory
 
+    def _root_recovered(self) -> bool:
+        """The Network watchdog's report that it already swapped the Hub back.
+
+        Its marker is written only after this journal went stale mid-apply, so
+        newer-than-journal means the restore addressed this exact stall. The
+        comparison mirrors the watchdog's own re-fire guard.
+        """
+        marker = self.root / "recovery.json"
+        try:
+            return marker.stat().st_mtime >= self.journal.stat().st_mtime
+        except OSError:
+            return False
+
     def tick(self) -> None:
         # An apply interrupted by reboot/crash never starts from scratch over
         # a half-replaced installation. Recover its exact prior transaction.
+        if self.current.get("state") in {"applying", "verifying"} and self._root_recovered():
+            # The bundle swap already happened under root; rollback finishes
+            # the rest of the transaction (services, client, plugins) and
+            # skips the app whose backup the watchdog consumed.
+            self.backend.rollback(self.current)
+            self.save(state="rolled_back", detail="root watchdog restored the retained hub backup")
         if self.current.get("state") == "applying":
             recover = getattr(self.backend, "recovery_status", None)
             status = recover(self.current) if recover else "unknown"
@@ -246,6 +265,13 @@ class Supervisor:
             while True:
                 try:
                     self.tick()
+                    restart = getattr(self.backend, "restart_required", None)
+                    if not once and restart and restart(self.current):
+                        # The supervisor's own bundle was replaced and the job
+                        # is confirmed; exit so launchd relaunches this service
+                        # from the new bundle instead of running old code on.
+                        print("update: supervisor restarting from the replaced bundle", flush=True)
+                        return
                     activate = getattr(self.backend, "activate_runtime", None)
                     if not once and activate and activate(self.current):
                         import sys
@@ -279,6 +305,10 @@ def main():
     from .update_macos import MacBackend
     backend = MacBackend
     if configuration.get("service_model") == "app":
+        # This process replaces the bundle it imports from. Load the whole
+        # working set now, while sys.path still names this process's code.
+        from . import preload
+        preload.updater()
         from .update_app import AppBackend
         backend = AppBackend
     Supervisor(root, configuration, backend(root, configuration)).run(once=args.once)

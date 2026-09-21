@@ -55,7 +55,7 @@ def exclusive(root: Path | None = None):
 
 
 def approved_app(app: Path):
-    requirement = 'anchor apple generic and certificate leaf[subject.OU] = "MZ95H77RQQ" and identifier "live.jstack.hub.services"'
+    requirement = 'anchor apple generic and certificate leaf[subject.OU] = "MZ95H77RQQ" and identifier "live.jstack.hub"'
     command(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R", "=" + requirement, str(app)])
     command(["/usr/sbin/spctl", "--assess", "--type", "execute", str(app)])
 

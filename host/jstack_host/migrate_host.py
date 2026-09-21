@@ -34,8 +34,6 @@ def file_hash(path: Path) -> str | None:
 
 
 def target(settings: dict, role: str) -> tuple[Path, str, str]:
-    if role == "updater":
-        return Path(settings["services_app"]), role, "live.jstack.hub.updater"
     return app_services.specification(Path(settings["app"]), settings, role)
 
 
@@ -67,12 +65,8 @@ def provenance(path: Path) -> dict:
     return value
 
 
-def verified_pair(settings: dict) -> dict:
-    main = install_signed.identity(Path(settings["app"]), "live.jstack.hub")
-    recovery = install_signed.identity(Path(settings["services_app"]), "live.jstack.hub.services")
-    if any(main.get(key) != recovery.get(key) for key in ("sha", "release", "build", "github_repo")):
-        raise ValueError("migration bundles differ in release identity")
-    return main
+def verified_hub(settings: dict) -> dict:
+    return install_signed.identity(Path(settings["app"]), "live.jstack.hub")
 
 
 def prepare(request: dict, root: Path) -> Path:
@@ -110,7 +104,7 @@ def _prepare(request: dict, root: Path) -> Path:
             previous.get("local_url") != f"http://127.0.0.1:{settings['port']}" or
             (state / "host-id").read_text().strip() != previous.get("machine")):
         raise ValueError("existing updater identity or endpoint does not match the request")
-    source = verified_pair(settings)
+    source = verified_hub(settings)
     public = json.loads((Path(settings["app"]) / "Contents/Resources/packages/jstack_host/release-trust.json").read_text())["public_key"]
     if public != previous.get("public_key"):
         raise ValueError("migration cannot rotate release trust")
@@ -136,7 +130,7 @@ def _prepare(request: dict, root: Path) -> Path:
                 old_bind != settings.get("bind", "0.0.0.0")):
             raise ValueError("standalone endpoint differs from its legacy definition")
     new_configuration = {**previous, "service_model": "app", "menubar_path": settings["app"],
-                         "menubar_bundle_id": "live.jstack.hub", "services_app": settings["services_app"]}
+                         "menubar_bundle_id": "live.jstack.hub"}
     for key in ("dispatcher", "runtime_imports", "python", "host_plist", "host_label", "menubar_plist", "menubar_label"):
         new_configuration.pop(key, None)
     if settings.get("host_capability"):
@@ -145,7 +139,7 @@ def _prepare(request: dict, root: Path) -> Path:
     if settings.get("host_capability"):
         capability = settings["host_capability"]
         service_catalog.validate(capability, host_job)
-        manifest = json.loads((Path(settings["services_app"]) / "Contents/Resources/automation-catalog.json").read_text())
+        manifest = json.loads((Path(settings["app"]) / "Contents/Resources/automation-catalog.json").read_text())
         if manifest[capability]["job_sha256"] != service_catalog.digest(host_job):
             raise ValueError("embedded definition differs from the sealed capability")
         path = service_settings.automation_path(settings)
@@ -172,7 +166,7 @@ def _prepare(request: dict, root: Path) -> Path:
         evidence = provenance(path)
         if evidence != request["provenance"][role]:
             raise ValueError("legacy code differs from reviewed provenance")
-        approval = migration.legacy_status(Path(settings["services_app"]), path)
+        approval = migration.legacy_status(Path(settings["app"]), path)
         loaded = migration.loaded(label)
         if approval not in {"enabled", "not_registered", "not_found", "requires_approval"} or loaded and approval != "enabled":
             raise ValueError("legacy approval is unobservable or ambiguous")
@@ -207,7 +201,7 @@ def load(journal: Path) -> dict:
     value = migration.load(journal)
     if value.get("kind") != "host":
         raise ValueError("not a host migration journal")
-    if verified_pair(value["settings"]) != value["identity"]:
+    if verified_hub(value["settings"]) != value["identity"]:
         raise ValueError("migration artifacts changed")
     return value
 
@@ -275,7 +269,7 @@ def _rollback(journal: Path):
         if not path.exists():
             atomic_bytes(path, data, mode=0o600)
         if record["enabled"] and record["label"] not in migration.disabled_labels():
-            approval = migration.legacy_status(Path(value["settings"]["services_app"]), path)
+            approval = migration.legacy_status(Path(value["settings"]["app"]), path)
             if approval == "requires_approval":
                 held.append(record["role"])
                 continue
@@ -313,7 +307,7 @@ def apply(journal: Path):
             for record in value["records"]:
                 path = Path(record["path"])
                 if (file_hash(path) != record["sha256"] or
-                        migration.legacy_status(Path(value["settings"]["services_app"]), path) != record["approval"] or
+                        migration.legacy_status(Path(value["settings"]["app"]), path) != record["approval"] or
                         migration.loaded(record["label"]) != record["loaded"] or
                         (record["label"] in migration.disabled_labels()) != record["disabled"]):
                     raise ValueError("legacy approval or definition changed during cutover")

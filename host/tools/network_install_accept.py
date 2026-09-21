@@ -71,7 +71,10 @@ def main():
                    "policy": {"owner": os.getuid(), "configuration": str(configuration),
                               "address": "10.199.76.1/24", "subnet": "10.199.76.0/24",
                               "nameFile": "/var/run/wireguard/jstack-installer-lab.name",
-                              "forwarding": False, "active": True}, "legacy": []}
+                              "forwarding": False, "active": True},
+                   "recovery": {"bundle": "/Applications/jStack Hub.app",
+                                "state": str(Path.home() / "Library/Application Support/jstack-installer-lab")},
+                   "legacy": []}
         if args.phase == "prepare-legacy":
             assert not original.exists(), "legacy fixture already installed"
             wrapper = root / "legacy-network.sh"
@@ -159,7 +162,13 @@ def main():
             assert digest(installed / "Contents/_CodeSignature/CodeResources") == request["candidateSeal"]
             assert digest(installed / "Contents/MacOS/JStackHub") == request["candidateBinary"]
             assert not request["legacy"] or not original.exists(), "legacy persistence remains installed"
-            result = {"active": True, "signature_identity": True, "transaction": request["transaction"]}
+            hub_policy_path = "/Library/Preferences/live.jstack.hub.recovery.json"
+            hub_policy = json.loads(run("sudo", "/bin/cat", hub_policy_path))
+            assert hub_policy == {"bundle": request["recovery"]["bundle"], "owner": request["policy"]["owner"],
+                                  "state": request["recovery"]["state"]}, hub_policy
+            assert run("sudo", "/usr/bin/stat", "-f", "%u:%Lp", hub_policy_path) == "0:600"
+            result = {"active": True, "signature_identity": True, "hub_recovery_policy": True,
+                      "transaction": request["transaction"]}
         else:
             assert request["legacy"]
             original_digest = run("sudo", "/usr/bin/shasum", "-a", "256", str(original)).split()[0]
