@@ -190,6 +190,131 @@ if command -v git >/dev/null 2>&1; then
     else
         fail "same-label drift not named — the version string would still read as identity"
     fi
+    # ── the registered source is graded on its own terms ───────────────────
+    # The blindness this closes: `versions` resolves
+    # "the checkout" FROM the registration and then compares it against a cache
+    # taken from that same copy. Point the registration at a frozen release
+    # stage and the two agree forever — the one check built to catch drift
+    # reads its ground truth from the thing that is wrong. So the registered
+    # path is graded without asking it anything.
+
+    marketplace() {
+        mkdir -p "$TMP/home/.claude/plugins"
+        printf '{"jStack":{"source":{"source":"directory","path":"%s"},"lastUpdated":"2026-09-20T11:15:37.694Z"}}' \
+            "$1" > "$TMP/home/.claude/plugins/known_marketplaces.json"
+    }
+
+    ledger "$SHA1"
+    STAGE="$TMP/state/updates/releases/76-68c646f7/stage-ev0umz_y/stack"
+    mkdir -p "$STAGE"
+    marketplace "$STAGE"
+    run_vdoctor > "$TMP/mstage.json" 2>/dev/null
+    g=$(grade_of "$TMP/mstage.json" marketplace)
+    [ "$g" = "fail" ] || fail "a marketplace on a release stage should grade fail, got '$g'"
+    [ "$g" = "fail" ] && pass "a source under releases/*/stage-* is a finding, not agreement"
+    if grep -q "$STAGE" "$TMP/mstage.json"; then
+        pass "the stage path is named, so the reader can repoint it"
+    else
+        fail "graded the stage without saying which path it is"
+    fi
+
+    # The point of the whole issue: this must be caught while every version
+    # label on the machine still agrees. The cache is pinned at HEAD here.
+    g=$(grade_of "$TMP/mstage.json" versions)
+    [ "$g" != "fail" ] || fail "versions should not be the check that fails here"
+    if grep -q '"grade": "fail"' "$TMP/mstage.json"; then
+        pass "a machine whose versions all agree still fails on the registration"
+    else
+        fail "agreement on versions let a frozen registration pass the whole run"
+    fi
+
+    marketplace "$VREPO"
+    run_vdoctor > "$TMP/mrepo.json" 2>/dev/null
+    g=$(grade_of "$TMP/mrepo.json" marketplace)
+    [ "$g" = "ok" ] || fail "a marketplace on a real checkout should grade ok, got '$g'"
+    [ "$g" = "ok" ] && pass "serving from a checkout is the healthy case"
+
+    SHIPPED="$TMP/opt/jstack-copy"
+    mkdir -p "$SHIPPED"
+    marketplace "$SHIPPED"
+    run_vdoctor > "$TMP/mship.json" 2>/dev/null
+    g=$(grade_of "$TMP/mship.json" marketplace)
+    [ "$g" = "ok" ] || fail "a leaf's shipped copy should grade ok, got '$g'"
+    [ "$g" = "ok" ] && pass "a shipped copy is not a failure — a leaf has no checkout"
+    if grep -q "shipped copy" "$TMP/mship.json"; then
+        pass "the shipped copy is named as one, not passed off as a checkout"
+    else
+        fail "a non-checkout source read as a checkout"
+    fi
+
+    marketplace "$TMP/not-on-disk"
+    run_vdoctor > "$TMP/mgone.json" 2>/dev/null
+    g=$(grade_of "$TMP/mgone.json" marketplace)
+    [ "$g" = "fail" ] || fail "a source that is not there should grade fail, got '$g'"
+    [ "$g" = "fail" ] && pass "a registration pointing at nothing is a failure"
+
+    # ── and `versions` itself refuses a stage, where it can actually reach one ─
+    # Every case above leaves the guard in `versions` unreachable: PLUGIN_ROOT
+    # sits inside $VREPO, so `rev-parse --show-toplevel` answers first and the
+    # registration is never consulted. The case that DOES reach it is a leaf —
+    # the plugin unpacked outside any repo, where the registration is the only
+    # candidate checkout there is. That is precisely where trusting it costs:
+    # the cache was copied from the stage, so comparing the two agrees by
+    # construction and `versions` would report a healthy machine forever.
+    NOREPO="$TMP/norepo"
+    mkdir -p "$NOREPO"
+    cp -R "$VREPO/plugins/jstack" "$NOREPO/jstack"
+    rm -rf "$NOREPO/jstack/__pycache__" "$NOREPO/jstack"/*/__pycache__
+
+    # The stage has to be a real git tree standing at the very sha the cache
+    # records. That agreement IS the trap, and it is the only fixture that
+    # tests the guard: point this at a stage with no git in it and `versions`
+    # warns "git cannot read it" for an unrelated reason, which passes whether
+    # the guard is there or not.
+    GSTAGE="$TMP/state/updates/releases/77-0ff57a9e/stage-qq31mb7k/stack"
+    mkdir -p "$GSTAGE"
+    printf 'stage\n' > "$GSTAGE/marker"
+    git -C "$GSTAGE" init -q
+    git -C "$GSTAGE" -c user.email=t@t -c user.name=t add -A
+    git -C "$GSTAGE" -c user.email=t@t -c user.name=t commit -qm stage
+    GSHA=$(git -C "$GSTAGE" rev-parse HEAD)
+
+    vdoctor_norepo() {
+        HOME="$TMP/home" JSTACK_ROOT="$TMP/root" \
+        SCHEDULER_INSTALL_FILE="$TMP/root/absent-scheduler.json" \
+        SCHEDULER_API_PORT=59992 \
+        "$PY" "$NOREPO/jstack/bin/jstack-doctor" --json
+    }
+
+    if [ -n "$(git -C "$NOREPO" rev-parse --show-toplevel 2>/dev/null)" ]; then
+        fail "the no-repo fixture is inside a git repo — the guard stays unreachable"
+    else
+        ledger "$GSHA"
+        marketplace "$GSTAGE"
+        vdoctor_norepo > "$TMP/vstage.json" 2>/dev/null
+        g=$(grade_of "$TMP/vstage.json" versions)
+        [ "$g" = "warn" ] || fail "versions took a release stage as its checkout, got '$g'"
+        [ "$g" = "warn" ] && pass "versions refuses a stage even when every sha agrees"
+        if grep -q "would mean nothing" "$TMP/vstage.json"; then
+            pass "the refusal says why agreeing there would prove nothing"
+        else
+            fail "versions refused without naming the comparison as empty"
+        fi
+
+        # The guard must cost nothing on a leaf whose source is honest: same
+        # no-repo plugin, shipped copy instead of a stage, and `versions` goes
+        # back to grading the cache on its own terms.
+        marketplace "$SHIPPED"
+        vdoctor_norepo > "$TMP/vship.json" 2>/dev/null
+        if grep -q "would mean nothing" "$TMP/vship.json"; then
+            fail "the stage refusal fired on a shipped copy"
+        else
+            pass "a leaf on a shipped copy is still graded, not refused"
+        fi
+        ledger "$SHA1"
+    fi
+
+    rm -f "$TMP/home/.claude/plugins/known_marketplaces.json"
 else
     echo "skip: no git — versions drift cases not run"
 fi

@@ -457,6 +457,81 @@ def _marketplace_checkout(marketplace: str) -> "Path|None":
     return None
 
 
+def _release_stage(source: "Path") -> bool:
+    """Is this path inside a release staging tree?
+
+    A managed release unpacks each build to `…/releases/<release>/stage-<tok>/`
+    and points every jStack reference at the `stack/` inside it. That copy is
+    one commit, frozen at unpack time, and nothing will ever move it — which
+    is the property that matters here, whatever the machine.
+
+    Matched on shape rather than on a fixed prefix: the state dir is
+    configurable, so the only portable signal is the layout the release writer
+    itself produces.
+    """
+    parts = source.parts
+    return any(part.startswith("stage-") and "releases" in parts[max(0, i - 2):i]
+               for i, part in enumerate(parts))
+
+
+def check_marketplace_source() -> dict:
+    """Where is the marketplace pointed, and could an update ever move it?
+
+    The second opinion `check_versions` cannot be. That check resolves "the
+    checkout" from the registration and then compares it against the cache —
+    so when the registration is wrong, it compares a frozen copy against a
+    cache taken from that copy and reports agreement. A check that reads its
+    own ground truth from the thing under test cannot grade it, so this one
+    grades the registered path itself and asks nothing of it.
+
+    Caught on a hub 2026-09-17 → 2026-09-21: a release repointed the
+    marketplace at its own stage, and four nights of `claude plugin update`
+    re-read a directory that cannot change — correctly concluding, every
+    time, that there was nothing to do.
+    """
+    marketplace, _ = _installed_jstack()
+    if not marketplace:
+        return _check("marketplace", OK, "jstack is not installed from a "
+                      "marketplace — nothing registered to grade")
+    try:
+        known = json.loads(
+            (USER_CLAUDE / "plugins" / "known_marketplaces.json").read_text())
+    except FileNotFoundError:
+        return _check("marketplace", OK, f"{marketplace} has no local "
+                      "registration — nothing on this machine points anywhere")
+    except (OSError, json.JSONDecodeError) as exc:
+        return _check("marketplace", WARN, f"the marketplace registry is "
+                      f"unreadable ({exc}) — where jstack is served from "
+                      "cannot be established", "repair known_marketplaces.json")
+    registered = (known.get(marketplace) or {}).get("source") or {}
+    if registered.get("source") != "directory":
+        return _check("marketplace", OK, f"{marketplace} is a "
+                      f"{registered.get('source') or 'unregistered'} marketplace "
+                      "— its source is not a local path to grade")
+    source = Path(registered["path"])
+    if _release_stage(source):
+        return _check("marketplace", FAIL,
+                      f"{marketplace} is served from a release stage — {source}. "
+                      "That copy is frozen at one commit, so `plugin update` "
+                      "re-reads it and correctly finds nothing to do; the "
+                      "install cannot move and no restart changes that",
+                      f"re-register against the checkout — `claude plugin "
+                      f"marketplace remove {marketplace}` then `marketplace add "
+                      f"<checkout>`, then `claude plugin update jstack@{marketplace}`")
+    if not source.exists():
+        return _check("marketplace", FAIL,
+                      f"{marketplace} is served from {source}, which is not "
+                      "there — every update and every version comparison below "
+                      "is reading a path that does not resolve",
+                      "re-register the marketplace against a directory that exists")
+    if (source / ".git").exists():
+        return _check("marketplace", OK, f"{marketplace} serves from the "
+                      f"checkout at {source}")
+    return _check("marketplace", OK, f"{marketplace} serves from {source} — a "
+                  "shipped copy, not a checkout, so the cache is exactly as "
+                  "current as whatever put that copy there")
+
+
 def check_versions() -> dict:
     """Do the copies of jStack on this machine agree about what runs?
 
@@ -475,6 +550,15 @@ def check_versions() -> dict:
     repo = _git(PLUGIN_ROOT, "rev-parse", "--show-toplevel")
     checkout = Path(repo) if repo else _marketplace_checkout(marketplace)
 
+    if checkout and _release_stage(checkout):
+        # The one place `_marketplace_checkout` gets trusted as "the checkout".
+        # A stage is not one: it is a snapshot, and the cache below was taken
+        # from it, so every comparison this check makes would agree by
+        # construction. Refuse the comparison instead of passing it.
+        return _check("versions", WARN,
+                      f"the copy this would grade against is a release stage "
+                      f"({checkout}) — the cache was taken from it, so agreement "
+                      f"here would mean nothing", "see the marketplace check")
     if not pin and not checkout:
         return _check("versions", WARN, "no installed plugin record and no "
                       "checkout — this copy's identity is unknowable",
@@ -550,7 +634,8 @@ def check_versions() -> dict:
 
 CHECKS = (check_python, check_claude, check_git, check_dateutil, check_root,
           check_agents, check_timeline, check_rules, check_commands, check_hooks,
-          check_bin, check_config, check_scheduler, check_versions)
+          check_bin, check_config, check_scheduler, check_marketplace_source,
+          check_versions)
 
 
 def checks() -> list:
