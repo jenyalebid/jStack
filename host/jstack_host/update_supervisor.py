@@ -35,6 +35,11 @@ def atomic_json(path: Path, value: dict) -> None:
 
 
 class Supervisor:
+    #: Settings that name the code this process already loaded. `activate_runtime`
+    #: writes them for the NEXT launch, so adopting them mid-life would point a
+    #: running transaction at a runtime it did not start on.
+    PINNED_SETTINGS = ("runtime_imports", "dispatcher")
+
     def __init__(self, root: Path, configuration: dict, backend, client=None):
         self.root, self.config, self.backend = root, configuration, backend
         self.client = client or httpx.Client(timeout=30, trust_env=False, follow_redirects=False)
@@ -42,6 +47,27 @@ class Supervisor:
         self.current = json.loads(self.journal.read_text()) if self.journal.exists() else {}
         self.last_error = ""
         self.channel_error = ""
+
+    def refresh_settings(self) -> None:
+        """Re-read config.json each cycle, for the reason `connection` re-reads
+        the adoption: this daemon outlives the settings it started with.
+
+        A setting written while it runs stayed invisible until someone restarted
+        it, and the refusal it produced named the key that was by then already
+        configured — a report about state the process could not observe. In
+        place, because the backend holds this same dict.
+        """
+        try:
+            fresh = json.loads((self.root / "config.json").read_text())
+        except (OSError, ValueError):
+            return  # Unreadable or mid-write: keep running on what is loaded.
+        if not isinstance(fresh, dict):
+            return
+        merged = {**fresh, **{key: self.config[key]
+                              for key in self.PINNED_SETTINGS if key in self.config}}
+        if merged != self.config:
+            self.config.clear()
+            self.config.update(merged)
 
     def save(self, **changes):
         self.current.update(changes)
@@ -144,6 +170,7 @@ class Supervisor:
             return False
 
     def tick(self) -> None:
+        self.refresh_settings()
         # An apply interrupted by reboot/crash never starts from scratch over
         # a half-replaced installation. Recover its exact prior transaction.
         if self.current.get("state") in {"applying", "verifying"} and self._root_recovered():
