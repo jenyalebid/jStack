@@ -428,8 +428,7 @@ def off_network(journey, fleet: Fleet, candidate: Candidate) -> None:
     guest = fleet.leaves[-1]
     machine = fleet.machine(guest)
 
-    hub_lan = fleet.hub.sh("/usr/sbin/ipconfig getifaddr en0 || true").strip()
-    expect(hub_lan, "the hub guest reports no LAN address to take away")
+    hub_lan = lan_address(fleet.hub)
     hub_mesh = mesh_address(fleet.hub)
     expect(hub_mesh != hub_lan, "the hub's mesh and LAN addresses are the same host route")
     journey.observe("device", {"machine": machine, "guest": guest.name,
@@ -480,6 +479,23 @@ def mesh_address(guest: Guest) -> str:
     addresses = [line.strip() for line in out.splitlines() if line.strip()]
     expect(addresses, f"{guest.name} has no mesh address; the tunnel is not up there")
     return addresses[0]
+
+
+def lan_address(guest: Guest) -> str:
+    """The guest's LAN address, off whichever interface actually carries it.
+
+    Naming an interface guesses: this hub reaches its LAN over Wi-Fi (en1) and
+    `ipconfig getifaddr en0` answers with an empty string there, which read as
+    "no LAN address to take away" rather than "asked the wrong interface". So
+    ask the routing table which interface holds the default route, and take the
+    address off that one.
+    """
+    interface = guest.sh("/sbin/route -n get default 2>/dev/null "
+                         "| /usr/bin/awk '/interface:/ {print $2}'").strip()
+    expect(interface, f"{guest.name} has no default route; it is on no LAN")
+    address = guest.sh(f"/usr/sbin/ipconfig getifaddr {interface} || true").strip()
+    expect(address, f"{guest.name} carries no address on {interface}, its default-route interface")
+    return address
 
 
 JOURNEYS = {"fresh_install": fresh_install, "upgrade": upgrade, "fleet": fleet_journey,
