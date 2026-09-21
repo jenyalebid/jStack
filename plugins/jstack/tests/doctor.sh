@@ -253,6 +253,67 @@ if command -v git >/dev/null 2>&1; then
     [ "$g" = "fail" ] || fail "a source that is not there should grade fail, got '$g'"
     [ "$g" = "fail" ] && pass "a registration pointing at nothing is a failure"
 
+    # ── and `versions` itself refuses a stage, where it can actually reach one ─
+    # Every case above leaves the guard in `versions` unreachable: PLUGIN_ROOT
+    # sits inside $VREPO, so `rev-parse --show-toplevel` answers first and the
+    # registration is never consulted. The case that DOES reach it is a leaf —
+    # the plugin unpacked outside any repo, where the registration is the only
+    # candidate checkout there is. That is precisely where trusting it costs:
+    # the cache was copied from the stage, so comparing the two agrees by
+    # construction and `versions` would report a healthy machine forever.
+    NOREPO="$TMP/norepo"
+    mkdir -p "$NOREPO"
+    cp -R "$VREPO/plugins/jstack" "$NOREPO/jstack"
+    rm -rf "$NOREPO/jstack/__pycache__" "$NOREPO/jstack"/*/__pycache__
+
+    # The stage has to be a real git tree standing at the very sha the cache
+    # records. That agreement IS the trap, and it is the only fixture that
+    # tests the guard: point this at a stage with no git in it and `versions`
+    # warns "git cannot read it" for an unrelated reason, which passes whether
+    # the guard is there or not.
+    GSTAGE="$TMP/state/updates/releases/77-0ff57a9e/stage-qq31mb7k/stack"
+    mkdir -p "$GSTAGE"
+    printf 'stage\n' > "$GSTAGE/marker"
+    git -C "$GSTAGE" init -q
+    git -C "$GSTAGE" -c user.email=t@t -c user.name=t add -A
+    git -C "$GSTAGE" -c user.email=t@t -c user.name=t commit -qm stage
+    GSHA=$(git -C "$GSTAGE" rev-parse HEAD)
+
+    vdoctor_norepo() {
+        HOME="$TMP/home" JSTACK_ROOT="$TMP/root" \
+        SCHEDULER_INSTALL_FILE="$TMP/root/absent-scheduler.json" \
+        SCHEDULER_API_PORT=59992 \
+        "$PY" "$NOREPO/jstack/bin/jstack-doctor" --json
+    }
+
+    if [ -n "$(git -C "$NOREPO" rev-parse --show-toplevel 2>/dev/null)" ]; then
+        fail "the no-repo fixture is inside a git repo — the guard stays unreachable"
+    else
+        ledger "$GSHA"
+        marketplace "$GSTAGE"
+        vdoctor_norepo > "$TMP/vstage.json" 2>/dev/null
+        g=$(grade_of "$TMP/vstage.json" versions)
+        [ "$g" = "warn" ] || fail "versions took a release stage as its checkout, got '$g'"
+        [ "$g" = "warn" ] && pass "versions refuses a stage even when every sha agrees"
+        if grep -q "would mean nothing" "$TMP/vstage.json"; then
+            pass "the refusal says why agreeing there would prove nothing"
+        else
+            fail "versions refused without naming the comparison as empty"
+        fi
+
+        # The guard must cost nothing on a leaf whose source is honest: same
+        # no-repo plugin, shipped copy instead of a stage, and `versions` goes
+        # back to grading the cache on its own terms.
+        marketplace "$SHIPPED"
+        vdoctor_norepo > "$TMP/vship.json" 2>/dev/null
+        if grep -q "would mean nothing" "$TMP/vship.json"; then
+            fail "the stage refusal fired on a shipped copy"
+        else
+            pass "a leaf on a shipped copy is still graded, not refused"
+        fi
+        ledger "$SHA1"
+    fi
+
     rm -f "$TMP/home/.claude/plugins/known_marketplaces.json"
 else
     echo "skip: no git — versions drift cases not run"
