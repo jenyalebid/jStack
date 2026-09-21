@@ -19,9 +19,14 @@ def test_loopback_never_appears():
 def test_lan_comes_first_and_mesh_last():
     """Order is advice, and the reader is a device that is still pairing —
     which by definition is not on the mesh yet. The mesh address is the one
-    it can never reach right now, so it reads last, not first."""
+    it can never reach right now, so it reads last, not first.
+
+    It also reads a second time, under `lan`: a shipped client keeps only
+    lan and local, and that duplicate is the whole point of the kind."""
     out = addresses.classify(["192.168.0.106", "10.66.0.1"], "mac", 9090)
-    assert [a["kind"] for a in out] == ["lan", "local", "mesh"]
+    assert [a["kind"] for a in out] == ["lan", "lan", "local", "mesh"]
+    assert [a["host"] for a in out] == ["192.168.0.106", "10.66.0.1",
+                                        "mac.local", "10.66.0.1"]
 
 
 def test_public_and_link_local_are_dropped():
@@ -30,7 +35,8 @@ def test_public_and_link_local_are_dropped():
     already failed."""
     out = addresses.classify(["97.120.113.78", "169.254.3.9", "10.66.0.1"],
                              "mac", 9090)
-    assert [a["kind"] for a in out] == ["local", "mesh"]
+    assert [a["kind"] for a in out] == ["lan", "local", "mesh"]
+    assert {a["host"] for a in out} == {"10.66.0.1", "mac.local"}
 
 
 def test_port_rides_into_every_url():
@@ -92,7 +98,7 @@ def test_the_mesh_survives_the_interface_filter():
     out = addresses.classify(
         ["192.168.0.106", "10.66.0.1"], "mac", 9090,
         {"192.168.0.106": "en1", "10.66.0.1": "utun0"})
-    assert [a["kind"] for a in out] == ["lan", "local", "mesh"]
+    assert [a["kind"] for a in out] == ["lan", "lan", "local", "mesh"]
     assert out[-1]["host"] == "10.66.0.1"
 
 
