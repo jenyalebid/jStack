@@ -161,6 +161,36 @@ def test_the_domain_is_normalised_like_every_other_name():
         assert [a["host"] for a in out] == ["hub.jstack.live"], given
 
 
+def test_reachable_runs_on_the_real_machine(monkeypatch):
+    """The entry point every caller actually uses, called for real.
+
+    Every other test here drives the pure classifier, which is why a missing
+    `import os` in `hub_domain` survived the whole suite and only appeared when
+    the host was asked what it publishes. `reachable` is the seam between the
+    pure half and the machine, so it gets exercised as itself.
+    """
+    monkeypatch.setenv("JSTACK_HUB_DOMAIN", "hub.example.test")
+    out = addresses.reachable(9090)
+    assert out[0]["kind"] in {"lan", "local"}
+    assert any(a["host"] == "hub.example.test" and a["kind"] == "local"
+               for a in out)
+
+
+def test_hub_domain_reads_the_environment_before_any_file(monkeypatch):
+    """The override exists so a second host on this Mac — a test, a rig — can
+    publish its own name without writing over the machine's file."""
+    monkeypatch.setenv("JSTACK_HUB_DOMAIN", "  Rig.Example.Test  ")
+    assert addresses.hub_domain() == "Rig.Example.Test"
+
+
+def test_hub_domain_is_empty_when_nothing_configures_it(monkeypatch, tmp_path):
+    """No name is a real answer. A host that guessed would publish an address
+    resolving to somebody else's machine."""
+    monkeypatch.setenv("JSTACK_HUB_DOMAIN", "")
+    monkeypatch.setenv("JREMOTE_STATE_DIR", str(tmp_path))
+    assert addresses.hub_domain() == ""
+
+
 def test_every_entry_carries_the_shape_the_app_draws():
     out = addresses.classify(["10.66.0.1", "192.168.0.106"], "mac", 9090)
     assert out
