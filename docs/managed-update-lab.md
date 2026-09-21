@@ -13,7 +13,7 @@ not an exemption from the product contract.
 
 These tools are diagnostic fixtures, **not production acceptance receipts**.
 They exercise signed candidates, real HTTP APIs, launchd, bundle replacement
-and the actual supervisor. They do not exercise real enrollment or cellular.
+and the actual supervisor. They do not exercise real enrollment.
 
 Use disposable macOS GUI guests only. Install the previous stack, menu and
 Developer ID client first. Keep the base image stopped. Do not run against a

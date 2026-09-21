@@ -152,18 +152,18 @@ def test_a_complete_run_opens_the_gate_and_signs(tmp_path, candidate):
 
 def test_a_journey_that_never_ran_is_named_not_assumed(tmp_path, candidate):
     receipts = tmp_path / "receipts"
-    pass_everything(acceptance.Run(receipts, candidate["manifest"]), skip={"cellular"})
-    with pytest.raises(releases.ReleaseError, match="cellular: missing"):
+    pass_everything(acceptance.Run(receipts, candidate["manifest"]), skip={"off_network"})
+    with pytest.raises(releases.ReleaseError, match="off_network: missing"):
         acceptance.gate(receipts, candidate["manifest"])
 
 
 def test_a_recorded_skip_is_refused_exactly_like_an_absence(tmp_path, candidate):
     receipts = tmp_path / "receipts"
     run = acceptance.Run(receipts, candidate["manifest"])
-    pass_everything(run, skip={"cellular"})
-    run.skip("cellular", "test phone is not wired up")
-    assert json.loads((receipts / "cellular.json").read_text())["skipped"] == 1
-    with pytest.raises(releases.ReleaseError, match="test phone is not wired up"):
+    pass_everything(run, skip={"off_network"})
+    run.skip("off_network", "no leaf can be taken off the LAN")
+    assert json.loads((receipts / "off_network.json").read_text())["skipped"] == 1
+    with pytest.raises(releases.ReleaseError, match="no leaf can be taken off the LAN"):
         acceptance.gate(receipts, candidate["manifest"])
 
 
@@ -247,13 +247,13 @@ def test_qualify_reports_what_a_runner_that_died_left_behind(tmp_path, candidate
 
     def half_a_run(argv, **kwargs):
         run = acceptance.Run(receipts, candidate["manifest"])
-        pass_everything(run, skip={"cellular", "fleet"})
+        pass_everything(run, skip={"off_network", "fleet"})
         return __import__("subprocess").CompletedProcess(argv, 1)
 
     monkeypatch.setattr(publish_release.subprocess, "run", half_a_run)
     state = publish_release.qualify({"acceptance": ["runner"]}, candidate["dir"], receipts,
                                     candidate["private"])
-    assert state["cellular"]["state"] == "missing" and state["fleet"]["state"] == "missing"
+    assert state["off_network"]["state"] == "missing" and state["fleet"]["state"] == "missing"
     assert state["upgrade"]["state"] == "passed"
     with pytest.raises(releases.ReleaseError):
         publish_release.promote(candidate["dir"], receipts, tmp_path / "feed", candidate["private"])

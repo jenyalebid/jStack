@@ -26,7 +26,7 @@ entry points must resolve to the same active Hub installation.
 The candidate implements unique build allocation, unified installed identity,
 client distribution ownership, public release discovery and the native Info
 form. Build 74 has exact-artifact receipts for the eight Mac journeys below.
-The cellular journey and complete unattended release configuration remain
+The complete unattended release configuration remains
 unfinished under #72. A branch or passing unit suite does not establish
 production readiness.
 
@@ -113,7 +113,7 @@ cannot be updated remotely until bootstrap has run on that leaf.
 
 - Run the acceptance runner to completion against the fixtures and retain all
   nine final-artifact receipts: fresh_install, upgrade, fleet, offline_catchup,
-  session_survival, interruption, rollback, revocation, cellular. Unit passes
+  session_survival, interruption, rollback, revocation, off_network. Unit passes
   are not these receipts, and the runner existing is not a run.
 - Build 74 passed fresh installation, upgrade, fleet, offline catch-up,
   session survival, interruption/reboot, rollback/artifact refusal and queued
@@ -126,8 +126,9 @@ cannot be updated remotely until bootstrap has run on that leaf.
   and verifies cancellation plus authenticated-request rejection. It does not
   claim mesh enrollment or the native device-removal UI: the HTTP-relay lab is
   not a mesh-owning Hub.
-- The cellular journey is not automated: it needs the designated test phone
-  wired and unlocked, and the runner records it skipped until then.
+- The off_network journey runs unattended: it blackholes a leaf's LAN route to
+  the hub, proves the LAN path is dead and the mesh path carries health, the
+  release notice and a real session. No phone, no human.
 - Mobile distribution and release notification in the phone UI remain open.
   Discovery currently reconciles by polling, not a release stream event.
 - Staged Python dependencies are resolved by pip, not yet a locked, bundled
@@ -246,12 +247,12 @@ Before promotion, the candidate needs receipts tied to its exact artifacts:
   resume correctly. Bad signatures and incompatible releases are refused.
 - A failed candidate rolls back without losing pairing or remote access.
   Detached/revoked machines cannot execute queued update jobs.
-- A real phone over cellular discovers the release and completes an
+- A Mac with no LAN route to the hub discovers the release and completes an
   authenticated session journey against the updated hub and leaf.
 
 Use disposable GUI VMs and the designated test phone. NAT hairpin and local
 HTTP contract tests remain useful evidence, but cannot substitute for the
-physical cellular journey. Missing, skipped or stale required receipts prevent
+off_network journey. Missing, skipped or stale required receipts prevent
 promotion; a test's existence does not satisfy the gate.
 
 The hub continually reconciles desired versus observed versions and job

@@ -141,9 +141,9 @@ def test_public_channel_never_overrides_parent_or_candidate_feed(tmp_path, exclu
 def test_promotion_requires_exact_artifact_receipts(release, mutation):
     _, _, envelope = release
     manifest = envelope["manifest"]
-    receipt = manifest["receipts"]["cellular"]
+    receipt = manifest["receipts"]["off_network"]
     if mutation == "missing":
-        del manifest["receipts"]["cellular"]
+        del manifest["receipts"]["off_network"]
     elif mutation == "skipped":
         receipt["skipped"] = 1
     elif mutation == "stale":
@@ -582,7 +582,7 @@ def test_promote_checks_evidence_bytes_and_preserves_prior_feed(tmp_path, releas
         log = evidence / (name + ".log")
         log.write_text("synthetic UNIT TEST evidence, never production acceptance")
         atomic_json(evidence / (name + ".json"), {**receipt, "evidence_sha256": releases.digest(log)})
-    (evidence / "cellular.log").write_text("changed")
+    (evidence / "off_network.log").write_text("changed")
     with pytest.raises(releases.ReleaseError, match="evidence"):
         promote(candidate, evidence, feed, key.private_bytes_raw())
     assert json.loads((feed / "latest.json").read_text()) == {"prior": "untouched"}

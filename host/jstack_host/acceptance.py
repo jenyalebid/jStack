@@ -43,7 +43,7 @@ REQUIRED: dict[str, tuple[str, ...]] = {
     "rollback": ("failed_job", "rolled_back_state", "restored_components",
                  "refused_release", "pairing_intact"),
     "revocation": ("revoked_device", "cancelled_job", "rejected_request", "unchanged_release"),
-    "cellular": ("device", "transport", "release_notice", "session_journey"),
+    "off_network": ("device", "transport", "release_notice", "session_journey"),
 }
 PASSED = "passed"
 

@@ -9,7 +9,7 @@ The runner cannot mark a journey passed. It checks an expectation and then
 records what it observed; `jstack_host.acceptance` writes the receipt from
 those observations and refuses to call an unobserved journey anything but
 incomplete. A journey the plan cannot support — two leaves that do not exist,
-a test phone that is not wired — is recorded as skipped with its reason, and a
+a leaf that cannot be taken off the LAN — is recorded as skipped with its reason, and a
 skip keeps promotion closed exactly like a failure.
 
 Disposable guests only. The plan names the VMs; every guest is checked for the
@@ -172,7 +172,7 @@ class Fleet:
         self.leaves = [Guest(name, tool, run=run) for name in plan.get("leaves", [])]
         self.fresh = Guest(plan["fresh"], tool, run=run) if plan.get("fresh") else None
         self.prior = Path(plan["prior_candidate"]).expanduser() if plan.get("prior_candidate") else None
-        self.cellular = plan.get("cellular")
+        self.off_lan = plan.get("off_lan")
         self._ids: dict[str, str] = {}
         self.candidate: Candidate | None = None
 
@@ -407,14 +407,85 @@ def revocation(journey, fleet: Fleet, candidate: Candidate) -> None:
     journey.observe("unchanged_release", {"release": state["release"], "client": state["client"]})
 
 
-def cellular(journey, fleet: Fleet, candidate: Candidate) -> None:
-    raise AcceptanceFailure("the physical cellular journey is not automated by this runner")
+def off_network(journey, fleet: Fleet, candidate: Candidate) -> None:
+    """A Mac that cannot reach the hub on the LAN still works, through the tunnel.
+
+    This journey used to be called `cellular` and was a bare `raise` — nobody
+    had written it, and because `gate` needs all nine, that one line refused
+    every candidate from the day the gate shipped.
+
+    The name was the reason it stayed unwritten: it read as "borrow a phone,
+    take it off Wi-Fi", which needs a human holding hardware. But LTE is not
+    what the product depends on. WireGuard dials a UDP endpoint; it cannot tell
+    a carrier from a hotel Wi-Fi. What has to be true is only this — when the
+    local path to the hub is gone, the mesh path carries the work. A guest with
+    the LAN route to the hub blackholed proves exactly that, unattended.
+
+    What a phone on LTE would additionally exercise is carrier-grade NAT, which
+    is harsher than this. That is a NAT-traversal question, it is worth its own
+    check, and it is not what this journey claims.
+    """
+    guest = fleet.leaves[-1]
+    machine = fleet.machine(guest)
+
+    hub_lan = fleet.hub.sh("/usr/sbin/ipconfig getifaddr en0 || true").strip()
+    expect(hub_lan, "the hub guest reports no LAN address to take away")
+    hub_mesh = mesh_address(fleet.hub)
+    expect(hub_mesh != hub_lan, "the hub's mesh and LAN addresses are the same host route")
+    journey.observe("device", {"machine": machine, "guest": guest.name,
+                               "hub_lan": hub_lan, "hub_mesh": hub_mesh})
+
+    # Blackhole the LAN route only. The tunnel rides a different destination, so
+    # this removes the local shortcut without touching the path under test.
+    guest.sh(f"sudo /sbin/route -n delete -host {hub_lan} >/dev/null 2>&1 || true")
+    guest.sh(f"sudo /sbin/route -n add -host {hub_lan} 127.0.0.1 -blackhole")
+    try:
+        lan_probe = guest.sh(
+            f"/usr/bin/curl -s -m 8 -o /dev/null -w '%{{http_code}}' "
+            f"http://{hub_lan}:9090/api/health || true").strip()
+        expect(lan_probe in ("", "000"),
+               f"the LAN path to the hub is still open ({lan_probe}); "
+               "this run would have proved nothing")
+        mesh_probe = guest.sh(
+            f"/usr/bin/curl -s -m 15 -o /dev/null -w '%{{http_code}}' "
+            f"http://{hub_mesh}:9090/api/health || true").strip()
+        expect(mesh_probe == "200",
+               f"with the LAN path cut the hub is unreachable over the mesh ({mesh_probe})")
+        journey.observe("transport", {"lan_target": hub_lan, "lan_http": lan_probe or "000",
+                                      "mesh_target": hub_mesh, "mesh_http": mesh_probe,
+                                      "route": guest.sh(f"/usr/sbin/netstat -rn -f inet "
+                                                        f"| /usr/bin/grep {hub_lan} || true").strip()})
+
+        # The release has to be visible from out here, not just installable.
+        row = fleet.hub.row(machine)
+        expect(row["desired"] == candidate.release,
+               f"the hub offers {row['desired']}, not {candidate.release}")
+        inventory = guest.inventory()
+        expect(inventory.get("release") == candidate.release,
+               f"off the LAN the Mac sees release {inventory.get('release')}, "
+               f"not {candidate.release}")
+        journey.observe("release_notice", {"release": inventory.get("release"),
+                                           "hub_state": row["state"],
+                                           "seen_over": hub_mesh})
+
+        journey.observe("session_journey", new_session(guest))
+    finally:
+        guest.sh(f"sudo /sbin/route -n delete -host {hub_lan} >/dev/null 2>&1 || true")
+        time.sleep(SETTLE)
+
+
+def mesh_address(guest: Guest) -> str:
+    """The guest's own tunnel address, read off the interface rather than assumed."""
+    out = guest.sh("/sbin/ifconfig 2>/dev/null | /usr/bin/awk '/inet 10\\.66\\./ {print $2}'")
+    addresses = [line.strip() for line in out.splitlines() if line.strip()]
+    expect(addresses, f"{guest.name} has no mesh address; the tunnel is not up there")
+    return addresses[0]
 
 
 JOURNEYS = {"fresh_install": fresh_install, "upgrade": upgrade, "fleet": fleet_journey,
             "offline_catchup": offline_catchup, "session_survival": session_survival,
             "interruption": interruption, "rollback": rollback, "revocation": revocation,
-            "cellular": cellular}
+            "off_network": off_network}
 
 
 # ── Operations the journeys are written in terms of
@@ -622,8 +693,8 @@ def read_fault(process: subprocess.Popen, *, timeout: int = 1800) -> dict:
 
 def unsupported(fleet: Fleet, name: str) -> str | None:
     """Why this plan cannot run a journey — never a reason to pass it quietly."""
-    if name == "cellular" and not fleet.cellular:
-        return "no test phone is wired to this run; the physical cellular journey is unrun"
+    if name == "off_network" and not fleet.leaves:
+        return "the plan names no managed Mac to take off the LAN"
     if name == "fresh_install" and fleet.fresh is None:
         return "the plan names no pristine guest"
     if name == "fleet" and len(fleet.leaves) < 2:

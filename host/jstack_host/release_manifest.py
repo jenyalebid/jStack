@@ -14,7 +14,7 @@ from pathlib import Path
 SCHEMA = 1
 COMPONENTS = {"stack", "menubar", "client"}
 RECEIPTS = {"fresh_install", "upgrade", "fleet", "offline_catchup", "session_survival",
-            "interruption", "rollback", "revocation", "cellular"}
+            "interruption", "rollback", "revocation", "off_network"}
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 HEX = re.compile(r"[a-f0-9]{64}\Z")
 

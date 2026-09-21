@@ -172,7 +172,9 @@ def test_a_rolled_back_machine_never_reads_as_reaching_the_release(runner, candi
 def test_one_leaf_cannot_stand_in_for_the_contract_s_two(runner, candidate, tmp_path):
     fleet = build(runner, ScriptedFleet(), leaves=["leaf-a"])
     assert runner.unsupported(fleet, "fleet") == "the plan names fewer than two managed Macs"
-    assert runner.unsupported(fleet, "cellular").startswith("no test phone")
+    assert runner.unsupported(fleet, "off_network") is None, "one leaf is enough to go off the LAN"
+    assert runner.unsupported(build(runner, ScriptedFleet(), leaves=[]), "off_network") \
+        == "the plan names no managed Mac to take off the LAN"
     assert runner.unsupported(fleet, "fresh_install") == "the plan names no pristine guest"
     assert runner.unsupported(fleet, "upgrade") is None
 
