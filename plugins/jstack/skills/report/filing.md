@@ -5,7 +5,13 @@ Resolve the owning repo from where the problem lives, not where you stand:
 
 Search before filing. A recurrence gets a comment on the open issue, not a second number:
 
-`gh issue list --repo <owner/name> --search "<distinctive words>" --state all --limit 10`
+`gh api "repos/<owner/name>/issues?state=all&per_page=100" --jq '.[]|select(.pull_request==null)|"#\(.number) [\(.state)] \(.title)"' | grep -i "<distinctive word>"`
+
+Not `gh issue list --search` and not `--label`. Both route through the GitHub *search* API, which
+cannot see this org's repositories — it answers HTTP 422, and `gh` renders that as an empty list
+with exit 0. A dedup step built on it reports "nothing like this exists" every single time, which
+is how one defect becomes five numbers. The `repos/.../issues` endpoint above is a plain list read
+and does see them.
 
 Write the body to a file, then:
 
