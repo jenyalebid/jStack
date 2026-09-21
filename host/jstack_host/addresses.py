@@ -16,9 +16,12 @@ should try them:
     which is where pairing happens: the device being enrolled is, by
     definition, not on the mesh yet. First because it is the one address a
     new device can act on *now*.
-  · **local** — the Bonjour name. Survives a DHCP move, which the numeric LAN
-    address does not; second because `.local` resolution is flakier than a
-    number on a guest network.
+  · **local** — the names. This host's configured domain first if it has one
+    (`hub_domain`), then the Bonjour name. Both survive a DHCP move, which the
+    numeric LAN address does not; they come second because name resolution is
+    flakier than a number on a guest network, and a device standing in front of
+    the Mac should not wait on DNS to pair. A device that has already left is
+    the one they exist for — see `hub_domain`.
   · **mesh** — `10.66.0.x`. The address a device ends up *using* once its
     tunnel is up — and the one a device that is still pairing can never
     reach. Last, and only present on a host that has a tunnel at all: a
@@ -79,6 +82,46 @@ _HOST_ONLY_IFACES = ("bridge", "vmenet", "vnic", "awdl", "llw")
 
 DEFAULT_PORT = 9090
 
+#: This host's own stable name, if its owner gave it one — `JSTACK_HUB_DOMAIN`,
+#: else a single line in `<state_dir>/hub-domain`. Empty on a host that has
+#: none, which is every host by default: the package ships no domain, the
+#: machine supplies one.
+_DOMAIN_ENV = "JSTACK_HUB_DOMAIN"
+_DOMAIN_FILE = "hub-domain"
+
+
+def hub_domain() -> str:
+    """A name that resolves to this host's LAN address, kept true by DNS.
+
+    This is the fix for the failure that outlived every other one here: a
+    device pairs at home, stores the Mac's LAN *number*, the Mac's address then
+    moves — three times in three days, on this machine — and the device is left
+    dialing a host that is no longer there. It cannot relearn, because
+    relearning means reaching the hub, and reaching the hub is what broke. A
+    number frozen inside twenty-three devices is unfixable by definition.
+
+    A name is fixable. The number lives in one DNS record the hub itself
+    rewrites when it moves, and every device re-resolves on its own with no
+    contact, no re-pairing and no new build.
+
+    It is published as `local` rather than a kind of its own, and that is not
+    an accident: `local` in this protocol means *a name, not a number* — the
+    kind whose note is already "survives this Mac changing address", which a
+    domain does more completely than Bonjour ever did. Clients in the field
+    filter the address list to `lan` and `local`, so a new kind would be
+    dropped by every app already installed and deliver nothing until a build
+    shipped. This one is picked up on the next `/host` fetch by devices paired
+    months ago.
+    """
+    env = os.environ.get(_DOMAIN_ENV, "").strip()
+    if env:
+        return env
+    try:
+        from . import hostenv
+        return (hostenv.state_dir() / _DOMAIN_FILE).read_text().strip()
+    except Exception:  # noqa: BLE001 — no file, no domain, no claim
+        return ""
+
 
 def _inet_addrs() -> list[str]:
     """Every IPv4 this machine holds. A seam, so the tests drive the
@@ -133,7 +176,7 @@ def _is_host_only(iface: str) -> bool:
 
 
 def classify(inets: list[str], hostname: str, port: int,
-             ifaces: dict[str, str] | None = None) -> list[dict]:
+             ifaces: dict[str, str] | None = None, domain: str = "") -> list[dict]:
     """The address list, ordered lan → local → mesh. Pure, so the ordering
     and the exclusions are what the tests actually pin.
 
@@ -166,13 +209,23 @@ def classify(inets: list[str], hostname: str, port: int,
                     "url": f"http://{addr}:{port}",
                     "note": "works while both machines are on this network"})
 
+    # The configured domain leads the names: it survives a move the Bonjour
+    # name also survives, and additionally works on a network where `.local`
+    # resolution is blocked — which is most guest and corporate Wi-Fi.
+    stable = (domain or "").strip().rstrip(".").lower()
+    if stable:
+        out.append({"kind": "local", "host": stable,
+                    "url": f"http://{stable}:{port}",
+                    "note": "this Mac's permanent name on this network"})
+
     name = (hostname or "").strip().rstrip(".")
     if name and name.lower() != "localhost":
         if not name.endswith(".local"):
             name = name.split(".")[0] + ".local"
-        out.append({"kind": "local", "host": name,
-                    "url": f"http://{name}:{port}",
-                    "note": "survives this Mac changing address"})
+        if name.lower() != stable:
+            out.append({"kind": "local", "host": name,
+                        "url": f"http://{name}:{port}",
+                        "note": "survives this Mac changing address"})
 
     for addr in mesh:
         out.append({"kind": "mesh", "host": addr,
@@ -185,4 +238,4 @@ def classify(inets: list[str], hostname: str, port: int,
 def reachable(port: int = DEFAULT_PORT) -> list[dict]:
     """Where a second machine could try to reach this one."""
     held = _inet_ifaces()
-    return classify(list(held), _hostname(), port, held)
+    return classify(list(held), _hostname(), port, held, hub_domain())

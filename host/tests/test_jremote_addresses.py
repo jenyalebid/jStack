@@ -119,6 +119,48 @@ def test_interfaces_are_read_off_the_real_machine():
     assert held.get("127.0.0.1") == "lo0"
 
 
+def test_the_domain_leads_the_names_and_keeps_the_lan_number_first():
+    """The order the app probes: a number in front of the Mac, then names for
+    a device that has moved. The domain is a name, so it goes with the names —
+    ahead of Bonjour, which resolves on fewer networks than DNS does."""
+    out = addresses.classify(["192.168.0.10"], "mac", 9090,
+                             domain="hub.jstack.live")
+    assert [a["host"] for a in out] == ["192.168.0.10", "hub.jstack.live",
+                                        "mac.local"]
+
+
+def test_the_domain_ships_as_local_so_installed_apps_accept_it():
+    """`HostStore.directURLs` filters the published list to `lan` and `local`.
+    A kind of its own would be dropped by every app already on a phone, and
+    the whole point is that devices paired months ago pick this up without a
+    new build."""
+    out = addresses.classify([], "", 9090, domain="hub.jstack.live")
+    assert [a["kind"] for a in out] == ["local"]
+
+
+def test_no_domain_configured_publishes_no_domain():
+    """The package ships no name. A host whose owner never set one must not
+    advertise a guess — an address that resolves somewhere else is worse than
+    one absent."""
+    out = addresses.classify(["192.168.0.10"], "mac", 9090)
+    assert [a["host"] for a in out] == ["192.168.0.10", "mac.local"]
+
+
+def test_a_domain_matching_the_bonjour_name_is_not_published_twice():
+    """Two identical entries cost the app a duplicate probe on the path where
+    probes are slowest — the one with no route at all."""
+    out = addresses.classify([], "mac", 9090, domain="mac.local")
+    assert [a["host"] for a in out] == ["mac.local"]
+
+
+def test_the_domain_is_normalised_like_every_other_name():
+    """A trailing dot and an upper-case letter are both things a hand-written
+    config file carries, and neither may become a second address."""
+    for given in ("HUB.jstack.live", "hub.jstack.live.", " hub.jstack.live "):
+        out = addresses.classify([], "", 9090, domain=given)
+        assert [a["host"] for a in out] == ["hub.jstack.live"], given
+
+
 def test_every_entry_carries_the_shape_the_app_draws():
     out = addresses.classify(["10.66.0.1", "192.168.0.106"], "mac", 9090)
     assert out
