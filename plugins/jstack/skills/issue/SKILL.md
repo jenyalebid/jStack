@@ -8,7 +8,7 @@ argument-hint: "<owner/repo#N>"
 
 `$ARGUMENTS` is `owner/repo#N`. Missing → ask which issue, never guess.
 
-Take the issue to a verified PR. Explicit landing or release requests continue through the authorized workflow; otherwise leave it ready for review. Read the user's current instructions and record the outcome on the issue.
+Take the issue to a verified PR. Read the user's current instructions and record the outcome on the issue.
 
 Two contracts hold the machinery together. **The branch is `issue-<N>`**, exactly: closing the issue merges the open PR whose head is `issue-<N>`, and nothing else records which branch belonged to which issue. And **never switch branches in the shared checkout** — every agent on this machine shares one working tree per repo, so `git checkout -b` moves the branch under other sessions mid-edit. Use a worktree, with no exception for a small change.
 
@@ -22,18 +22,19 @@ Comments matter: a re-assignment or resume means a conversation may already be a
 
 The type label sets the ask: `bug` = restore the claimed behaviour · `optimization` = same behaviour, faster or clearer · `feature` = build what does not exist. A body naming no symptom, surface, or ask is unactionable — go to **Blocked** rather than guessing.
 
-Cards are not your job: In Progress, Review, Blocked, Done all move process-side on the events you fire anyway. Never place a card.
+Cards move process-side on the events you fire anyway. Never place one.
 
 ## 2. Get a worktree
 
-Branch beside the repo's checkout, never inside it:
+Beside the repo's checkout, never inside it. Never judge first-run against resume yourself — `issue-worktree` decides from what is running:
 
 ```bash
 WT=<your-seat>/pad/issue-<N>
-git -C <repo-root> worktree add "$WT" -b issue-<N>     # first time
-git -C <repo-root> worktree add "$WT" issue-<N>        # resume
+issue-worktree --repo <owner/repo> --issue <N> --path "$WT" --repo-root <repo-root>
 cd "$WT"
 ```
+
+Exit 0 hands you the tree and says how it got it. **Exit 3 refuses**: another session already holds this issue — **Blocked**.
 
 Repo not on this machine → clone it into the pad and work there.
 
