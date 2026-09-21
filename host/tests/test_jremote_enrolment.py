@@ -722,7 +722,17 @@ def test_pair_json_puts_the_reachable_address_in_the_link(store, monkeypatch,
     the one it was failing."""
     out = _pair_json(store, monkeypatch, capsys,
                      ["10.66.0.1", "192.168.0.106"])
-    assert [a["kind"] for a in out["addresses"]] == ["lan", "local", "mesh"]
+    assert [a["kind"] for a in out["addresses"]] == [
+        "lan", "lan", "local", "mesh"]
+    # The tunnel address goes out twice, and the duplicate is the point. The
+    # `mesh` copy is what `cli.py` selects on; the `lan` copy is the only one
+    # a shipped app keeps, because clients in the field drop every kind but
+    # `lan` and `local`. Assert the second `lan` really is the mesh address —
+    # a shape-only assertion would pass just as happily if this became a
+    # second LAN interface and quietly strand every roaming device again.
+    lan_hosts = [a["host"] for a in out["addresses"] if a["kind"] == "lan"]
+    assert "10.66.0.1" in lan_hosts
+    assert lan_hosts.index("192.168.0.106") < lan_hosts.index("10.66.0.1")
     assert out["link"].startswith("jremote://pair?")
     assert "url=http%3A%2F%2F192.168.0.106%3A9090" in out["link"]
     assert "10.66.0.1" not in out["link"]

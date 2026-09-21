@@ -210,6 +210,34 @@ def classify(inets: list[str], hostname: str, port: int,
                     "url": f"http://{addr}:{port}",
                     "note": "works while both machines are on this network"})
 
+    # The tunnel address, published under `lan` rather than its own kind.
+    #
+    # Not cosmetic, and not a lie about what it is — it is the only tag that
+    # reaches a device already in the field. Shipped clients filter this list
+    # to `lan` and `local` and drop everything else, which is stated forty
+    # lines up about the domain and then contradicted at the bottom of this
+    # same function, where the mesh entry goes out under `mesh` and is deleted
+    # by every installed app before a human sees it.
+    #
+    # What that cost, concretely: on 2026-09-18 this Mac's LAN address moved
+    # and three devices lost the hub for three days. The address that would
+    # have saved them was computed, serialised, sent, and thrown away at the
+    # client. Meanwhile the one entry those clients *did* keep — the domain,
+    # published as `local` — is refused by iOS App Transport Security, because
+    # a real public name over plain http gets no local-networking exemption.
+    # So the list contained exactly one address the app would accept and one
+    # the OS would accept, and they were never the same entry.
+    #
+    # A private 10.66/24 address is exempt under NSAllowsLocalNetworking, so
+    # this one clears ATS, and under `lan` it clears the client filter too. It
+    # is emitted after the real LAN addresses on purpose: at home with the
+    # tunnel down, the LAN entry still answers first and nothing waits on a
+    # timeout; away, the LAN entry fails and this is the next thing tried.
+    for addr in mesh:
+        out.append({"kind": "lan", "host": addr,
+                    "url": f"http://{addr}:{port}",
+                    "note": "works from anywhere this device's tunnel is up"})
+
     # The configured domain leads the names: it survives a move the Bonjour
     # name also survives, and additionally works on a network where `.local`
     # resolution is blocked — which is most guest and corporate Wi-Fi.
