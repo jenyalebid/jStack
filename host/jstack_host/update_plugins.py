@@ -21,6 +21,28 @@ def run(argv: list[str]) -> str:
     return result.stdout
 
 
+def serves_a_checkout(root: str) -> bool:
+    """Is this marketplace served from a git checkout rather than a shipped copy?
+
+    A machine that DEVELOPS jStack registers its marketplace against the
+    checkout, and everything downstream reads that registration: `plugin
+    update`, the nightly currency heal, `jstack-doctor`. Moving it to a
+    release stage pins all of them to one commit forever — the update re-reads
+    a directory that cannot change and correctly reports nothing to do, so the
+    drift is both permanent and invisible. A leaf has no checkout to protect
+    and moves exactly as before. `.git` is a file in a worktree, so test for
+    existence rather than for a directory.
+    """
+    return (Path(root) / ".git").exists()
+
+
+def pinned(kind: str, root: str) -> None:
+    """Say what was left alone. A release that silently declines half its work
+    is indistinguishable from one that did it."""
+    print(f"update: leaving the {kind} jStack marketplace at {root} — it serves a "
+          f"checkout, which no release stage can stand in for", flush=True)
+
+
 def discover() -> list[dict]:
     import tomllib
     home = Path.home()
@@ -32,10 +54,14 @@ def discover() -> list[dict]:
         if entry:
             if entry.get("source", {}).get("source") != "directory":
                 raise ReleaseError("convert the jStack marketplace to a local source before managed updates")
+            root = entry["source"]["path"]
             binary = shutil.which("claude") or str(home / ".local/bin/claude")
-            result.append({"kind": "claude", "binary": binary, "root": entry["source"]["path"],
-                           "config": str(claude_dir / "settings.json"), "marketplace": str(marketplace_file),
-                           "ledger": str(claude_dir / "plugins/installed_plugins.json")})
+            if serves_a_checkout(root):
+                pinned("claude", root)
+            else:
+                result.append({"kind": "claude", "binary": binary, "root": root,
+                               "config": str(claude_dir / "settings.json"), "marketplace": str(marketplace_file),
+                               "ledger": str(claude_dir / "plugins/installed_plugins.json")})
     codex_dir = Path(os.environ.get("CODEX_HOME", home / ".codex"))
     native_config = codex_dir / "config.toml"
     if native_config.exists():
@@ -43,9 +69,13 @@ def discover() -> list[dict]:
         if entry:
             if entry.get("source_type") != "local":
                 raise ReleaseError("convert the native jStack marketplace to a local source before managed updates")
+            root = entry["source"]
             binary = shutil.which("codex") or str(home / ".local/bin/codex")
-            result.append({"kind": "codex", "binary": binary, "root": entry["source"],
-                           "config": str(native_config), "hooks": str(codex_dir / "hooks.json")})
+            if serves_a_checkout(root):
+                pinned("codex", root)
+            else:
+                result.append({"kind": "codex", "binary": binary, "root": root,
+                               "config": str(native_config), "hooks": str(codex_dir / "hooks.json")})
     return result
 
 

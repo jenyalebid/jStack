@@ -190,6 +190,70 @@ if command -v git >/dev/null 2>&1; then
     else
         fail "same-label drift not named — the version string would still read as identity"
     fi
+    # ── the registered source is graded on its own terms ───────────────────
+    # The blindness this closes: `versions` resolves
+    # "the checkout" FROM the registration and then compares it against a cache
+    # taken from that same copy. Point the registration at a frozen release
+    # stage and the two agree forever — the one check built to catch drift
+    # reads its ground truth from the thing that is wrong. So the registered
+    # path is graded without asking it anything.
+
+    marketplace() {
+        mkdir -p "$TMP/home/.claude/plugins"
+        printf '{"jStack":{"source":{"source":"directory","path":"%s"},"lastUpdated":"2026-09-20T11:15:37.694Z"}}' \
+            "$1" > "$TMP/home/.claude/plugins/known_marketplaces.json"
+    }
+
+    ledger "$SHA1"
+    STAGE="$TMP/state/updates/releases/76-68c646f7/stage-ev0umz_y/stack"
+    mkdir -p "$STAGE"
+    marketplace "$STAGE"
+    run_vdoctor > "$TMP/mstage.json" 2>/dev/null
+    g=$(grade_of "$TMP/mstage.json" marketplace)
+    [ "$g" = "fail" ] || fail "a marketplace on a release stage should grade fail, got '$g'"
+    [ "$g" = "fail" ] && pass "a source under releases/*/stage-* is a finding, not agreement"
+    if grep -q "$STAGE" "$TMP/mstage.json"; then
+        pass "the stage path is named, so the reader can repoint it"
+    else
+        fail "graded the stage without saying which path it is"
+    fi
+
+    # The point of the whole issue: this must be caught while every version
+    # label on the machine still agrees. The cache is pinned at HEAD here.
+    g=$(grade_of "$TMP/mstage.json" versions)
+    [ "$g" != "fail" ] || fail "versions should not be the check that fails here"
+    if grep -q '"grade": "fail"' "$TMP/mstage.json"; then
+        pass "a machine whose versions all agree still fails on the registration"
+    else
+        fail "agreement on versions let a frozen registration pass the whole run"
+    fi
+
+    marketplace "$VREPO"
+    run_vdoctor > "$TMP/mrepo.json" 2>/dev/null
+    g=$(grade_of "$TMP/mrepo.json" marketplace)
+    [ "$g" = "ok" ] || fail "a marketplace on a real checkout should grade ok, got '$g'"
+    [ "$g" = "ok" ] && pass "serving from a checkout is the healthy case"
+
+    SHIPPED="$TMP/opt/jstack-copy"
+    mkdir -p "$SHIPPED"
+    marketplace "$SHIPPED"
+    run_vdoctor > "$TMP/mship.json" 2>/dev/null
+    g=$(grade_of "$TMP/mship.json" marketplace)
+    [ "$g" = "ok" ] || fail "a leaf's shipped copy should grade ok, got '$g'"
+    [ "$g" = "ok" ] && pass "a shipped copy is not a failure — a leaf has no checkout"
+    if grep -q "shipped copy" "$TMP/mship.json"; then
+        pass "the shipped copy is named as one, not passed off as a checkout"
+    else
+        fail "a non-checkout source read as a checkout"
+    fi
+
+    marketplace "$TMP/not-on-disk"
+    run_vdoctor > "$TMP/mgone.json" 2>/dev/null
+    g=$(grade_of "$TMP/mgone.json" marketplace)
+    [ "$g" = "fail" ] || fail "a source that is not there should grade fail, got '$g'"
+    [ "$g" = "fail" ] && pass "a registration pointing at nothing is a failure"
+
+    rm -f "$TMP/home/.claude/plugins/known_marketplaces.json"
 else
     echo "skip: no git — versions drift cases not run"
 fi
