@@ -1030,6 +1030,22 @@ if [ -n "$RELEASE_TAG" ] && [ -f "$CHECKOUT/host/release-identity.json" ] && [ "
             || die "could not unpack the Hub into /Applications — see $LAST_LOG"
         rm -f "$HUB_ZIP"
         [ -d "/Applications/jStack Hub.app" ] || die "the Hub zip did not contain 'jStack Hub.app'"
+        # A service approval granted to a previous sealed Hub outlives its
+        # bundle: it sits in the Background Task Management database, launchctl
+        # bootout never touches it, and the sealed installer refuses over it
+        # ("existing registrations or approvals require reviewed migration").
+        # The unregister verb lives inside the bundle, so the earliest it can
+        # run is now, with the fresh bundle in place. Fresh machines see every
+        # role as not_found and skip this entirely.
+        HUB_BIN="/Applications/jStack Hub.app/Contents/MacOS/JStackHub"
+        hub_status="$("$HUB_BIN" status 2>/dev/null || true)"
+        for role in updater menu host; do
+            case "$(printf '%s' "$hub_status" | sed -nE "s/.*\"$role\": *\"([a-z_]+)\".*/\\1/p")" in
+                enabled|requires_approval)
+                    warn "a previous Hub's $role registration is still on file — unregistering it"
+                    "$HUB_BIN" unregister "$role" >/dev/null 2>&1 || true ;;
+            esac
+        done
         if run_long "running the Hub's sealed installer" \
                 "/Applications/jStack Hub.app/Contents/MacOS/JStackRuntime" install \
                 --app "/Applications/jStack Hub.app" --state-dir "$HOME/.local/state/jremote"; then
