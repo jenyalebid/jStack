@@ -197,7 +197,7 @@ def publish(directory: Path, repo: str, public_key: str) -> None:
     else:
         command(["gh", "release", "create", tag, "--repo", repo, "--draft",
                  "--target", manifest["sources"]["stack"],
-                 "--title", "jStack " + manifest["components"]["stack"]["version"],
+                 "--title", "jStack " + manifest["release"],
                  "--notes", manifest.get("notes", "")], timeout=120)
     # Draft until the last upload succeeds. No consumer sees a partial release.
     command(["gh", "release", "upload", tag, "--repo", repo, "--clobber", *map(str, assets)], timeout=900)
