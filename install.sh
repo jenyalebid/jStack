@@ -206,6 +206,32 @@ uninstall() {
         note "no host installer in the checkout — skipping the host"
     fi
 
+    # 2b. Direct sweep. The two steps above delegate to installers inside the
+    #     checkout — and a machine mid-wreckage, where uninstall matters most,
+    #     often has no checkout or a broken one, turning both into silent
+    #     no-ops that leave the menu bar running. Remove the sealed pieces
+    #     directly, unregistering through the bundle first (a Background Task
+    #     Management approval outlives both launchctl bootout and the bundle).
+    if [ "$(uname -s)" = "Darwin" ] && [ "$DRY_RUN" != "1" ]; then
+        HUB_BIN="/Applications/jStack Hub.app/Contents/MacOS/JStackHub"
+        if [ -x "$HUB_BIN" ]; then
+            for role in updater menu host; do "$HUB_BIN" unregister "$role" >/dev/null 2>&1 || true; done
+        fi
+        for l in live.jstack.hub.host live.jstack.hub.menu live.jstack.hub.updater \
+                 com.jremote.host com.jremote.menubar com.jremote.updater; do
+            launchctl bootout "gui/$(id -u)/$l" >/dev/null 2>&1 || true
+        done
+        rm -f "$HOME/Library/LaunchAgents"/com.jremote.*.plist
+        pkill -f JStackHostBar 2>/dev/null || true
+        rm -rf "/Applications/jStack Hub.app"
+        ok "sealed Hub, services and menu bar removed"
+        if [ -n "$purge" ]; then
+            rm -rf "$HOME/.local/state/jremote" "$HOME/.local/share/jremote"
+            rm -f "$HOME/.local/bin/jstack-host"
+            ok "host state, token and credentials removed"
+        fi
+    fi
+
     # 3. the scheduler daemon.
     if command -v jstack-scheduler >/dev/null 2>&1; then
         run jstack-scheduler uninstall || warn "scheduler uninstall reported a problem"
