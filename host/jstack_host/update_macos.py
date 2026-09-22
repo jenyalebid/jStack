@@ -83,12 +83,27 @@ def bundle_info(path: Path) -> dict:
         return plistlib.load(stream)
 
 
+def client_signed_ours(path: Path) -> bool:
+    """The bundle proves it is ours cryptographically, not by declaration."""
+    requirement = 'anchor apple generic and certificate leaf[subject.OU] = "MZ95H77RQQ"'
+    result = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict",
+                             "-R", "=" + requirement, str(path)], capture_output=True)
+    return result.returncode == 0
+
+
 def client_distribution(path: Path, config: dict) -> str:
-    """Only hub-distributed bundles and previously enrolled clients are ours."""
+    """Only hub-distributed bundles and previously enrolled clients are ours.
+
+    An Info.plist key is a claim anyone can type; "hub" — the verdict that
+    authorizes this host to manage and replace the bundle — additionally
+    requires the bundle to verify against our signing team.
+    """
     if not path.exists():
         return "missing"
     if (path / "Contents/_MASReceipt/receipt").exists():
         return "app_store"
+    if not client_signed_ours(path):
+        return "external"
     info = bundle_info(path)
     if info.get("JStackDistribution") == "hub":
         return "hub"
