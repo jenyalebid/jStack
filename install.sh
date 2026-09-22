@@ -40,6 +40,7 @@ LAST_ELAPSED=""
 # Pairing needs BOTH — a host with no app has nothing to introduce itself to,
 # and an app with no host has nothing to be introduced to.
 HOST_INSTALLED=0
+SIGNED_HUB=0
 APP_INSTALLED=0
 
 usage() {
@@ -902,6 +903,7 @@ if [ -n "$RELEASE_TAG" ] && [ -f "$CHECKOUT/host/release-identity.json" ] && [ "
                 --app "/Applications/jStack Hub.app" --state-dir "$HOME/.local/state/jremote"; then
             ok "signed Hub installed"
             HOST_INSTALLED=1
+            SIGNED_HUB=1
             # Pairing and every later step reach the host through
             # ~/.local/bin/jstack-host. The sealed Hub's CLI picks its role
             # from its own executable name, so this is a wrapper, not a link.
@@ -1061,7 +1063,10 @@ fi
 
 # ── 11. the verdict ─────────────────────────────────────────────────────────
 
-if [ "$HOST_INSTALLED" = "1" ] && [ "$WANT_MENUBAR" = "1" ]; then
+if [ "${SIGNED_HUB:-0}" = "1" ]; then
+    step "Managed updater"
+    ok "the sealed Hub runs its own updater service — nothing to bootstrap"
+elif [ "$HOST_INSTALLED" = "1" ] && [ "$WANT_MENUBAR" = "1" ]; then
     step "Managed updater"
     if [ "$DRY_RUN" = "1" ]; then
         would "bootstrap the restart-independent updater with the shipped release trust key"
