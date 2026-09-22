@@ -146,6 +146,10 @@ if [ -z "$REPO" ]; then
     REPO="$(printf '%s' "$ORIGIN" \
         | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')"
 fi
+if [ -z "$REPO" ] && [ -f "$SELF_DIR/../host/release-identity.json" ]; then
+    # A release snapshot has no git remote; its identity names the repo.
+    REPO="$(sed -n 's/.*"github_repo": *"\([^"]*\)".*/\1/p' "$SELF_DIR/../host/release-identity.json")"
+fi
 [ -n "$REPO" ] || die "could not tell which repo to download from — run this from a clone, or pass --repo OWNER/NAME"
 case "$REPO" in
     */*) ;;
