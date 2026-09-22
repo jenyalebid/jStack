@@ -1,13 +1,20 @@
 #!/bin/bash
-# WHAT: after a full reset, the hub menu and Instances window show THIS Mac, local and online — no ghosts
+# WHAT: after a full reset, the hub menu reads "· local" — never managed/offline/ghost — and jRemote opens onto this Mac
 # TIME: ~20m
 # GUEST: pristine
 #
 # Born 2026-09-22: a reset proven by process checks alone shipped a menu bar
 # that still named a five-day-dead "M2 Pro Mac mini · managed · offline" and
-# an empty Instances window. The verdict here is read off the same surfaces
-# the user reads — the menu's own item titles and the window's rows — never
-# inferred from a process table.
+# an empty Instances view. The verdict here is read off the same surfaces
+# the user reads — the status menu's own item titles and the client's
+# window — never inferred from a process table.
+#
+# What a healthy fresh install actually shows (established on a live guest,
+# same day): the menu names the machine by HARDWARE MODEL ("M2 Pro Mac
+# mini", "M2 Max (Virtual) …"), never by ComputerName — so the ghost is not
+# detectable by name. The state line is: "Port 9090 · local" when healthy,
+# "· managed · offline" in the defect. The status item may be in menu bar 1
+# or 2 depending on session state — always address the LAST menu bar.
 . "$(dirname "$0")/../../lib/common.sh"
 
 ASSET_URL="$(gh release view --repo jenyalebid/jStack \
@@ -36,46 +43,56 @@ ditto -x -k ~/Downloads/jRemote.zip /Applications/
 open /Applications/jRemote.app
 sleep 15
 
-echo "== read the hub menu the way the user does =="
+echo "== read the hub status menu the way the user does =="
 MENU="$(osascript 2>&1 <<'AS'
 tell application "System Events"
     tell process "JStackHostBar"
-        click menu bar item 1 of menu bar 2
-        delay 1
-        set out to ""
-        repeat with mi in menu items of menu 1 of menu bar item 1 of menu bar 2
-            try
-                set out to out & (name of mi) & linefeed
-            end try
-        end repeat
-        key code 53
-        return out
+        set mb to menu bar item 1 of menu bar (count of menu bars)
+        ignoring application responses
+            click mb
+        end ignoring
     end tell
 end tell
+delay 2
+set names to {}
+tell application "System Events"
+    tell process "JStackHostBar"
+        set mb to menu bar item 1 of menu bar (count of menu bars)
+        set names to name of every menu item of menu 1 of mb
+        key code 53
+    end tell
+end tell
+set AppleScript's text item delimiters to linefeed
+return names as text
 AS
 )"
 echo "menu items:"; echo "$MENU" | sed 's/^/  | /'
-screencapture -x ~/instances-menu.png
+echo "$MENU" | grep -q "execution error" \
+    && echo "FAIL menu read failed (harness, not product): $MENU"
 
 echo "== verdict =="
-HOSTNAME_NOW="$(scutil --get ComputerName 2>/dev/null || hostname)"
-echo "this machine is: $HOSTNAME_NOW"
-echo "$MENU" | grep -qi "offline" && echo "FAIL menu shows an offline entry on a fresh install" \
+echo "$MENU" | grep -qi "offline" && echo "FAIL menu shows an offline entry after a fresh reset" \
     || echo "OK nothing offline in the menu"
-echo "$MENU" | grep -qi "M2 Pro" && echo "FAIL a ghost machine name survived the reset" \
-    || echo "OK no ghost machine names"
-echo "$MENU" | grep -q "$HOSTNAME_NOW" && echo "OK menu names this machine" \
-    || echo "FAIL menu does not name this machine ($HOSTNAME_NOW)"
-ROWS="$(osascript -e 'tell application "System Events" to tell process "jRemote" to get entire contents of window "Instances"' 2>/dev/null | head -c 2000)"
-[ -n "$ROWS" ] && echo "OK Instances window has content" || echo "FAIL Instances window is empty"
-echo "$ROWS" > ~/instances-rows.txt
-screencapture -x ~/instances-window.png
+echo "$MENU" | grep -qi "managed" && echo "FAIL fresh standalone install claims to be hub-managed" \
+    || echo "OK not managed"
+echo "$MENU" | grep -q "· local" && echo "OK menu shows this Mac as local" \
+    || echo "FAIL menu has no '· local' line"
+FIRST="$(echo "$MENU" | head -1)"
+[ -n "$FIRST" ] && echo "OK menu names a machine: $FIRST" || echo "FAIL menu names no machine"
+# A fresh install IS the latest release — offering it an update is the
+# fleet grading "no job history" as "available" (fleet_updates.py inventory).
+echo "$MENU" | grep -q "Update Available" \
+    && echo "FAIL fresh install at the latest release advertises an update to itself" \
+    || echo "OK no self-update offered"
+
+WINS="$(osascript -e 'tell application "System Events" to tell process "jRemote" to get name of every window' 2>&1)"
+echo "jRemote windows: $WINS"
+echo "$WINS" | grep -q "Home" \
+    && echo "OK client opened onto this Mac (Home window)" \
+    || echo "FAIL client did not open onto the local instance (windows: $WINS)"
 echo DONE-FULL-INSTANCES
 EOF
 
 p="$(guest_payload "$RECEIPTS/payload.sh")"
 guest_term bash "$p"
-guest_fetch /Users/admin/instances-menu.png
-guest_fetch /Users/admin/instances-window.png
-guest_fetch /Users/admin/instances-rows.txt
 finish_verdict "$RECEIPTS/term.log" DONE-FULL-INSTANCES

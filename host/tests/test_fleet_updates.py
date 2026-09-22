@@ -194,6 +194,18 @@ def test_current_requires_verification_and_expired_inventory_is_unknown(tmp_path
     assert store.inventory("leaf", "Office", "test-1")["state"] == "unknown/offline"
 
 
+def test_fresh_install_at_the_desired_release_is_current_not_available(tmp_path):
+    # No job ever ran and nothing was verified: the installer put the release
+    # there. Running exactly the desired release means there is no update to
+    # offer — the menu read "Update Available" on every fresh install
+    # (proven 2026-09-22, guest vfy-full-instances, release ffe85dc9).
+    store = fleet.FleetStore(tmp_path / "jobs.sqlite")
+    store.report("leaf", {"release": "test-1", "verified": False, "supervisor": 1})
+    assert store.inventory("leaf", "Office", "test-1")["state"] == "current"
+    assert store.inventory("leaf", "Office", "test-2")["state"] == "available"
+    assert store.inventory("leaf", "Office", None)["state"] == "not_published"
+
+
 def test_parent_accepts_a_leaf_rollback_after_restart_during_download(tmp_path, release):
     store = fleet.FleetStore(tmp_path / "jobs.sqlite")
     job = store.queue("leaf", "cred", release[2], "click")

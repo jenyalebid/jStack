@@ -166,16 +166,26 @@ class FleetStore:
                 job = self.transition(job["id"], machine, "cancelled", "adoption authority revoked")
         fresh = bool(row and time.time() - row["seen"] < STALE_SECONDS)
         state = "not_published" if fresh and not desired else "unknown"
+        # A machine with no job history that already reports the desired
+        # release is current, not updatable: a fresh install arrives at the
+        # release by the installer, never the updater, so it has no job and
+        # no verification — and must not advertise an update to itself. The
+        # verification gate below stays for job-claimed "current", where the
+        # claim is a leaf's word about a transition rather than the release
+        # stamp its host process observed on itself.
+        installed_as_desired = False
         if job:
             state = job["state"]
         elif report.get("job", {}).get("state"):
             state = report["job"]["state"]
         elif fresh and desired:
-            state = "available"
+            installed_as_desired = report.get("release") == desired
+            state = "current" if installed_as_desired else "available"
         if not fresh and state not in {"cancelled", "failed", "rolled_back"}:
             state = "pending/offline" if job and job["state"] in ACTIVE else "unknown/offline"
-        elif state == "current" and (report.get("release") != desired or
-                                     report.get("verified") is not True):
+        elif (state == "current" and not installed_as_desired
+              and (report.get("release") != desired or
+                   report.get("verified") is not True)):
             state = "available" if desired else "not_published"
         return {"machine": machine, "name": name, "desired": desired, "state": state,
                 "last_contact": row["seen"] if row else None, "observed": report,

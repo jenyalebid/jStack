@@ -49,8 +49,9 @@ esac
 files=""
 for want in "$@"; do files="$files $(resolve "$want")"; done
 
-fail=0; summary=""
+fail=0; summary=""; total=$(echo $files | wc -w); n=0
 for f in $files; do
+    n=$((n + 1))
     id="${f#"$SCEN/"}"; id="${id%.sh}"
     run_dir="$RECEIPTS_ROOT/${id//\//-}/$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$run_dir"
@@ -63,6 +64,15 @@ for f in $files; do
             || "${VM_SH:-$HOME/Operations/Infrastructure/scripts/vm.sh}" stop "vfy-${id//\//-}" >/dev/null 2>&1 || true
     else
         v=FAIL; fail=1
+        # A red guest stays booted for inspection — but only the LAST one.
+        # tart caps concurrent VMs; a kept guest mid-batch starved the next
+        # scenario of its boot slot (proven 2026-09-22: full/pair never got
+        # an address behind full/instances' kept guest). The receipts hold
+        # the evidence either way.
+        [ "$n" -lt "$total" ] && {
+            echo "   (guest vfy-${id//\//-} stopped to free its VM slot — receipts keep the evidence)"
+            "${VM_SH:-$HOME/Operations/Infrastructure/scripts/vm.sh}" stop "vfy-${id//\//-}" >/dev/null 2>&1 || true
+        }
     fi
     echo "$v" > "$run_dir/verdict.txt"
     summary="$summary$(printf '  %-24s %s' "$id" "$v")\n"
