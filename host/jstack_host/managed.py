@@ -694,6 +694,12 @@ def open_managed(sid: str, cwd: str, resume: bool = True, displace=None,
     engine = engine or prior.get("engine") or "claude"
     model = model or prior.get("model") or ""
     env = {**os.environ, "PATH": _PATH}
+    # The sealed Hub bundles Homebrew's tmux, whose ncurses looks for terminfo
+    # in a Homebrew prefix a clean Mac doesn't have; without this every session
+    # spawns spewing "can't find terminfo database". The system database is
+    # always present, so it anchors the search path.
+    env.setdefault("TERMINFO_DIRS",
+                   "/usr/share/terminfo:/opt/homebrew/share/terminfo")
     subprocess.run(_t("new-session", "-d", "-s", name, "-c", cwd),
                    check=True, env=env)
     # Mouse on, server-wide: wheel events scroll tmux copy-mode, which is how
