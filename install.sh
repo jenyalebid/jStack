@@ -880,7 +880,33 @@ fi
 step "Host and menu bar"
 
 HOST_INSTALLER="$CHECKOUT/host/install.sh"
-if [ ! -f "$HOST_INSTALLER" ]; then
+if [ -n "$RELEASE_TAG" ] && [ -f "$CHECKOUT/host/release-identity.json" ] && [ "$WANT_HOST" != "0" ] \
+        && [ "$(uname -s)" = "Darwin" ] && [ ! -d "/Applications/jStack Hub.app" ]; then
+    # A release install gets the SIGNED, notarized Hub the release published —
+    # never a source-built unsigned menubar with python launch agents. The
+    # sealed app carries its own installer; codesign/spctl verification happens
+    # inside install_signed before anything is adopted.
+    HUB_ZIP="$(mktemp -t jstack-hub).zip"
+    run_long "downloading the signed jStack Hub" \
+        curl -fsSL -o "$HUB_ZIP" "${REPO_URL%.git}/releases/download/$RELEASE_TAG/menubar-notarized.zip" \
+        || die "hub download failed — see $LAST_LOG"
+    if [ "$DRY_RUN" = "1" ]; then
+        would "install the signed Hub into /Applications and run its sealed installer"
+    else
+        run_long "installing the signed Hub" ditto -x -k "$HUB_ZIP" /Applications \
+            || die "could not unpack the Hub into /Applications — see $LAST_LOG"
+        rm -f "$HUB_ZIP"
+        [ -d "/Applications/jStack Hub.app" ] || die "the Hub zip did not contain 'jStack Hub.app'"
+        if run_long "running the Hub's sealed installer" \
+                "/Applications/jStack Hub.app/Contents/MacOS/JStackHub" install \
+                --app "/Applications/jStack Hub.app" --state-dir "$HOME/.local/state/jremote"; then
+            ok "signed Hub installed"
+            HOST_INSTALLED=1
+        else
+            warn "sealed Hub install reported a problem — see $LAST_LOG"
+        fi
+    fi
+elif [ ! -f "$HOST_INSTALLER" ]; then
     note "no host installer in this checkout — skipped"
 elif [ "$WANT_HOST" = "0" ]; then
     note "skipped by --no-host — run $HOST_INSTALLER any time"
