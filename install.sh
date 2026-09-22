@@ -902,6 +902,13 @@ if [ -n "$RELEASE_TAG" ] && [ -f "$CHECKOUT/host/release-identity.json" ] && [ "
                 --app "/Applications/jStack Hub.app" --state-dir "$HOME/.local/state/jremote"; then
             ok "signed Hub installed"
             HOST_INSTALLED=1
+            # Pairing and every later step reach the host through
+            # ~/.local/bin/jstack-host. The sealed Hub's CLI picks its role
+            # from its own executable name, so this is a wrapper, not a link.
+            mkdir -p "$HOME/.local/bin"
+            printf '#!/bin/sh\nexec "/Applications/jStack Hub.app/Contents/MacOS/JStackCLI" "$@"\n' \
+                > "$HOME/.local/bin/jstack-host"
+            chmod +x "$HOME/.local/bin/jstack-host"
         else
             warn "sealed Hub install reported a problem — see $LAST_LOG"
         fi
