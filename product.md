@@ -163,8 +163,10 @@ app we ship is one client, not the product.
 - A client asks a hub what it can do, and draws only what is really there.
 
 **Files**
-- A folder per agent that you and the agent both read and write, from any
-  device.
+- The hub's file surface, offered so a connected device can mount it and work
+  it like local storage — not an upload box.
+- A folder per agent inside it that you and the agent both read and write,
+  from any device.
 - What you put there is yours: an agent may tidy its own mess, never your
   things.
 

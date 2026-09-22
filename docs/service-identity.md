@@ -1,8 +1,20 @@
 # Signed service ownership
 
 Product domain: `jstack.live`. New namespace: `live.jstack`. Product name:
-**jStack Hub**. This document describes the migration target, not a claim
-that existing installations already implement it.
+**jStack Hub**.
+
+**Deployed as of 2026-09-22.** Two signed owners, no third:
+`/Applications/jStack Hub.app` (`live.jstack.hub`, user level — every access
+permission and all command execution) and
+`/Library/PrivilegedHelperTools/jStack Network.app` (`live.jstack.network`,
+admin level — WireGuard gateway and the privileged side of updates). The
+menu runs as `live.jstack.hub.menu`, every other capability as a
+`live.jstack.hub.<role>` SMAppService owned by Hub.
+
+**Still target, not deployed:** the separate `jStack Hub Services.app`
+(`live.jstack.hub.services`) and the schema 2 release format that carries it.
+Promotion refuses schema 2 today. Sections below marked candidate describe
+qualified components, not a released path.
 
 ## Inventory before migration
 
@@ -34,8 +46,12 @@ be checked in the exact-artifact acceptance run.
   protected from ordinary-user writes. It must not run checkout scripts or
   user-installed package-manager executables as root. Authenticate its
   callers and validate requests; never expose arbitrary execution.
-- The **jStack Updater** retains independent recovery of an unavailable Hub.
-  Consolidated ownership must not couple rollback to the process it replaces.
+- Update recovery is a capability of the two owners, not a third owner. The
+  updater runs as the Hub-owned `live.jstack.hub.updater` role; the privileged
+  half of a replacement belongs to Network. Ownership consolidation does not
+  relax the requirement it was built for: rollback must never be coupled to
+  the process it replaces, so a controller that replaces Hub cannot be Hub
+  itself, and an unavailable Hub must still be recoverable.
 - Optional local automation belongs to an explicit installed service catalog,
   not hardcoded assumptions about a particular operator's home tree. Each
   entry records purpose, owner, privilege, trigger, code identity, logs,
