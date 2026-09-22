@@ -185,8 +185,13 @@ uninstall() {
     note "dependencies are left untouched: Claude Code, git, Python, python-dateutil, WireGuard"
 
     # 1. the Mac app — its own installer knows the signed bundle it placed.
+    #    On purge it also deletes the app's container and keychain tokens: a
+    #    "full reset" that leaves the paired-host store behind resurrects the
+    #    old machines on the very next launch, which reads as no reset at all.
     if [ -f "$CHECKOUT/app/install.sh" ]; then
-        run bash "$CHECKOUT/app/install.sh" --uninstall || warn "app uninstall reported a problem"
+        # shellcheck disable=SC2086
+        run bash "$CHECKOUT/app/install.sh" --uninstall ${purge:+--purge} \
+            || warn "app uninstall reported a problem"
     else
         note "no app installer in the checkout — skipping the Mac app"
     fi
@@ -233,10 +238,25 @@ uninstall() {
         pkill -f JStackHostBar 2>/dev/null || true
         rm -rf "/Applications/jStack Hub.app"
         ok "sealed Hub, services and menu bar removed"
+        # The Mac app too — step 1 only reaches it through a checkout that a
+        # wrecked machine may not have.
+        if [ -d "/Applications/jRemote.app" ]; then
+            pkill -TERM -f "/Applications/jRemote.app/Contents/MacOS/jRemote" 2>/dev/null || true
+            rm -rf "/Applications/jRemote.app"
+            ok "removed /Applications/jRemote.app"
+        fi
         if [ -n "$purge" ]; then
             rm -rf "$HOME/.local/state/jremote" "$HOME/.local/share/jremote"
             rm -f "$HOME/.local/bin/jstack-host"
             ok "host state, token and credentials removed"
+            # The app's own memory: its sandbox container (settings and the
+            # paired-host store) and its keychain tokens. Leaving either one
+            # brings the dead hosts back on the next install.
+            rm -rf "$HOME/Library/Containers/dev.jenya.jRemote" \
+                   "$HOME/Library/Containers/dev.jenya.jRemote.Share" \
+                   "$HOME/Library/Containers/dev.jenya.jRemote.tunnel"
+            while security delete-generic-password -s jRemote >/dev/null 2>&1; do :; done
+            ok "app settings, paired hosts and tokens removed"
         fi
     fi
 

@@ -55,6 +55,7 @@ REPO="${JSTACK_REPO:-}"
 TAG=""
 DRY_RUN=0
 DO_UNINSTALL=0
+DO_PURGE=0
 ASSUME_YES=0
 FORCE=0
 
@@ -66,6 +67,7 @@ usage: install.sh [options]
   --yes, -y        don't ask; accept every default
   --force          reinstall even when the selected build is already installed
   --uninstall      remove the app (its settings and paired hosts stay)
+  --purge          with --uninstall: also delete settings, paired hosts and tokens
   --tag TAG        install a specific release instead of the newest
   --repo OWNER/NAME  where to download from (default: this checkout's origin)
   --prefix DIR     where to install (default /Applications)
@@ -83,6 +85,7 @@ while [ $# -gt 0 ]; do
         --yes|-y)     ASSUME_YES=1 ;;
         --force)      FORCE=1 ;;
         --uninstall)  DO_UNINSTALL=1 ;;
+        --purge)      DO_PURGE=1 ;;
         --tag)        TAG="${2:-}"; shift ;;
         --repo)       REPO="${2:-}"; shift ;;
         --prefix)     PREFIX="${2:-}"; shift ;;
@@ -121,15 +124,43 @@ done
 # ── uninstall ───────────────────────────────────────────────────────────────
 
 if [ "$DO_UNINSTALL" = "1" ]; then
-    [ -d "$APP_PATH" ] || die "nothing installed at $APP_PATH"
+    if [ ! -d "$APP_PATH" ] && [ "$DO_PURGE" != "1" ]; then
+        die "nothing installed at $APP_PATH"
+    fi
     if pgrep -f "$APP_PATH/Contents/MacOS/$APP_NAME" >/dev/null 2>&1; then
         run pkill -TERM -f "$APP_PATH/Contents/MacOS/$APP_NAME" || true
         [ "$DRY_RUN" = "1" ] || sleep 2
     fi
-    run rm -rf "$APP_PATH"
-    did "removed $APP_PATH"
-    note "settings, paired hosts and tokens are untouched — reinstalling picks"
-    note "them back up. To clear those too, remove the app in Settings first."
+    if [ -d "$APP_PATH" ]; then
+        run rm -rf "$APP_PATH"
+        did "removed $APP_PATH"
+    fi
+    if [ "$DO_PURGE" = "1" ]; then
+        # The app is sandboxed: settings, the paired-host store and drafts all
+        # live in its container. The bearer tokens live in the login keychain
+        # under the app's service name — one delete per item until none match.
+        for c in "$HOME/Library/Containers/dev.jenya.jRemote" \
+                 "$HOME/Library/Containers/dev.jenya.jRemote.Share" \
+                 "$HOME/Library/Containers/dev.jenya.jRemote.tunnel"; do
+            [ -e "$c" ] || continue
+            run rm -rf "$c"
+            did "removed $c"
+        done
+        if [ "$DRY_RUN" = "1" ]; then
+            note "would: delete keychain items for service jRemote"
+        else
+            n=0
+            while security delete-generic-password -s jRemote >/dev/null 2>&1; do
+                n=$((n+1))
+            done
+            [ "$n" -gt 0 ] && ok "deleted $n keychain token(s)" \
+                           || note "no keychain tokens to delete"
+        fi
+        did "settings, paired hosts and tokens removed — the next install starts clean"
+    else
+        note "settings, paired hosts and tokens are untouched — reinstalling picks"
+        note "them back up. To clear those too: --uninstall --purge."
+    fi
     exit 0
 fi
 
