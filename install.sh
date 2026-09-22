@@ -898,7 +898,7 @@ if [ -n "$RELEASE_TAG" ] && [ -f "$CHECKOUT/host/release-identity.json" ] && [ "
         rm -f "$HUB_ZIP"
         [ -d "/Applications/jStack Hub.app" ] || die "the Hub zip did not contain 'jStack Hub.app'"
         if run_long "running the Hub's sealed installer" \
-                "/Applications/jStack Hub.app/Contents/MacOS/JStackHub" install \
+                "/Applications/jStack Hub.app/Contents/MacOS/JStackRuntime" install \
                 --app "/Applications/jStack Hub.app" --state-dir "$HOME/.local/state/jremote"; then
             ok "signed Hub installed"
             HOST_INSTALLED=1
