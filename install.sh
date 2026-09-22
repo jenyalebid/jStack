@@ -547,7 +547,7 @@ step "jStack source at $CHECKOUT"
 # their hash suffix, and a lexicographic sort orders those randomly. The
 # releases API lists newest-first; the tag sort remains as offline fallback.
 RELEASE_TAG="$(curl -fsSL "https://api.github.com/repos/jenyalebid/jStack/releases?per_page=30" 2>/dev/null \
-    | grep -o '"tag_name": *"stack-release-2[^"]*"' | head -1 | sed 's/.*"\(stack-release-2[^"]*\)"/\1/')"
+    | "$PY" -c 'import json,sys; rs=[r for r in json.load(sys.stdin) if r["tag_name"].startswith("stack-release-2")]; print(max(rs, key=lambda r: r["published_at"])["tag_name"] if rs else "")' 2>/dev/null)"
 [ -n "$RELEASE_TAG" ] || RELEASE_TAG="$(git ls-remote --tags "$REPO_URL" 'refs/tags/stack-release-2*' 2>/dev/null \
     | sed 's|.*refs/tags/||' | sort | tail -1)"
 
