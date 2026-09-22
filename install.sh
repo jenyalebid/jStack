@@ -534,6 +534,31 @@ export PATH="$HOME/.local/bin:$PATH"
 
 step "jStack source at $CHECKOUT"
 
+# Which release is current, resolved once over the git protocol (no API rate
+# limit). Everything below installs THIS — the published, tested snapshot with
+# its release identity — never raw main.
+RELEASE_TAG="$(git ls-remote --tags "$REPO_URL" 'refs/tags/stack-release-2*' 2>/dev/null \
+    | sed 's|.*refs/tags/||' | sort | tail -1)"
+
+if [ -d "$CHECKOUT/.git" ] && [ -n "$RELEASE_TAG" ] \
+        && [ "${JSTACK_SOURCE:-0}" != "1" ] && [ -z "${JSTACK_RELEASE_CONFIG:-}" ] \
+        && [ -z "$(git -C "$CHECKOUT" status --porcelain 2>/dev/null)" ] \
+        && [ -z "$(git -C "$CHECKOUT" log --oneline '@{u}..HEAD' 2>/dev/null)" ]; then
+    # A clean source clone is what earlier installers left behind, and it is
+    # exactly why machines reported stale versions: main is source, not the
+    # release. Convert it — old bytes move aside rather than vanish. A dirty
+    # tree or local commits mean somebody's work: leave it on the git path.
+    # JSTACK_SOURCE=1 keeps a deliberate source install; the publisher is
+    # recognized by JSTACK_RELEASE_CONFIG and never converted.
+    ASIDE="$CHECKOUT-source-$(date +%Y%m%d%H%M%S)"
+    if [ "$DRY_RUN" = "1" ]; then
+        would "move source clone to $ASIDE and install $RELEASE_TAG"
+    else
+        mv "$CHECKOUT" "$ASIDE"
+        ok "source clone moved aside to $ASIDE — installing the published release"
+    fi
+fi
+
 if [ -d "$CHECKOUT/.git" ]; then
     # An existing checkout is somebody's working tree. Fetch so the install is
     # current, but never reset — an installer that discards local commits is a
@@ -568,8 +593,26 @@ elif [ -f "$CHECKOUT/host/release-identity.json" ] && [ -f "$CHECKOUT/plugins/js
 elif [ -e "$CHECKOUT" ]; then
     die "$CHECKOUT exists and is not a git checkout — move it aside or pass --checkout DIR"
 else
-    run_long "cloning $REPO_URL" git clone --quiet "$REPO_URL" "$CHECKOUT" || die "clone failed — see $LAST_LOG"
-    [ "$DRY_RUN" = "1" ] || ok "cloned in ${LAST_ELAPSED}s at $(git -C "$CHECKOUT" log --oneline -1)"
+    # A fresh machine gets the published release, resolved above. Only if no
+    # release exists at all does the clone remain, so a brand-new repo can
+    # still bootstrap.
+    if [ -n "$RELEASE_TAG" ]; then
+        SNAP="$(mktemp -t jstack-release).tar.gz"
+        run_long "downloading release $RELEASE_TAG" \
+            curl -fsSL -o "$SNAP" "${REPO_URL%.git}/releases/download/$RELEASE_TAG/stack.tar.gz" \
+            || die "release download failed — see $LAST_LOG"
+        if [ "$DRY_RUN" = "1" ]; then
+            would "unpack $RELEASE_TAG into $CHECKOUT"
+        else
+            mkdir -p "$CHECKOUT"
+            tar xzf "$SNAP" -C "$CHECKOUT" || die "could not unpack $RELEASE_TAG into $CHECKOUT"
+            rm -f "$SNAP"
+            ok "installed release $RELEASE_TAG ($(sed -n 's/.*"release": *"\([^"]*\)".*/\1/p' "$CHECKOUT/host/release-identity.json"))"
+        fi
+    else
+        run_long "cloning $REPO_URL" git clone --quiet "$REPO_URL" "$CHECKOUT" || die "clone failed — see $LAST_LOG"
+        [ "$DRY_RUN" = "1" ] || ok "cloned in ${LAST_ELAPSED}s at $(git -C "$CHECKOUT" log --oneline -1)"
+    fi
 fi
 
 PLUGIN="$CHECKOUT/plugins/jstack"
