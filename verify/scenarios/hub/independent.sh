@@ -62,10 +62,18 @@ fi
 # The Agents tab: the auto-created agent MUST show. This is the roster the app
 # polls (GET /agents -> board.roster()); read it the same way the tab renders,
 # not from the directory on disk — the bug is exactly that the two disagree.
-echo "== Agents tab: does the agent the installer just created show? =="
+#
+# Read it the way the SEALED HUB does: launchd hands its host only HOME — no
+# login shell, so no $JSTACK_ROOT, and the old JREMOTE_INSTANCE_ROOT pin lived
+# in a com.jremote.host plist the sealed app never loads. Reading the roster
+# with $JSTACK_ROOT still exported (as this payload set it) is a lie: it
+# resolves the root from an env var the real host never has, so it passes on a
+# host that shows a blank tab. Strip that env here or the check proves nothing.
+echo "== Agents tab: does the agent show with ONLY the env the sealed host has? =="
 PKG="/Applications/jStack Hub.app/Contents/Resources/packages"
 PY="/Applications/jStack Hub.app/Contents/MacOS/JStackPython"
-ROSTER="$(PYTHONPATH="$PKG" "$PY" -c 'from jstack_host import board,hostenv; print(type(hostenv.profile()).__name__); print(" ".join(a["base"] for a in board.roster()["agents"]))' 2>&1)"
+ROSTER="$(env -u JSTACK_ROOT -u JREMOTE_INSTANCE_ROOT -u JREMOTE_HOST_PROFILE \
+    PYTHONPATH="$PKG" "$PY" -c 'from jstack_host import board,hostenv; print(type(hostenv.profile()).__name__); print(" ".join(a["base"] for a in board.roster()["agents"]))' 2>&1)"
 echo "$ROSTER" | sed 's/^/  roster: /'
 if echo "$ROSTER" | tr 'A-Z' 'a-z' | grep -qw jarvis; then
     echo "OK the auto-created agent shows in the Agents tab"
