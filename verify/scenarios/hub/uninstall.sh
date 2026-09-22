@@ -15,7 +15,6 @@ mkdir -p "$JSTACK_ROOT"
 echo "== install first =="
 curl -fsSL https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh \
     | bash -s -- --agent Jarvis
-state_before="$(ls ~/.local/state/jremote 2>/dev/null | wc -l | tr -d ' ')"
 
 echo "== README uninstall (keep state) =="
 curl -fsSL https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh \
@@ -27,9 +26,13 @@ launchctl list | grep -qi jstack && echo "FAIL a jstack launchd job survived" \
 pgrep -f JStackHostBar >/dev/null && echo "FAIL menu bar still running" || echo "OK menu bar gone"
 [ -d "/Applications/jStack Hub.app" ] && echo "FAIL Hub.app still installed" || echo "OK Hub.app gone"
 [ -d "$JSTACK_ROOT" ] && echo "OK root tree kept ($JSTACK_ROOT)" || echo "FAIL root tree deleted"
-state_after="$(ls ~/.local/state/jremote 2>/dev/null | wc -l | tr -d ' ')"
-[ "$state_after" = "$state_before" ] && echo "OK host state kept ($state_after entries)" \
-    || echo "FAIL host state changed ($state_before -> $state_after)"
+# The keep-state contract, by name: identity, tokens and data survive so the
+# machine comes back as the same instance. The two installation descriptors
+# (service-settings.json, install-journal.json) are deliberately removed —
+# they describe an installation that no longer exists.
+for keep in api-token internal-token host-id jremote_store.sqlite feed.sqlite; do
+    [ -e ~/.local/state/jremote/$keep ] && echo "OK kept $keep" || echo "FAIL $keep deleted"
+done
 echo DONE-HUB-UNINSTALL
 EOF
 
