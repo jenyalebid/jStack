@@ -53,6 +53,15 @@ from pathlib import Path
 
 HOME = Path.home()
 
+# The sealed Hub's tmux carries Homebrew's static ncurses, which looks for
+# terminfo in a prefix a clean Mac doesn't have; a launchd-spawned host has no
+# TERMINFO_DIRS either, so every tmux client it runs prints "can't find
+# terminfo database" straight into the session. Anchor the whole host process
+# — and every child it spawns — to the system database, here in the module
+# every host entrypoint imports.
+os.environ.setdefault("TERMINFO_DIRS",
+                      "/usr/share/terminfo:/opt/homebrew/share/terminfo")
+
 # Directories that live inside an agent's root but are never a sub-mode. Same
 # list as lib.agents' — a seat's pad and content buckets are not spawnable,
 # and `git` is the seat's save folder. This set is mode discovery only here,

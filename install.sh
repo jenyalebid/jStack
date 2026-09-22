@@ -543,7 +543,12 @@ step "jStack source at $CHECKOUT"
 # Which release is current, resolved once over the git protocol (no API rate
 # limit). Everything below installs THIS — the published, tested snapshot with
 # its release identity — never raw main.
-RELEASE_TAG="$(git ls-remote --tags "$REPO_URL" 'refs/tags/stack-release-2*' 2>/dev/null \
+# Newest by publication, not by tag text: same-day releases differ only in
+# their hash suffix, and a lexicographic sort orders those randomly. The
+# releases API lists newest-first; the tag sort remains as offline fallback.
+RELEASE_TAG="$(curl -fsSL "https://api.github.com/repos/jenyalebid/jStack/releases?per_page=30" 2>/dev/null \
+    | grep -o '"tag_name": *"stack-release-2[^"]*"' | head -1 | sed 's/.*"\(stack-release-2[^"]*\)"/\1/')"
+[ -n "$RELEASE_TAG" ] || RELEASE_TAG="$(git ls-remote --tags "$REPO_URL" 'refs/tags/stack-release-2*' 2>/dev/null \
     | sed 's|.*refs/tags/||' | sort | tail -1)"
 
 if [ -d "$CHECKOUT/.git" ] && [ -n "$RELEASE_TAG" ] \
