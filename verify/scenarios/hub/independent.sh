@@ -59,6 +59,20 @@ fi
 # It should have zero leaves attached (it just minted a code, nobody redeemed).
 "$H" leaves >/dev/null 2>&1 && echo "OK leaves query answers" || echo "FAIL leaves query errored"
 
+# The Agents tab: the auto-created agent MUST show. This is the roster the app
+# polls (GET /agents -> board.roster()); read it the same way the tab renders,
+# not from the directory on disk — the bug is exactly that the two disagree.
+echo "== Agents tab: does the agent the installer just created show? =="
+PKG="/Applications/jStack Hub.app/Contents/Resources/packages"
+PY="/Applications/jStack Hub.app/Contents/MacOS/JStackPython"
+ROSTER="$(PYTHONPATH="$PKG" "$PY" -c 'from jstack_host import board,hostenv; print(type(hostenv.profile()).__name__); print(" ".join(a["base"] for a in board.roster()["agents"]))' 2>&1)"
+echo "$ROSTER" | sed 's/^/  roster: /'
+if echo "$ROSTER" | tr 'A-Z' 'a-z' | grep -qw jarvis; then
+    echo "OK the auto-created agent shows in the Agents tab"
+else
+    echo "FAIL Agents tab is empty — the installer's agent does not show (host reads the wrong root)"
+fi
+
 echo "menu bar (read the glass in the screenshot):"
 pgrep -f JStackHostBar >/dev/null && echo "OK menu bar running" || echo "FAIL menu bar not running"
 echo DONE-HUB-INDEPENDENT
