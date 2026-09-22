@@ -675,3 +675,153 @@ def test_running_observes_exec_after_cached_process_scan(tmp_path):
         process.terminate()
         process.wait(timeout=5)
         process.stdin.close()
+
+
+def _channel_feed(release, offers, manifests):
+    """A GitHub release list and the manifest each tag serves.
+
+    `offers` is what the API lists, `manifests` maps tag -> signed envelope.
+    A tag with no entry serves a 404, which is how a client-only release —
+    one that publishes no stack manifest at all — looks from here.
+    """
+    def transport(request):
+        if request.url.host == "api.github.com":
+            return httpx.Response(200, json=offers)
+        tag = str(request.url).split("/download/")[1].split("/")[0]
+        if request.url.path.endswith("manifest.json"):
+            envelope = manifests.get(tag)
+            return httpx.Response(200, json=envelope) if envelope else httpx.Response(404)
+        return httpx.Response(200, content=b"artifact")
+    return httpx.MockTransport(transport)
+
+
+def _signed(fixture, **fields):
+    return releases.sign({**fixture[2]["manifest"], **fields}, fixture[0].private_bytes_raw())
+
+
+def test_a_hub_on_stable_never_takes_a_branch_release(tmp_path, release):
+    """The branch line is published as a prerelease, and stable's filter drops
+    prereleases — so a side branch cannot reach a hub that did not ask for it
+    even if it is the newest thing published."""
+    from jstack_host import release_channel
+    branch_tag = release_channel.TAG_PREFIX + "branch-1"
+    stable_tag = release_channel.TAG_PREFIX + "test-1"
+    offers = [{"draft": False, "prerelease": True, "tag_name": branch_tag},
+              {"draft": False, "prerelease": False, "tag_name": stable_tag}]
+    manifests = {
+        branch_tag: _signed(release, release="branch-1", sequence=99,
+                            channel={"name": "feature/x"}),
+        stable_tag: _signed(release, release="test-1", sequence=5,
+                            channel={"name": "stable"})}
+    feed = tmp_path / "feed"
+    config = {"github_repo": "example/stack", "feed_dir": str(feed),
+              "public_key": release[1]}
+    with httpx.Client(transport=_channel_feed(release, offers, manifests)) as client:
+        release_channel.refresh(tmp_path / "updates", config, client=client, now=1000)
+    assert json.loads((feed / "latest.json").read_text())["manifest"]["release"] == "test-1"
+
+
+def test_a_hub_switched_to_a_branch_takes_that_branchs_release(tmp_path, release):
+    """The whole of the switch: a channel name in this hub's config."""
+    from jstack_host import release_channel
+    branch_tag = release_channel.TAG_PREFIX + "branch-1"
+    stable_tag = release_channel.TAG_PREFIX + "test-1"
+    offers = [{"draft": False, "prerelease": True, "tag_name": branch_tag},
+              {"draft": False, "prerelease": False, "tag_name": stable_tag}]
+    manifests = {
+        branch_tag: _signed(release, release="branch-1", sequence=99,
+                            channel={"name": "feature/x"}),
+        stable_tag: _signed(release, release="test-1", sequence=5,
+                            channel={"name": "stable"})}
+    feed = tmp_path / "feed"
+    config = {"github_repo": "example/stack", "feed_dir": str(feed),
+              "public_key": release[1], "channel": "feature/x"}
+    with httpx.Client(transport=_channel_feed(release, offers, manifests)) as client:
+        release_channel.refresh(tmp_path / "updates", config, client=client, now=1000)
+    assert json.loads((feed / "latest.json").read_text())["manifest"]["release"] == "branch-1"
+
+
+def test_the_channel_comes_from_the_signed_manifest_not_the_tag(tmp_path, release):
+    """A tag is metadata anyone with push rights can write; the line a hub
+    follows is a trust decision. A tag that says stable over a manifest that
+    says otherwise is not an offer to a stable hub."""
+    from jstack_host import release_channel
+    liar = release_channel.TAG_PREFIX + "test-1"
+    offers = [{"draft": False, "prerelease": False, "tag_name": liar}]
+    manifests = {liar: _signed(release, release="test-1", sequence=99,
+                               channel={"name": "feature/x"})}
+    feed = tmp_path / "feed"
+    config = {"github_repo": "example/stack", "feed_dir": str(feed),
+              "public_key": release[1]}
+    root = tmp_path / "updates"
+    with httpx.Client(transport=_channel_feed(release, offers, manifests)) as client:
+        release_channel.refresh(root, config, client=client, now=1000)
+    assert not (feed / "latest.json").exists()
+    assert json.loads((root / "channel.json").read_text())["status"] == "not_published"
+
+
+def test_the_channel_refuses_to_walk_a_hub_backwards(tmp_path, release):
+    """The guard the counter used to provide. It is a sequence now, because
+    the identity is a hash and a date and neither of those orders."""
+    from jstack_host import release_channel
+    tag = release_channel.TAG_PREFIX + "older"
+    offers = [{"draft": False, "prerelease": False, "tag_name": tag}]
+    manifests = {tag: _signed(release, release="older", sequence=4,
+                              channel={"name": "stable"})}
+    feed = tmp_path / "feed"
+    current = _signed(release, release="newer", sequence=9, channel={"name": "stable"})
+    atomic_json(feed / "latest.json", current)
+    config = {"github_repo": "example/stack", "feed_dir": str(feed),
+              "public_key": release[1]}
+    with httpx.Client(transport=_channel_feed(release, offers, manifests)) as client:
+        with pytest.raises(releases.ReleaseError):
+            release_channel.refresh(tmp_path / "updates", config, client=client, now=1000)
+    assert json.loads((feed / "latest.json").read_text()) == current
+
+
+def test_moving_to_a_branch_is_not_a_downgrade(tmp_path, release):
+    """Two counts only compare along one line. A hub deliberately switched is
+    changing which history it measures against, and its old count means
+    nothing on the new one — so a branch whose sequence is lower still lands."""
+    from jstack_host import release_channel
+    tag = release_channel.TAG_PREFIX + "branch-1"
+    offers = [{"draft": False, "prerelease": True, "tag_name": tag}]
+    manifests = {tag: _signed(release, release="branch-1", sequence=2,
+                              channel={"name": "feature/x"})}
+    feed = tmp_path / "feed"
+    atomic_json(feed / "latest.json",
+                _signed(release, release="newer", sequence=9, channel={"name": "stable"}))
+    config = {"github_repo": "example/stack", "feed_dir": str(feed),
+              "public_key": release[1], "channel": "feature/x"}
+    with httpx.Client(transport=_channel_feed(release, offers, manifests)) as client:
+        release_channel.refresh(tmp_path / "updates", config, client=client, now=1000)
+    assert json.loads((feed / "latest.json").read_text())["manifest"]["release"] == "branch-1"
+
+
+def test_a_manifest_from_before_channels_reads_as_stable(tmp_path, release):
+    """Every release already published came off main. If absent read as "no
+    channel" instead of stable, every hub in the field would stop updating."""
+    from jstack_host import release_channel
+    tag = release_channel.TAG_PREFIX + "test-1"
+    offers = [{"draft": False, "prerelease": False, "tag_name": tag}]
+    manifests = {tag: release[2]}          # no channel name, no sequence
+    feed = tmp_path / "feed"
+    config = {"github_repo": "example/stack", "feed_dir": str(feed),
+              "public_key": release[1]}
+    with httpx.Client(transport=_channel_feed(release, offers, manifests)) as client:
+        release_channel.refresh(tmp_path / "updates", config, client=client, now=1000)
+    assert json.loads((feed / "latest.json").read_text()) == release[2]
+
+
+@pytest.mark.parametrize("name", ["../etc", "-rf", "a b", "x" * 200])
+def test_a_channel_name_that_is_not_a_branch_is_refused(name):
+    """The name is pasted into a comparison against signed content and comes
+    from a config file — bound it here, once, rather than at each use."""
+    from jstack_host import release_channel
+    with pytest.raises(releases.ReleaseError):
+        release_channel.channel_name({"channel": name})
+
+
+def test_no_channel_configured_is_the_stable_line():
+    from jstack_host import release_channel
+    assert release_channel.channel_name({}) == releases.STABLE_CHANNEL

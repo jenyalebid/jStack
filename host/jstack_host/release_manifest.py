@@ -15,6 +15,10 @@ SCHEMA = 1
 COMPONENTS = {"stack", "menubar", "client"}
 RECEIPTS = {"fresh_install", "upgrade", "fleet", "offline_catchup", "session_survival",
             "interruption", "rollback", "revocation", "off_network"}
+#: The line a hub follows when nobody chose one. Named rather than empty so a
+#: manifest built before channels existed can be read as belonging to it: the
+#: releases already published came off main, which is what this names.
+STABLE_CHANNEL = "stable"
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 HEX = re.compile(r"[a-f0-9]{64}\Z")
 

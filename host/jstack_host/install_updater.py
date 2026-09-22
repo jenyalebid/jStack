@@ -154,6 +154,12 @@ def bootstrap(public_key: str, *, state_dir: Path | None = None, load=True,
     source = old_config.get("github_repo") or identity.get("github_repo") or origin.stdout.strip()
     if source:
         configuration["github_repo"] = repository(source)
+    # Which release line this hub follows, carried across reinstalls the same
+    # way `github_repo` is. A hub switched to a branch must stay switched:
+    # reinstalling the updater is routine, and dropping the choice here would
+    # silently walk the machine back to stable at the next repair.
+    from .release_channel import channel_name
+    configuration["channel"] = channel_name(old_config)
     atomic_json(root / "config.json", configuration)
     logs = root / "logs"
     logs.mkdir(exist_ok=True)

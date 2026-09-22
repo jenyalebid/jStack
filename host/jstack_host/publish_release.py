@@ -113,10 +113,28 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
     from .release_channel import repository
     github_repo = repository(config.get("github_repo") or command(
         ["git", "-C", str(stack), "remote", "get-url", "origin"]).strip())
+    # Ordering, now that nothing counts releases. The identity is a hash and a
+    # date, and neither orders: hashes have no order at all, and two releases
+    # cut on one day share a date. A hub receiving an offer has to answer "is
+    # this ahead of what I run" with no git and no history — so the answer
+    # travels inside the signed manifest or it cannot be asked.
+    #
+    # `rev-list --count` is that answer: the number of commits behind this one
+    # on its own line. It is not a version and is never displayed — it exists
+    # only to be compared against the sequence of the release a hub already
+    # holds, and only within one channel, where the two counts share a root.
+    sequence = int(command(["git", "-C", str(stack), "rev-list", "--count", stack_sha]).strip())
+    # Which line this release belongs to. `stack_repo` is on whatever branch
+    # the releaser checked out, and the snapshot is by sha, so building from a
+    # side branch already worked — what was missing was the offer saying which
+    # line it came from, so a hub can decline the ones that are not its own.
+    channel = command(["git", "-C", str(config["stack_repo"]), "rev-parse",
+                       "--abbrev-ref", "HEAD"]).strip()
+    channel = releases.STABLE_CHANNEL if channel in ("main", "HEAD") else channel
     from .sourcestamp import fingerprint
     (stack / "host/release-identity.json").write_text(json.dumps({
         "release": release_id, "sha": stack_sha, "version": version, "date": date,
-        "github_repo": github_repo,
+        "github_repo": github_repo, "sequence": sequence, "channel": channel,
         "package_sha256": fingerprint(stack / "host/jstack_host")}))
     archive = output / "stack.tar.gz"
     with tarfile.open(archive, "w:gz") as bundle:
@@ -180,7 +198,9 @@ def seal(work: Path, config: dict, notes: str) -> Path:
         raise releases.ReleaseError("configured private capability variant was not built for this candidate")
     manifest = {"schema": releases.SCHEMA, "release": release_id, "notes": notes,
                 "build": identity.get("build"),
-                "channel": {"github_repo": identity.get("github_repo")},
+                "sequence": identity.get("sequence"),
+                "channel": {"github_repo": identity.get("github_repo"),
+                            "name": identity.get("channel") or releases.STABLE_CHANNEL},
                 "sources": {"stack": stack_sha, "client": client_sha},
                 "client_packages": dependencies,
                 "components": {"stack": component(archive, version),

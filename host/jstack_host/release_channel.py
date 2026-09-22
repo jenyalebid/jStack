@@ -27,6 +27,28 @@ def repository(value: str) -> str:
     return value
 
 
+#: A branch name is a path, and a channel name is pasted into a URL and
+#: compared against signed content — so what a hub will follow is bounded
+#: here rather than wherever it happens to be used. No leading dash, no
+#: traversal, no spaces.
+CHANNEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,63}\Z")
+
+
+def channel_name(config: dict) -> str:
+    """Which release line this hub follows.
+
+    Absent from the config on every hub installed before this existed, and the
+    releases those hubs already hold came off main — so absent is `stable`,
+    not "unset". A hub only leaves the stable line when somebody puts a branch
+    name in its config, which is the whole of the switch: the selector below
+    then matches that name against the channel inside each signed manifest.
+    """
+    name = str(config.get("channel") or releases.STABLE_CHANNEL).strip()
+    if not CHANNEL.fullmatch(name) or ".." in name:
+        raise releases.ReleaseError("release channel must name a branch")
+    return name
+
+
 def refresh(root: Path, config: dict, *, client=None, now=None) -> None:
     """Cache a complete signed release before advancing the local offer."""
     from .update_supervisor import atomic_json
@@ -45,26 +67,68 @@ def refresh(root: Path, config: dict, *, client=None, now=None) -> None:
     try:
         response = client.get(f"https://api.github.com/repos/{repo}/releases?per_page=100")
         response.raise_for_status()
-        release = next((r for r in response.json() if not r["draft"] and not r["prerelease"]
-                        and r["tag_name"].startswith(TAG_PREFIX)), None)
+        wanted = channel_name(config)
+        stable = wanted == releases.STABLE_CHANNEL
+        # A side-branch release is published as a GitHub prerelease, which is
+        # what keeps it invisible to every hub that did not ask for it: the
+        # stable line's filter has always dropped prereleases and still does.
+        # A hub following a branch lifts that filter for itself alone.
+        offers = [r for r in response.json() if not r["draft"]
+                  and r["tag_name"].startswith(TAG_PREFIX)
+                  and (stable is not True or not r["prerelease"])]
+        # The channel a release belongs to is inside its signed manifest, not
+        # in its tag — a tag is attacker-writable metadata and the name of the
+        # line a hub follows is a trust decision. So the offers are walked
+        # newest first and each manifest is verified before its channel is
+        # read; the first that verifies AND names this hub's channel wins.
+        release = manifest = envelope = None
+        for offer in offers:
+            tag = releases.identifier(offer["tag_name"])
+            base = f"https://github.com/{repo}/releases/download/{tag}"
+            found = client.get(base + "/manifest.json")
+            if found.status_code != 200:
+                continue          # a release without a stack manifest is not an offer
+            candidate = releases.verify(found.json(), config["public_key"])
+            if tag != TAG_PREFIX + candidate["release"]:
+                raise releases.ReleaseError("release tag does not match signed manifest")
+            # Manifests published before channels existed carry no name, and
+            # they all came off main — so absent reads as stable rather than
+            # as "no channel", which would strand every hub on the old feed.
+            if (candidate.get("channel", {}).get("name") or releases.STABLE_CHANNEL) != wanted:
+                continue
+            release, manifest, envelope = offer, candidate, found.json()
+            break
         if release is None:
-            atomic_json(status_file, {"checked": now, "status": "not_published"})
+            atomic_json(status_file, {"checked": now, "status": "not_published",
+                                      "channel": wanted})
             return
         tag = release["tag_name"]
-        releases.identifier(tag)
         base = f"https://github.com/{repo}/releases/download/{tag}"
-        response = client.get(base + "/manifest.json")
-        response.raise_for_status()
-        envelope = response.json()
-        manifest = releases.verify(envelope, config["public_key"])
-        if tag != TAG_PREFIX + manifest["release"]:
-            raise releases.ReleaseError("release tag does not match signed manifest")
         latest = feed / "latest.json"
         if latest.exists():
             current = releases.verify(json.loads(latest.read_text()), config["public_key"])
-            if (isinstance(current.get("build"), int) and isinstance(manifest.get("build"), int)
-                    and manifest["build"] < current["build"]):
-                raise releases.ReleaseError("public channel would downgrade the current release")
+            # Two counts are only comparable when they count along the same
+            # line, so this compares sequences only when the release in hand
+            # came off the channel being followed. A hub deliberately moved to
+            # a branch is not downgrading — it is changing which history it
+            # measures against, and its old count means nothing on the new one.
+            held = current.get("channel", {}).get("name") or releases.STABLE_CHANNEL
+            if held == wanted:
+                if (isinstance(current.get("sequence"), int)
+                        and isinstance(manifest.get("sequence"), int)
+                        and manifest["sequence"] < current["sequence"]):
+                    raise releases.ReleaseError(
+                        "public channel would downgrade the current release")
+                # The counter-based guard this replaced compared `build`, and
+                # it stopped firing the day releases stopped carrying one —
+                # silently, because a comparison between two Nones is simply
+                # skipped. Keeping it costs nothing and covers a hub that
+                # still holds a pre-sequence release from the counter era.
+                if (isinstance(current.get("build"), int)
+                        and isinstance(manifest.get("build"), int)
+                        and manifest["build"] < current["build"]):
+                    raise releases.ReleaseError(
+                        "public channel would downgrade the current release")
         destination = feed / manifest["release"]
         feed.mkdir(parents=True, exist_ok=True)
         if destination.exists():
