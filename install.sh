@@ -899,8 +899,46 @@ fi
 step "Host and menu bar"
 
 HOST_INSTALLER="$CHECKOUT/host/install.sh"
+
+# This script is also the updater and the repairer. A machine that already has
+# a signed Hub answering is left alone (its updater delivers releases); a Hub
+# app that is present but dead is torn down and reinstalled fresh; leftover
+# legacy services or state are purged rather than silently steering the
+# install onto the legacy path — that fallback installed an unsigned stack on
+# a machine that asked for the release.
+JSTACK_HUB_CURRENT=0
+if [ -n "$RELEASE_TAG" ] && [ "$(uname -s)" = "Darwin" ] && [ "$WANT_HOST" != "0" ]; then
+    if [ -d "/Applications/jStack Hub.app" ]; then
+        if curl -fsS -m 3 http://127.0.0.1:9090/api/health >/dev/null 2>&1; then
+            installed_release="$(sed -nE 's/.*"release": *"([^"]+)".*/\1/p' \
+                "/Applications/jStack Hub.app/Contents/Resources/packages/release-identity.json" 2>/dev/null)"
+            ok "signed Hub already installed and answering${installed_release:+ (release $installed_release)} — its updater delivers new releases"
+            JSTACK_HUB_CURRENT=1
+            HOST_INSTALLED=1
+            SIGNED_HUB=1
+        else
+            warn "a jStack Hub app is present but its host is not answering — replacing it"
+            if [ "$DRY_RUN" = "1" ]; then
+                would "remove the dead Hub app, its services and state, then reinstall"
+            else
+                for role in host menu updater; do
+                    launchctl bootout "gui/$(id -u)/live.jstack.hub.$role" >/dev/null 2>&1 || true
+                done
+                rm -rf "/Applications/jStack Hub.app" "$HOME/.local/state/jremote"
+            fi
+        fi
+    fi
+    if [ "$JSTACK_HUB_CURRENT" != "1" ] && ls "$HOME"/Library/LaunchAgents/com.jremote.*.plist >/dev/null 2>&1; then
+        warn "legacy jStack services found — purging them so the sealed install can proceed"
+        if [ "$DRY_RUN" = "1" ]; then
+            would "$HOST_INSTALLER --purge --yes"
+        elif [ -f "$HOST_INSTALLER" ]; then
+            bash "$HOST_INSTALLER" --purge --yes || warn "legacy purge reported a problem"
+        fi
+    fi
+fi
 if [ -n "$RELEASE_TAG" ] && [ -f "$CHECKOUT/host/release-identity.json" ] && [ "$WANT_HOST" != "0" ] \
-        && [ "$(uname -s)" = "Darwin" ] && [ ! -d "/Applications/jStack Hub.app" ]; then
+        && [ "$(uname -s)" = "Darwin" ] && [ "${JSTACK_HUB_CURRENT:-0}" != "1" ]; then
     # A release install gets the SIGNED, notarized Hub the release published —
     # never a source-built unsigned menubar with python launch agents. The
     # sealed app carries its own installer; codesign/spctl verification happens
