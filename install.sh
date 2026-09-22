@@ -25,7 +25,7 @@ MIN_PY_MINOR=9
 ASSUME_YES=0
 DRY_RUN=0
 DO_UNINSTALL=0
-DO_PURGE=0
+KEEP_STATE=0
 AGENT_NAME=""
 WANT_SCHEDULER=1
 WANT_CLAUDE=1
@@ -49,8 +49,10 @@ usage: install.sh [options]
 
   --yes, -y           don't ask; accept every default
   --dry-run           print what would happen and change nothing
-  --uninstall         take jStack back off; leave your data and dependencies
-  --purge             uninstall AND delete the host's state, token and root decl
+  --uninstall         take jStack off completely: services, app, state, token
+  --keep-state        with --uninstall: keep the host's state, token and root
+                      declaration so a later install resumes where you left off
+  --purge             same as --uninstall (kept for compatibility)
   --root DIR          root for Agents, Logs, Config, State, Credentials
   --agent NAME        create this agent workspace (default: ask, or "Jarvis" with --yes)
   --agent-root DIR    where agent workspaces live (default: <root>/Agents)
@@ -78,7 +80,8 @@ while [ $# -gt 0 ]; do
         -y|--yes)      ASSUME_YES=1 ;;
         --dry-run)     DRY_RUN=1 ;;
         --uninstall)   DO_UNINSTALL=1 ;;
-        --purge)       DO_UNINSTALL=1; DO_PURGE=1 ;;
+        --keep-state)  KEEP_STATE=1 ;;
+        --purge)       DO_UNINSTALL=1 ;;
         --agent)       AGENT_NAME="${2:-}"; shift ;;
         --agent-root)  AGENT_ROOT="${2:-}"; shift ;;
         --checkout)    CHECKOUT="${2:-}"; shift ;;
@@ -167,8 +170,10 @@ run() {
 # removed here. Only what jStack itself wrote comes off. The destructive halves
 # (the signed app bundle, the host's state and token) are delegated to the
 # sub-installers that placed them, so this orchestrates rather than reimplements.
-# --uninstall leaves your data (agent workspaces, host state, token); --purge
-# also takes the host state/token/credentials and the root declaration.
+# --uninstall takes everything jStack wrote, including the host's
+# state/token/credentials and the root declaration — an uninstaller that leaves
+# state behind breaks the next sealed install. --keep-state preserves those so
+# a later install resumes where it left off. Agent workspaces are never touched.
 uninstall() {
     local purge="$1"
     PLUGIN="$CHECKOUT/plugins/jstack"
@@ -191,11 +196,9 @@ uninstall() {
     if [ -f "$CHECKOUT/host/install.sh" ]; then
         if [ -n "$purge" ]; then
             # The host's own confirmation ("type the word purge") cannot be
-            # answered when this script arrives through a pipe — forward the
-            # consent the caller already gave with --yes.
-            purge_args=(--purge)
-            [ "$ASSUME_YES" = "1" ] && purge_args+=(--yes)
-            run bash "$CHECKOUT/host/install.sh" "${purge_args[@]}" || warn "host purge reported a problem"
+            # answered when this script arrives through a pipe; asking for
+            # --uninstall here IS the consent, so forward it as --yes.
+            run bash "$CHECKOUT/host/install.sh" --purge --yes || warn "host purge reported a problem"
         else
             run bash "$CHECKOUT/host/install.sh" --uninstall || warn "host uninstall reported a problem"
         fi
@@ -280,7 +283,7 @@ uninstall() {
 }
 
 if [ "$DO_UNINSTALL" = "1" ]; then
-    if [ "$DO_PURGE" = "1" ]; then uninstall purge; else uninstall ""; fi
+    if [ "$KEEP_STATE" = "1" ]; then uninstall ""; else uninstall purge; fi
 fi
 
 # Is there a human at a terminal to answer a question?
