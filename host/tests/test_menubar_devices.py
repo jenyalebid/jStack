@@ -60,9 +60,15 @@ assert(bootstrap.localUpdate(hostID: "local") != nil,
 bootstrap.machines[0].state = "pending"
 assert(bootstrap.machines[0].needsBootstrap,
        "a job already stranded pending still needs the local recovery action")
-let identity = try decoder.decode(HostIdentity.self, from: Data(#"{"host_id":"local","source":{"sha":"abcdef","version":"0.69.3","build":74}}"#.utf8))
-assert(identity.source?.displayVersion == "0.69.3 (74)",
+let identity = try decoder.decode(HostIdentity.self, from: Data(#"{"host_id":"local","source":{"sha":"abcdef","version":"0.69.3","release":"2026-09-22-abcdef12","build":74}}"#.utf8))
+assert(identity.source?.displayVersion == "2026-09-22-abcdef12",
        "current Hub version must not depend on a supervisor report")
+assert(!identity.source!.displayVersion.contains("74"),
+       "the build counter is retired and must never reach the menu")
+// A host too old to report a release still names itself, by its semver alone
+// -- never by the counter, which is exactly what the identity replaced.
+let legacyIdentity = try decoder.decode(HostIdentity.self, from: Data(#"{"host_id":"local","source":{"sha":"abcdef","version":"0.69.3","build":74}}"#.utf8))
+assert(legacyIdentity.source?.displayVersion == "0.69.3")
 func device(_ json: String) throws -> Device {
     try decoder.decode(Device.self, from: Data(json.utf8))
 }
