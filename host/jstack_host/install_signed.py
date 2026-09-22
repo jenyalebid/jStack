@@ -196,6 +196,59 @@ def verify_install() -> None:
             time.sleep(0.25)
 
 
+def uninstall(app: Path, *, purge: bool = False) -> dict:
+    """Remove everything this bundle's install placed, tolerating wreckage.
+
+    The installer's refusal gates protect a healthy machine from a blind
+    install; an uninstall faces the opposite duty — a half-broken machine is
+    exactly where it runs, so no unreadable settings file, missing journal or
+    dead service may stop it. Every step attempts, the end state is what gets
+    verified.
+    """
+    import shutil
+    problems = []
+    for role in ("updater", "menu", "host"):
+        try:
+            if control(app, "status").get(role) in {"enabled", "requires_approval"}:
+                control(app, "unregister", role)
+        except Exception as error:
+            problems.append(f"{role}: {error}")
+    for label in ("live.jstack.hub.host", "live.jstack.hub.menu", "live.jstack.hub.updater"):
+        import subprocess
+        subprocess.run(["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
+                       capture_output=True)
+        if not install_host.wait_unloaded(label, seconds=10):
+            problems.append(f"{label} is still loaded")
+    state = service_settings.path().parent
+    removed = {"services": not problems}
+    wrapper = Path.home() / ".local/bin/jstack-host"
+    if wrapper.exists():
+        wrapper.unlink(missing_ok=True)
+    if purge:
+        shutil.rmtree(state, ignore_errors=True)
+        shutil.rmtree(Path.home() / ".local/share/jremote", ignore_errors=True)
+        removed["state"] = not state.exists()
+    else:
+        # An uninstall keeps state and credentials, but the settings and
+        # journal describe an installation that no longer exists.
+        for name in (service_settings.path(), journal_path()):
+            name.unlink(missing_ok=True)
+    shutil.rmtree(app, ignore_errors=True)
+    removed["bundle"] = not app.exists()
+    return {"state": "uninstalled" if not problems and all(removed.values()) else "incomplete",
+            "removed": removed, "problems": problems}
+
+
+def uninstall_main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--app", type=Path, required=True)
+    parser.add_argument("--purge", action="store_true")
+    args = parser.parse_args()
+    result = uninstall(args.app, purge=args.purge)
+    print(json.dumps(result))
+    return 0 if result["state"] == "uninstalled" else 1
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app", type=Path, required=True)

@@ -213,6 +213,14 @@ uninstall() {
     #     directly, unregistering through the bundle first (a Background Task
     #     Management approval outlives both launchctl bootout and the bundle).
     if [ "$(uname -s)" = "Darwin" ] && [ "$DRY_RUN" != "1" ]; then
+        # A bundle new enough carries its own journal-driven uninstall verb —
+        # the product removing what the product placed. Older bundles reject
+        # the verb; the sweep below then covers them.
+        HUB_RT="/Applications/jStack Hub.app/Contents/MacOS/JStackRuntime"
+        if [ -x "$HUB_RT" ] && "$HUB_RT" uninstall --app "/Applications/jStack Hub.app" \
+                ${purge:+--purge} >/dev/null 2>&1; then
+            ok "the Hub uninstalled itself${purge:+ (purged)}"
+        fi
         HUB_BIN="/Applications/jStack Hub.app/Contents/MacOS/JStackHub"
         if [ -x "$HUB_BIN" ]; then
             for role in updater menu host; do "$HUB_BIN" unregister "$role" >/dev/null 2>&1 || true; done

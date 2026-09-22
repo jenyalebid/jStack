@@ -78,6 +78,8 @@ def main():
         from jstack_host.install_signed import provision as run
     elif role == "verify-install":
         from jstack_host.install_signed import verify_install as run
+    elif role == "uninstall":
+        from jstack_host.install_signed import uninstall_main as run
     else:
         raise SystemExit("unsupported runtime role")
     return run()
