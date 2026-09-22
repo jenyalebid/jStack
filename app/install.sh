@@ -169,6 +169,16 @@ if [ -z "$TAG" ]; then
         | head -1 | sed -E 's/.*"([^"]*)"$/\1/')"
 fi
 if [ -z "$TAG" ]; then
+    # The API answer above is anonymous and rate-limited per IP; a machine
+    # that has run this a few times in an hour gets an empty listing that is
+    # indistinguishable from "no release exists" — and quietly keeps whatever
+    # old app it has. The git protocol carries the same tags with no limit,
+    # so an empty API answer falls back to it before it may mean anything.
+    TAG="$(git ls-remote --tags "https://github.com/$REPO.git" "${TAG_PREFIX}*" 2>/dev/null \
+        | sed -E 's|.*refs/tags/||; s|\^\{\}$||' | sort -u -t- -k4,4n | tail -1)"
+    [ -n "$TAG" ] && note "release listing rate-limited — tag found via git: $TAG"
+fi
+if [ -z "$TAG" ]; then
     # Exit 3, not 1: "no release has been published yet" is a fact about the
     # repository, not a fault in this machine. The top-level installer treats
     # 1 as a problem worth a warning line and 3 as a note, because a warning

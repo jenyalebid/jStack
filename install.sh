@@ -543,8 +543,23 @@ if [ -d "$CHECKOUT/.git" ]; then
         would "git -C $CHECKOUT merge --ff-only (if clean)"
     elif [ -z "$(git -C "$CHECKOUT" status --porcelain)" ] && git -C "$CHECKOUT" merge --ff-only --quiet '@{u}' 2>/dev/null; then
         ok "updated to $(git -C "$CHECKOUT" log --oneline -1)"
+    elif [ -n "$(git -C "$CHECKOUT" log --oneline '@{u}..HEAD' 2>/dev/null)" ]; then
+        # Local commits are somebody's work: refuse loudly, never silently.
+        # An install that keeps running old code under a green summary is the
+        # failure this script exists to stop, so this is a die, not a warn.
+        die "$CHECKOUT has local commits and is $(git -C "$CHECKOUT" rev-list --count 'HEAD..@{u}') behind — rebase or move it aside, then re-run"
     else
-        warn "left as-is at $(git -C "$CHECKOUT" log --oneline -1) — the tree has local changes or diverged"
+        # Uncommitted noise (build junk, an aborted edit) must not pin the
+        # whole machine to an old stack. Save the exact bytes aside, then take
+        # upstream — the machine ends current, and nothing is lost.
+        STASH="$CHECKOUT/../jstack-local-changes-$(date +%Y%m%d%H%M%S).diff"
+        git -C "$CHECKOUT" diff HEAD > "$STASH" 2>/dev/null
+        run git -C "$CHECKOUT" checkout -- . && run git -C "$CHECKOUT" clean -fdq -e .venv -e .venv312
+        if git -C "$CHECKOUT" merge --ff-only --quiet '@{u}' 2>/dev/null; then
+            ok "updated to $(git -C "$CHECKOUT" log --oneline -1) (local edits saved to $STASH)"
+        else
+            die "could not fast-forward $CHECKOUT — it has diverged from origin; move it aside and re-run"
+        fi
     fi
 elif [ -f "$CHECKOUT/host/release-identity.json" ] && [ -f "$CHECKOUT/plugins/jstack/.claude-plugin/plugin.json" ]; then
     # A publisher snapshot intentionally has no mutable git checkout. Keep
