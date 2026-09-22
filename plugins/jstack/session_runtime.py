@@ -6,6 +6,7 @@ import os
 import re
 import selectors
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -135,6 +136,94 @@ def user_text(row: dict) -> str:
     return text
 
 
+# Wrappers the harness injects INSIDE an otherwise-real turn. The turn is speech;
+# the wrapper is not, so these come out and what surrounds them stays.
+_INJECTED = [re.compile(p, re.S) for p in (
+    r"<system-reminder>.*?</system-reminder>",
+    r"<persisted-output>.*?</persisted-output>",
+    r"<jstack-timeline>.*?</jstack-timeline>",
+    r"<local-command-stdout>.*?</local-command-stdout>",
+    r"<command-message>.*?</command-message>",
+    r"<command-args>.*?</command-args>",
+    r"<user-prompt-submit-hook>.*?</user-prompt-submit-hook>",
+    r"<environment_context>.*?</environment_context>",
+    r"<permissions instructions>.*?</permissions instructions>",
+)]
+# A turn that is ONLY machine opening is not speech at all.
+_NOT_SPEECH = re.compile(r"^\s*(<command-name>|Caveat: The messages below|\[Request interrupted)")
+
+
+def strip_injected(text: str) -> str:
+    for pattern in _INJECTED:
+        text = pattern.sub("", text)
+    return text.strip()
+
+
+def assistant_text(row: dict) -> str:
+    """What the agent said — never its thinking, tool calls, or tool results."""
+    if row.get("type") == "response_item":
+        message = row.get("payload") or {}
+        if message.get("type") != "message" or message.get("role") != "assistant":
+            return ""
+    elif row.get("type") == "assistant" and not row.get("isMeta"):
+        message = row.get("message") or {}
+    else:
+        return ""
+    content = message.get("content") or []
+    if isinstance(content, str):
+        return content
+    return "\n".join(b.get("text", "") for b in content if isinstance(b, dict)
+                     and b.get("type") in ("text", "output_text"))
+
+
+def dialogue(path) -> list[dict]:
+    """A transcript as speech only, either engine: who said it, when, what.
+
+    A session file is mostly machinery — tool calls, tool results, reasoning,
+    file snapshots, injected rules. Reading one whole to learn what was said
+    spends a context window on the 98% that was never said by anyone.
+    """
+    turns = []
+    try:
+        with Path(path).open(errors="replace") as stream:
+            for line in stream:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict) or row.get("isSidechain"):
+                    continue
+                # Claude delivers tool results as type=user; they are not speech.
+                if row.get("toolUseResult") is not None:
+                    continue
+                for role, body in (("user", user_text(row)), ("agent", assistant_text(row))):
+                    body = strip_injected(body)
+                    if body and not _NOT_SPEECH.match(body):
+                        turns.append({"role": role, "text": body,
+                                      "timestamp": row.get("timestamp", "")})
+    except OSError:
+        return []
+    return turns
+
+
+def render_dialogue(turns: list[dict], tail: int = 0) -> str:
+    total = len(turns)
+    if tail and total > tail:
+        turns, head = turns[-tail:], f"[dialogue only — last {tail} of {total} turns]"
+    else:
+        head = f"[dialogue only — {total} turns]"
+    lines = [head, ""]
+    for turn in turns:
+        stamp = str(turn.get("timestamp", ""))[:16].replace("T", " ")
+        lines.append(f"── {'user' if turn['role'] == 'user' else 'agent'} {stamp}".rstrip())
+        lines.append(turn["text"])
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
 def engagement_marker(sid: str, state_dir=None) -> Path:
     root = state_dir or os.environ.get("JSTACK_REVIEW_STATE") or Path.home() / ".claude/jstack/review-state"
     return Path(root).expanduser() / "user-engaged" / re.sub(r"[^A-Za-z0-9_-]", "_", sid)
@@ -212,6 +301,14 @@ class CodexRPC:
 def command_main():
     """Skill fallback: invoke the same deterministic hook with native facts."""
     import argparse
+    if len(sys.argv) > 1 and sys.argv[1] == "dialogue":
+        sub = argparse.ArgumentParser(prog="session_runtime.py dialogue")
+        sub.add_argument("_", help=argparse.SUPPRESS)
+        sub.add_argument("path")
+        sub.add_argument("--tail", type=int, default=0, help="only the last N turns")
+        opts = sub.parse_args()
+        print(render_dialogue(dialogue(opts.path), tail=opts.tail))
+        return 0
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("splitoff", "takeover", "print", "tag", "pict"))
     parser.add_argument("--session", default=session_id())
