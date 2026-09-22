@@ -5,6 +5,7 @@
 set -euo pipefail
 
 WG="${WG:-/opt/homebrew/bin/wg}"
+IFCONFIG="${IFCONFIG:-/sbin/ifconfig}"
 # Three rungs, and the middle one is the fix: `WG_CONF` (what install_hub.sh
 # writes into this daemon's plist) wins, then `WG_PEER_DIR` — the variable
 # `wg_peer.py` honours, so a relocated mesh moves its readers with it — then the
@@ -26,7 +27,13 @@ IFACE="$(cat "$NAME_FILE")"
 err=""
 for _ in 1 2 3 4 5; do
     if [ -s "$CONF" ] && err="$("$WG" syncconf "$IFACE" "$CONF" 2>&1)"; then
-        echo "wg_sync: $CONF -> $IFACE"
+        # Convergence includes the MTU clamp (see wg_up.sh): a tunnel that came
+        # up before the clamp existed heals on its next sync, live, without
+        # dropping the interface or a single handshake. Unconditional because it
+        # is idempotent — setting an MTU the interface already has changes
+        # nothing.
+        "$IFCONFIG" "$IFACE" mtu "${WG_MTU:-1240}"
+        echo "wg_sync: $CONF -> $IFACE (mtu ${WG_MTU:-1240})"
         exit 0
     fi
     sleep 1

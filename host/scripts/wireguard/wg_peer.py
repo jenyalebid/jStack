@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 """WireGuard peer pairing — add/list/remove devices, emit client config + QR.
 
-Runs unprivileged. Appending a peer to wg0.conf is all it takes: the hub's
-sync LaunchDaemon watches the conf and applies it to the live interface
-(wg syncconf) — no sudo, no restart, no tunnel drop.
+Runs unprivileged. Appending a peer to wg0.conf is all it takes: the signed
+Network owner (`live.jstack.network`, /Library/PrivilegedHelperTools/jStack
+Network.app) watches the conf and applies it to the live interface — no sudo,
+no restart, no tunnel drop.
+
+Named exactly, because the name is load-bearing during an outage. This used to
+say "the hub's sync LaunchDaemon", meaning `com.jarvisandj.wireguard-sync`;
+that daemon was retired when the Network owner took over and now resolves to
+nothing. On 2026-09-21, mid-outage, that sentence sent a reader hunting a
+service that does not exist — `launchctl print` returned empty, which reads as
+"the sync is dead" rather than "you asked for the wrong label". Verify the real
+owner with `launchctl print system/live.jstack.network` before concluding the
+sync is down.
 
     wg_peer.py add <device-name>          pair a new device (prints QR path)
     wg_peer.py add --leaf <machine-name>  enrol a leaf host (emits an install bundle)
@@ -24,6 +34,7 @@ Env overrides (tests): WG_PEER_DIR, WG_BIN, WG_ENDPOINT, WG_SUBNET_PREFIX.
 
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -161,18 +172,27 @@ def _emit_leaf_bundle(name, ip, client_key, server_pub):
         f"Endpoint = {_endpoint()}\n"
         f"PersistentKeepalive = 25\n",
     )
-    (bundle / "leaf.env").write_text(
+    # Owner-only throughout, scripts included. Nothing in this bundle is the
+    # group's or the world's business: it is written INSIDE the credential
+    # store, next to the private key above, and `ops_hygiene_audit`'s
+    # credential_containment check holds the whole store to that (issue #94).
+    # 0755 here meant every new leaf re-opened a handful of paths in the store
+    # the night after the audit closed them. The leaf still runs them — a
+    # 0700 script is executable by the account that unpacks the bundle, which
+    # is the only account that ever runs it.
+    _write_private(
+        bundle / "leaf.env",
         f"WG_ADDR={ip}/32\n"
         f"WG_SUBNET={SUBNET_PREFIX}.0/24\n"
         f"WG_HUB={SUBNET_PREFIX}.1\n"
-        f"WG_MTU={MTU}\n"
+        f"WG_MTU={MTU}\n",
     )
     here = Path(__file__).resolve().parent
     for script in LEAF_SCRIPTS:
         target = bundle / script
         target.write_bytes((here / script).read_bytes())
-        target.chmod(0o755)
-    (bundle / "README.md").write_text(_leaf_readme(name, ip))
+        target.chmod(0o700)
+    _write_private(bundle / "README.md", _leaf_readme(name, ip))
     return bundle
 
 
@@ -276,6 +296,10 @@ def remove(name):
     _write_private(CONF, out.rstrip("\n") + "\n")
     for suffix in (".conf", ".png"):
         (CLIENTS / f"{name}{suffix}").unlink(missing_ok=True)
+    # A leaf's material is a folder, not the .conf/.png a device gets; leaving it
+    # behind keeps a revoked machine's private key and install bundle on disk,
+    # re-pairable from the same key. Revoke means gone.
+    shutil.rmtree(CLIENTS / f"{name}-leaf", ignore_errors=True)
     print(f"removed {name}")
 
 

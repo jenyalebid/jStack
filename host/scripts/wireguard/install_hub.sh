@@ -86,6 +86,10 @@ fi
 # succeeded into a file nothing loaded and nothing watched: a device handed a
 # working config, a hub that never got the peer, and no error on either side.
 #
+# It also meant a test or probe that set WG_PEER_DIR to a scratch directory
+# still wrote the real endpoint file — which is how this store's endpoint came
+# back as `hub.example.com:51820` on 2026-09-22.
+#
 # The derivation stays as the default because under sudo $HOME is root's, so the
 # keys must land beside the host code that reads them whoever ran the installer.
 WG_DIR="${WG_PEER_DIR:-$(cd "$SRC/../.." && pwd)/Credentials/wireguard}"
