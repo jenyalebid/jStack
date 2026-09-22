@@ -169,9 +169,11 @@ if [ ! -x "$IDENTITY_PYTHON" ]; then
     IDENTITY_PYTHON="$(command -v python3 || true)"
 fi
 [ -n "$IDENTITY_PYTHON" ] || die "Python 3 is required to reserve a source-build identity"
-IDENTITY=$("$IDENTITY_PYTHON" "$SELF_DIR/build_identity.py" "$SELF_DIR/../.." \
-    "$HOME/Library/Application Support/jStack/build-identity") || die "cannot reserve build identity"
-read -r BUILD_VERSION BUILD_NUMBER BUILD_SHA <<< "$IDENTITY"
+IDENTITY=$("$IDENTITY_PYTHON" "$SELF_DIR/build_identity.py" "$SELF_DIR/../..") \
+    || die "cannot name this build's source"
+# BUILD_SHA is empty for a tree with no provenance — a rig's rsync'd copy has
+# no .git — and that is recorded as empty rather than guessed at.
+read -r BUILD_VERSION BUILD_BUNDLE BUILD_SHA <<< "$IDENTITY"
 
 "${SWIFTC[@]}" -O -o "$STAGE/Contents/MacOS/JStackHostBar" "$SELF_DIR/$SOURCE" \
     || die "the build failed — the compiler output above says why"
@@ -191,7 +193,7 @@ cat > "$STAGE/Contents/Info.plist" <<EOF
     <key>CFBundleDisplayName</key><string>jStack Hub</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$BUILD_VERSION</string>
-    <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
+    <key>CFBundleVersion</key><string>$BUILD_BUNDLE</string>
     <key>JStackSourceCommit</key><string>$BUILD_SHA</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
