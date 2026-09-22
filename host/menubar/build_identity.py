@@ -42,7 +42,16 @@ def source(repo: Path) -> tuple[str, bool]:
             text=True, stderr=subprocess.DEVNULL))
         return sha, dirty
     except (OSError, subprocess.SubprocessError):
-        return "", False
+        pass
+    # A copied tree: `live-vm-test.sh` rsyncs with `--exclude '.git'` and
+    # leaves this behind instead, because the end doing the copying is the
+    # only end that knows which commit it took.
+    copied = repo / "host/copied-from.json"
+    if copied.exists():
+        data = json.loads(copied.read_text())
+        if data.get("sha"):
+            return data["sha"], bool(data.get("dirty"))
+    return "", False
 
 
 def reserve(repo: Path, state: Path | None = None) -> dict:

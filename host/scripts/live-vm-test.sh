@@ -113,12 +113,31 @@ else
     rsync -a --exclude '.venv' --exclude '__pycache__' --exclude '.pytest_cache' \
           --exclude '.git' --exclude '*.egg-info' --exclude 'Credentials' \
           "$HOST_DIR/" "$STAGE/host/" || die "could not stage the tree"
+    # `host/` is not the whole install. The menubar app stamps its own
+    # version from the plugin manifest, which sits outside this directory —
+    # so a guest that got only `host/` could install the host fine and then
+    # fail to name the bar app it built, which is how the acceptance leg
+    # went red with all 18 client tests passing. Carried narrowly: the one
+    # manifest, not the plugins tree.
+    MANIFEST='plugins/jstack/.claude-plugin/plugin.json'
+    [ -f "$REPO_ROOT/$MANIFEST" ] || die "no plugin manifest at $REPO_ROOT/$MANIFEST — the guest would have no version to stamp"
+    mkdir -p "$STAGE/$(dirname "$MANIFEST")"
+    cp "$REPO_ROOT/$MANIFEST" "$STAGE/$MANIFEST" || die "could not stage the plugin manifest"
+    # The copy leaves `.git` behind on purpose, so the guest cannot work out
+    # which commit it is running — and a build that cannot name its source is
+    # the thing a hash-and-date identity exists to stop. This end knows, so
+    # this end records it, as of the moment the bytes were taken.
+    printf '{"sha": "%s", "dirty": %s}\n' \
+        "$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)" \
+        "$([ -n "$(git -C "$REPO_ROOT" status --porcelain -uno 2>/dev/null)" ] && echo true || echo false)" \
+        > "$STAGE/host/copied-from.json" || die "could not record the staged tree's commit"
     vssh 'if [ -d ~/jStack/host/Credentials ]; then
               rm -rf /tmp/jr-keep-credentials
               mv ~/jStack/host/Credentials /tmp/jr-keep-credentials
           fi
           rm -rf ~/jStack && mkdir -p ~/jStack'
     "$VM_SH" cp "$VM_NAME" "$STAGE/host" '~/jStack/host' || die "copy failed"
+    "$VM_SH" cp "$VM_NAME" "$STAGE/plugins" '~/jStack/plugins' || die "copying the plugin manifest failed"
     vssh 'if [ -d /tmp/jr-keep-credentials ]; then
               rm -rf ~/jStack/host/Credentials
               mv /tmp/jr-keep-credentials ~/jStack/host/Credentials

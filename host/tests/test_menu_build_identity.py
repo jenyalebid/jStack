@@ -50,13 +50,30 @@ def test_a_checkout_is_named_by_its_commit_and_its_dirt(tmp_path):
     assert identity.reserve(repo)["version"].endswith(".dirty")
 
 
-def test_a_copied_tree_is_named_unprovenanced_not_fatal(tmp_path):
+def test_a_copied_tree_is_named_by_the_commit_it_was_copied_from(tmp_path):
     # live-vm-test.sh rsyncs with --exclude '.git', so every test rig runs
-    # this case. It used to raise out of `git rev-parse` and take the whole
-    # menubar stage down with it.
+    # this case. The copying end records the commit because it is the only
+    # end that knows it.
+    repo = tree(tmp_path / "repo")
+    (repo / "host/copied-from.json").write_text(
+        json.dumps({"sha": "b" * 40, "dirty": True}))
+    built = identity.reserve(repo)
+    assert built["sha"] == "b" * 40
+    assert built["version"] == f"1.2.3+{built['date']}.bbbbbbbb.dirty"
+
+
+def test_a_tree_that_nothing_can_place_is_named_not_fatal(tmp_path):
+    # Neither a release, nor a checkout, nor a recorded copy. It used to
+    # raise out of `git rev-parse` and take the whole menubar stage down.
     built = identity.reserve(tree(tmp_path / "repo"))
     assert built["sha"] == ""
     assert built["version"] == f"1.2.3+{built['date']}.nosource"
+
+
+def test_an_empty_recorded_commit_is_not_a_commit(tmp_path):
+    repo = tree(tmp_path / "repo")
+    (repo / "host/copied-from.json").write_text(json.dumps({"sha": "", "dirty": False}))
+    assert identity.reserve(repo)["version"].endswith(".nosource")
 
 
 def test_the_bundle_version_is_the_day_and_sorts(tmp_path):
