@@ -248,9 +248,13 @@ def create_app() -> FastAPI:
 
         It says what kind of host this is and nothing about what is on it: no
         agent names, no session ids, no paths. The board is behind the token.
-        The source stamp keeps that promise — sha and dirty flag only, never
-        the checkout path — and is what lets the doctor compare the bytes
-        this process serves against the tree they came from.
+        The source stamp keeps that promise — everything that names the running
+        version (sha, dirty, release, version, date) but never `root`, the
+        checkout path, which an unauthenticated caller has no business reading.
+        `release` is what carries the version: a health route that dropped it
+        forced every caller to re-derive the version from a plist or a sha
+        lookup — the "ten versions" that disagree. One resolver
+        (sourcestamp.capture), one shape, everywhere it is allowed to appear.
         """
         from . import managed_access, sourcestamp
         stamp = sourcestamp.capture()
@@ -261,7 +265,7 @@ def create_app() -> FastAPI:
             "profile": hostenv.profile().name,
             "provisioned": _provisioned(),
             "managed": managed_access.is_leaf(),
-            "source": {"sha": stamp["sha"], "dirty": stamp["dirty"]},
+            "source": {k: v for k, v in stamp.items() if k != "root"},
         }
 
     return app

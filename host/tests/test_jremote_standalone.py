@@ -305,11 +305,12 @@ assert h.status_code == 200, h.status_code
 assert h.json()["standalone"] is True and h.json()["profile"] == "default", h.json()
 assert h.json()["provisioned"] is True, h.json()
 
-# The source stamp: sha and dirty flag only — the probe is unauthenticated,
-# so the checkout PATH stays out of it, and the doctor still gets enough to
-# compare the serving bytes against the tree.
+# The source stamp: everything that names the version (sha, dirty, and,
+# when the copy has them, release/version/date) but never `root`, the
+# checkout PATH — the probe is unauthenticated. One resolver, one shape.
 src = h.json()["source"]
-assert set(src) == {"sha", "dirty"}, src
+assert "root" not in src, src
+assert {"sha", "dirty"} <= set(src), src
 assert src["sha"] == "" or len(src["sha"]) == 40, src
 ''')
     assert r.returncode == 0 and "OK" in r.stdout, r.stderr[-3000:]
@@ -649,3 +650,27 @@ print("OK")
     r = subprocess.run([sys.executable, "-c", probe], cwd=INFRA,
                        capture_output=True, text=True)
     assert r.returncode == 0 and "OK" in r.stdout, r.stderr[-3000:]
+
+
+def test_health_serves_the_whole_source_stamp_so_release_is_readable():
+    """One resolver, one shape. `/api/health` used to hand-copy sha+dirty out
+    of `sourcestamp.capture()` and drop `release` — so every caller re-derived
+    the version its own way (a plist, a sha lookup), which is how the machine
+    ended up with several disagreeing version strings. Health now returns the
+    same stamp `/host` and `/updates/inventory` do, `release` included.
+    """
+    from fastapi.testclient import TestClient
+
+    from jstack_host import sourcestamp
+    from jstack_host.server import create_app
+
+    stamp = sourcestamp.capture()
+    src = TestClient(create_app()).get("/api/health").json()["source"]
+    # Everything that names the version, and nothing that names the machine.
+    assert src == {k: v for k, v in stamp.items() if k != "root"}, src
+    assert "root" not in src, "health must not leak the checkout path unauthenticated"
+    for key in ("sha", "dirty"):
+        assert key in src, key
+    # `release` is the version; it rides through when the stamp has one.
+    if stamp.get("release"):
+        assert src["release"] == stamp["release"]
