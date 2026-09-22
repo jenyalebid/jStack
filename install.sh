@@ -966,7 +966,9 @@ if [ "${SCHED_PENDING:-0}" = "1" ]; then
         run_long "vendoring python-dateutil beside the plugin" \
             "$PY" -m pip install --quiet --target "$VENDOR" python-dateutil \
             || warn "could not vendor python-dateutil — see $LAST_LOG"
-        if PYTHONPATH="$VENDOR" "$HUB_PY" -c 'import dateutil' 2>/dev/null; then
+        # the sealed interpreter ignores PYTHONPATH — probe via sys.path, the
+        # same way the installed daemon definition loads it
+        if "$HUB_PY" -c "import sys; sys.path.insert(0, '$VENDOR'); import dateutil" 2>/dev/null; then
             SCHED_PY="$HUB_PY"
         else
             warn "the signed interpreter cannot import dateutil — daemon stays on $PY"

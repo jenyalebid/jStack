@@ -171,6 +171,22 @@ def resolve(args) -> SimpleNamespace:
     )
 
 
+def launch_argv(r: SimpleNamespace) -> list:
+    """The daemon's argv with its import paths baked into the command line.
+
+    The signed Hub's sealed interpreter ignores PYTHONPATH (isolated build),
+    so `-m scheduler` plus EnvironmentVariables never finds the plugin under
+    it. sys.path insertion on the command line works for every interpreter.
+    """
+    paths = [str(PLUGIN_ROOT)]
+    vendor = PLUGIN_ROOT / "vendor"
+    if vendor.is_dir():
+        paths.append(str(vendor))
+    code = (f"import sys, runpy; sys.path[:0] = {paths!r}; "
+            "runpy.run_module('scheduler', run_name='__main__')")
+    return [r.python, "-c", code]
+
+
 def foreground_cmd(r: SimpleNamespace) -> str:
     """The daemon with no service manager at all — always a runnable answer."""
     parts = [f"PYTHONPATH={shlex.quote(str(PLUGIN_ROOT))}",
@@ -226,7 +242,7 @@ def refuse(target: Path) -> int:
 def plist_bytes(r: SimpleNamespace) -> bytes:
     data = {
         "Label": r.label,
-        "ProgramArguments": [r.python, "-m", "scheduler"],
+        "ProgramArguments": launch_argv(r),
         "WorkingDirectory": str(r.root),
         # RunAtLoad + KeepAlive is what makes "it fires with nobody logged in
         # watching" survive reboots and crashes; without them the definition
@@ -254,7 +270,7 @@ def unit_text(r: SimpleNamespace) -> str:
 Description=jstack scheduler daemon
 
 [Service]
-ExecStart={r.python} -m scheduler
+ExecStart={shlex.join(launch_argv(r))}
 WorkingDirectory={r.root}
 {env_lines}
 StandardOutput=append:{r.out_log}
