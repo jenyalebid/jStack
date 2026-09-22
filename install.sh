@@ -862,7 +862,12 @@ if [ "$WANT_SCHEDULER" = "0" ]; then
 elif [ "$DRY_RUN" = "1" ]; then
     would "$BIN/jstack-scheduler install"
 else
-    "$PY" "$BIN/jstack-scheduler" install && ok "daemon installed" || warn "daemon install reported a problem"
+    # Deferred past the host step: on a release install the daemon runs under
+    # the signed Hub's interpreter, and that app is not on the disk yet. A
+    # bare python3 registered here would sit in Login Items as an
+    # unidentified background item — the exact thing the signed Hub removes.
+    SCHED_PENDING=1
+    note "daemon is installed after the host step chooses its interpreter"
 fi
 
 # ── 8. the host and its menu bar icon ───────────────────────────────────────
@@ -944,6 +949,37 @@ else
         HOST_INSTALLED=1
     else
         warn "host install reported a problem — re-run $HOST_INSTALLER to see it"
+    fi
+fi
+
+# The deferred scheduler daemon, now that the host step has decided what is on
+# the disk. Signed install: the daemon runs under the Hub's own interpreter and
+# Login Items shows "jStack Hub", never an unidentified python3. Its one
+# dependency (python-dateutil, pure python) is vendored beside the plugin,
+# where jstack-scheduler adds it to the daemon's PYTHONPATH.
+if [ "${SCHED_PENDING:-0}" = "1" ]; then
+    step "Scheduler daemon (deferred)"
+    HUB_PY="/Applications/jStack Hub.app/Contents/MacOS/JStackPython"
+    SCHED_PY="$PY"
+    if [ "${SIGNED_HUB:-0}" = "1" ] && [ -x "$HUB_PY" ]; then
+        VENDOR="$CHECKOUT/plugins/jstack/vendor"
+        run_long "vendoring python-dateutil beside the plugin" \
+            "$PY" -m pip install --quiet --target "$VENDOR" python-dateutil \
+            || warn "could not vendor python-dateutil — see $LAST_LOG"
+        if PYTHONPATH="$VENDOR" "$HUB_PY" -c 'import dateutil' 2>/dev/null; then
+            SCHED_PY="$HUB_PY"
+        else
+            warn "the signed interpreter cannot import dateutil — daemon stays on $PY"
+        fi
+    fi
+    if "$PY" "$BIN/jstack-scheduler" install --python "$SCHED_PY"; then
+        if [ "$SCHED_PY" = "$HUB_PY" ]; then
+            ok "daemon installed under the signed Hub — no bare python3 login item"
+        else
+            ok "daemon installed"
+        fi
+    else
+        warn "daemon install reported a problem"
     fi
 fi
 
