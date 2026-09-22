@@ -967,6 +967,33 @@ else
     fi
 fi
 
+# ── Mesh tooling ────────────────────────────────────────────────────────────
+# The mesh — a hub adopting a leaf, a device pairing — is WireGuard, and both
+# halves shell out to `wg` and `wireguard-go`. Neither binary is in the app
+# bundle and a fresh Mac has neither, so `install_hub.sh` and `install_leaf.sh`
+# both die on a machine that installed cleanly — which surfaces as "adoption is
+# broken" long after the install reported every check passed. Install them here
+# the way dateutil is installed rather than reported. Not a hard prerequisite: a
+# machine that never joins a mesh never touches them, so a missing Homebrew is a
+# warning, not a die.
+step "Mesh tooling (WireGuard)"
+
+if command -v wg >/dev/null 2>&1 && command -v wireguard-go >/dev/null 2>&1; then
+    ok "WireGuard present — wg and wireguard-go on PATH"
+elif [ "$DRY_RUN" = "1" ]; then
+    would "brew install wireguard-go wireguard-tools"
+elif command -v brew >/dev/null 2>&1; then
+    run_long "installing WireGuard (wireguard-go, wireguard-tools)" \
+        brew install wireguard-go wireguard-tools
+    if command -v wg >/dev/null 2>&1 && command -v wireguard-go >/dev/null 2>&1; then
+        ok "WireGuard installed — a hub can mint a leaf, a leaf can join"
+    else
+        warn "could not install WireGuard; adoption and leaf joins stay broken until 'brew install wireguard-go wireguard-tools' succeeds — see $LAST_LOG"
+    fi
+else
+    warn "no Homebrew, so WireGuard was not installed — adoption and leaf joins need 'wg' and 'wireguard-go' on PATH; install them before adopting"
+fi
+
 # Not a question. `jstack-doctor` runs at the end of this script and grades an
 # absent scheduler as a warning — so asking here hands the reader a warning they
 # chose and cannot act on. Installed by default; --no-scheduler declines it.
