@@ -190,7 +190,12 @@ uninstall() {
     #    deletes the state, token and credentials it keeps.
     if [ -f "$CHECKOUT/host/install.sh" ]; then
         if [ -n "$purge" ]; then
-            run bash "$CHECKOUT/host/install.sh" --purge || warn "host purge reported a problem"
+            # The host's own confirmation ("type the word purge") cannot be
+            # answered when this script arrives through a pipe — forward the
+            # consent the caller already gave with --yes.
+            purge_args=(--purge)
+            [ "$ASSUME_YES" = "1" ] && purge_args+=(--yes)
+            run bash "$CHECKOUT/host/install.sh" "${purge_args[@]}" || warn "host purge reported a problem"
         else
             run bash "$CHECKOUT/host/install.sh" --uninstall || warn "host uninstall reported a problem"
         fi
