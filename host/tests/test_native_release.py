@@ -75,7 +75,7 @@ def test_publisher_binds_the_public_hub_to_its_release_identity(tmp_path, monkey
     stack, output = tmp_path / "stack", tmp_path / "output"
     (stack / "host").mkdir(parents=True)
     output.mkdir()
-    identity = {"release": "18-source", "github_repo": "example/stack", "build": 18}
+    identity = {"release": "2026-09-21-source", "github_repo": "example/stack", "date": "2026-09-21"}
     (stack / "host/release-identity.json").write_text(json.dumps(identity))
     capabilities = {"dashboard": {"label": "live.jstack.automation.dashboard"}}
     catalog = tmp_path / "automation-catalog.json"
@@ -100,5 +100,5 @@ def test_publisher_binds_the_public_hub_to_its_release_identity(tmp_path, monkey
         assert source == stack and version == "0.70.0"
         assert kwargs["release_id"] == identity["release"]
         assert kwargs["github_repo"] == identity["github_repo"]
-        assert kwargs["build_number"] == 18
+        assert kwargs["date"] == "2026-09-21"
     assert (output / "menubar-notarized.zip").read_bytes() != (output / "hub-catalog.zip").read_bytes()

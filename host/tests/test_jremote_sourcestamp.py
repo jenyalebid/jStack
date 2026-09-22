@@ -51,13 +51,13 @@ def test_the_stamp_names_the_loaded_commit(checkout):
     assert sourcestamp.describe(stamp) == stamp["sha"][:12]
 
 
-def test_packaged_identity_reports_build_and_exact_source(checkout):
+def test_packaged_identity_reports_date_and_exact_source(checkout):
     _, pkg = checkout
     identity = {"sha": "a" * 40, "release": "72-aaaaaaaa", "version": "0.69.3",
-                "build": 72, "package_sha256": sourcestamp.fingerprint(pkg)}
+                "date": "2026-09-21", "package_sha256": sourcestamp.fingerprint(pkg)}
     (pkg.parent / "release-identity.json").write_text(json.dumps(identity))
     stamp = sourcestamp.capture()
-    assert stamp["build"] == 72
+    assert stamp["date"] == "2026-09-21"
     assert stamp["version"] == "0.69.3"
     assert stamp["sha"] == "a" * 40
     assert stamp["dirty"] is False

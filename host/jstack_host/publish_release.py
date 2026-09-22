@@ -34,8 +34,14 @@ def component(path: Path, version: str) -> dict:
             "sha256": releases.digest(path)}
 
 
-def allocate_build(candidates: Path, minimum: int) -> int:
-    """Reserve an identity before building; failed builds never recycle it."""
+def allocate_client_build(candidates: Path, minimum: int) -> int:
+    """Reserve jRemote's next build number; failed builds never recycle it.
+
+    This is the *client's* counter and only the client's. jRemote ships through
+    TestFlight and the App Store, which reject a build that does not outrank the
+    last one, so the counter is Apple's requirement rather than ours. The Hub
+    stopped sharing it — see release_date().
+    """
     candidates.mkdir(parents=True, exist_ok=True)
     with (candidates / "build-number.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -44,6 +50,18 @@ def allocate_build(candidates: Path, minimum: int) -> int:
         number = max(previous, minimum) + 1
         atomic_json(state, {"build": number})
         return number
+
+
+def release_date() -> str:
+    """The day this release is cut, as its own identity — no counter to reserve.
+
+    The old allocate_build() held a lock so two builds could never claim the
+    same number. Nothing needs reserving now: two releases cut on one day are
+    still distinct, because the source hash is the other half of the identity,
+    and two builds of the *same* hash on the same day are the same release.
+    """
+    from datetime import date
+    return date.today().isoformat()
 
 
 def sign_hub(stack: Path, output: Path, version: str, config: dict) -> None:
@@ -64,7 +82,7 @@ def sign_hub(stack: Path, output: Path, version: str, config: dict) -> None:
         destination = output / (name.removesuffix(".zip") + "-build")
         app = build_hub.build(stack, destination, version, config, catalog=catalog,
                               release_id=identity["release"], github_repo=identity["github_repo"],
-                              build_number=identity["build"])
+                              date=identity["date"])
         build_hub.notarize(app, destination, config)
         shutil.copy2(destination / "hub-notarized.zip", output / name)
 
@@ -84,11 +102,11 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
         target.parent.mkdir(exist_ok=True)
         dependencies[name] = snapshot(Path(repository), target)
     print(f"Release sources: stack {stack_sha}, client {client_sha}", flush=True)
-    import re
-    project = client / "jRemote-Code/jRemote/jRemote.xcodeproj/project.pbxproj"
-    current = max(map(int, re.findall(r"CURRENT_PROJECT_VERSION = (\d+);", project.read_text())))
-    build_number = allocate_build(candidates, current)
-    release_id = f"{build_number}-" + stack_sha[:8]
+    # The Hub's identity no longer reads the client's CURRENT_PROJECT_VERSION.
+    # Deriving a Hub number from jRemote's project file is what made the two
+    # products' versions look comparable when they count different things.
+    date = release_date()
+    release_id = f"{date}-" + stack_sha[:8]
     output = work / release_id
     output.mkdir()
     version = json.loads((stack / "plugins/jstack/.claude-plugin/plugin.json").read_text())["version"]
@@ -97,7 +115,7 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
         ["git", "-C", str(stack), "remote", "get-url", "origin"]).strip())
     from .sourcestamp import fingerprint
     (stack / "host/release-identity.json").write_text(json.dumps({
-        "release": release_id, "sha": stack_sha, "version": version, "build": build_number,
+        "release": release_id, "sha": stack_sha, "version": version, "date": date,
         "github_repo": github_repo,
         "package_sha256": fingerprint(stack / "host/jstack_host")}))
     archive = output / "stack.tar.gz"
@@ -125,8 +143,12 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
     app_script = client / "jRemote-Code/jRemote/release-mac.sh"
     print("Building, signing and notarizing client candidate", flush=True)
     log_path = work / "client-build.log"
+    import re
+    project = client / "jRemote-Code/jRemote/jRemote.xcodeproj/project.pbxproj"
+    current = max(map(int, re.findall(r"CURRENT_PROJECT_VERSION = (\d+);", project.read_text())))
+    client_build = allocate_client_build(candidates, current)
     with log_path.open("w") as log:
-        process = subprocess.run(["bash", str(app_script), "--build-number", str(build_number), "--candidate-dir", str(app_output),
+        process = subprocess.run(["bash", str(app_script), "--build-number", str(client_build), "--candidate-dir", str(app_output),
                                   "--notes", notes], timeout=2400, stdout=log, stderr=subprocess.STDOUT,
                                  env={**os.environ, "JSTACK_CHECKOUT": str(stack)})
     if process.returncode:

@@ -20,28 +20,29 @@ from jstack_host import acceptance, publish_release, release_manifest as release
 def test_build_reservations_are_unique_and_survive_failed_builds(tmp_path):
     from concurrent.futures import ThreadPoolExecutor
 
-    assert publish_release.allocate_build(tmp_path, 71) == 72
+    assert publish_release.allocate_client_build(tmp_path, 71) == 72
     with ThreadPoolExecutor(max_workers=8) as pool:
-        numbers = list(pool.map(lambda _: publish_release.allocate_build(tmp_path, 71), range(16)))
+        numbers = list(pool.map(lambda _: publish_release.allocate_client_build(tmp_path, 71), range(16)))
     assert sorted(numbers) == list(range(73, 89))
-    assert publish_release.allocate_build(tmp_path, 71) == 89
-    assert publish_release.allocate_build(tmp_path, 100) == 101
+    assert publish_release.allocate_client_build(tmp_path, 71) == 89
+    assert publish_release.allocate_client_build(tmp_path, 100) == 101
 
 
 def test_corrupt_build_counter_refuses_identity_reuse(tmp_path):
     (tmp_path / "build-number.json").write_text("broken")
     with pytest.raises(ValueError):
-        publish_release.allocate_build(tmp_path, 71)
+        publish_release.allocate_client_build(tmp_path, 71)
 
 
 def test_signed_hub_has_hub_name_and_exact_build_identity():
     from jstack_host import build_hub
     # Every privacy grant hangs off this one signed identity; the consent
     # dialogs name jStack Hub and each prompted access carries its purpose.
-    info = build_hub.hub_info("0.69.3", {"build": 72, "sha": "a" * 40})
+    info = build_hub.hub_info("0.69.3", {"date": "2026-09-21", "sha": "a" * 40})
     assert info["CFBundleName"] == info["CFBundleDisplayName"] == "jStack Hub"
     assert info["CFBundleIdentifier"] == "live.jstack.hub"
-    assert info["CFBundleVersion"] == "72"
+    # The day it was cut, not a counter anyone could mistake for jRemote's.
+    assert info["CFBundleVersion"] == "20260921"
     assert info["CFBundleShortVersionString"] == "0.69.3"
     for key, purpose in info.items():
         if key.startswith("NS") and key.endswith("UsageDescription"):

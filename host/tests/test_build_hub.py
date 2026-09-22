@@ -57,17 +57,22 @@ def test_macho_does_not_follow_symlinks(tmp_path):
 
 
 def test_release_bundle_uses_the_manifest_identity():
-    identity = build_hub.release_identity("a" * 40, "0.70.0", release_id="77-aaaaaaaa",
-                                          github_repo="https://github.com/owner/repo.git", build_number=77)
-    assert identity == {"sha": "a" * 40, "release": "77-aaaaaaaa", "version": "0.70.0",
-                        "github_repo": "owner/repo", "build": 77}
+    identity = build_hub.release_identity("a" * 40, "0.70.0", release_id="2026-09-21-aaaaaaaa",
+                                          github_repo="https://github.com/owner/repo.git", date="2026-09-21")
+    assert identity == {"sha": "a" * 40, "release": "2026-09-21-aaaaaaaa", "version": "0.70.0",
+                        "github_repo": "owner/repo", "date": "2026-09-21"}
 
 
 @pytest.mark.parametrize("arguments", [
-    {"release_id": "77-aaaaaaaa"},
-    {"release_id": "77-aaaaaaaa", "github_repo": "owner/repo", "build_number": 0},
-    {"release_id": "../escape", "github_repo": "owner/repo", "build_number": 77},
-    {"release_id": "77-aaaaaaaa", "github_repo": "https://foreign.invalid/repo", "build_number": 77},
+    {"release_id": "2026-09-21-aaaaaaaa"},
+    {"release_id": "2026-09-21-aaaaaaaa", "github_repo": "owner/repo", "date": ""},
+    # A counter is no longer an identity, whatever it counts.
+    {"release_id": "2026-09-21-aaaaaaaa", "github_repo": "owner/repo", "date": 77},
+    # A day that never happened is a typo, not a release date.
+    {"release_id": "2026-09-21-aaaaaaaa", "github_repo": "owner/repo", "date": "2026-02-31"},
+    {"release_id": "2026-09-21-aaaaaaaa", "github_repo": "owner/repo", "date": "21-09-2026"},
+    {"release_id": "../escape", "github_repo": "owner/repo", "date": "2026-09-21"},
+    {"release_id": "2026-09-21-aaaaaaaa", "github_repo": "https://foreign.invalid/repo", "date": "2026-09-21"},
 ])
 def test_release_identity_rejects_incomplete_or_invalid_inputs(arguments):
     with pytest.raises(ValueError):

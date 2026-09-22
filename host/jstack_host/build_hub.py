@@ -37,7 +37,11 @@ def hub_info(version: str, identity: dict) -> dict:
     return {
         "CFBundleIdentifier": "live.jstack.hub", "CFBundleExecutable": "JStackHub",
         "CFBundleName": "jStack Hub", "CFBundleDisplayName": "jStack Hub",
-        "CFBundlePackageType": "APPL", "CFBundleVersion": str(identity.get("build", version)),
+        # The date the release was cut, digits only — macOS wants a CFBundleVersion
+        # and this is the honest one. A dev build has no date and falls back to the
+        # version, exactly as it did before.
+        "CFBundlePackageType": "APPL",
+        "CFBundleVersion": identity.get("date", version).replace("-", ""),
         "CFBundleShortVersionString": version, "LSUIElement": True,
         "LSMinimumSystemVersion": "13.0",
         "NSLocalNetworkUsageDescription":
@@ -80,25 +84,45 @@ def relocate(path: Path, source: Path, target: Path):
         command(["/usr/bin/install_name_tool", *changes, str(path)])
 
 
-def release_identity(source_sha: str, version: str, *, release_id=None, github_repo=None, build_number=None) -> dict:
+def release_identity(source_sha: str, version: str, *, release_id=None, github_repo=None, date=None) -> dict:
+    """A Hub release is its source hash and the day it was cut — never a counter.
+
+    The Hub is not App Store distributed, so nothing requires a monotonically
+    rising CFBundleVersion, and a counter here was actively harmful: it read as
+    comparable to jRemote's own build numbers while counting something else
+    entirely. Ordering is not the identity's job either — whichever hash is
+    promoted is current, by definition, so rollback is promoting another hash
+    rather than out-numbering the last one.
+    """
     from .release_manifest import identifier
     from .release_channel import repository
-    if any(value is not None for value in (release_id, github_repo, build_number)):
-        if not release_id or not github_repo or type(build_number) is not int or build_number <= 0:
-            raise ValueError("release builds require release ID, GitHub origin and positive build number together")
+    if any(value is not None for value in (release_id, github_repo, date)):
+        if not release_id or not github_repo or not _is_date(date):
+            raise ValueError("release builds require release ID, GitHub origin and an ISO date together")
         return {"sha": source_sha, "release": identifier(release_id), "version": version,
-                "build": build_number, "github_repo": repository(github_repo)}
+                "date": date, "github_repo": repository(github_repo)}
     return {"sha": source_sha, "release": f"hub-{version}-{source_sha[:8]}", "version": version}
 
 
+def _is_date(value) -> bool:
+    """An ISO day, and a real one — `2026-02-31` is a typo, not a release date."""
+    from datetime import date as _date
+    if type(value) is not str:
+        return False
+    try:
+        return _date.fromisoformat(value).isoformat() == value
+    except ValueError:
+        return False
+
+
 def build(stack: Path, output: Path, version: str, config: dict | None = None, *, catalog=None,
-          release_id=None, github_repo=None, build_number=None) -> Path:
+          release_id=None, github_repo=None, date=None) -> Path:
     # Build one immutable git snapshot. A clean-tree check alone does not
     # exclude untracked package files or concurrent changes during pip/build.
     command(["git", "-C", str(stack), "diff", "--quiet", "HEAD", "--", "host"])
     source_sha = command(["git", "-C", str(stack), "rev-parse", "HEAD"]).strip()
     identity = release_identity(source_sha, version, release_id=release_id,
-                                github_repo=github_repo, build_number=build_number)
+                                github_repo=github_repo, date=date)
     with tempfile.TemporaryDirectory(prefix="jstack-source-") as temporary:
         root = Path(temporary)
         archive = root / "source.tar"
@@ -259,7 +283,7 @@ def main():
     parser.add_argument("--version", required=True)
     parser.add_argument("--release-id")
     parser.add_argument("--github-repo")
-    parser.add_argument("--build-number", type=int)
+    parser.add_argument("--date", help="ISO day this release is cut, e.g. 2026-09-21")
     parser.add_argument("--signing-config", type=Path)
     parser.add_argument("--notarize", action="store_true")
     parser.add_argument("--catalog", type=Path, help="private optional capability definitions; never publish this variant")
@@ -269,7 +293,7 @@ def main():
         parser.error("--notarize requires --signing-config")
     catalog = json.loads(args.catalog.read_text()) if args.catalog else None
     app = build(args.stack.resolve(), args.output.resolve(), args.version, config, catalog=catalog,
-                release_id=args.release_id, github_repo=args.github_repo, build_number=args.build_number)
+                release_id=args.release_id, github_repo=args.github_repo, date=args.date)
     if args.notarize:
         notarize(app, args.output.resolve(), config)
     print(app)
