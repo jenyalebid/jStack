@@ -878,7 +878,62 @@ else
     note "daemon is installed after the host step chooses its interpreter"
 fi
 
-# ── 8. the host and its menu bar icon ───────────────────────────────────────
+# ── 8. the Mac app ──────────────────────────────────────────────────────────
+#
+# The host makes the machine reachable; the app is what reaches it. Offered
+# here rather than left to a second document, for the same reason the host is:
+# a machine set up to be reached, with nothing on it that can reach, is half
+# an install that reads as a finished one.
+#
+# Installed BEFORE the host on purpose: the sealed Hub records at provision
+# time whether a hub-managed jRemote client is on the disk — an app arriving
+# after the host is written down as unmanaged and never corrected.
+#
+# It downloads a signed release rather than building from this checkout, which
+# is why it is the one step that can be declined without leaving a hole:
+# --no-app. app/install.sh verifies the hash, the signature, notarization and
+# the signing team before anything lands in /Applications.
+
+step "The Mac app"
+
+APP_INSTALLER="$CHECKOUT/app/install.sh"
+if [ "$(uname -s)" != "Darwin" ]; then
+    note "macOS only — skipped"
+elif [ ! -f "$APP_INSTALLER" ]; then
+    note "no app installer in this checkout — skipped"
+elif [ "$WANT_APP" = "0" ]; then
+    note "skipped by --no-app — run $APP_INSTALLER any time"
+elif [ "$DRY_RUN" = "1" ]; then
+    would "$APP_INSTALLER"
+else
+    app_args=()
+    [ "$ASSUME_YES" = "1" ] && app_args+=(--yes)
+    # A release snapshot has no git remote for the app installer to derive its
+    # repo from — hand it the one this install already came from.
+    app_args+=(--repo "$(printf '%s' "$REPO_URL" | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')")
+    # macOS ships bash 3.2, where "${app_args[@]}" on an empty array trips
+    # `set -u`; the ${arr[@]+...} form expands to nothing instead of dying.
+    run_long "downloading and verifying the app" bash "$APP_INSTALLER" ${app_args[@]+"${app_args[@]}"}
+    case $? in
+        0) ok "app installed in ${LAST_ELAPSED}s"; APP_INSTALLED=1 ;;
+        # 3 is "no release published yet". This used to be a note, on the
+        # reasoning that a reader cannot act on a fact about the repository and
+        # a warn would end a clean install on a line that looks like something
+        # to fix. Both halves of that were wrong. The app IS something to fix —
+        # it is the only thing on the machine that can reach the host this
+        # install just built — and the line the reader could not act on was the
+        # one that never mentioned the consequence: pairing is gated on the app
+        # being here, so a note here silently took step 10 out too. An install
+        # that ends with a host, no client and no code, under a green summary,
+        # is the failure this whole script exists to stop.
+        3) warn "no signed release published yet — no app, and nothing paired.
+     Install it later with: $APP_INSTALLER" ;;
+        *) warn "app install reported a problem — re-run $APP_INSTALLER to see it: $LAST_LOG" ;;
+    esac
+fi
+
+
+# ── 9. the host and its menu bar icon ───────────────────────────────────────
 #
 # Steps 1-7 leave a stack you drive from a terminal on this machine. The host
 # is what makes the machine reachable at all — from a phone, from another Mac,
@@ -983,9 +1038,8 @@ else
     # both read as extras, and a "no" here produces an install that looks
     # complete and answers nothing. --no-host is the way out, stated in
     # --help, rather than a prompt that has one sensible answer.
-    # --no-pair: the app is installed in the NEXT step, so pairing here would
-    # be introducing the host to something that is not on the disk yet. Step 10
-    # does it, once both halves exist.
+    # --no-pair: pairing is step 10, once both halves exist and the host can
+    # introduce itself to the app installed in the previous step.
     host_args=(--yes --no-pair)
     [ "$WANT_MENUBAR" = "0" ] && host_args+=(--no-menubar)
     if [ "$DRY_RUN" = "1" ]; then
@@ -1029,56 +1083,6 @@ if [ "${SCHED_PENDING:-0}" = "1" ]; then
     else
         warn "daemon install reported a problem"
     fi
-fi
-
-# ── 9. the Mac app ──────────────────────────────────────────────────────────
-#
-# The host makes the machine reachable; the app is what reaches it. Offered
-# here rather than left to a second document, for the same reason the host is:
-# a machine set up to be reached, with nothing on it that can reach, is half
-# an install that reads as a finished one.
-#
-# It downloads a signed release rather than building from this checkout, which
-# is why it is the one step that can be declined without leaving a hole:
-# --no-app. app/install.sh verifies the hash, the signature, notarization and
-# the signing team before anything lands in /Applications.
-
-step "The Mac app"
-
-APP_INSTALLER="$CHECKOUT/app/install.sh"
-if [ "$(uname -s)" != "Darwin" ]; then
-    note "macOS only — skipped"
-elif [ ! -f "$APP_INSTALLER" ]; then
-    note "no app installer in this checkout — skipped"
-elif [ "$WANT_APP" = "0" ]; then
-    note "skipped by --no-app — run $APP_INSTALLER any time"
-elif [ "$DRY_RUN" = "1" ]; then
-    would "$APP_INSTALLER"
-else
-    app_args=()
-    [ "$ASSUME_YES" = "1" ] && app_args+=(--yes)
-    # A release snapshot has no git remote for the app installer to derive its
-    # repo from — hand it the one this install already came from.
-    app_args+=(--repo "$(printf '%s' "$REPO_URL" | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')")
-    # macOS ships bash 3.2, where "${app_args[@]}" on an empty array trips
-    # `set -u`; the ${arr[@]+...} form expands to nothing instead of dying.
-    run_long "downloading and verifying the app" bash "$APP_INSTALLER" ${app_args[@]+"${app_args[@]}"}
-    case $? in
-        0) ok "app installed in ${LAST_ELAPSED}s"; APP_INSTALLED=1 ;;
-        # 3 is "no release published yet". This used to be a note, on the
-        # reasoning that a reader cannot act on a fact about the repository and
-        # a warn would end a clean install on a line that looks like something
-        # to fix. Both halves of that were wrong. The app IS something to fix —
-        # it is the only thing on the machine that can reach the host this
-        # install just built — and the line the reader could not act on was the
-        # one that never mentioned the consequence: pairing is gated on the app
-        # being here, so a note here silently took step 10 out too. An install
-        # that ends with a host, no client and no code, under a green summary,
-        # is the failure this whole script exists to stop.
-        3) warn "no signed release published yet — no app, and nothing paired.
-     Install it later with: $APP_INSTALLER" ;;
-        *) warn "app install reported a problem — re-run $APP_INSTALLER to see it: $LAST_LOG" ;;
-    esac
 fi
 
 # ── 10. introducing the two halves ──────────────────────────────────────────
