@@ -983,12 +983,33 @@ if [ -n "$RELEASE_TAG" ] && [ "$(uname -s)" = "Darwin" ] && [ "$WANT_HOST" != "0
             fi
         fi
     fi
-    if [ "$JSTACK_HUB_CURRENT" != "1" ] && ls "$HOME"/Library/LaunchAgents/com.jremote.*.plist >/dev/null 2>&1; then
-        warn "legacy jStack services found — purging them so the sealed install can proceed"
-        if [ "$DRY_RUN" = "1" ]; then
-            would "$HOST_INSTALLER --purge --yes"
-        elif [ -f "$HOST_INSTALLER" ]; then
-            bash "$HOST_INSTALLER" --purge --yes || warn "legacy purge reported a problem"
+    if [ "$JSTACK_HUB_CURRENT" != "1" ]; then
+        if ls "$HOME"/Library/LaunchAgents/com.jremote.*.plist >/dev/null 2>&1; then
+            warn "legacy jStack services found — purging them so the sealed install can proceed"
+            if [ "$DRY_RUN" = "1" ]; then
+                would "$HOST_INSTALLER --purge --yes"
+            elif [ -f "$HOST_INSTALLER" ]; then
+                bash "$HOST_INSTALLER" --purge --yes || warn "legacy purge reported a problem"
+            fi
+        fi
+        # The sealed installer refuses over any of these three leftovers, and a
+        # deleted plist does NOT unload its registration — a machine can carry
+        # a loaded com.jremote.* job with no file on disk. Clear all of it, or
+        # the refusal lands on the person as "an existing host requires the
+        # migration installer".
+        if [ "$DRY_RUN" != "1" ]; then
+            for l in com.jremote.host com.jremote.menubar com.jremote.updater; do
+                launchctl bootout "gui/$(id -u)/$l" >/dev/null 2>&1 || true
+            done
+            rm -f "$HOME/Library/LaunchAgents"/com.jremote.*.plist
+            # The sealed installer also refuses over ANY entry in the state
+            # dir. Move it aside rather than delete — a wrongly swept token is
+            # unrecoverable, a moved one is sitting next door.
+            if [ -d "$HOME/.local/state/jremote" ] && [ -n "$(ls -A "$HOME/.local/state/jremote" 2>/dev/null)" ]; then
+                aside="$HOME/.local/state/jremote.replaced-$(date +%Y%m%d%H%M%S)"
+                mv "$HOME/.local/state/jremote" "$aside"
+                warn "previous host state moved aside to $aside"
+            fi
         fi
     fi
 fi
