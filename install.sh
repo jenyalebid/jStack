@@ -931,7 +931,9 @@ elif [ "$DRY_RUN" = "1" ]; then
 else
     app_args=()
     [ "$ASSUME_YES" = "1" ] && app_args+=(--yes)
-    run_long "downloading and verifying the app" bash "$APP_INSTALLER" "${app_args[@]}"
+    # macOS ships bash 3.2, where "${app_args[@]}" on an empty array trips
+    # `set -u`; the ${arr[@]+...} form expands to nothing instead of dying.
+    run_long "downloading and verifying the app" bash "$APP_INSTALLER" ${app_args[@]+"${app_args[@]}"}
     case $? in
         0) ok "app installed in ${LAST_ELAPSED}s"; APP_INSTALLED=1 ;;
         # 3 is "no release published yet". This used to be a note, on the
