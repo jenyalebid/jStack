@@ -626,9 +626,14 @@ struct UpdateSource: Decodable {
     var release: String?
     var build: Int?
 
+    /// What identifies a release is its hash and date — never a counter, and
+    /// never the package semver. `version` still exists because the plugin
+    /// manifest and CFBundleVersion require one, but it says nothing about
+    /// which build this is: two different releases share it. `build` is the
+    /// retired counter and is deliberately not rendered.
     var displayVersion: String {
-        guard let version else { return "Version not reported" }
-        return build.map { "\(version) (\($0))" } ?? version
+        if let release, !release.isEmpty { return release }
+        return version ?? "Version not reported"
     }
 }
 
