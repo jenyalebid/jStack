@@ -32,8 +32,17 @@ for _ in 1 2 3 4 5; do
         # dropping the interface or a single handshake. Unconditional because it
         # is idempotent — setting an MTU the interface already has changes
         # nothing.
-        "$IFCONFIG" "$IFACE" mtu "${WG_MTU:-1240}"
-        echo "wg_sync: $CONF -> $IFACE (mtu ${WG_MTU:-1240})"
+        #
+        # Best-effort, and that is the point: syncconf has already returned 0,
+        # so the peer IS on the live interface and the sync SUCCEEDED. Letting
+        # `set -e` kill the script here would turn a applied-peer run into a
+        # failed one — and under the retry loop above, into four more pointless
+        # syncconf calls and a red exit. The clamp is convergence, not the job.
+        if "$IFCONFIG" "$IFACE" mtu "${WG_MTU:-1240}" 2>/dev/null; then
+            echo "wg_sync: $CONF -> $IFACE (mtu ${WG_MTU:-1240})"
+        else
+            echo "wg_sync: $CONF -> $IFACE (peer applied; mtu clamp skipped)"
+        fi
         exit 0
     fi
     sleep 1
