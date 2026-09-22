@@ -565,6 +565,19 @@ case "$AGENT_ROOT" in
     "$HOME/Agents") AGENT_ROOT="$JSTACK_ROOT/Agents" ;;
 esac
 
+# Record the agent root where a launchd-spawned host can find it. The sealed
+# Hub launches through SMAppService with HOME and nothing else — no login
+# shell, so no $JSTACK_ROOT — and without this it resolves an empty ~/Agents
+# and the app's Agents tab comes up blank. Plain ~/.config (never Application
+# Support, which is TCC-gated and pops a dialog on any non-owning reader),
+# keyed off HOME alone, exactly like hostenv.instance_root_marker() — keep the
+# two paths in step.
+if [ "$DRY_RUN" != "1" ]; then
+    MARKER="$HOME/.config/jstack/instance_root"
+    mkdir -p "$(dirname "$MARKER")" && printf '%s\n' "$AGENT_ROOT" > "$MARKER" \
+        && ok "recorded agent root for the host — $AGENT_ROOT"
+fi
+
 # The second and last question — and only when there is something to answer.
 #
 # Asked here rather than at step 4 so both answers are given before anything is

@@ -563,17 +563,56 @@ def _fold(name: str) -> str:
 _profile = None
 
 
+def instance_root_marker() -> Path:
+    """The file the installer writes so an env-less host still finds its agents.
+
+    A fixed path under `$HOME` — deliberately *not* under `state_dir()`, which
+    resolves through `profile()` → `instance_root()` and would make this
+    recursive, and deliberately *not* under `~/Library/Application Support`,
+    which is TCC-gated: any non-owning reader (the CLI, a test, the installer)
+    trips a permission dialog on the user's screen. `~/.config` is plain,
+    dialog-free, and readable by the host. The sealed Hub launches through
+    SMAppService with `HOME` and nothing else (no login shell, so no
+    `$JSTACK_ROOT`; the old `JREMOTE_INSTANCE_ROOT` was pinned into a
+    `com.jremote.host` plist that the sealed app never loads). `HOME` is the one
+    thing it always has, so the root it was installed against is recorded here,
+    keyed off `HOME` alone."""
+    return HOME / ".config" / "jstack" / "instance_root"
+
+
+def _marker_root() -> Path | None:
+    """The instance root recorded at install time, or None if unwritten."""
+    try:
+        text = instance_root_marker().read_text().strip()
+    except OSError:
+        return None
+    return Path(text).expanduser() if text else None
+
+
+def write_instance_root(root: Path) -> Path:
+    """Record the instance root so a launchd-spawned host resolves it without a
+    shell. Called by the installer, which knows the root from `$JSTACK_ROOT`."""
+    marker = instance_root_marker()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(str(Path(root).expanduser()) + "\n")
+    return marker
+
+
 def instance_root() -> Path:
     """Where the default profile looks for agents.
 
     Order matters, and the last step is a safety rule, not a convenience:
 
-    · `JREMOTE_INSTANCE_ROOT` wins — the installer pins it into the daemon's
-      plist (launchd inherits no shell, so the daemon has this and nothing
-      else), and a test points it at a fixture.
+    · `JREMOTE_INSTANCE_ROOT` wins — a test points it at a fixture, and a
+      shell-launched tool that exports it means it.
     · else `$JSTACK_ROOT/Agents` — the one tree the installer, the plugin and
       `jstack-doctor` all resolve agents against. Honouring it here is what
       makes the host agree with the doctor a person just watched pass.
+    · else the **install-time marker** (`instance_root_marker()`) — this is the
+      answer for the sealed Hub, which launches with no shell and so has
+      neither env var above. Without it `active_agents()` read an empty
+      `~/Agents` and the app's Agents tab came up blank on every install whose
+      tree lives under `$JSTACK_ROOT`.
     · else `$HOME/Agents`, **even when that directory does not exist.**
 
     The old last resort was a bare `$HOME`, and it was the blank-thread bug:
@@ -590,6 +629,9 @@ def instance_root() -> Path:
     jstack_root = os.environ.get("JSTACK_ROOT")
     if jstack_root:
         return Path(jstack_root).expanduser() / "Agents"
+    marker = _marker_root()
+    if marker is not None:
+        return marker
     return HOME / "Agents"
 
 

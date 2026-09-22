@@ -155,6 +155,43 @@ def test_instance_root_never_falls_back_to_a_bare_home(monkeypatch, tmp_path):
     assert hostenv.active_agents() == {}
 
 
+def test_instance_root_reads_the_install_marker_without_a_shell(monkeypatch, tmp_path):
+    """The empty-Agents-tab bug: the sealed Hub launches through SMAppService
+    with `HOME` and nothing else — no login shell, so no `$JSTACK_ROOT`, and
+    the old `JREMOTE_INSTANCE_ROOT` was pinned into a `com.jremote.host` plist
+    the sealed app never loads. With neither env var it fell to an empty
+    `~/Agents` and the tab came up blank. The installer records the real tree
+    in `instance_root_marker()`; an env-less host must resolve it from there."""
+    monkeypatch.delenv("JREMOTE_INSTANCE_ROOT", raising=False)
+    monkeypatch.delenv("JSTACK_ROOT", raising=False)
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(hostenv, "HOME", fake_home)
+    agents = tmp_path / "work" / "Alpine" / "Agents"
+    (agents / "Jarvis").mkdir(parents=True)
+    # No marker yet: the shipped blank-tab behaviour.
+    assert hostenv.instance_root() == fake_home / "Agents"
+    # The installer writes the marker; the same env-less host now finds it.
+    hostenv.write_instance_root(agents)
+    assert hostenv.instance_root_marker() == fake_home / ".config" / "jstack" / "instance_root"
+    assert hostenv.instance_root() == agents
+    monkeypatch.setenv("JREMOTE_HOST_PROFILE", "default")
+    hostenv.reset_profile()
+    assert set(hostenv.active_agents()) == {"jarvis"}
+
+
+def test_jstack_root_env_beats_the_marker(monkeypatch, tmp_path):
+    """A shell-launched tool that exports `$JSTACK_ROOT` means it: the live env
+    wins over a marker written at some past install."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(hostenv, "HOME", fake_home)
+    monkeypatch.delenv("JREMOTE_INSTANCE_ROOT", raising=False)
+    hostenv.write_instance_root(tmp_path / "old" / "Agents")
+    monkeypatch.setenv("JSTACK_ROOT", str(tmp_path / "current"))
+    assert hostenv.instance_root() == tmp_path / "current" / "Agents"
+
+
 # ── the default profile: the filesystem is the roster ──
 
 def test_roster_is_the_directories(instance):

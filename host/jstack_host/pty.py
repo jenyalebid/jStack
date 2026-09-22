@@ -219,6 +219,13 @@ def _spawn_attach(sid: str, cols: int, rows: int) -> tuple[int, int]:
     env = {
         "PATH": managed._PATH,
         "TERM": "xterm-256color",
+        # The attach client is ncurses: without a terminfo path the bundled
+        # tmux floods "can't find terminfo database" straight onto the glass.
+        # hostenv anchors TERMINFO_DIRS on the host process, but this exec gets
+        # a fresh env dict, so it has to be carried in explicitly or the fix
+        # never reaches the one process the user actually sees.
+        "TERMINFO_DIRS": os.environ.get(
+            "TERMINFO_DIRS", "/usr/share/terminfo:/opt/homebrew/share/terminfo"),
         "LANG": "en_US.UTF-8",
         "LC_ALL": "en_US.UTF-8",
         "HOME": str(Path.home()),

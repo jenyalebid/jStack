@@ -69,7 +69,24 @@ from pathlib import Path
 from .hostenv import spawn_path
 from . import hostenv
 
-_TMUX = shutil.which("tmux") or "/opt/homebrew/bin/tmux"
+def _bundled_tmux() -> str | None:
+    """The tmux the Hub shipped, next to its own Python. A clean Mac has no
+    tmux on PATH, so a managed session can only spawn if we use the one in the
+    bundle — sibling of sys.executable (…/Contents/MacOS/tmux). None when this
+    host is not running from the sealed bundle (a dev/venv run), where
+    which()/Homebrew is the right answer."""
+    try:
+        exe = Path(sys.executable)
+        for base in (exe.parent, exe.resolve().parent):
+            cand = base / "tmux"
+            if cand.is_file():
+                return str(cand)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+_TMUX = _bundled_tmux() or shutil.which("tmux") or "/opt/homebrew/bin/tmux"
 _REG = hostenv.state_dir() / "jremote_open.json"
 # Dedicated tmux socket, shared by the daemon and iTerm. Overridable so tests
 # can exercise the real teardown paths against a throwaway server instead of
