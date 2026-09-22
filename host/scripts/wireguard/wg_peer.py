@@ -7,10 +7,10 @@ Network.app) watches the conf and applies it to the live interface — no sudo,
 no restart, no tunnel drop.
 
 Named exactly, because the name is load-bearing during an outage. This used to
-say "the hub's sync LaunchDaemon", meaning `com.jarvisandj.wireguard-sync`;
-that daemon was retired when the Network owner took over and now resolves to
-nothing. On 2026-09-21, mid-outage, that sentence sent a reader hunting a
-service that does not exist — `launchctl print` returned empty, which reads as
+say "the hub's sync LaunchDaemon", which resolved to a legacy sync daemon label
+retired when the Network owner took over; it now names nothing. On 2026-09-21,
+mid-outage, that sentence sent a reader hunting a service that does not exist —
+`launchctl print` returned empty, which reads as
 "the sync is dead" rather than "you asked for the wrong label". Verify the real
 owner with `launchctl print system/live.jstack.network` before concluding the
 sync is down.
