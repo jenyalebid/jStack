@@ -910,7 +910,9 @@ if [ -n "$RELEASE_TAG" ] && [ -f "$CHECKOUT/host/release-identity.json" ] && [ "
                 > "$HOME/.local/bin/jstack-host"
             chmod +x "$HOME/.local/bin/jstack-host"
         else
-            warn "sealed Hub install reported a problem — see $LAST_LOG"
+            # A machine with a Hub app but no provisioned host service is the
+            # green-looking broken install this script exists to prevent.
+            die "sealed Hub install failed — $(tail -3 "$LAST_LOG" 2>/dev/null | tr '\n' ' ')"
         fi
     fi
 elif [ ! -f "$HOST_INSTALLER" ]; then
