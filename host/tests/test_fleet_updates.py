@@ -838,7 +838,7 @@ def _channel_cli(state, *argv):
 
 
 def test_switching_a_hub_to_a_branch_is_one_command(tmp_path, monkeypatch):
-    """Boss switches a hub by naming a branch, not by editing JSON. The write
+    """A hub is switched by naming a branch, not by editing JSON. The write
     goes to the same config `refresh` reads and a reinstall carries forward."""
     monkeypatch.delenv("JREMOTE_STATE_DIR", raising=False)
     config = tmp_path / "updates" / "config.json"

@@ -9,8 +9,29 @@ The Plugin and jRemote client are independently usable products.
 
 There is one installed Hub per OS. Develop on feature/release branches and
 test installations in separate macOS VMs. Main receives complete, verified
-functionality. Every build gets a new build number and its exact source commit,
-including rebuilds of the same source. Info displays version/build/source and
+functionality.
+
+A release is identified by its source: the date it was cut and the first eight
+characters of its stack commit, e.g. `2026-09-21-235fc996`. There is no build
+number and no version counter — a rebuild of the same source is the same
+source, and the hash says so. The Claude plugin manifest and the macOS bundle
+still carry a semver, because the marketplace and CFBundleVersion require one;
+that number belongs to those obligations and never identifies a release.
+
+Because a hash does not order and two releases can share a date, each manifest
+also carries a `sequence` — the commit count behind its own source, never
+displayed. It exists only so a hub can refuse an offer older than what it
+runs, and it is compared only between releases on the same channel, where the
+two counts are measured from the same root.
+
+Each release names the line it came from. A hub follows one line, `stable` by
+default, set with `jstack-host updates channel <branch>`; branch releases are
+published as prereleases, so a hub that never asked cannot be handed one. The
+name is read from the signed manifest rather than the release tag. Moving a
+hub between lines is not a downgrade: the old count means nothing on the new
+history, so the sequence guard does not apply across a switch.
+
+Info displays version/build/source and
 observed running status in a native macOS form, with the jRemote icon/version,
 Open or Download, and actionable update state.
 
