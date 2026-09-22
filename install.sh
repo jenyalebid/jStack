@@ -200,6 +200,20 @@ uninstall() {
     #    deletes the state, token and credentials it keeps.
     if [ -f "$CHECKOUT/host/install.sh" ]; then
         if [ -n "$purge" ]; then
+            # A machine that was adopted as a managed leaf keeps that
+            # attachment in /Library — root-owned, beyond every rm below.
+            # Left there, the next install reads the daemon's presence and
+            # calls itself "managed · offline" forever, and the app shows no
+            # local instance. Detach now, while the host still holds the
+            # parent record it needs to tell the hub; it asks for admin
+            # rights itself and reports any step it could not do.
+            if [ -f /Library/LaunchDaemons/com.jremote.leaf.plist ]; then
+                if command -v jstack-host >/dev/null 2>&1; then
+                    run jstack-host detach || warn "leaf detach reported a problem — finish with \`jstack-host detach\` by hand"
+                elif [ -x "$HOME/.local/bin/jstack-host" ]; then
+                    run "$HOME/.local/bin/jstack-host" detach || warn "leaf detach reported a problem — finish with \`jstack-host detach\` by hand"
+                fi
+            fi
             # The host's own confirmation ("type the word purge") cannot be
             # answered when this script arrives through a pipe; asking for
             # --uninstall here IS the consent, so forward it as --yes.
@@ -257,6 +271,30 @@ uninstall() {
                    "$HOME/Library/Containers/dev.jenya.jRemote.tunnel"
             while security delete-generic-password -s jRemote >/dev/null 2>&1; do :; done
             ok "app settings, paired hosts and tokens removed"
+            # The leaf tunnel — what adoption placed as root. The detach in
+            # step 2 only ran with a host binary to run it; the wrecked
+            # machine this sweep exists for has none, so take the daemons
+            # and conf off directly. Skipped rather than half-done when
+            # there is no way to become root: a leaf left installed must be
+            # said out loud, because the machine will keep reading as
+            # "managed · offline" until it comes off.
+            if [ -f /Library/LaunchDaemons/com.jremote.leaf.plist ] \
+                    || [ -f /Library/LaunchDaemons/com.jremote.leaf-watch.plist ] \
+                    || [ -f /etc/wireguard/jrleaf.conf ]; then
+                if sudo -p "admin password (removing the leaf tunnel): " true 2>/dev/null; then
+                    for l in com.jremote.leaf com.jremote.leaf-watch; do
+                        sudo launchctl bootout "system/$l" >/dev/null 2>&1 || true
+                    done
+                    sudo rm -rf /Library/LaunchDaemons/com.jremote.leaf.plist \
+                                /Library/LaunchDaemons/com.jremote.leaf-watch.plist \
+                                /etc/wireguard/jrleaf.conf \
+                                "/Library/Application Support/jRemote Leaf" \
+                                /var/log/jremote-leaf
+                    ok "leaf tunnel removed — this Mac no longer claims a parent hub"
+                else
+                    warn "no admin rights — the leaf tunnel is still installed and this Mac will keep reading as managed · offline; run \`jstack-host detach\` by hand"
+                fi
+            fi
         fi
     fi
 
