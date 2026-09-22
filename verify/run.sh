@@ -15,7 +15,7 @@
 # $JSTACK_VERIFY_RECEIPTS (default ~/.local/state/jstack-verify), one
 # directory per scenario per run. The guest is left booted and on screen
 # after the run — reading the verdict off the glass is the point.
-set -u
+set -u -o pipefail   # a scenario's exit code must survive the tee into its log
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCEN="$HERE/scenarios"
