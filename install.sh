@@ -98,6 +98,9 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# The one installer. Sub-installers check this and refuse direct invocation.
+export JSTACK_INSTALLER=1
+
 # ── output ──────────────────────────────────────────────────────────────────
 
 if [ -t 1 ]; then B=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; Z=$'\033[0m'

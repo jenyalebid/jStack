@@ -23,6 +23,13 @@
 
 set -uo pipefail
 
+# One installer. This script is a step of the top-level install.sh, not a door.
+if [ -z "${JSTACK_INSTALLER:-}" ]; then
+    echo "this is an internal step of the jStack installer — run instead:" >&2
+    echo "  curl -fsSL https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh | bash" >&2
+    exit 2
+fi
+
 # The repo to clone when this is run outside a checkout. Not spelled here:
 # the script normally runs *from* the checkout, and a hardcoded account name
 # in a public installer is a name that outlives whoever owns the repo.

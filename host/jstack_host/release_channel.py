@@ -209,3 +209,21 @@ def publish(directory: Path, repo: str, public_key: str) -> None:
             if releases.digest(downloaded / path.name) != releases.digest(path):
                 raise releases.ReleaseError("uploaded artifact differs from qualified bytes")
     command(["gh", "release", "edit", tag, "--repo", repo, "--draft=false", "--latest=false"])
+    # One release action feeds every install door. The Mac app installer reads
+    # the newest mac-app-* tag; leaving it behind is how a promoted stack
+    # release still hands a five-day-old client to a fresh install.
+    client = manifest["components"]["client"]
+    app_tag = "mac-app-1.0-" + str(client["version"])
+    probe = subprocess.run(["gh", "api", f"repos/{repo}/releases/tags/{app_tag}"],
+                           capture_output=True, text=True, timeout=60)
+    if probe.returncode and "HTTP 404" in probe.stderr:
+        with tempfile.TemporaryDirectory(prefix="jstack-app-manifest-") as temporary:
+            app_manifest = Path(temporary) / "latest.json"
+            app_manifest.write_text(json.dumps({
+                "file": client["file"], "build": int(client["version"]),
+                "version": client["version"], "sha256": client["sha256"]}) + "\n")
+            command(["gh", "release", "create", app_tag, "--repo", repo,
+                     "--target", manifest["sources"]["stack"],
+                     "--title", f"jRemote for Mac 1.0 ({client['version']})",
+                     "--notes", "Client from release " + manifest["release"],
+                     str(directory / client["file"]), str(app_manifest)], timeout=900)

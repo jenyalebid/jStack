@@ -27,6 +27,13 @@
 
 set -uo pipefail
 
+# One installer. This script is a step of the top-level install.sh, not a door.
+if [ -z "${JSTACK_INSTALLER:-}" ]; then
+    echo "this is an internal step of the jStack installer — run instead:" >&2
+    echo "  curl -fsSL https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh | bash" >&2
+    exit 2
+fi
+
 # The Apple team the app is signed by. Pinned here as a constant and NOT read
 # from the downloaded manifest, which is the whole difference between a check
 # and a formality: a manifest that could nominate its own signer would let a
