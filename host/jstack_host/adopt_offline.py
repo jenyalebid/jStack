@@ -47,21 +47,22 @@ JOIN_SCRIPT = "join.sh"
 
 
 def _installer_url() -> str:
-    """Use this distribution's origin, never a private host's repository."""
+    """Use this distribution's origin, never a private host's repository.
+
+    Asked of the source stamp, not of git: a Hub that has been installed is a
+    signed bundle with no `.git` anywhere in it, so asking git inside the app
+    is a question that can only fail — and it failed on the one machine that
+    matters, the hub, every time someone asked it for a joiner file. The
+    published origin travels inside the bundle in `release-identity.json`.
+    """
     import os
-    import re
-    import subprocess
     if value := os.environ.get("JSTACK_INSTALL_URL"):
         return value
-    from . import hostenv
-    checkout = hostenv.package_root()
-    result = subprocess.run(["git", "-C", str(checkout), "remote", "get-url", "origin"],
-                            capture_output=True, text=True, timeout=5)
-    match = re.fullmatch(r"(?:https://github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?",
-                         result.stdout.strip())
-    if not match:
+    from . import sourcestamp
+    repo = sourcestamp.github_repo()
+    if not repo:
         raise ValueError("set JSTACK_INSTALL_URL to this distribution's installer URL")
-    return f"https://raw.githubusercontent.com/{match[1]}/main/install.sh"
+    return f"https://raw.githubusercontent.com/{repo}/main/install.sh"
 
 
 def _join_script(name: str, code: str, port: int, hub: str) -> str:

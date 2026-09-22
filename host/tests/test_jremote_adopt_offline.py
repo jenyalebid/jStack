@@ -315,3 +315,20 @@ def test_an_offline_code_gets_the_longest_life_the_mint_allows():
     from jstack_host import enrolment
 
     assert enrolment.MAX_TTL > enrolment.DEFAULT_TTL
+
+
+def test_an_installed_hub_can_name_the_installer_without_git(tmp_path, monkeypatch):
+    """The second wall the joiner file hit, after the mesh tooling.
+
+    Every other test in this file runs under the autouse fixture that sets
+    `JSTACK_INSTALL_URL`, so none of them ever exercised the resolver a real
+    hub falls back to. This one unsets it and stands where the shipped Hub
+    stands: a signed tree, no checkout, identity file beside the package.
+    """
+    from jstack_host import sourcestamp
+    from test_jremote_sourcestamp import bundle_tree
+    monkeypatch.delenv("JSTACK_INSTALL_URL", raising=False)
+    monkeypatch.setattr(sourcestamp, "_PKG", bundle_tree(tmp_path))
+    monkeypatch.setattr(sourcestamp, "_stamp", None)
+    assert (adopt_offline._installer_url()
+            == "https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh")

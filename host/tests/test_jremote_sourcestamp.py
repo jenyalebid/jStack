@@ -101,3 +101,38 @@ def test_outside_any_checkout_the_stamp_is_empty_not_wrong(tmp_path, monkeypatch
     stamp = sourcestamp.capture()
     assert stamp == {"sha": "", "dirty": False, "root": ""}
     assert sourcestamp.describe(stamp) == "not a checkout"
+
+
+def bundle_tree(tmp_path, repo="jenyalebid/jStack"):
+    """A signed bundle as it is installed: an identity file, and no `.git`."""
+    import json
+    from jstack_host.sourcestamp import fingerprint
+    pkg = tmp_path / "packages" / "jstack_host"
+    pkg.mkdir(parents=True)
+    (pkg / "server.py").write_text("shipped bytes\n")
+    identity = {"sha": "b" * 40, "release": "2026-09-22-bbbbbbbb", "version": "0.69.9",
+                "date": "2026-09-22", "package_sha256": fingerprint(pkg)}
+    if repo:
+        identity["github_repo"] = repo
+    (pkg.parent / "release-identity.json").write_text(json.dumps(identity))
+    return pkg
+
+
+def test_a_shipped_bundle_still_knows_where_it_was_published_from(tmp_path, monkeypatch):
+    """The installer URL in a joiner file is derived from this.
+
+    `_installer_url` used to ask git for the origin inside `package_root()`.
+    In an installed Hub that is a signed app bundle with no `.git` anywhere,
+    so the question could only fail — and it did, on the hub itself, every
+    time someone asked for a joiner file. The origin rides in the bundle.
+    """
+    monkeypatch.setattr(sourcestamp, "_PKG", bundle_tree(tmp_path))
+    monkeypatch.setattr(sourcestamp, "_stamp", None)
+    assert sourcestamp.capture()["github_repo"] == "jenyalebid/jStack"
+    assert sourcestamp.github_repo() == "jenyalebid/jStack"
+
+
+def test_a_bundle_without_an_origin_says_so_rather_than_guessing(tmp_path, monkeypatch):
+    monkeypatch.setattr(sourcestamp, "_PKG", bundle_tree(tmp_path, repo=""))
+    monkeypatch.setattr(sourcestamp, "_stamp", None)
+    assert sourcestamp.github_repo() == ""

@@ -24,6 +24,7 @@ from __future__ import annotations
 import subprocess
 import json
 import hashlib
+import re
 from pathlib import Path
 
 _PKG = Path(__file__).resolve().parent
@@ -78,7 +79,24 @@ def capture() -> dict:
                 _stamp["version"] = data["version"]
             if data.get("date"):
                 _stamp["date"] = data["date"]
+            # Where these bytes were published from. A signed bundle has no
+            # `.git` to ask, and the one caller that needed this — the joiner
+            # file's installer URL — was asking git inside the app bundle and
+            # getting nothing, so no installed Hub could write a joiner file.
+            if data.get("github_repo"):
+                _stamp["github_repo"] = data["github_repo"]
     return dict(_stamp)
+
+
+def github_repo() -> str:
+    """`owner/name` this distribution was published from, or "" in a checkout
+    that has no origin on GitHub."""
+    stamp = capture()
+    if repo := stamp.get("github_repo"):
+        return repo
+    match = re.fullmatch(r"(?:https://github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?",
+                         _git("remote", "get-url", "origin"))
+    return match[1] if match else ""
 
 
 def describe(stamp: dict | None = None) -> str:
