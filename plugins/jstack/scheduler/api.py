@@ -8,8 +8,19 @@ from __future__ import annotations
 import json
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 
 from . import config
+
+
+class _Server(ThreadingHTTPServer):
+    def server_bind(self):
+        # http.server's server_bind calls socket.getfqdn(), a reverse-DNS
+        # lookup that hangs for minutes on hosts with no PTR record — the
+        # daemon never reaches serve_forever. Loopback-only server: skip it.
+        TCPServer.server_bind(self)
+        self.server_name = "localhost"
+        self.server_port = self.socket.getsockname()[1]
 
 _RUN_NOW_RE = re.compile(r"^/jobs/([^/]+)/run-now$")
 _KILL_RE = re.compile(r"^/runs/([^/]+)/kill$")
@@ -56,6 +67,6 @@ def make_server(engine, port: "int|None" = None) -> ThreadingHTTPServer:
                 return
             self._send(404, {"error": "not found"})
 
-    return ThreadingHTTPServer(
+    return _Server(
         ("127.0.0.1", port if port is not None else config.API_PORT), Handler
     )
