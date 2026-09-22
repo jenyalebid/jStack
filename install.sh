@@ -957,6 +957,9 @@ elif [ "$DRY_RUN" = "1" ]; then
 else
     app_args=()
     [ "$ASSUME_YES" = "1" ] && app_args+=(--yes)
+    # A release snapshot has no git remote for the app installer to derive its
+    # repo from — hand it the one this install already came from.
+    app_args+=(--repo "$(printf '%s' "$REPO_URL" | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')")
     # macOS ships bash 3.2, where "${app_args[@]}" on an empty array trips
     # `set -u`; the ${arr[@]+...} form expands to nothing instead of dying.
     run_long "downloading and verifying the app" bash "$APP_INSTALLER" ${app_args[@]+"${app_args[@]}"}
