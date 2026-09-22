@@ -570,9 +570,30 @@ def check_versions() -> dict:
 
     head = _git(checkout, "rev-parse", "HEAD")
     if not head:
+        # A shipped release copy has no .git on purpose — its identity file
+        # is the identity. Grading it as a broken checkout told people with
+        # git installed to install git.
+        try:
+            identity = json.loads(
+                (checkout / "host" / "release-identity.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            identity = None
+        if identity and identity.get("sha"):
+            sha = str(identity["sha"])
+            rel = identity.get("release") or identity.get("version") or "release"
+            if pin and pin == sha:
+                return _check("versions", OK, f"shipped copy {rel} at "
+                              f"{sha[:12]} — cache in step with it")
+            if pin:
+                return _check("versions", WARN, f"shipped copy {rel} at "
+                              f"{sha[:12]}, cache pinned {pin[:12]} — two "
+                              "different snapshots",
+                              "reinstall/update the plugin to re-pin the cache")
+            return _check("versions", OK, f"shipped copy {rel} at {sha[:12]} "
+                          "— not installed as a plugin")
         return _check("versions", WARN, f"checkout at {checkout}, but git "
                       "cannot read it — no identity to compare",
-                      "install git, or repair the checkout")
+                      "repair the checkout, or reinstall from a release")
 
     dirty = len(_git(checkout, "status", "--porcelain").splitlines())
     facts, actions = [], []
