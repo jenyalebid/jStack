@@ -157,6 +157,20 @@ def resolve(args) -> SimpleNamespace:
     if port_flag:
         env["SCHEDULER_API_PORT"] = str(port_flag)
 
+    # launchd opens the log files and chdirs to WorkingDirectory BEFORE the
+    # process exists — if either path sits in a TCC-protected folder (Desktop,
+    # Documents, Downloads: anywhere a root like ~/Desktop/Alpine puts the
+    # state dir), the spawn is denied with nothing to prompt, the job dies at
+    # exit 78 and KeepAlive loops it forever. So the spawn-time paths live in
+    # never-protected locations; the root itself still reaches the daemon via
+    # JSTACK_ROOT, and a protected root then fails INSIDE the daemon, where
+    # the error is written to a log that can be read.
+    if kind == "launchd":
+        log_dir = Path.home() / "Library" / "Logs" / "jstack-scheduler"
+        workdir = Path.home()
+    else:
+        log_dir = state / "scheduler"
+        workdir = rootp
     return SimpleNamespace(
         kind=kind,
         label=label,
@@ -164,8 +178,9 @@ def resolve(args) -> SimpleNamespace:
         python=str(Path(getattr(args, "python", None)
                         or sys.executable).expanduser()),
         root=rootp,
-        out_log=state / "scheduler" / "daemon.out",
-        err_log=state / "scheduler" / "daemon.err",
+        workdir=workdir,
+        out_log=log_dir / "daemon.out",
+        err_log=log_dir / "daemon.err",
         env=env,
         port_flag=port_flag,
     )
@@ -243,7 +258,7 @@ def plist_bytes(r: SimpleNamespace) -> bytes:
     data = {
         "Label": r.label,
         "ProgramArguments": launch_argv(r),
-        "WorkingDirectory": str(r.root),
+        "WorkingDirectory": str(r.workdir),
         # RunAtLoad + KeepAlive is what makes "it fires with nobody logged in
         # watching" survive reboots and crashes; without them the definition
         # is a file, not a daemon.
@@ -271,7 +286,7 @@ Description=jstack scheduler daemon
 
 [Service]
 ExecStart={shlex.join(launch_argv(r))}
-WorkingDirectory={r.root}
+WorkingDirectory={r.workdir}
 {env_lines}
 StandardOutput=append:{r.out_log}
 StandardError=append:{r.err_log}
