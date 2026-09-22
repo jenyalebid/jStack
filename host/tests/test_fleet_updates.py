@@ -825,3 +825,41 @@ def test_a_channel_name_that_is_not_a_branch_is_refused(name):
 def test_no_channel_configured_is_the_stable_line():
     from jstack_host import release_channel
     assert release_channel.channel_name({}) == releases.STABLE_CHANNEL
+
+
+def _channel_cli(state, *argv):
+    import io
+    import contextlib
+    from jstack_host import cli
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = cli.main(["updates", "channel", *argv, "--state-dir", str(state)])
+    return code, out.getvalue().strip(), err.getvalue().strip()
+
+
+def test_switching_a_hub_to_a_branch_is_one_command(tmp_path, monkeypatch):
+    """Boss switches a hub by naming a branch, not by editing JSON. The write
+    goes to the same config `refresh` reads and a reinstall carries forward."""
+    monkeypatch.delenv("JREMOTE_STATE_DIR", raising=False)
+    config = tmp_path / "updates" / "config.json"
+    atomic_json(config, {"github_repo": "example/stack"})
+    assert _channel_cli(tmp_path)[:2] == (0, releases.STABLE_CHANNEL)
+    assert _channel_cli(tmp_path, "feature/x")[:2] == (0, "feature/x")
+    assert json.loads(config.read_text())["channel"] == "feature/x"
+    assert json.loads(config.read_text())["github_repo"] == "example/stack"
+    assert _channel_cli(tmp_path)[:2] == (0, "feature/x")
+    assert _channel_cli(tmp_path, "stable")[:2] == (0, releases.STABLE_CHANNEL)
+
+
+def test_a_mistyped_branch_name_is_a_sentence_not_a_traceback(tmp_path, monkeypatch):
+    monkeypatch.delenv("JREMOTE_STATE_DIR", raising=False)
+    atomic_json(tmp_path / "updates" / "config.json", {"github_repo": "example/stack"})
+    code, _, err = _channel_cli(tmp_path, "../etc")
+    assert code == 1 and "must name a branch" in err
+    assert "channel" not in json.loads((tmp_path / "updates" / "config.json").read_text())
+
+
+def test_asking_before_updates_are_enabled_says_so(tmp_path, monkeypatch):
+    monkeypatch.delenv("JREMOTE_STATE_DIR", raising=False)
+    code, _, err = _channel_cli(tmp_path)
+    assert code == 1 and "updates enable" in err

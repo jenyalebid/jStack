@@ -61,6 +61,52 @@ def _cmd_updates_enable(args) -> int:
     return 0
 
 
+def _cmd_updates_channel(args) -> int:
+    """Read or set the release line this hub follows.
+
+    The channel lives in the updater's own config because that is what
+    `release_channel.refresh` reads and what a reinstall carries forward. It
+    is written here rather than by hand so the name is validated once, at the
+    moment somebody chooses it, instead of failing later inside a refresh on
+    a machine nobody is watching.
+
+    Setting it does not pull anything: the supervisor's next refresh sees the
+    new line and takes its newest release the same way it always did. Nothing
+    is downgraded on the way — a switch is not a downgrade, because the two
+    lines' counts are not measured against the same history.
+    """
+    import json
+    from pathlib import Path
+    import os
+    from . import hostenv, release_channel
+
+    state_dir = _path(args.state_dir)
+    if state_dir is not None:
+        os.environ["JREMOTE_STATE_DIR"] = str(state_dir)
+        hostenv.reset_profile()
+    config_path = hostenv.state_dir() / "updates" / "config.json"
+    if not config_path.exists():
+        print("updates are not enabled on this host — run `jstack-host updates enable`",
+              file=sys.stderr)
+        return 1
+    config = json.loads(config_path.read_text())
+    if args.name is None:
+        print(release_channel.channel_name(config))
+        return 0
+    from . import release_manifest
+    from .update_supervisor import atomic_json
+    try:
+        name = release_channel.channel_name({"channel": args.name})
+    except release_manifest.ReleaseError as exc:
+        # A mistyped branch name is a typo, not a crash. This is a command a
+        # person types, so it answers in a sentence.
+        print(f"{exc}: {args.name!r}", file=sys.stderr)
+        return 1
+    atomic_json(config_path, {**config, "channel": name})
+    print(name)
+    return 0
+
+
 def _cmd_emergency_stop(args) -> int:
     from . import emergency_stop
     return emergency_stop.stop(out=sys.stdout)
@@ -1118,6 +1164,12 @@ def build_parser() -> argparse.ArgumentParser:
         "enable", help="install and start the local update supervisor")
     up.add_argument("--state-dir", default=None)
     up.set_defaults(fn=_cmd_updates_enable)
+    up = updates.add_parser(
+        "channel", help="read or set the release line this hub follows")
+    up.add_argument("name", nargs="?", default=None,
+                    help="a branch name, or 'stable' for main (omit to read)")
+    up.add_argument("--state-dir", default=None)
+    up.set_defaults(fn=_cmd_updates_channel)
 
     p = sub.add_parser("files", help="declare and inspect selected-folder SMB access")
     files = p.add_subparsers(dest="files_cmd", required=True)
