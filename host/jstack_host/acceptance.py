@@ -151,6 +151,63 @@ class Run:
                 "passed": sorted(n for n, r in self.results.items() if r == PASSED)}
 
 
+def _fabricated(receipt: dict, evidence: Path) -> str:
+    """Why this receipt cannot have come from a run, or "" if it could.
+
+    `observe()` guards the shape of a value and nothing about where it came
+    from, so a typed dict and a measured one are the same object by the time
+    the gate sees them. On 2026-09-22 that let a release promote with
+    `fresh_install` PASSED and `pairing` among its observations, on a build
+    whose pairing code was not in the bundle — the receipt said so itself
+    (`"new_full_journey_performed": false`) and the gate had no way to care.
+
+    Provenance cannot be proven from inside the file, so this does not try to.
+    It refuses the one mark a real run cannot leave: every check answering
+    with the same bag of facts. A run probes each check separately and writes
+    back what that probe returned, so the payloads differ — they are answers
+    to different questions. When they are all one value, one thing was
+    measured (or typed) and then labelled N times, and that is true whether or
+    not it says so.
+
+    Compared with each payload's self-naming field removed. The receipt that
+    shipped carried `"check": "<this check>"` inside an otherwise identical
+    dict, so a byte comparison called six copies six observations — the paste
+    was stamped with the name of the thing it was pretending to be.
+
+    Deliberately not a timing rule. Elapsed seconds look like the obvious tell
+    and are not one — the evidence log stamps whole seconds, so an honest run
+    that is quick, or any synthetic one, starts and finishes in the same
+    second. That rule would have failed every existing acceptance test and
+    taught the next reader to widen the gate to get their run through.
+    """
+    payloads: dict[str, str] = {}
+    try:
+        for line in evidence.read_text().splitlines():
+            parts = line.split(" observed ", 1)
+            if len(parts) != 2:
+                continue
+            check, _, value = parts[1].partition(" ")
+            try:
+                body = json.loads(value)
+            except ValueError:
+                body = value
+            if isinstance(body, dict):
+                # Only when something survives it. A payload whose single
+                # field is the check's own name is a probe answer that says
+                # "this check ran" and nothing more — stripping it leaves an
+                # empty dict under every check and makes honest runs look
+                # pasted, which is how a guard like this gets deleted.
+                rest = {k: v for k, v in body.items() if v != check}
+                body = rest or body
+            payloads[check] = json.dumps(body, sort_keys=True, default=str)
+    except OSError:
+        return ""
+    if len(payloads) > 2 and len(set(payloads.values())) == 1:
+        return (f"all {len(payloads)} checks recorded one identical answer — "
+                "that is one thing measured and labelled many times, not many observations")
+    return ""
+
+
 def inspect(receipts: Path, manifest: dict) -> dict[str, dict]:
     """What every journey's receipt says right now, checked against its bytes."""
     receipts = Path(receipts)
@@ -184,6 +241,8 @@ def inspect(receipts: Path, manifest: dict) -> dict[str, dict]:
                        else f"journey result is {result}"))
         elif set(receipt.get("observed") or []) != set(REQUIRED[name]):
             answer = ("incomplete", "receipt does not name every required observation")
+        elif reason := _fabricated(receipt, evidence):
+            answer = ("not_observed", reason)
         else:
             answer = (PASSED, "")
         state[name] = {"state": answer[0], "detail": answer[1], "receipt": receipt}

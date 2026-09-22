@@ -290,7 +290,10 @@ def test_selected_journey_retains_existing_exact_artifact_receipts(
     run = acceptance.Run(receipts, candidate.manifest)
     with run.journey("upgrade") as journey:
         for check in acceptance.REQUIRED["upgrade"]:
-            journey.observe(check, "observed")
+            # One value under every check is what a pasted receipt looks like,
+            # and the gate now refuses it. A fixture standing in for a run has
+            # to answer each check with that check's own answer.
+            journey.observe(check, "observed " + check)
     original = (receipts / "upgrade.json").read_bytes()
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps({"disposable": True, "vm_tool": "/bin/vm.sh", "hub": "hub",

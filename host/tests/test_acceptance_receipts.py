@@ -263,3 +263,47 @@ def test_qualify_reports_what_a_runner_that_died_left_behind(tmp_path, candidate
 def test_qualify_without_a_configured_runner_refuses(tmp_path, candidate):
     with pytest.raises(releases.ReleaseError, match="acceptance runner"):
         publish_release.qualify({}, candidate["dir"], tmp_path / "receipts", candidate["private"])
+
+
+def test_one_payload_pasted_under_every_check_is_not_a_run(tmp_path, candidate):
+    """The receipt that promoted a Hub which could not pair.
+
+    On 2026-09-22 `fresh_install` was promoted PASSED with `pairing` among its
+    observations, on a build whose pairing code was not in the bundle. The
+    receipt was written by hand: one dict under all six checks, and that dict
+    said `"new_full_journey_performed": false` in plain sight. Every existing
+    trap here passed it — the evidence log was present and its digest matched,
+    the artifacts matched, every required name was there. `observe()` guards
+    the shape of a value and nothing about where it came from.
+    """
+    receipts = tmp_path / "receipts"
+    run = acceptance.Run(receipts, candidate["manifest"])
+    pass_everything(run, skip={"fresh_install"})
+    pasted = {"disposition": "owner_directed_release_exception",
+              "new_full_journey_performed": False}
+    with run.journey("fresh_install") as journey:
+        for check in acceptance.REQUIRED["fresh_install"]:
+            journey.observe(check, pasted)
+    # Everything the older traps look at is in order.
+    receipt = json.loads((receipts / "fresh_install.json").read_text())
+    assert receipt["result"] == "passed" and not receipt["missing"]
+    assert receipt["evidence_sha256"] == releases.digest(receipts / "fresh_install.log")
+    state = acceptance.inspect(receipts, candidate["manifest"])
+    assert state["fresh_install"]["state"] == "not_observed"
+    assert "all 6 checks" in state["fresh_install"]["detail"]
+    with pytest.raises(releases.ReleaseError, match="fresh_install"):
+        acceptance.gate(receipts, candidate["manifest"])
+
+
+def test_checks_that_honestly_agree_are_not_mistaken_for_a_paste(tmp_path, candidate):
+    """Two checks may legitimately read the same value; the trap needs more
+    than agreement, or the next honest run gets refused and the gate widened."""
+    receipts = tmp_path / "receipts"
+    run = acceptance.Run(receipts, candidate["manifest"])
+    pass_everything(run, skip={"fresh_install"})
+    with run.journey("fresh_install") as journey:
+        for index, check in enumerate(acceptance.REQUIRED["fresh_install"]):
+            journey.observe(check, {"release": "2026-09-22-9f6c8c02"} if index < 2
+                            else {"check": check})
+    assert acceptance.inspect(receipts, candidate["manifest"])["fresh_install"]["state"] == "passed"
+    assert acceptance.gate(receipts, candidate["manifest"])
