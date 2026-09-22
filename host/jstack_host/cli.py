@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import shlex
+import subprocess
 import sys
 
 from . import hostenv, install_host, server
@@ -514,6 +515,41 @@ def _adopt_offline(name: str, row: dict, port: int, as_json: bool = False) -> in
     return 0
 
 
+def _become_hub_for_adopt(m, open_mode, tunnel) -> None:
+    """Provision the mesh on first adopt so a standalone hub can mint a leaf.
+
+    Only from a standalone (`local`) hub — a managed leaf was already turned
+    away above, and re-provisioning a hub that just cannot *read* its table
+    would be wrong. Runs the mesh installer the refusal message names, with the
+    hub's own LAN address as the endpoint (a never-joined leaf's first attach
+    dials the hub over the LAN, so that is the address that has to answer).
+    `install_hub.sh` is idempotent and needs root for the tunnel daemons, so it
+    is `sudo`; on failure we say nothing here and let the detailed refusal that
+    follows stand. `rebind()` re-reads the table so `can_pair()` sees the conf
+    this just wrote."""
+    if m.get("mode") != "local":
+        return
+    script = hostenv.peer_script().parent / "install_hub.sh"
+    if not script.is_file():
+        return
+    endpoint = open_mode.lan_ip()
+    if not endpoint:
+        print("this Mac has no LAN address up, so it cannot be the endpoint a "
+              "leaf dials — connect it to the network and adopt again.",
+              file=sys.stderr)
+        return
+    print(f"making this Mac a mesh hub so it can hand out a leaf tunnel "
+          f"(endpoint {endpoint}:51820) — this needs your password once.",
+          flush=True)
+    try:
+        subprocess.run(["sudo", "bash", str(script), "--endpoint",
+                        f"{endpoint}:51820"], check=False)
+    except OSError as exc:
+        print(f"could not run the hub installer: {exc}", file=sys.stderr)
+        return
+    tunnel.rebind()
+
+
 def _cmd_adopt(args) -> int:
     """Mint a host code — the hub's half of assigning a leaf to itself.
 
@@ -531,7 +567,7 @@ def _cmd_adopt(args) -> int:
     and the machine being adopted cannot work out where to send it.
     """
     _adopt(args)
-    from . import addresses, devices, enrolment, mode, tunnel
+    from . import addresses, devices, enrolment, mode, open_mode, tunnel
     if not devices.provisioned():
         print("this host has no token yet — run `jstack-host install` first.",
               file=sys.stderr)
@@ -548,6 +584,14 @@ def _cmd_adopt(args) -> int:
               f"({m.get('parent') or 'the hub this one is attached to'}), or "
               "`jstack-host detach` first.", file=sys.stderr)
         return 1
+    if not tunnel.can_pair():
+        # A standalone hub is meant to be able to adopt a leaf, but a fresh
+        # install has the pairing tool and no mesh: no wg0.conf, no live tunnel.
+        # The refusal below has always ended "run install_hub.sh to make this
+        # Mac a hub" — so do it, once, here, instead of handing the user a
+        # dead-end. Provisioning brings up the tunnel daemons (root) with this
+        # Mac's own LAN address as the endpoint the leaf will dial.
+        _become_hub_for_adopt(m, open_mode, tunnel)
     if not tunnel.can_pair():
         # `can_pair()` and not the mode's hub test, deliberately: the mode will
         # call a machine a hub on the strength of holding `10.66.0.1`, which is
