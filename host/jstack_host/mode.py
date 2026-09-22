@@ -1,60 +1,33 @@
-"""Which of the three shapes this host is — the whole of the mode question.
+"""Which of the three shapes this host is, keyed on how an off-LAN device reaches it.
 
-A host is one of three things, and the entire difference between them is how a
-device that is *not* on this network reaches it:
+  · **local**   — nothing off the LAN can reach it. Dials out on no tunnel,
+    publishes no way in. Where a fresh install lands.
+  · **open**    — this Mac itself publishes a WireGuard endpoint the outside
+    can dial.
+  · **managed** — dials OUT to a parent hub and rides its mesh, so devices
+    paired to that parent reach here with no setup of their own. A leaf.
 
-  · **local**   — nothing off the LAN can reach it. It dials out on no tunnel
-    and publishes no way in. The shape a fresh install lands in, and an honest
-    one: a machine that has done nothing to be reachable from outside is not.
-  · **open**    — independently reachable from outside, because this Mac itself
-    holds a public way in. Today that is a hub that publishes a WireGuard
-    endpoint the outside can dial; open mode's guided HTTP port-forward
-    (issue #29) is the second signal that joins this one when it lands.
-  · **managed** — attached to a parent hub. This Mac dials OUT to a hub and
-    rides its mesh, so every device paired to that parent reaches here with no
-    per-device setup of its own. A leaf, in the tunnel's own word — "a managed
-    hub" in the product's.
+Read from what the machine *is*, never from a setting it was told to believe:
+managed when a leaf tunnel is installed (and this is not itself a hub) or when
+it sits on the mesh without owning it; open when it owns the mesh AND publishes
+an endpoint; local otherwise.
 
-The verdict is read from what the machine actually *is*, never from a setting
-it was told to believe about itself:
+Mesh ownership is two independent facts, either sufficient: `tunnel.can_pair()`
+and holding the mesh gateway `10.66.0.1` on an interface (leaves get `.2` up).
+can_pair alone was jStack#42 — it answers no whenever `wg0.conf` is outside
+this package's tree, which demoted a Mac that owned the mesh to a leaf.
 
-  · it is **managed** when a leaf tunnel is installed on it (the LaunchDaemon
-    that dials out is present), or — failing that record — when it sits on the
-    mesh without owning it. Owning-the-mesh is what separates a leaf from the
-    hub it dials into.
-  · it is **open** when it owns the mesh AND publishes an endpoint to dial.
-  · it is **local** otherwise.
+Two limits are deliberate, both the difference between a check and a claim.
+A leaf whose tunnel is momentarily down stays *managed* — attachment is a fact
+on disk; the separate `live` flag carries whether the mesh address is up now.
+And an open host publishes an endpoint, which is all this Mac can see by
+itself; `verified` carries whether an off-network handshake was actually
+observed (`open_mode.verify`).
 
-**Owning the mesh is read from the interface, not only from a file.** A hub
-holds the mesh subnet's *gateway* address — `10.66.0.1` — and a leaf never
-does; leaves are handed `.2` upward. That is a fact about the running machine,
-which is why it outranks `tunnel.can_pair()`: can_pair answers "can I mint a
-peer", and it answers no whenever `wg0.conf` is not where *this package*
-expects it. A host whose tunnel is administered from outside the package tree
-is the ordinary case of that, and reading can_pair as the hub test demoted such
-a machine to "managed" — the mode telling the owner of the mesh it was a leaf
-of somebody else. Both facts are consulted now, and either one proves a hub.
-
-**Configured shape, not proven reachability.** Two honest limits are baked in
-here, both of them the difference between a check and a claim:
-
-  · A leaf whose tunnel is momentarily down is still *managed* — its
-    attachment is a fact on disk, not a fact about whether wifi is up this
-    second. The mode reports the attachment; a separate `live` flag reports
-    whether the mesh address is actually present right now. Flipping a leaf to
-    "local" every time a cafe's wifi hiccups would be the check lying about
-    what the machine is.
-  · An open host *publishes* an endpoint — a fact this Mac can see. Whether a
-    packet from outside actually lands on it is a fact about the router in
-    between, which this module cannot observe and therefore does not assert.
-    Proving that end-to-end is open mode's own job (issue #29); until it runs,
-    the note says plainly that reachability is declared, not verified.
-
-Pure core, I/O at the edges: `classify` decides the taxonomy from four booleans
-so the tests pin the rules against fixed facts, and `current` is the one place
-that reads this machine's own — through `addresses`, `tunnel` and the same two
-endpoint locations `wg_peer.py` itself honours, so a host that moved `WG_DIR`
-or set the env is judged by what the tunnel tool would do, not by a guess.
+`classify` is pure so the tests pin the rules against fixed facts; `current` is
+the one place that reads this machine's own, through `addresses`, `tunnel` and
+the same endpoint locations `wg_peer.py` honours — so a host that moved
+`WG_DIR` is judged by what the tunnel tool would do, not by a guess.
 """
 
 from __future__ import annotations
