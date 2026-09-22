@@ -26,6 +26,19 @@ curl -fsSL https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh |
 
 ## Uninstall
 
+Removes the app, Hub and services; keeps your state, token and paired devices:
+
 ```
 curl -fsSL https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh | bash -s -- --uninstall
+```
+
+## Full reset
+
+Wipes everything — state, token, credentials — then installs the latest
+published release clean. Devices re-pair afterward.
+
+```
+curl -fsSL https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh | bash -s -- --purge
+rm -rf ~/jStack
+curl -fsSL https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh | bash
 ```
