@@ -41,6 +41,28 @@
       "notes": "Registered in hooks/hooks.json — Claude Code auto-loads when the plugin is installed. Kill switch: JSTACK_PATH_RULES_DISABLED=1. Re-fire threshold: JSTACK_RULE_REINJECT_BYTES (default 400000 ≈ 100K tokens). Defensive: any exception → silent exit 0, never blocks the tool. Marker files live at /tmp/jstack-rule-cache/<session_id>/<rule>.marker storing the transcript byte offset at last injection."
     },
     {
+      "id": "transcript-dialogue",
+      "kind": "hook",
+      "name": "Transcript Dialogue Read",
+      "status": "live",
+      "description": "PreToolUse hook on Read that answers a session transcript — Claude session file or Codex rollout — with speech only: what the user said and what the agent said, with tool calls, tool results, reasoning, snapshots and injected wrappers stripped. A session .jsonl is an append-only machine log in which speech is a rounding error (355KB renders to 4KB), so reading one whole spends a context window on text nobody said. This was a rule in rules-stage and was routinely ignored, because reading a handed-over path is the obvious move; the reader changed instead of the instruction. Deliberate raw access via jq or grep is untouched, and every failure path falls through to the real read.",
+      "code": [
+        "hooks/pretooluse-read-transcript.py",
+        "hooks/hooks.json",
+        "prompts/read-transcript.md",
+        "session_runtime.py"
+      ],
+      "config": [],
+      "docs": [
+        "docs/systems/transcript-dialogue.md"
+      ],
+      "test": {
+        "type": "script",
+        "path": "tests/read-transcript.sh",
+        "description": "Pipes fixture PreToolUse payloads through the real hook against a temp tree. Asserts passthrough for ordinary files, non-Read tools and unrelated .jsonl; denial carrying both sides' speech for a Claude session file and a Codex rollout; that no tool call, tool result, thinking, meta, sidechain, snapshot or injected text survives either engine; that a <system-reminder> wrapped inside a real prompt is stripped without taking the prompt with it; and that an unparseable transcript falls through to the real read."
+      }
+    },
+    {
       "id": "timeline-injection",
       "kind": "hook",
       "name": "SessionStart Timeline Injection",

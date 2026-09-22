@@ -27,8 +27,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import session_runtime  # noqa: E402
+from _prompts import load as load_prompt  # noqa: E402 — sibling module
 
 # Claude: ~/.claude/projects/<slug>/<uuid>.jsonl · Codex: .../rollout-*.jsonl
 CLAUDE_SESSION = re.compile(r"/\.claude/projects/[^/]+/[0-9a-fA-F-]{36}\.jsonl$")
@@ -70,20 +72,16 @@ def main() -> int:
     body = session_runtime.render_dialogue(turns)
 
     if len(body) > MAX_CHARS:
-        body = body[:MAX_CHARS] + (
-            f"\n\n[truncated at {MAX_CHARS} chars — for the recent end run: "
-            f"python3 {Path(session_runtime.__file__).parent}/session_runtime.py "
-            f"dialogue {path} --tail 40]")
+        command = (f"python3 {Path(session_runtime.__file__).resolve()} "
+                   f"dialogue {path} --tail 40")
+        body = body[:MAX_CHARS] + "\n\n" + load_prompt(
+            "read-transcript.md", "truncated").format(limit=MAX_CHARS, command=command)
 
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
         "permissionDecisionReason":
-            "A session transcript is never read whole — it is almost entirely tool calls, "
-            "tool results and injected context. Below is the session as dialogue: what the "
-            "user said and what the agent said, nothing else. This IS the read — do not "
-            "retry it, and do not cat the file. Reach for jq only if you need one specific "
-            "non-speech record.\n\n" + body,
+            load_prompt("read-transcript.md", "denial").format(body=body),
     }}))
     return 0
 
