@@ -208,13 +208,19 @@ def get_host(request: Request):
     # 9090 would otherwise hand out an address list that is wrong in the one
     # detail nobody checks, on the screen whose whole job is that address.
     port = request.url.port or addresses.DEFAULT_PORT
+    # The mesh address does not get that number. It is served by this
+    # process's own listener, so its port is ours, not the caller's route to
+    # us — and a caller arriving through a forward reaches a port nothing
+    # serves on the mesh. `scope["server"]` is the socket this app is bound
+    # to, which no forward and no proxy header can rewrite.
+    bound = (request.scope.get("server") or (None, None))[1] or port
     return {
         "host_id": hostenv.host_id(),
         "source": sourcestamp.capture(),
         "name": hostenv.host_name(),
         "profile": hostenv.profile().name,
         # Where a SECOND machine should try. Never loopback — see addresses.py.
-        "addresses": addresses.reachable(port),
+        "addresses": addresses.reachable(port, mesh_port=bound),
         # local / open / managed — the same verdict `jstack-host mode` prints,
         # hoisted here so the menu bar draws the mode from the one call it
         # already makes rather than a route of its own.

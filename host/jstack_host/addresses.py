@@ -177,9 +177,22 @@ def _is_host_only(iface: str) -> bool:
 
 
 def classify(inets: list[str], hostname: str, port: int,
-             ifaces: dict[str, str] | None = None, domain: str = "") -> list[dict]:
+             ifaces: dict[str, str] | None = None, domain: str = "",
+             mesh_port: int | None = None) -> list[dict]:
     """The address list, ordered lan → local → mesh. Pure, so the ordering
     and the exclusions are what the tests actually pin.
+
+    `mesh_port` defaults to `port` and exists because the two are not always
+    the same number. `port` is the port the caller reached us on, which is the
+    right one to hand back for the addresses the caller could reach the same
+    way. The mesh address is not one of those: it is served by this process's
+    own listener, so its port is a property of this host and survives nothing
+    else. When a caller arrives through a forward — an ssh `-L 9091:…:9090`,
+    a reverse proxy — the reached port is the forward's, and stamping it onto
+    the mesh entry publishes an address that has never had anything behind it
+    (proven: device run 8 — the phone pinned `http://10.66.0.1:9091` off the
+    LAN and drew "Could not connect to the server." while the hub's only
+    listener sat on 9090).
 
     Every entry here is reachable only from this LAN or from something already
     on this mesh. Nothing in this list gets a machine that is neither — see
@@ -191,6 +204,7 @@ def classify(inets: list[str], hostname: str, port: int,
     as network-facing: an interface map is extra evidence for dropping an
     entry, never a precondition for keeping one.
     """
+    mesh_port = port if mesh_port is None else mesh_port
     out: list[dict] = []
     mesh, lan = [], []
     for raw in inets:
@@ -235,7 +249,7 @@ def classify(inets: list[str], hostname: str, port: int,
     # timeout; away, the LAN entry fails and this is the next thing tried.
     for addr in mesh:
         out.append({"kind": "lan", "host": addr,
-                    "url": f"http://{addr}:{port}",
+                    "url": f"http://{addr}:{mesh_port}",
                     "note": "works from anywhere this device's tunnel is up"})
 
     # The configured domain leads the names: it survives a move the Bonjour
@@ -258,13 +272,14 @@ def classify(inets: list[str], hostname: str, port: int,
 
     for addr in mesh:
         out.append({"kind": "mesh", "host": addr,
-                    "url": f"http://{addr}:{port}",
+                    "url": f"http://{addr}:{mesh_port}",
                     "note": "for a device already paired onto this Mac's "
                             "tunnel"})
     return out
 
 
-def reachable(port: int = DEFAULT_PORT) -> list[dict]:
+def reachable(port: int = DEFAULT_PORT, mesh_port: int | None = None) -> list[dict]:
     """Where a second machine could try to reach this one."""
     held = _inet_ifaces()
-    return classify(list(held), _hostname(), port, held, hub_domain())
+    return classify(list(held), _hostname(), port, held, hub_domain(),
+                    mesh_port=mesh_port)

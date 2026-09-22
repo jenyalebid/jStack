@@ -204,3 +204,36 @@ def test_every_entry_carries_the_shape_the_app_draws():
         assert set(a) == {"kind", "host", "url", "note"}
         assert a["url"].startswith("http://")
         assert a["note"]
+
+
+def test_a_forward_does_not_move_the_mesh_address_off_this_hosts_port():
+    """The address that a forward gets wrong.
+
+    A caller reaching us through an ssh `-L 9091:127.0.0.1:9090` sees 9091,
+    and 9091 is the correct port to hand back for the addresses it could
+    reach the same way. The mesh address is not one of those — it is served
+    by this process's own listener, so it keeps this host's port. Publishing
+    the forward's port there hands a device an address with nothing behind
+    it, and the device believes it: the phone pinned `10.66.0.1:9091` and
+    drew "Could not connect to the server." off the LAN, against a hub whose
+    only listener was 9090.
+    """
+    out = addresses.classify(["192.168.0.106", "10.66.0.1"], "mac", 9091,
+                             mesh_port=9090)
+    urls = {(a["kind"], a["host"]): a["url"] for a in out}
+    assert urls[("lan", "192.168.0.106")] == "http://192.168.0.106:9091"
+    assert urls[("local", "mac.local")] == "http://mac.local:9091"
+    # Both mesh emissions — the `mesh` entry and its `lan` twin that shipped
+    # clients actually keep — carry the listener's port, not the forward's.
+    assert urls[("mesh", "10.66.0.1")] == "http://10.66.0.1:9090"
+    assert urls[("lan", "10.66.0.1")] == "http://10.66.0.1:9090"
+
+
+def test_mesh_port_defaults_to_the_reached_port():
+    """Reached directly, the two are the same number and nothing changes —
+    a host genuinely moved off 9090 still publishes 9090's replacement
+    everywhere, which is the behaviour `mesh_port` was added not to break."""
+    out = addresses.classify(["192.168.0.106", "10.66.0.1"], "mac", 9595)
+    assert {a["url"] for a in out} == {
+        "http://192.168.0.106:9595", "http://10.66.0.1:9595",
+        "http://mac.local:9595"}
