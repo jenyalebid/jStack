@@ -176,6 +176,7 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
 
 def seal(work: Path, config: dict, notes: str) -> Path:
     """Resume after completed signing without building different bytes."""
+    from . import build_hub
     stack, client = work / "stack", work / "Projects/client"
     identity = json.loads((stack / "host/release-identity.json").read_text())
     release_id, stack_sha = identity["release"], identity["sha"]
@@ -204,7 +205,7 @@ def seal(work: Path, config: dict, notes: str) -> Path:
                 "sources": {"stack": stack_sha, "client": client_sha},
                 "client_packages": dependencies,
                 "components": {"stack": component(archive, version),
-                               "menubar": component(menu, str(identity.get("build", version))),
+                               "menubar": component(menu, build_hub.bundle_version(identity, version)),
                                "client": component(destination, str(app_manifest["build"]))},
                 "compatibility": {"protocol": 1, "rollback": True, "platform": "macos",
                                   "architecture": "arm64", "minimum_os": "26.0"},

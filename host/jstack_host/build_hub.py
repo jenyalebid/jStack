@@ -32,16 +32,32 @@ def service_plist(role: str) -> dict:
             "AssociatedBundleIdentifiers": ["live.jstack.hub"]}
 
 
+def bundle_version(identity: dict, version: str) -> str:
+    """The menubar's CFBundleVersion — and the only thing a manifest may record
+    as that component's version.
+
+    The updater stages a release by comparing the built bundle's
+    CFBundleVersion against the version the manifest claims for it, so these
+    two cannot be derived independently. They were, and when the build counter
+    was removed the seam split: the plist started carrying the release date
+    while the manifest kept falling back to the short version, so every
+    candidate died in staging with "menubar bundle version differs from
+    release" — after signing and notarisation, on the installing machine.
+
+    The date the release was cut, digits only: macOS wants a monotonic
+    CFBundleVersion and this is the honest one. A dev build has no date and
+    falls back to the version, exactly as it did before.
+    """
+    return str(identity.get("date") or version).replace("-", "")
+
+
 def hub_info(version: str, identity: dict) -> dict:
     """The one bundle the user grants to: its name, identity and purposes."""
     return {
         "CFBundleIdentifier": "live.jstack.hub", "CFBundleExecutable": "JStackHub",
         "CFBundleName": "jStack Hub", "CFBundleDisplayName": "jStack Hub",
-        # The date the release was cut, digits only — macOS wants a CFBundleVersion
-        # and this is the honest one. A dev build has no date and falls back to the
-        # version, exactly as it did before.
         "CFBundlePackageType": "APPL",
-        "CFBundleVersion": identity.get("date", version).replace("-", ""),
+        "CFBundleVersion": bundle_version(identity, version),
         "CFBundleShortVersionString": version, "LSUIElement": True,
         "LSMinimumSystemVersion": "13.0",
         "NSLocalNetworkUsageDescription":
