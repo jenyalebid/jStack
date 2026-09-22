@@ -109,6 +109,20 @@ def can_pair() -> bool:
     return PEER_SCRIPT.is_file() and HUB_CONF.is_file()
 
 
+def missing_for_pairing() -> list[Path]:
+    """Which of `can_pair()`'s two files is not there — in that order.
+
+    `can_pair()` is one boolean over two independent files, and every message
+    written against it named only `wg0.conf`. That held while the peer table
+    was the interesting half; it stopped holding when the app shipped without
+    `wg_peer.py`, and the refusal then pointed a reader at a present, correct
+    peer table and told them to repoint `WG_PEER_DIR` at it. A refusal that
+    names the wrong file is worse than one that names none: it spends the
+    reader's time proving the thing it accused is fine.
+    """
+    return [path for path in (PEER_SCRIPT, HUB_CONF) if not path.is_file()]
+
+
 def _peer_subnet() -> ipaddress.IPv4Network:
     """The peer subnet, read from wg_peer.py itself rather than restated here.
 

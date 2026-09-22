@@ -77,3 +77,67 @@ def test_release_bundle_uses_the_manifest_identity():
 def test_release_identity_rejects_incomplete_or_invalid_inputs(arguments):
     with pytest.raises(ValueError):
         build_hub.release_identity("a" * 40, "0.70.0", **arguments)
+
+
+def test_the_built_package_tree_can_mint_a_peer(tmp_path, monkeypatch):
+    """The whole bug in one assertion: a shipped Hub must be able to pair.
+
+    `pip install --target` carries the `jstack_host` package and nothing else
+    under `host/`, so for every release up to 0.69.9 the staged package tree
+    had no `wg_peer.py` — `can_pair()` was False inside the signed app on the
+    machine that owns the mesh, taking device pairing, `adopt` and every leaf
+    bundle with it. Asserted against the staged tree rather than against the
+    repo, because the repo always had the file; only the bundle did not.
+    """
+    from jstack_host import hostenv, tunnel
+    packages = tmp_path / "packages"
+    packages.mkdir()
+    build_hub.stage_mesh_tools(Path(__file__).resolve().parents[2], packages)
+    (packages / "Credentials/wireguard").mkdir(parents=True)
+    (packages / "Credentials/wireguard/wg0.conf").write_text("[Interface]\n")
+
+    monkeypatch.setattr(hostenv, "package_root", lambda: packages)
+    monkeypatch.delenv("WG_PEER_DIR", raising=False)
+    monkeypatch.delenv("JREMOTE_PEER_SCRIPT", raising=False)
+    tunnel.rebind()
+    try:
+        assert tunnel.PEER_SCRIPT == packages / "scripts/wireguard/wg_peer.py"
+        assert tunnel.can_pair()
+        assert tunnel.missing_for_pairing() == []
+    finally:
+        tunnel.rebind()
+
+
+def test_staging_refuses_a_tree_without_the_mesh_tooling(tmp_path):
+    stack = tmp_path / "stack"
+    (stack / "host/scripts/wireguard").mkdir(parents=True)
+    peer = stack / "host/scripts/wireguard/wg_peer.py"
+    peer.write_text("#\n")
+    peer.chmod(0o755)
+    with pytest.raises(ValueError, match="could not pair"):
+        build_hub.stage_mesh_tools(stack, tmp_path / "packages")
+
+
+def test_staging_refuses_a_script_that_cannot_be_run(tmp_path):
+    """A staged-but-unrunnable script fails the same way a missing one does —
+    `wg_peer.py` is spawned, and the leaf installers are run on the far Mac."""
+    stack = tmp_path / "stack"
+    (stack / "host/scripts/wireguard").mkdir(parents=True)
+    for name in ("wg_peer.py", "install_hub.sh", "install_leaf.sh", "wg_up.sh",
+                 "wg_leaf_watch.sh", "wg_sync.sh"):
+        path = stack / "host/scripts/wireguard" / name
+        path.write_text("#\n")
+        path.chmod(0o755)
+    (stack / "host/scripts/wireguard/wg_up.sh").chmod(0o644)
+    with pytest.raises(ValueError, match="executable bit"):
+        build_hub.stage_mesh_tools(stack, tmp_path / "packages")
+
+
+def test_a_present_peer_table_is_not_blamed_for_a_missing_tool(tmp_path, monkeypatch):
+    """The refusal must name the absent file, not the one it expected to be."""
+    from jstack_host import tunnel
+    conf = tmp_path / "wg0.conf"
+    conf.write_text("[Interface]\n")
+    monkeypatch.setattr(tunnel, "HUB_CONF", conf)
+    monkeypatch.setattr(tunnel, "PEER_SCRIPT", tmp_path / "gone/wg_peer.py")
+    assert tunnel.missing_for_pairing() == [tmp_path / "gone/wg_peer.py"]

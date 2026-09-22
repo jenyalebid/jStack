@@ -131,6 +131,43 @@ def _is_date(value) -> bool:
         return False
 
 
+#: The mesh tooling, which is not importable Python and so is not something
+#: `pip install` will carry. `hostenv.peer_script()` resolves
+#: `package_root()/scripts/wireguard/wg_peer.py`, and in a shipped app
+#: `package_root()` is `Contents/Resources/packages` — the directory pip
+#: writes. pip installs the `jstack_host` package and nothing else in `host/`,
+#: so every signed Hub shipped without `wg_peer.py`: `tunnel.can_pair()` was
+#: False on a real hub holding a real peer table, which is device pairing,
+#: machine adoption and every leaf bundle refusing at once. The refusal even
+#: named `wg0.conf`, the half that was present. Staged here, beside the
+#: package, because that is where the readers already look.
+MESH_TOOLS = "scripts"
+
+
+def stage_mesh_tools(stack: Path, packages: Path) -> Path:
+    """Put the mesh scripts where `hostenv.peer_script()` reads them.
+
+    Executable bits are the payload here, not a detail: `wg_peer.py` is spawned
+    and the leaf installers are handed to joining machines to run. `copytree`
+    preserves mode, and the absence check below is what turns a renamed or
+    dropped script into a failed build rather than a Hub that installs, signs,
+    notarizes and then cannot mint a peer.
+    """
+    source = stack / "host" / MESH_TOOLS
+    staged = packages / MESH_TOOLS
+    shutil.copytree(source, staged, ignore=shutil.ignore_patterns("__pycache__"))
+    required = ("wireguard/wg_peer.py", "wireguard/install_hub.sh",
+                "wireguard/install_leaf.sh", "wireguard/wg_up.sh",
+                "wireguard/wg_leaf_watch.sh", "wireguard/wg_sync.sh")
+    for name in required:
+        path = staged / name
+        if not path.is_file():
+            raise ValueError(f"the mesh tooling is missing {name} — this Hub could not pair")
+        if not os.access(path, os.X_OK):
+            raise ValueError(f"{name} is staged without its executable bit")
+    return staged
+
+
 def build(stack: Path, output: Path, version: str, config: dict | None = None, *, catalog=None,
           release_id=None, github_repo=None, date=None) -> Path:
     # Build one immutable git snapshot. A clean-tree check alone does not
@@ -197,6 +234,7 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
     for metadata in packages.glob("jstack_host-*.dist-info/direct_url.json"):
         metadata.write_text(json.dumps({"url": "source:jstack-host", "dir_info": {}}) + "\n")
     shutil.copy2(stack / "host/macos/runtime_entry.py", resources / "runtime_entry.py")
+    stage_mesh_tools(stack, packages)
     from .sourcestamp import fingerprint
     (packages / "release-identity.json").write_text(json.dumps({
         **identity,

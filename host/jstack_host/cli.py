@@ -554,13 +554,28 @@ def _cmd_adopt(args) -> int:
         # true of a machine whose peer table this process cannot find. Minting
         # is the narrower question — this process has to be able to edit the
         # peer table, not merely be on the mesh it describes.
+        # Name the file that is actually absent. The message used to name the
+        # peer table unconditionally, so a Hub shipped without `wg_peer.py`
+        # accused a present `wg0.conf` and sent the reader to repoint
+        # WG_PEER_DIR at the directory it was already correctly reading.
+        absent = tunnel.missing_for_pairing()
         print("this Mac cannot mint a mesh peer, so it cannot hand a machine "
               "the tunnel that joining means — the code would fail on the "
-              f"other Mac, not here. Expected the peer table at "
-              f"{tunnel.HUB_CONF}. If this Mac does run the mesh, that is the "
-              "wrong directory: set WG_PEER_DIR to the one its daemons drive. "
-              "Otherwise run `install_hub.sh` to make this Mac a hub.",
+              "other Mac, not here. Missing: "
+              + ", ".join(str(path) for path in absent) + ".",
               file=sys.stderr)
+        if tunnel.HUB_CONF in absent:
+            print("If this Mac does run the mesh, that is the wrong directory: "
+                  "set WG_PEER_DIR to the one its daemons drive. Otherwise run "
+                  "`install_hub.sh` to make this Mac a hub.", file=sys.stderr)
+        else:
+            # The peer table is present and this Mac is the hub — so the gap is
+            # in the installation, not in anything the reader can point at a
+            # different directory. Say so rather than inventing a repair.
+            print("The peer table is here and correct — this installation did "
+                  "not ship the mesh tooling beside it, so nothing on this Mac "
+                  "can edit the table. Reinstall the Hub from "
+                  "`~/jStack/install.sh` to restore it.", file=sys.stderr)
         return 1
     port = getattr(args, "port", None) or addresses.DEFAULT_PORT
     found = addresses.reachable(port)

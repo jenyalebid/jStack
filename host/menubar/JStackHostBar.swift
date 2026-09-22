@@ -2974,22 +2974,7 @@ final class StatusController: NSObject {
         // gets a file instead: the tunnel travels to the machine.
         ask.addButton(withTitle: "Save a Joiner File…")
         ask.addButton(withTitle: "Cancel")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-        field.stringValue = "New Mac"
-        let note = NSTextField(wrappingLabelWithString: Self.onMeshNote)
-        note.font = .systemFont(ofSize: 11)
-        note.textColor = .secondaryLabelColor
-        note.preferredMaxLayoutWidth = 280
-        let stack = NSStackView(views: [field, note])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        // Measured with the note in place and emptied afterwards: the panel is
-        // laid out once, so a frame sized around a blank label would clip the
-        // sentence the moment a typed name earns it.
-        stack.frame = NSRect(x: 0, y: 0, width: 280,
-                             height: stack.fittingSize.height)
-        note.stringValue = ""
+        let (stack, field, note) = Self.adoptAccessory()
         ask.accessoryView = stack
         ask.window.initialFirstResponder = field
 
@@ -2997,7 +2982,7 @@ final class StatusController: NSObject {
         let steer = { (typed: String) in
             let onMesh = roster.holds(typed)
             offline.isEnabled = !onMesh
-            note.stringValue = onMesh ? Self.onMeshNote : ""
+            note.stringValue = onMesh ? Self.onMeshNote : Self.offMeshNote
         }
         let watcher = FieldWatcher(steer)
         field.delegate = watcher
@@ -3091,6 +3076,64 @@ final class StatusController: NSObject {
         "That Mac is already on this mesh — it answers this hub over the "
         + "tunnel, so it can redeem a code from where it stands. Use Get a "
         + "Code. The joiner file is for a Mac that cannot reach here at all."
+
+    /// The Adopt panel's accessory — the name field with the steering note
+    /// under it, both at the panel's width.
+    ///
+    /// A named function rather than twenty lines inside the handler, because
+    /// this is the part that shipped broken and a private local cannot be
+    /// asserted on. `test_menubar_adopt_accessory.py` compiles it and measures
+    /// the field.
+    ///
+    /// Width as a constraint, not as a frame. Every other accessory in this
+    /// file is a plain view sized by its frame, and that works because nothing
+    /// lays it out again. An NSStackView does: it is Auto Layout, its own frame
+    /// says nothing about its arranged subviews, and with a leading alignment
+    /// and no width of their own both drop to their intrinsic size — an
+    /// editable NSTextField's is a few points wide. That is what shipped: an
+    /// Adopt dialog with a sliver where the name field should be, un-typeable.
+    static func adoptAccessory() -> (NSStackView, NSTextField, NSTextField) {
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.stringValue = "New Mac"
+        let note = NSTextField(wrappingLabelWithString: onMeshNote)
+        note.font = .systemFont(ofSize: 11)
+        note.textColor = .secondaryLabelColor
+        note.preferredMaxLayoutWidth = 280
+        let stack = NSStackView(views: [field, note])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        for view in [field, note] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            view.widthAnchor.constraint(equalToConstant: 280).isActive = true
+        }
+        // Measured against the longer of the two sentences, because the panel
+        // is laid out once and the note has to be able to grow into whatever a
+        // typed name earns. Both sentences, not one and a blank: reserving the
+        // room and then emptying it left a band of dead space under the field
+        // in the common case, which reads as a dialog that failed to draw.
+        stack.translatesAutoresizingMaskIntoConstraints = true
+        var reserved: CGFloat = 0
+        for text in [onMeshNote, offMeshNote] {
+            note.stringValue = text
+            stack.layoutSubtreeIfNeeded()
+            reserved = max(reserved, stack.fittingSize.height)
+        }
+        note.stringValue = offMeshNote
+        stack.frame = NSRect(x: 0, y: 0, width: 280, height: reserved)
+        return (stack, field, note)
+    }
+
+    /// What the same line says when the name is not one this mesh holds.
+    ///
+    /// The space is reserved either way — the panel lays out once — so the
+    /// choice is between this sentence and an empty band under the field. It
+    /// names the one thing a person cannot work out from the two buttons:
+    /// which of them applies to the Mac they are standing at.
+    private static let offMeshNote =
+        "Not a Mac this hub can reach yet — Get a Code works from a machine "
+        + "that can already answer this hub, and Save a Joiner File… is what "
+        + "you carry to one that cannot."
 
     /// Adopt a Mac this hub cannot reach — by handing over a file, not a code.
     ///
