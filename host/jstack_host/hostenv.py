@@ -376,17 +376,7 @@ class DefaultProfile:
     def credentials_dir(self) -> Path:
         """`~/.local/share/jremote/credentials` — beside state, not inside it.
 
-        The APNs signing key lives here: it is minted in the user's own install
-        context, where a home-relative path is the right one. (The WireGuard
-        keys do *not* — `install_hub.sh` runs under `sudo` and lands them beside
-        the code, so `tunnel.WG_DIR` reads `<package>/Credentials/wireguard`,
-        not here. Two homes for two secrets, each written where its installer
-        can reach it.)
-
-        State is rebuildable; the APNs key is not. A host that loses its state
-        dir re-indexes and carries on, and one that loses this cannot push a
-        notification without being re-issued the key. Separate directories so a
-        "clear the state" instruction can never be read as including it.
+        APNs keys and a signed Hub's mesh credentials survive state resets.
         """
         return HOME / ".local" / "share" / "jremote" / "credentials"
 
