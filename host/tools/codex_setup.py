@@ -76,6 +76,39 @@ def share_workspace(workspace):
         link_commands(directory / ".claude/commands", directory / ".agents/skills")
 
 
+# The walk-up, in Codex's words. Codex reads AGENTS.md and nothing else by
+# default, so a machine this script installed handed a Codex session no org, no
+# agent and no seat — the identity chain a Claude session gets for free. Codex
+# concatenates every fallback-named doc from the project root down to cwd,
+# closest wins, which is exactly our walk-up order, so one key buys the whole
+# chain with no second copy of it to rot.
+DOC_SETTINGS = {
+    "project_doc_fallback_filenames": '["CLAUDE.md"]',
+    # The chain is ~10KB at a chat seat and a product seat adds the app's own
+    # doc on top. A half-loaded identity is worse than none, because nothing
+    # reports it.
+    "project_doc_max_bytes": "262144",
+}
+
+
+def doc_config(text):
+    """Point Codex at the CLAUDE.md walk-up, above the first table.
+
+    These are bare keys: TOML only reads them before the first table header, so
+    this block goes at the top of the file and not, like the shell policy, at
+    the end. A value the user has already chosen is left alone — including our
+    own from a previous install, which is what makes this idempotent.
+    """
+    if any(re.search(r"^\s*" + key + r"\s*=", text, flags=re.M) for key in DOC_SETTINGS):
+        return text
+    block = "# BEGIN jstack docs\n"
+    block += "".join(f"{key} = {value}\n" for key, value in DOC_SETTINGS.items())
+    block += "# END jstack docs\n"
+    table = re.search(r"^\[", text, flags=re.M)
+    cut = table.start() if table else len(text)
+    return text[:cut] + block + ("\n" if text[cut:cut + 1] not in ("", "\n") else "") + text[cut:]
+
+
 def shell_config(text, plugin, path):
     header = "[shell_environment_policy.set]"
     owned = "# BEGIN jstack shell" in text
@@ -122,7 +155,8 @@ def main():
     text = config.read_text() if config.exists() else ""
     entries = [str(plugin / "bin")] + os.environ.get("PATH", os.defpath).split(os.pathsep)
     entries = [p for p in entries if "/.codex/tmp/" not in p and not p.endswith("/codex-path")]
-    config.write_text(shell_config(text, plugin, os.pathsep.join(dict.fromkeys(entries))))
+    text = shell_config(text, plugin, os.pathsep.join(dict.fromkeys(entries)))
+    config.write_text(doc_config(text))
     # Preserve local post-write tooling (for example a workspace's Swift lint).
     settings = home / ".claude/settings.json"
     claude_settings = json.loads(settings.read_text()) if settings.exists() else {}

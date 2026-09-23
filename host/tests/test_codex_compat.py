@@ -221,3 +221,43 @@ def test_explicit_native_resume_binding_is_never_overwritten(tmp_path, monkeypat
             self.target()
     monkeypatch.setattr(codex_transcript.threading, "Thread", InlineThread)
     codex_transcript.bind_open_session("board", 0, attempts=1)
+
+
+def _codex_setup():
+    path = PLUGIN.parents[1] / "host/tools/codex_setup.py"
+    spec = importlib.util.spec_from_file_location("setup_docs", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_setup_points_codex_at_the_claude_walkup():
+    """Without this key Codex reads AGENTS.md and nothing else, so a machine
+    jStack installed gave a session no org, no agent and no seat."""
+    import tomllib
+    module = _codex_setup()
+    parsed = tomllib.loads(module.doc_config('[marketplaces.jstack]\nsource = "/x"\n'))
+    assert parsed["project_doc_fallback_filenames"] == ["CLAUDE.md"]
+    assert parsed["project_doc_max_bytes"] == 262144
+    assert parsed["marketplaces"]["jstack"]["source"] == "/x"
+
+
+def test_walkup_keys_land_above_the_first_table():
+    """They are bare keys: written under a table header they silently become
+    that table's members, and Codex never sees them."""
+    module = _codex_setup()
+    written = module.doc_config('[marketplaces.jstack]\nsource = "/x"\n')
+    assert written.index("project_doc_fallback_filenames") < written.index("[marketplaces.jstack]")
+
+
+def test_a_users_own_walkup_answer_is_left_alone():
+    module = _codex_setup()
+    mine = 'project_doc_fallback_filenames = ["AGENTS.md", "CLAUDE.md"]\n[tui]\n'
+    assert module.doc_config(mine) == mine
+
+
+def test_the_walkup_block_is_written_once():
+    module = _codex_setup()
+    once = module.doc_config("model = \"chosen\"\n")
+    assert module.doc_config(once) == once
+    assert once.count("project_doc_max_bytes") == 1
