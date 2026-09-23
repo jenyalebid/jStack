@@ -149,6 +149,11 @@ def main():
     home = Path.home()
     codex = Path(os.environ.get("CODEX_HOME", home / ".codex"))
     codex.mkdir(parents=True, exist_ok=True)
+    # First, and not last: the hooks are the layer everything else on this
+    # machine leans on, and a marketplace that will not answer must not take
+    # them down with it.
+    if not args.no_managed_hooks:
+        print(install_managed_config(plugin))
     subprocess.run(["codex", "plugin", "marketplace", "add", str(checkout)], check=True)
     subprocess.run(["codex", "plugin", "add", "jstack@jstack"], check=True)
     link_skills(home / ".claude/skills", home / ".agents/skills")
@@ -163,8 +168,6 @@ def main():
     entries = [p for p in entries if "/.codex/tmp/" not in p and not p.endswith("/codex-path")]
     text = shell_config(text, plugin, os.pathsep.join(dict.fromkeys(entries)))
     config.write_text(doc_config(text))
-    if not args.no_managed_hooks:
-        print(install_managed_config(plugin))
     # Preserve local post-write tooling (for example a workspace's Swift lint).
     settings = home / ".claude/settings.json"
     claude_settings = json.loads(settings.read_text()) if settings.exists() else {}
