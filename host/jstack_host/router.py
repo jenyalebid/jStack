@@ -810,6 +810,12 @@ class EnrolmentRedeemRequest(BaseModel):
     #: that grows a fresh duplicate on every reconnect. Empty from an older app,
     #: which mints a fresh row exactly as before.
     identity: str = ""
+    #: The shell half of a machine's handshake (#131): the public key of the
+    #: identity it minted on itself, and the account a granted peer shells
+    #: into. Public halves only — the private key never crosses the wire.
+    #: Empty from a device, and from a machine built before shell grants.
+    ssh_pubkey: str = ""
+    ssh_user: str = ""
 
 
 class EnrolmentRevokeRequest(BaseModel):
@@ -896,7 +902,8 @@ def redeem_enrolment_code(body: EnrolmentRedeemRequest, request: Request):
         return enrolment.redeem(body.code, client_ip,
                                 body.host_key, body.port, body.device_token,
                                 body.grant_token, body.identity,
-                                parent_port=request.url.port or enrolment.DEFAULT_PORT)
+                                parent_port=request.url.port or enrolment.DEFAULT_PORT,
+                                ssh_pubkey=body.ssh_pubkey, ssh_user=body.ssh_user)
     except enrolment.HostKeyRefused as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except enrolment.EnrolmentLockedOut as exc:

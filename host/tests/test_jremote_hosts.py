@@ -354,6 +354,25 @@ def test_the_whole_trip_over_http(client, store, paired, on_console):
     assert client.get("/api/jremote/v1/hosts").json()["hosts"] == []
 
 
+def test_redeeming_over_http_records_the_shell_identity(client, store, paired, on_console):
+    """The route model must carry the shell halves through to `redeem` — a
+    dropped field here loses shell access silently while the attach succeeds,
+    which is exactly what the first live shell_adopt run caught."""
+    minted = client.post("/api/jremote/v1/enrolment/codes",
+                         json={"name": "Laptop", "kind": "host"})
+    anon = TestClient(app)
+    redeemed = anon.post("/api/jremote/v1/enrolment/redeem",
+                         json={"code": minted.json()["code"],
+                               "host_key": "host-key-aaaa", "port": 9091,
+                               "ssh_pubkey": "ssh-ed25519 AAAAexampleA host-key-aaaa",
+                               "ssh_user": "admin"})
+    assert redeemed.status_code == 200
+    assert "shell" in redeemed.json()
+    row = store.host_row("host-key-aaaa")
+    assert row["shell_pubkey"] == "ssh-ed25519 AAAAexampleA host-key-aaaa"
+    assert row["shell_user"] == "admin"
+
+
 def test_the_host_registry_is_behind_the_token(client, store):
     """A tile naming every machine the user owns is a map of the estate."""
     anon = TestClient(app)
