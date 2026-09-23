@@ -235,6 +235,41 @@ def codex_user_engaged(path, state_dir=None) -> bool:
                           or engagement_marker(meta.get("id", ""), state_dir).is_file()))
 
 
+def user_engaged(path, state_dir=None) -> bool:
+    """Is a person typing into this session?
+
+    The one discriminator, shared by everything that has to stay out of a
+    person's way: the review engine, the timeline reminder, the turn budget.
+    `promptSource="typed"`, a mode or permission-mode row, a Codex thread whose
+    source is the CLI — only a human produces any of them.
+
+    An unreadable transcript answers *engaged*. Every caller uses this to decide
+    whether to interrupt, and interrupting a person on a failed read is the
+    expensive way to be wrong.
+    """
+    path = Path(path)
+    if codex_user_engaged(path, state_dir):
+        return True
+    try:
+        with path.open() as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                kind = row.get("type")
+                if kind == "session_meta" and (row.get("payload") or {}).get("source") == "cli":
+                    return True
+                if kind in ("mode", "permission-mode"):
+                    return True
+                if (kind == "user" and not row.get("isMeta")
+                        and row.get("promptSource") == "typed"):
+                    return True
+    except OSError:
+        return True
+    return False
+
+
 class CodexRPC:
     """Short-lived native app server, for offline fork/read operations only.
 

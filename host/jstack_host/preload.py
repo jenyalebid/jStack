@@ -41,6 +41,7 @@ MODULES = (
     "jstack_host.doctor",
     "jstack_host.allowance",
     "jstack_host.claude_settings",
+    "jstack_host.context_ceiling",
     "jstack_host.codex_hooks",
     "jstack_host.attach_parent",
     "jstack_host.auth",
