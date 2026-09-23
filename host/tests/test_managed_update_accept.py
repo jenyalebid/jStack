@@ -711,6 +711,43 @@ def test_a_request_already_on_screen_is_not_typed_twice(runner, monkeypatch):
     assert calls == []
 
 
+TRUE_UPDATER = "/Applications/jStack Hub.app/Contents/MacOS/JStackRuntime\n"
+STALE_UPDATER = "/Applications/jStack Hub.app.failed-job-x/Contents/MacOS/JStackRuntime\n"
+
+
+def test_a_leaf_whose_updater_runs_from_a_moved_bundle_is_rebooted_and_recorded(runner):
+    answers = iter([STALE_UPDATER, TRUE_UPDATER])
+    power = []
+    guest = SimpleNamespace(name="leaf", sh=lambda command, **kwargs: next(answers),
+                            stop=lambda: power.append("stop"), start=lambda: power.append("start"))
+    journey = acceptance.Journey("interruption")
+    assert runner.ensure_true_updater(journey, guest) == TRUE_UPDATER.strip()
+    assert power == ["stop", "start"]
+    assert any("#119" in line and ".failed-job-x" in line for line in journey.lines)
+
+
+def test_a_leaf_whose_updater_stays_stale_after_a_reboot_fails(runner):
+    guest = SimpleNamespace(name="leaf", sh=lambda command, **kwargs: STALE_UPDATER,
+                            stop=lambda: None, start=lambda: None)
+    with pytest.raises(runner.AcceptanceFailure, match="after a reboot the updater still runs from"):
+        runner.ensure_true_updater(acceptance.Journey("rollback"), guest)
+
+
+def test_a_leaf_with_no_updater_process_fails_before_any_fault(runner):
+    guest = SimpleNamespace(name="leaf", sh=lambda command, **kwargs: "", stop=lambda: None, start=lambda: None)
+    with pytest.raises(runner.AcceptanceFailure, match="no updater process"):
+        runner.ensure_true_updater(acceptance.Journey("rollback"), guest)
+
+
+def test_the_reboot_leg_refuses_a_stale_updater_on_the_candidate(runner, monkeypatch, tmp_path):
+    fleet, guest, offered, queued, power = _reboot_fleet(
+        runner, monkeypatch, tmp_path, settled_detail="recovered interrupted application")
+    guest.sh = lambda command, **kwargs: STALE_UPDATER if command == runner.UPDATER_BUNDLE else ""
+    with pytest.raises(runner.AcceptanceFailure, match="the live one runs from"):
+        runner.reboot_mid_apply(fleet, guest, "leaf-id", SimpleNamespace(release=CANDIDATE, public_key="k"))
+    assert offered == [] and power == []
+
+
 def _fault_fleet(runner, monkeypatch, *, fault_result, prior_release=PRIOR):
     queued = []
     hub = SimpleNamespace(queue=lambda machine, request: queued.append(request) or
@@ -718,7 +755,9 @@ def _fault_fleet(runner, monkeypatch, *, fault_result, prior_release=PRIOR):
                           wait_for=lambda state, machine: {"state": state, "job": {}})
     guest = SimpleNamespace(name="leaf", installed=lambda: {"release": prior_release,
                                                              "client": "91", "menubar": "20260922"},
-                            sh=lambda command, **kwargs: "")
+                            sh=lambda command, **kwargs: (
+                                TRUE_UPDATER if command == runner.UPDATER_BUNDLE else ""),
+                            stop=lambda: None, start=lambda: None)
     fleet = SimpleNamespace(leaves=[guest], hub=hub, machine=lambda _: "leaf-id", plan={})
     monkeypatch.setattr(runner, "stage_prior", lambda fleet, guest: guest.installed())
     monkeypatch.setattr(runner, "arm_fault", lambda guest, fault: fault)
@@ -754,6 +793,8 @@ def test_the_prior_s_leftover_copy_is_recorded_and_removed_before_the_retry(runn
         if command == runner.RESIDUE_LISTING:
             found, listing["paths"] = listing["paths"], ""
             return found
+        if command == runner.UPDATER_BUNDLE:
+            return TRUE_UPDATER
         return ""
     guest.sh = shell
     releases = iter([PRIOR, CANDIDATE])
@@ -787,7 +828,9 @@ def _reboot_fleet(runner, monkeypatch, tmp_path, *, settled_detail, leftovers=""
     installed = iter([{"release": CANDIDATE}, {"release": CANDIDATE}, {"release": PRIOR}])
     guest = SimpleNamespace(name="leaf", installed=lambda: next(installed),
                             stop=lambda: power.append("stop"), start=lambda: power.append("start"),
-                            sh=lambda command, **kwargs: leftovers if command == runner.RESIDUE_LISTING else "")
+                            sh=lambda command, **kwargs: (
+                                leftovers if command == runner.RESIDUE_LISTING
+                                else TRUE_UPDATER if command == runner.UPDATER_BUNDLE else ""))
     fleet = SimpleNamespace(prior=prior, hub=hub, offer=lambda c: offered.append(c.release))
     return fleet, guest, offered, queued, power
 

@@ -447,6 +447,42 @@ def residue(guest: Guest) -> list[str]:
     return sorted(line for line in listing.splitlines() if line.startswith("/Applications/"))
 
 
+INSTALLED_BUNDLE = "/Applications/jStack Hub.app/"
+UPDATER_BUNDLE = (
+    'pid=$(/usr/bin/pgrep -f "JStackRuntime updater" | /usr/bin/head -1); '
+    '[ -n "$pid" ] && /usr/sbin/lsof -p "$pid" 2>/dev/null | '
+    "/usr/bin/awk '$4==\"txt\" && /JStackRuntime/ { i=index($0,\"/\"); print substr($0,i); exit }'")
+
+
+def updater_bundle(guest: Guest) -> str:
+    """The executable the guest's live updater is running from — the bundle
+    at /Applications, or the one a rollback moved aside (#119)."""
+    return guest.sh(UPDATER_BUNDLE).strip()
+
+
+def ensure_true_updater(journey, guest: Guest) -> str:
+    """A journey that queues a job on a leaf must know whose code will run it.
+
+    The supervisor exits for relaunch only when a job reaches `current`
+    (update_app.restart_required). After a rollback that swapped the Hub in,
+    launchd's relaunched process keeps executing the rejected release from
+    `jStack Hub.app.failed-<job>` while /Applications holds the previous one
+    (#119). Then the next job is applied by the wrong updater and the receipt
+    would measure it. Record the occurrence and reboot so the installed
+    release's own code runs."""
+    running = updater_bundle(guest)
+    expect(bool(running), f"{guest.name} has no updater process to read")
+    if not running.startswith(INSTALLED_BUNDLE):
+        journey.note(f"the live updater ran from {running}, not the installed bundle (#119); "
+                     "rebooted so the installed release's own code runs")
+        guest.stop()
+        guest.start()
+        running = updater_bundle(guest)
+        expect(running.startswith(INSTALLED_BUNDLE),
+               f"after a reboot the updater still runs from {running}")
+    return running
+
+
 def sweep_prior_residue(journey, guest: Guest) -> list[str]:
     """The published prior names its incoming copy per RELEASE and its rollback
     never removes it (#117): an updater killed during the client copy leaves
@@ -485,6 +521,9 @@ def reboot_mid_apply(fleet: Fleet, guest: Guest, machine: str, candidate: Candid
     state = guest.installed()
     expect(state["release"] == candidate.release,
            f"the reboot leg needs the candidate's updater; {guest.name} runs {state['release']}")
+    running = updater_bundle(guest)
+    expect(running.startswith(INSTALLED_BUNDLE),
+           f"the reboot leg needs the candidate's updater; the live one runs from {running!r} (#119)")
     previous = Candidate(fleet.prior, candidate.public_key)
     try:
         fleet.offer(previous)
@@ -521,6 +560,7 @@ def interruption(journey, fleet: Fleet, candidate: Candidate) -> None:
     guest = fleet.leaves[0]
     machine = fleet.machine(guest)
     stage_prior(fleet, guest)
+    ensure_true_updater(journey, guest)
     fault = arm_fault(guest, "interruption")
     job = fleet.hub.queue(machine, request_id("interrupt"))["jobs"][0]
     result = read_fault(fault)
@@ -541,6 +581,7 @@ def rollback(journey, fleet: Fleet, candidate: Candidate) -> None:
     guest = fleet.leaves[0]
     machine = fleet.machine(guest)
     before = stage_prior(fleet, guest)
+    ensure_true_updater(journey, guest)
     fault = arm_fault(guest, "rollback")
     job = fleet.hub.queue(machine, request_id("rollback"))["jobs"][0]
     result = read_fault(fault)
