@@ -34,6 +34,7 @@ machine-local paths:
   "hub": "dev-hub",
   "leaves": ["dev-leaf1", "dev-leaf2"],
   "release_config": "path to the machine's private release configuration",
+  "release_python": "the machine's audited 3.12 release interpreter (a branch worktree carries no venv of its own)",
   "provision_hub": "command run for the hub; {guest} {candidate} {hub} {tree}",
   "provision_leaf": "command run per leaf, same placeholders"
 }

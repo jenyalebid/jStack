@@ -24,7 +24,8 @@ def plan_file(tmp_path, **overrides) -> Path:
             "leaves": ["dev-leaf1", "dev-leaf2"],
             "release_config": str(tmp_path / "release-config.json"),
             "provision_hub": "provision {guest} {candidate}",
-            "provision_leaf": "provision {guest} {candidate} --adopt-to {hub}"}
+            "provision_leaf": "provision {guest} {candidate} --adopt-to {hub}",
+            "release_python": "/audited/312/bin/python3"}
     plan.update(overrides)
     path = tmp_path / "dev-plan.json"
     path.write_text(json.dumps(plan))
@@ -128,6 +129,7 @@ def test_build_records_the_candidate_for_reset(tmp_path, monkeypatch):
     assert result == candidate
     assert seen["argv"][1] == str(sandbox.tree() / "release.sh")
     assert "unit build" in seen["argv"]
+    assert seen["env"]["JSTACK_RELEASE_PYTHON"] == "/audited/312/bin/python3"
     derived = json.loads(Path(seen["env"]["JSTACK_RELEASE_CONFIG"]).read_text())
     assert derived["stack_repo"] == str(sandbox.tree())
     assert sandbox.recorded_candidate(plan_path) == candidate

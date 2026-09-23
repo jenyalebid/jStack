@@ -107,8 +107,13 @@ def build(plan: dict, plan_path: Path, *, notes: str, reuse_client: Path | None 
     argv = ["/bin/bash", str(tree() / "release.sh"), "build", "--notes", notes]
     if reuse_client is not None:
         argv += ["--reuse-client", str(reuse_client)]
-    candidate = Path(stream(argv, env={**os.environ,
-                                       "JSTACK_RELEASE_CONFIG": str(config_path)}))
+    env = {**os.environ, "JSTACK_RELEASE_CONFIG": str(config_path)}
+    # A branch worktree carries no release venv of its own; the plan names the
+    # machine's audited 3.12 interpreter and release.sh's PYTHONPATH still
+    # resolves this tree's packages ahead of whatever that venv has installed.
+    if plan.get("release_python"):
+        env["JSTACK_RELEASE_PYTHON"] = str(Path(plan["release_python"]).expanduser())
+    candidate = Path(stream(argv, env=env))
     if not (candidate / "candidate.json").is_file():
         raise SandboxError(f"the build reported no candidate: {candidate}")
     state_path(plan_path).write_text(json.dumps(
