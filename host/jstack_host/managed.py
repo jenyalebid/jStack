@@ -1019,14 +1019,19 @@ def _auto_accept_bypass(name: str) -> None:
     """bypassPermissions shows a one-time startup warning whose default is
     'No, exit'. A phone can't answer it, so accept it here — but only when it's
     actually on screen (so we never inject a stray keypress into real input).
-    Detached so the open endpoint returns immediately."""
+    Detached so the open endpoint returns immediately.
+
+    Watches the same 60s `_nudge_when_ready` does: a cold Mac renders this
+    dialog well after a warm one, and a 7.5s bound left it sitting on its
+    'No, exit' default there, wedging an unattended remote start. The two
+    watchers still never race — the nudge holds while 'Yes, I accept' is up."""
     script = (
-        f'for i in $(seq 1 25); do '
+        f'for i in $(seq 1 120); do '
         f'  p="$({_TMUX} -L {_SOCK} capture-pane -p -t {name} 2>/dev/null)"; '
         f'  if printf "%s" "$p" | grep -q "Yes, I accept"; then '
         f'    {_TMUX} -L {_SOCK} send-keys -t {name} Down; '
         f'    {_TMUX} -L {_SOCK} send-keys -t {name} Enter; break; '
-        f'  fi; sleep 0.3; done'
+        f'  fi; sleep 0.5; done'
     )
     subprocess.Popen(["bash", "-c", script], start_new_session=True,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
