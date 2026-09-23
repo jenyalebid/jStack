@@ -298,25 +298,51 @@ def test_fresh_install_refuses_existing_menu_before_any_write(runner, candidate)
         runner.install_candidate(Guest(), candidate, fresh=True)
 
 
-def test_candidate_installer_preserves_errors_and_uses_registered_menu(runner, candidate, monkeypatch):
+def test_candidate_installer_installs_the_sealed_hub_from_candidate_bytes(runner, candidate, monkeypatch):
     commands = []
     monkeypatch.setattr(runner.time, "sleep", lambda _: None)
     class Guest:
         name = "fresh"
         def sh(self, command, **kwargs):
             commands.append(command)
+            if "route -n get default" in command:
+                return "192.168.64.1\n"
             return ""
         def copy(self, *args):
             pass
 
     runner.install_candidate(Guest(), candidate, fresh=True)
     assert not any("| /usr/bin/tail" in command for command in commands)
-    assert any("ProgramArguments" in command and "app.parent" in command for command in commands)
     assert not any("ditto -x -k" in command and "~/Applications" in command for command in commands)
     # The one installer does the menu bar too; its own install.sh is an
     # internal step that refuses a direct call.
-    assert any("--no-claude --no-app" in command for command in commands)
+    install = next(command for command in commands if "install.sh --yes" in command)
+    assert "--no-claude --no-app" in install
     assert not any("menubar/install.sh" in command for command in commands)
+    # The Hub zip must come from the candidate, not the published release.
+    assert "JSTACK_REPO_URL=http://192.168.64.1:" in install
+    # The sealed provisioner writes candidate_test false; the lab flips it
+    # and restarts the updater so the run verifies unpromoted envelopes.
+    flip = next(command for command in commands if "candidate_test" in command)
+    assert "True" in flip
+    assert commands.index(flip) > commands.index(install)
+    assert any("kickstart" in command and "live.jstack.hub.updater" in command
+               for command in commands)
+
+
+def test_candidate_repo_serves_the_tag_and_the_candidate_assets(runner, candidate):
+    from urllib.error import HTTPError
+    from urllib.request import urlopen
+    with runner.candidate_repo(candidate) as port:
+        base = f"http://127.0.0.1:{port}/jstack.git"
+        refs = urlopen(base + "/info/refs?service=git-upload-pack").read().decode()
+        assert refs == f"{candidate.stack_sha}\trefs/tags/stack-release-{candidate.release}\n"
+        asset = urlopen(base + f"/releases/download/any-tag/{candidate.file('menubar').name}").read()
+        assert asset == candidate.file("menubar").read_bytes()
+        with pytest.raises(HTTPError):
+            urlopen(base + "/releases/download/any-tag/absent.zip")
+        with pytest.raises(HTTPError):
+            urlopen(base + f"/{candidate.file('menubar').name}")
 
 
 def test_new_session_with_a_provider_but_no_reply_fails(runner, monkeypatch):

@@ -18,10 +18,14 @@ fixture account and candidate-test trust before it is touched.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import http.server
 import json
 import shlex
+import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -29,7 +33,7 @@ from pathlib import Path
 GUEST_HOME = "/Users/admin"
 GUEST_TOOL = GUEST_HOME + "/update-vm.py"
 GUEST_FAULT = GUEST_HOME + "/update-fault.py"
-GUEST_PYTHON = GUEST_HOME + "/jStack/host/.venv/bin/python3"
+GUEST_PYTHON = "/Applications/jStack Hub.app/Contents/MacOS/JStackPython"
 SETTLE = 8
 
 
@@ -418,7 +422,7 @@ def revocation(journey, fleet: Fleet, candidate: Candidate) -> None:
     guest = fleet.leaves[-1]
     machine = fleet.machine(guest)
     stage_prior(fleet, guest)
-    guest.sh("/bin/launchctl bootout gui/$(id -u)/com.jremote.updater || true")
+    guest.sh("/bin/launchctl bootout gui/$(id -u)/live.jstack.hub.updater || true")
     try:
         job = fleet.hub.queue(machine, request_id("revoked"))["jobs"][0]
         journey.observe("revoked_device", fleet.hub.tool_call("revoke", "--machine", machine))
@@ -426,7 +430,8 @@ def revocation(journey, fleet: Fleet, candidate: Candidate) -> None:
         journey.observe("cancelled_job", {"job": job["id"], "state": row["state"]})
     finally:
         guest.sh("/bin/launchctl bootstrap gui/$(id -u) "
-                 "~/Library/LaunchAgents/com.jremote.updater.plist || true")
+                 "'/Applications/jStack Hub.app/Contents/Library/LaunchAgents/"
+                 "live.jstack.hub.updater.plist' || true")
     time.sleep(SETTLE * 4)
     log = guest.sh("/usr/bin/tail -n 40 ~/.local/state/jremote/updates/logs/supervisor.err "
                    "~/.local/state/jremote/updates/logs/supervisor.out 2>/dev/null || true")
@@ -551,10 +556,57 @@ CAST = {"fresh_install": lambda f: (f.hub, f.fresh),
 # ── Operations the journeys are written in terms of
 
 
+@contextlib.contextmanager
+def candidate_repo(candidate: Candidate):
+    """Serve one candidate's release assets the way the repo URL would.
+
+    install.sh resolves the current tag over the repo URL (git's dumb HTTP
+    reads info/refs as plain "sha<TAB>ref" lines) and downloads assets from
+    releases/download/<tag>/<file>. Answering both from the candidate
+    directory makes the shipped installer install the candidate's own sealed
+    Hub — the public URL would hand it the latest published release instead.
+    """
+    refs = f"{candidate.stack_sha}\trefs/tags/stack-release-{candidate.release}\n".encode()
+    directory = candidate.dir
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = self.path.split("?", 1)[0]
+            if path.endswith("/info/refs"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(refs)))
+                self.end_headers()
+                self.wfile.write(refs)
+                return
+            asset = directory / path.rsplit("/", 1)[-1]
+            if "/releases/download/" not in path or not asset.is_file():
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(asset.stat().st_size))
+            self.end_headers()
+            with asset.open("rb") as handle:
+                shutil.copyfileobj(handle, self.wfile)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+
+
 def install_candidate(guest: Guest, candidate: Candidate, *, fresh: bool = False) -> None:
     """Install exact candidate bytes through the shipped installer, not a copy of it."""
     if fresh:
         existing = guest.sh("for p in ~/.local/state/jremote ~/jStack "
+                            "'/Applications/jStack Hub.app' "
                             "~/Library/LaunchAgents/com.jremote.host.plist "
                             "~/Library/LaunchAgents/com.jremote.menubar.plist "
                             "~/Library/LaunchAgents/com.jremote.updater.plist "
@@ -567,34 +619,29 @@ def install_candidate(guest: Guest, candidate: Candidate, *, fresh: bool = False
     guest.sh(f"/bin/mkdir {remote}")
     for name in ("stack", "menubar", "client"):
         guest.copy(candidate.file(name), f"{remote}/{candidate.file(name).name}")
+    # An untarred snapshot with a release identity and no .git is what the
+    # installer treats as a publisher snapshot: exact local bytes, no fetch.
     guest.sh(f"/bin/mkdir ~/jStack && "
              f"/usr/bin/tar -xzf {remote}/{candidate.file('stack').name} -C ~/jStack", timeout=900)
-    # The menu bar installs through the one installer — its own install.sh is
-    # an internal step that refuses a direct call. The built bundle is then
-    # replaced below with the candidate's notarized bytes, keeping the launchd
-    # registration the installer made.
-    guest.sh("cd ~/jStack && JSTACK_CHECKOUT=$HOME/jStack /bin/bash install.sh --yes "
-             "--no-claude --no-app", timeout=2400)
-    # Resolve the actual installed bundle from launchd, never make a second
-    # registration under Applications. Keep the old bundle outside the .app
-    # namespace for recovery, then relaunch the exact signed candidate.
-    replace_menu = (
-        "import pathlib,plistlib,subprocess; "
-        "p=pathlib.Path.home()/'Library/LaunchAgents/com.jremote.menubar.plist'; "
-        "job=plistlib.loads(p.read_bytes()); "
-        "app=next(x for x in pathlib.Path(job['ProgramArguments'][0]).parents if x.suffix=='.app'); "
-        "domain='gui/'+str(__import__('os').getuid()); "
-        "subprocess.run(['/bin/launchctl','bootout',domain+'/'+job['Label']],check=True); "
-        "app.rename(app.with_suffix('.source-backup')); "
-        f"subprocess.run(['/usr/bin/ditto','-x','-k',{str(remote + '/' + candidate.file('menubar').name)!r},str(app.parent)],check=True); "
-        "subprocess.run(['/bin/launchctl','bootstrap',domain,str(p)],check=True)"
-    )
-    guest.sh(f"{shlex.quote(GUEST_PYTHON)} -c {shlex.quote(replace_menu)}", timeout=600)
+    gateway = guest.sh("/usr/sbin/route -n get default | /usr/bin/awk '/gateway/{print $2}'").strip()
+    expect(gateway, f"{guest.name}: no default gateway — cannot reach the host's candidate server")
+    with candidate_repo(candidate) as port:
+        guest.sh(f"cd ~/jStack && JSTACK_CHECKOUT=$HOME/jStack "
+                 f"JSTACK_REPO_URL=http://{gateway}:{port}/jstack.git "
+                 "/bin/bash install.sh --yes --no-claude --no-app", timeout=2400)
     guest.sh(f"/usr/bin/ditto -x -k {remote}/{candidate.file('client').name} /Applications",
              timeout=600)
     guest.sh("/usr/bin/open -a /Applications/jRemote.app")
-    guest.sh(f"{shlex.quote(GUEST_PYTHON)} -m jstack_host.install_updater --candidate-test "
-             "", timeout=600)
+    # The sealed provisioner writes candidate_test false unconditionally and
+    # its repair path refuses to change it — that guard is for production
+    # machines. A disposable lab guest gets the flag flipped in state, then
+    # the updater restarted so its next cycle verifies unpromoted envelopes.
+    flip = ("import json,pathlib; "
+            "p=pathlib.Path.home()/'.local/state/jremote/updates/config.json'; "
+            "c=json.loads(p.read_text()); c['candidate_test']=True; "
+            "p.write_text(json.dumps(c, indent=2))")
+    guest.sh(f"{shlex.quote(GUEST_PYTHON)} -c {shlex.quote(flip)}")
+    guest.sh("/bin/launchctl kickstart -k gui/$(id -u)/live.jstack.hub.updater")
     time.sleep(SETTLE)
 
 

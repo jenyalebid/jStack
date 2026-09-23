@@ -116,10 +116,14 @@ def main():
         # versions and this updater's loaded source. A file on disk is not an
         # observation of what is running, and neither is a checkout's HEAD.
         from jstack_host.update_macos import MacBackend
+        backend = MacBackend
+        if config.get("service_model") == "app":
+            from jstack_host.update_app import AppBackend
+            backend = AppBackend
         journal = root / "job.json"
         job = json.loads(journal.read_text()) if journal.exists() else {}
         print(json.dumps({"host_id": hostenv.host_id(),
-                          "observed": MacBackend(root, config).observe(job),
+                          "observed": backend(root, config).observe(job),
                           "job": {key: job.get(key) for key in ("id", "state", "detail", "release")},
                           "adopted": (state / "parent.json").exists(),
                           "managed": bool(config.get("managed"))}, indent=2))
