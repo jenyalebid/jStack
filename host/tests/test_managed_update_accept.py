@@ -13,6 +13,7 @@ import hashlib
 import importlib.util
 import json
 import subprocess
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,27 @@ from jstack_host import acceptance, release_manifest as releases
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools/managed_update_accept.py"
 PRIOR, CANDIDATE = "20260915T000000Z-aaaaaaaa", "20260916T192622Z-1737a381"
+
+
+def test_off_network_requires_a_working_lan_before_isolation(runner, monkeypatch):
+    commands = []
+    def shell(command):
+        commands.append(command)
+        return "000"
+    guest = SimpleNamespace(name="leaf", sh=shell)
+    fleet = SimpleNamespace(leaves=[guest], hub=object(), off_lan="192.168.2.250",
+                            machine=lambda _: "leaf-id")
+    monkeypatch.setattr(runner, "mesh_address", lambda _: "10.66.0.1")
+    with pytest.raises(runner.AcceptanceFailure, match="not usable before isolation"):
+        runner.off_network(SimpleNamespace(observe=lambda *args: None), fleet, None)
+    assert len(commands) == 1
+    assert "http://192.168.2.250:9090" in commands[0]
+    assert not any("route -n add" in command for command in commands)
+
+
+def test_credential_revocation_is_the_last_journey(runner):
+    # Revocation is permanent; later journeys cannot reuse that leaf's authority.
+    assert list(runner.JOURNEYS)[-1] == "revocation"
 
 
 @pytest.fixture(scope="module")

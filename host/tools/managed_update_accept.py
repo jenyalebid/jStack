@@ -475,11 +475,16 @@ def off_network(journey, fleet: Fleet, candidate: Candidate) -> None:
     guest = fleet.leaves[-1]
     machine = fleet.machine(guest)
 
-    hub_lan = lan_address(fleet.hub)
+    hub_lan = fleet.off_lan or lan_address(fleet.hub)
     hub_mesh = mesh_address(fleet.hub)
     expect(hub_mesh != hub_lan, "the hub's mesh and LAN addresses are the same host route")
     journey.observe("device", {"machine": machine, "guest": guest.name,
                                "hub_lan": hub_lan, "hub_mesh": hub_mesh})
+
+    baseline = guest.sh(
+        f"/usr/bin/curl -s -m 8 -o /dev/null -w '%{{http_code}}' "
+        f"http://{hub_lan}:9090/api/health || true").strip()
+    expect(baseline == "200", f"the LAN path was not usable before isolation ({baseline})")
 
     # Blackhole the LAN route only. The tunnel rides a different destination, so
     # this removes the local shortcut without touching the path under test.
@@ -547,8 +552,8 @@ def lan_address(guest: Guest) -> str:
 
 JOURNEYS = {"fresh_install": fresh_install, "upgrade": upgrade, "fleet": fleet_journey,
             "offline_catchup": offline_catchup, "session_survival": session_survival,
-            "interruption": interruption, "rollback": rollback, "revocation": revocation,
-            "off_network": off_network}
+            "interruption": interruption, "rollback": rollback, "off_network": off_network,
+            "revocation": revocation}
 
 # The guests each journey drives; everyone else may be parked on a
 # slot-limited host. The fleet journey swaps its own leaves mid-flight.
