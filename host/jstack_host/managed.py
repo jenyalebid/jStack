@@ -950,10 +950,10 @@ def _auto_skip_codex_update(name: str) -> None:
     the releases API, not on local startup."""
     script = (
         f'for i in $(seq 1 60); do '
-        f'  p="$({_TMUX} -L {_SOCK} capture-pane -p -t {name} 2>/dev/null)"; '
+        f'  p="$({shlex.join(_t("capture-pane", "-p", "-t", name))} 2>/dev/null)"; '
         f'  if printf "%s" "$p" | grep -q "Skip until next version"; then '
-        f'    {_TMUX} -L {_SOCK} send-keys -t {name} -l "2"; '
-        f'    {_TMUX} -L {_SOCK} send-keys -t {name} Enter; break; '
+        f'    {shlex.join(_t("send-keys", "-t", name, "-l", "2"))}; '
+        f'    {shlex.join(_t("send-keys", "-t", name, "Enter"))}; break; '
         f'  fi; sleep 0.5; done'
     )
     subprocess.Popen(["bash", "-c", script], start_new_session=True,
@@ -1029,10 +1029,10 @@ def _auto_accept_bypass(name: str) -> None:
     watchers still never race — the nudge holds while 'Yes, I accept' is up."""
     script = (
         f'for i in $(seq 1 120); do '
-        f'  p="$({_TMUX} -L {_SOCK} capture-pane -p -t {name} 2>/dev/null)"; '
+        f'  p="$({shlex.join(_t("capture-pane", "-p", "-t", name))} 2>/dev/null)"; '
         f'  if printf "%s" "$p" | grep -q "Yes, I accept"; then '
-        f'    {_TMUX} -L {_SOCK} send-keys -t {name} Down; '
-        f'    {_TMUX} -L {_SOCK} send-keys -t {name} Enter; break; '
+        f'    {shlex.join(_t("send-keys", "-t", name, "Down"))}; '
+        f'    {shlex.join(_t("send-keys", "-t", name, "Enter"))}; break; '
         f'  fi; sleep 0.5; done'
     )
     subprocess.Popen(["bash", "-c", script], start_new_session=True,
@@ -1068,13 +1068,13 @@ def _nudge_when_ready(name: str, text: str, engine: str = "claude") -> None:
     typing = "; ".join(shlex.join(a) for a in _type_argv(name, text))
     script = (
         f'for i in $(seq 1 120); do '
-        f'  p="$({_TMUX} -L {_SOCK} capture-pane -p -t {name} 2>/dev/null)"; '
+        f'  p="$({shlex.join(_t("capture-pane", "-p", "-t", name))} 2>/dev/null)"; '
         f'  if printf "%s" "$p" | grep -qi {shlex.quote(marker)} && '
         f'     ! printf "%s" "$p" | grep -q {shlex.quote(blocker)}; then '
         f'    sleep 0.5; '
         f'    {typing}; '
         f'    sleep 0.2; '
-        f'    {_TMUX} -L {_SOCK} send-keys -t {name} Enter; break; '
+        f'    {shlex.join(_t("send-keys", "-t", name, "Enter"))}; break; '
         f'  fi; sleep 0.5; done'
     )
     subprocess.Popen(["bash", "-c", script], start_new_session=True,
@@ -1219,7 +1219,7 @@ def close_managed(sid: str, review: bool = True) -> bool:
 
 def attach_command(sid: str) -> str:
     """Shell command that attaches a terminal to the managed session."""
-    return f"{_TMUX} -L {_SOCK} attach -t {_name(sid)}"
+    return shlex.join(_t("attach", "-t", _name(sid)))
 
 
 def launch_terminal(sid: str) -> None:
