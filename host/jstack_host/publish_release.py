@@ -345,8 +345,13 @@ def deploy(release: str, *, port: int = 9090, timeout: int = 2700, poll: int = 1
         unmanaged = sorted(row["machine"] for row in before["machines"] if not row.get("supervisor"))
         if not eligible:
             raise releases.ReleaseError("no machine on this hub can accept a managed update")
+        # A request id is idempotent on the hub: repeating one hands back the
+        # job it named, failed or not. A deploy run again after a machine's
+        # failure was fixed is a new request, so it gets a new id; a machine
+        # already current on the release is recognised by the hub regardless.
+        request_id = f"release-{release}-{time.strftime('%Y%m%d%H%M%S')}"
         queued = client.post(base + "/queue", headers=headers,
-                             json={"target": "all", "request_id": "release-" + release})
+                             json={"target": "all", "request_id": request_id})
         queued.raise_for_status()
         deadline = time.monotonic() + timeout
         states: dict[str, str] = {}

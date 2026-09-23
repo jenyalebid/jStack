@@ -35,6 +35,7 @@ class _Client:
 
     def post(self, url, headers=None, json=None):
         self.calls.append(("POST", url, headers["Authorization"]))
+        self.requests = getattr(self, "requests", []) + [json["request_id"]]
         return _Answer({"jobs": [{"id": "j1"}]})
 
 
@@ -123,3 +124,17 @@ def test_deploy_gives_up_on_a_hub_that_stays_down(monkeypatch):
     monkeypatch.setattr(httpx, "Client", lambda **kw: _RestartingClient(calls, refusals=10 ** 6))
     with pytest.raises(httpx.ConnectError):
         publish_release.deploy("r1", port=9090, timeout=0, poll=0)
+
+
+def test_each_deploy_run_is_its_own_request(monkeypatch):
+    """The hub answers a repeated request id with the job it already named,
+    so a deploy re-run after a failed machine was repaired must not reuse one."""
+    _hub_credential(monkeypatch)
+    import httpx
+    clients = []
+    monkeypatch.setattr(httpx, "Client", lambda **kw: clients.append(_Client([])) or clients[-1])
+    publish_release.deploy("r1", port=9090, timeout=1, poll=0)
+    monkeypatch.setattr(publish_release.time, "strftime", lambda fmt: "later")
+    publish_release.deploy("r1", port=9090, timeout=1, poll=0)
+    first, second = clients[0].requests[0], clients[1].requests[0]
+    assert first.startswith("release-r1-") and second == "release-r1-later" and first != second
