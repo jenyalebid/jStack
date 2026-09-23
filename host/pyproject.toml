@@ -33,7 +33,12 @@ jstack-update-bootstrap = "jstack_host.install_updater:main"
 jstack-release = "jstack_host.publish_release:main"
 
 [tool.setuptools.package-data]
-jstack_host = ["release-trust.json"]
+# Every non-Python file under jstack_host has to be named here or it does not ship.
+# `packages.find` below only finds PACKAGES, and `bin/` holds no `__init__.py`, so
+# jremote-compose-editor was dropped from every build ever made — leaving the installed
+# bundle's bin/ empty while the checkout's was not. `test_packaging.py` holds this list
+# against the tree so the next such file fails here instead of in a release.
+jstack_host = ["release-trust.json", "bin/*"]
 
 [tool.setuptools.packages.find]
 include = ["jstack_host*"]
