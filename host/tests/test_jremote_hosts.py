@@ -363,6 +363,21 @@ def test_the_host_registry_is_behind_the_token(client, store):
                      json={"name": "y"}).status_code == 401
 
 
+def test_a_machine_forgets_itself_and_only_itself_off_the_console(store):
+    """Detach's `_tell_parent` posts the forget from the mesh, not loopback:
+    the machine's own credential must be able to end its adoption, and must
+    not be able to end anybody else's."""
+    row, token = devices.mint("Update lab leaf")
+    store.upsert_host("host-key-aaaa", "Laptop", "10.66.0.7", 9090)
+    store.bind_host_device("host-key-aaaa", row["id"])
+    store.upsert_host("host-key-bbbb", "Other", "10.66.0.8", 9090)
+    leaf = TestClient(app)
+    leaf.headers.update({"Authorization": f"Bearer {token}"})
+    assert leaf.post("/api/jremote/v1/hosts/host-key-bbbb/forget").status_code == 403
+    assert leaf.post("/api/jremote/v1/hosts/host-key-aaaa/forget").status_code == 200
+    assert store.host_row("host-key-aaaa")["deleted"]
+
+
 def test_managing_a_host_that_is_not_there_is_a_404(client, store, on_console):
     assert client.post("/api/jremote/v1/hosts/ghost/rename",
                        json={"name": "y"}).status_code == 404

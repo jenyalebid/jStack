@@ -92,19 +92,23 @@ def main():
                                      "parent_address": args.parent_address, "parent_port": args.parent_port,
                                      "device_id": row["id"], "token": token})
         elif args.action == "adopt":
-            job = json.loads((root / "job.json").read_text())
-            if job.get("state") not in fleet_updates.TERMINAL:
+            # A guest that never ran an update has no journal yet; only a job
+            # actually in flight blocks a re-parent.
+            journal = root / "job.json"
+            job = json.loads(journal.read_text()) if journal.is_file() else {}
+            if job and job.get("state") not in fleet_updates.TERMINAL:
                 raise RuntimeError("cannot change fixture parent during an active update")
             record = json.loads(args.record.read_text())
-            if record.get("parent_name") != "Update lab VM hub":
-                raise RuntimeError("not a VM hub fixture record")
+            if not str(record.get("parent_name", "")).startswith("Update lab"):
+                raise RuntimeError("not an update-lab fixture record")
             backup = state / "parent.previous-update-lab.json"
             if backup.exists():
                 raise RuntimeError("fixture parent already moved")
             (state / "parent.json").rename(backup)
             atomic_json(state / "parent.json", record)
             atomic_json(args.record.with_suffix(".grant.json"),
-                        {"machine": hostenv.host_id(), "grant": grants.issue("Update lab VM hub")})
+                        {"machine": hostenv.host_id(),
+                         "grant": grants.issue(record["parent_name"])})
         else:
             record = json.loads(args.record.read_text())
             if not get_store().host_row(record["machine"]):

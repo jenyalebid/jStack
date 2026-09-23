@@ -998,10 +998,16 @@ def forget_host(key: str, request: Request, device_id: str = Depends(current_dev
 
     The tombstone hides it from clients and rejects its control credential,
     so cached projected credentials on the withdrawn leaf also stop working.
+
+    Console-only, with one exception: a machine's own credential may forget
+    the machine it is bound to — that is `detach` telling this hub goodbye
+    from the mesh, where there is no console to speak from.
     """
     from . import grants, shell_grants
     from .store import get_store
-    managed_access.require_console(request)
+    own = managed_access.leaf_for_device(device_id)
+    if own is None or own["key"] != key:
+        managed_access.require_console(request)
     if not get_store().forget_host(key):
         raise HTTPException(status_code=404,
                             detail="unknown or already forgotten host")

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 MODULES = (
     # standard library reached lazily inside the update paths
-    "argparse", "fcntl", "json", "os", "pathlib", "platform", "plistlib",
+    "argparse", "fcntl", "getpass", "json", "os", "pathlib", "platform", "plistlib",
     "re", "shlex", "shutil", "signal", "subprocess", "tarfile", "tempfile",
     "time", "tomllib", "resource", "uuid", "zipfile", "ssl", "hashlib", "base64",
     # third-party

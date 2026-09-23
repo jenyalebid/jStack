@@ -1,6 +1,6 @@
 """Acceptance receipts written from observations, never from a declaration.
 
-The nine journeys in `release_manifest.RECEIPTS` are what a candidate must
+The journeys in `release_manifest.RECEIPTS` are what a candidate must
 survive before it can be offered to a fleet. Each journey here names the facts
 it has to observe. A run records those facts while the journey executes against
 the exact artifact set of the candidate under test, and the receipt is written
@@ -45,6 +45,12 @@ REQUIRED: dict[str, tuple[str, ...]] = {
                  "refused_release", "pairing_intact"),
     "revocation": ("revoked_device", "cancelled_job", "rejected_request", "unchanged_release"),
     "off_network": ("device", "transport", "release_notice", "session_journey"),
+    "shell_adopt": ("granted_at_adoption", "capability_reported", "hub_shell_answers",
+                    "root_capable", "joiner_rerun_idempotent"),
+    "shell_flip": ("granted_pair", "peer_shell_answers", "revoked_pair",
+                   "refused_immediately", "no_readoption"),
+    "shell_detach": ("shell_before_detach", "detach_steps", "material_gone",
+                     "remote_login_restored", "hub_forgot_machine", "hub_shell_refused"),
 }
 PASSED = "passed"
 

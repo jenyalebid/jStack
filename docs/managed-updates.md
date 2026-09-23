@@ -121,7 +121,7 @@ waits for the hub's own confirmation of each. A machine that is offline or has
 no update supervisor is reported unreached, never counted as deployed.
 
 Build never installs locally or publishes. Promotion is an explicit second
-step; it validates all nine receipts and atomically changes the fleet feed.
+step; it validates every required receipt and atomically changes the fleet feed.
 The candidate includes `mobile.status=not_distributed`: an iOS upload or silent
 phone update is **not** implemented by this command.
 
@@ -132,10 +132,11 @@ cannot be updated remotely until bootstrap has run on that leaf.
 
 ### Remaining acceptance/integration work
 
-- Run the acceptance runner to completion against the fixtures and retain all
-  nine final-artifact receipts: fresh_install, upgrade, fleet, offline_catchup,
-  session_survival, interruption, rollback, revocation, off_network. Unit passes
-  are not these receipts, and the runner existing is not a run.
+- Run the acceptance runner to completion against the fixtures and retain a
+  final-artifact receipt per required journey: fresh_install, upgrade, fleet,
+  offline_catchup, session_survival, interruption, rollback, revocation,
+  off_network, shell_adopt, shell_flip, shell_detach. Unit passes are not
+  these receipts, and the runner existing is not a run.
 - Build 74 passed fresh installation, upgrade, fleet, offline catch-up,
   session survival, interruption/reboot, rollback/artifact refusal and queued
   authority revocation. Fleet evidence covers one parent and two leaves,
@@ -270,6 +271,17 @@ Before promotion, the candidate needs receipts tied to its exact artifacts:
   Detached/revoked machines cannot execute queued update jobs.
 - A Mac with no LAN route to the hub discovers the release and completes an
   authenticated session journey against the updated hub and leaf.
+- Shell access rode the adoption: the hub reaches the machine by name over
+  `ssh`, root-capable through the grant's own sudoers drop-in, and a joiner
+  re-run changes no key and duplicates nothing (shell_adopt).
+- A leaf→leaf pair granted live reaches its peer by name; flipped back, the
+  key is out of the target's authorized block and new connections are refused
+  immediately — no re-adoption either way (shell_flip).
+- Detach removes everything shell left: keys out everywhere, sudoers drop-in
+  gone, Remote Login restored to its pre-grant state, the machine's identity
+  destroyed, and the hub's registry and ssh config no longer name it
+  (shell_detach). Detach is terminal for that machine: a full acceptance run
+  ends with a detached leaf, and the sandbox `reset` re-provisions it.
 
 Use disposable GUI VMs and the designated test phone. NAT hairpin and local
 HTTP contract tests remain useful evidence, but cannot substitute for the

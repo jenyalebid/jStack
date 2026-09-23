@@ -14,7 +14,8 @@ from pathlib import Path
 SCHEMA = 1
 COMPONENTS = {"stack", "menubar", "client"}
 RECEIPTS = {"fresh_install", "upgrade", "fleet", "offline_catchup", "session_survival",
-            "interruption", "rollback", "revocation", "off_network"}
+            "interruption", "rollback", "revocation", "off_network",
+            "shell_adopt", "shell_flip", "shell_detach"}
 #: The line a hub follows when nobody chose one. Named rather than empty so a
 #: manifest built before channels existed can be read as belonging to it: the
 #: releases already published came off main, which is what this names.

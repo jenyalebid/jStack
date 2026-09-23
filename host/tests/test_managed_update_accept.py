@@ -64,9 +64,15 @@ def test_off_network_failure_releases_only_its_firewall_reference(runner, monkey
     assert not any("route -n" in c or "pfctl -d" in c for c in commands)
 
 
-def test_credential_revocation_is_the_last_journey(runner):
-    # Revocation is permanent; later journeys cannot reuse that leaf's authority.
-    assert list(runner.JOURNEYS)[-1] == "revocation"
+def test_the_permanent_journeys_close_the_run(runner):
+    # Revocation is permanent for leaves[-1]'s authority and detach removes its
+    # leaf from the fleet entirely: everything that needs a live pair runs
+    # before revocation, and detach — on a leaf revocation never touched — is
+    # the very last thing a run does.
+    assert list(runner.JOURNEYS)[-2:] == ["revocation", "shell_detach"]
+    fleet = SimpleNamespace(hub="hub", leaves=["a", "b"], fresh=None)
+    assert runner.CAST["shell_detach"](fleet) == ("hub", "a")
+    assert runner.CAST["revocation"](fleet) == ("hub", "b")
 
 
 @pytest.fixture(scope="module")
