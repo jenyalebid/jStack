@@ -153,7 +153,11 @@ def fleet_up(plan: dict, candidate: Path, *, runner=_run) -> dict:
         runner([vm, "reset", leaf])
         _provision(plan, plan["provision_leaf"], guest=leaf, candidate=candidate, runner=runner)
         runner([vm, "stop", leaf])
-    step(f"fleet ready: {hub} running, {len(leaves)} leaves provisioned and parked")
+    # A guest booted here is a child of the invoking shell and dies with it,
+    # so a "still running" hub would be a lie the moment this returns. Park
+    # everything; whatever drives the fleet next boots its own cast.
+    runner([vm, "stop", hub])
+    step(f"fleet provisioned and parked: {hub} + {len(leaves)} leaves on {candidate.name}")
     return {"hub": hub, "leaves": leaves, "candidate": str(candidate)}
 
 

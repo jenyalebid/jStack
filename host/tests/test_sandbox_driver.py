@@ -95,9 +95,12 @@ def test_up_parks_each_finished_leaf_before_the_next_boots(tmp_path):
     assert flat[5:8] == ["/lab/vm.sh reset dev-leaf1",
                          f"/bin/bash -c provision dev-leaf1 {candidate} --adopt-to dev-hub",
                          "/lab/vm.sh stop dev-leaf1"]
+    # The last stop parks the hub: a guest booted by this driver is a child
+    # of the invoking shell, so nothing may be reported as left running.
     assert flat[8:] == ["/lab/vm.sh reset dev-leaf2",
                         f"/bin/bash -c provision dev-leaf2 {candidate} --adopt-to dev-hub",
-                        "/lab/vm.sh stop dev-leaf2"]
+                        "/lab/vm.sh stop dev-leaf2",
+                        "/lab/vm.sh stop dev-hub"]
     assert summary == {"hub": "dev-hub", "leaves": ["dev-leaf1", "dev-leaf2"],
                        "candidate": str(candidate)}
 
