@@ -1,8 +1,44 @@
 from pathlib import Path
 
 import pytest
+import shutil
 
 from jstack_host import install_host, update_app, update_plugins
+
+
+def test_interrupted_copy_does_not_block_a_new_job_for_the_same_release(monkeypatch, tmp_path):
+    app, source = tmp_path / "Hub.app", tmp_path / "staged.app"
+    app.mkdir()
+    (app / "version").write_text("old")
+    source.mkdir()
+    (source / "version").write_text("new")
+    backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
+    monkeypatch.setattr(backend, "_statuses", lambda _: {})
+    monkeypatch.setattr(backend, "_stop_services", lambda *args: None)
+    monkeypatch.setattr(backend, "_restore_services", lambda *args: None)
+    monkeypatch.setattr(backend, "_check_app", lambda *args: None)
+    monkeypatch.setattr(update_plugins, "install", lambda *args: None)
+    monkeypatch.setattr(update_plugins, "rollback", lambda *args: None)
+    transaction = {"release": "same-release", "services": {}, "providers": [],
+                   "stack": str(tmp_path), "manifest": {"components": {"menubar": {}}},
+                   "apps": {"menubar": {"source": str(source), "target": str(app),
+                                         "backup": str(tmp_path / "backup")}}}
+
+    def interrupted_copy(argv):
+        destination = Path(argv[-1])
+        destination.mkdir()
+        (destination / "partial").write_text("interrupted")
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(update_app, "command", interrupted_copy)
+    with pytest.raises(KeyboardInterrupt):
+        backend.apply({"id": "interrupted-job", "transaction": transaction})
+    backend.rollback({"id": "interrupted-job", "transaction": transaction})
+    assert (app / "version").read_text() == "old"
+    monkeypatch.setattr(update_app, "command", lambda argv: shutil.copytree(argv[-2], argv[-1]))
+    backend.apply({"id": "retry-job", "transaction": transaction})
+    assert (app / "version").read_text() == "new"
+    assert (tmp_path / "Hub.app.incoming-interrupted-job" / "partial").exists()
 
 
 def test_disabled_services_are_never_registered_or_unregistered(monkeypatch, tmp_path):

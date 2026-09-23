@@ -262,7 +262,7 @@ class AppBackend(MacBackend):
             target, backup = Path(record["target"]), Path(record["backup"])
             if kind == "client":
                 stop_app(target)
-            incoming = target.with_name(target.name + ".incoming-" + transaction["release"])
+            incoming = target.with_name(target.name + ".incoming-" + job["id"])
             if incoming.exists():
                 raise releases.ReleaseError("unfinished incoming app requires recovery")
             command(["/usr/bin/ditto", record["source"], str(incoming)])
