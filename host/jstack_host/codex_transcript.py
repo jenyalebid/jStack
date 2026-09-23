@@ -89,7 +89,8 @@ def path_for_id(sid: str) -> Path | None:
     return matches[-1] if matches else None
 
 
-def rollout_started_after(started_at: float, cwd: str = "") -> Path | None:
+def rollout_started_after(started_at: float, cwd: str = "",
+                          exclude: "set[str] | tuple" = ()) -> Path | None:
     """The rollout Codex created for a launch at ``started_at``.
 
     Codex does not hold its JSONL open: it opens, appends, and closes on each
@@ -98,9 +99,17 @@ def rollout_started_after(started_at: float, cwd: str = "") -> Path | None:
     Pick the earliest matching rollout born after this launch; an older pane
     in the same cwd is therefore ineligible, and simultaneous launches each
     claim the file immediately following their own start.
+
+    `exclude` are rollouts another row already holds. Skipping them HERE and not
+    after the pick is what makes two panes in one workspace resolve: the second
+    pane's own rollout is the earliest unclaimed one after its start, while a
+    pick that ignored the claim would return the first pane's file and then have
+    to give up on it.
     """
     candidates = []
     for path in root().glob("**/rollout-*.jsonl"):
+        if str(path) in exclude:
+            continue
         meta = metadata(path)
         if cwd and meta.get("cwd") != cwd:
             continue
@@ -116,7 +125,16 @@ def rollout_started_after(started_at: float, cwd: str = "") -> Path | None:
 
 def bind_open_session(board_sid: str, started_at: float, cwd: str = "",
                       attempts: int = 80) -> None:
-    """Record the rollout created by this managed Codex launch."""
+    """Record the rollout created by this managed Codex launch.
+
+    Optimistic and bounded on purpose. Codex creates its rollout on the first
+    TURN, not at startup, so for a session opened from the phone and typed into
+    later there is nothing here to find for as long as it sits at an empty
+    prompt — measured at 4m03s on one ordinary open, against a 20s window. This
+    thread wins the case where the session is used immediately; every other case
+    is `recover_open_sessions`, which reads the same two facts off the registry
+    on every board build and does not expire.
+    """
     def run() -> None:
         from . import managed
         for _ in range(attempts):
@@ -189,6 +207,17 @@ def recover_open_sessions(reg: dict) -> dict:
     the card would otherwise stay blank forever while the session's real
     rollout sits unclaimed beside it.
 
+    **The spawn's own record comes first, and it asks tmux nothing.** A row that
+    carries `launched_at` and `cwd` (written by `managed.record_launch` at the
+    moment they were true) is matched against the rollouts directly. The pane
+    scan below is the fallback for rows registered before that record existed.
+
+    That order is the fix for a card that stays blank with a live session behind
+    it. Everything the scan needs — a tmux call that answers inside 3s, the sid's
+    pane still listed under its own name, a `pane_current_path` that has not
+    moved — is a way for the recovery to come back empty while saying nothing,
+    and each one is an inference about facts the spawn already knew for certain.
+
     A pane's creation time bounds its launch. Never claim another registered
     transcript, or a rollout born after the next pane in the same workspace.
     Among candidates inside that window the earliest wins — the same rule
@@ -204,6 +233,24 @@ def recover_open_sessions(reg: dict) -> dict:
     if not missing:
         return reg
     from . import managed
+    claimed = {info.get("transcript") for info in reg.values() if bound(info)}
+    # Oldest launch first: two panes in one workspace resolve in the order they
+    # were opened, so each claims its own rollout instead of the earlier one's.
+    recorded = sorted(
+        ((sid, reg[sid]) for sid in missing
+         if reg[sid].get("cwd") and reg[sid].get("launched_at")),
+        key=lambda item: item[1]["launched_at"])
+    for sid, info in recorded:
+        missing.discard(sid)
+        path = rollout_started_after(info["launched_at"], info["cwd"],
+                                     exclude=claimed)
+        if not path:
+            continue  # no first turn yet — nothing exists to bind
+        managed.record_transcript(sid, str(path))
+        reg[sid] = dict(info, transcript=str(path))
+        claimed.add(str(path))
+    if not missing:
+        return reg
     try:
         result = subprocess.run(managed._t(
             "list-panes", "-a", "-F",
@@ -219,7 +266,6 @@ def recover_open_sessions(reg: dict) -> dict:
                 panes[names[name]] = (float(stamp), cwd)
     except (OSError, ValueError, subprocess.SubprocessError):
         return reg
-    claimed = {info.get("transcript") for info in reg.values() if bound(info)}
     candidates = []
     for path in root().glob("**/rollout-*.jsonl"):
         if str(path) in claimed:

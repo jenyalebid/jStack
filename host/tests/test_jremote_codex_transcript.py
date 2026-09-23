@@ -258,3 +258,109 @@ def test_card_metadata_tracks_model_usage_and_turn_events(tmp_path):
         fh.write(json.dumps({'type': 'event_msg', 'payload': {'type': 'turn_aborted'}}) + '\n')
         fh.write('{"partial":')
     assert codex_transcript.summary(path)['turn'] == 'idle'
+
+
+def _no_tmux(monkeypatch):
+    """Every way the pane scan can come back with nothing, as one stand-in.
+
+    A non-zero `tmux list-panes`, a call that times out at 3s under load, a
+    server that is not running yet after a host restart — recovery treats all
+    three the same, and the point of these tests is that the card fills anyway.
+    """
+    from types import SimpleNamespace
+    monkeypatch.setattr(codex_transcript.subprocess, 'run',
+                        lambda *a, **k: SimpleNamespace(returncode=1, stdout=''))
+
+
+def test_the_spawns_own_record_binds_a_rollout_with_no_tmux_at_all(tmp_path, monkeypatch):
+    """The blank card, reproduced: a live Codex session whose rollout exists and
+    whose board row shows nothing.
+
+    Recovery inferred the launch window from `tmux list-panes` — pane creation
+    time for the launch, `pane_current_path` for the workspace — so any pass
+    where that call came back empty silently recovered nothing, and the card
+    stayed blank for the life of the session. `record_launch` writes both facts
+    at the spawn, where they are known for certain, and they cost no call.
+    """
+    from jstack_host import managed
+    monkeypatch.setattr(managed, '_REG', tmp_path / 'open.json')
+    sessions = tmp_path / 'sessions'
+    monkeypatch.setattr(codex_transcript, 'root', lambda: sessions)
+    sid = 'facade01-0000-0000-0000-000000000000'
+    cwd = '/Users/x/Agents/Nova/chat'
+    launched = datetime.fromisoformat('2026-08-26T20:59:59+00:00').timestamp()
+    managed.record_open(sid, 'nova', engine='codex')
+    managed.record_launch(sid, cwd, launched)
+    own = _rollout(sessions / f'rollout-own-{SID}.jsonl')
+    _stamp(own, '2026-08-26T21:00:00Z')
+    _no_tmux(monkeypatch)
+
+    result = codex_transcript.recover_open_sessions(managed._reg_load())
+    assert result[sid]['transcript'] == str(own)
+    assert managed._reg_load()[sid]['transcript'] == str(own)
+
+
+def test_a_rollout_the_session_has_not_written_yet_binds_nothing(tmp_path, monkeypatch):
+    """Codex creates its rollout on the first TURN, so a session sitting at an
+    empty prompt has no file — for minutes, or forever. Recovery must leave the
+    row alone rather than claim some other session's rollout out of the same
+    workspace, because the row it would corrupt is a live one."""
+    from jstack_host import managed
+    monkeypatch.setattr(managed, '_REG', tmp_path / 'open.json')
+    sessions = tmp_path / 'sessions'
+    sessions.mkdir()
+    monkeypatch.setattr(codex_transcript, 'root', lambda: sessions)
+    sid = 'facade02-0000-0000-0000-000000000000'
+    cwd = '/Users/x/Agents/Nova/chat'
+    launched = datetime.fromisoformat('2026-08-26T21:00:30+00:00').timestamp()
+    managed.record_open(sid, 'nova', engine='codex')
+    managed.record_launch(sid, cwd, launched)
+    _stamp(_rollout(sessions / f'rollout-earlier-{SID}.jsonl'),
+           '2026-08-26T21:00:00Z')  # born before this launch
+    _no_tmux(monkeypatch)
+
+    result = codex_transcript.recover_open_sessions(managed._reg_load())
+    assert 'transcript' not in result[sid]
+
+
+def test_two_panes_in_one_workspace_each_claim_their_own_rollout(tmp_path, monkeypatch):
+    """Resolved oldest launch first, so the second pane cannot be handed the
+    first one's file. Both rows carry the spawn's record, so neither depends on
+    the pane scan to tell them apart."""
+    from jstack_host import managed
+    monkeypatch.setattr(managed, '_REG', tmp_path / 'open.json')
+    sessions = tmp_path / 'sessions'
+    monkeypatch.setattr(codex_transcript, 'root', lambda: sessions)
+    cwd = '/Users/x/Agents/Nova/chat'
+    first = 'facade03-0000-0000-0000-000000000000'
+    second = 'facade04-0000-0000-0000-000000000000'
+    base = datetime.fromisoformat('2026-08-26T20:59:59+00:00').timestamp()
+    managed.record_open(first, 'nova', engine='codex')
+    managed.record_launch(first, cwd, base)
+    managed.record_open(second, 'nova', engine='codex')
+    managed.record_launch(second, cwd, base + 60)
+    early = _rollout(sessions / f'rollout-early-{SID}.jsonl')
+    _stamp(early, '2026-08-26T21:00:00Z')
+    late = _rollout(sessions / f'rollout-late-{SID}.jsonl')
+    _stamp(late, '2026-08-26T21:02:00Z')
+    _no_tmux(monkeypatch)
+
+    result = codex_transcript.recover_open_sessions(managed._reg_load())
+    assert result[first]['transcript'] == str(early)
+    assert result[second]['transcript'] == str(late)
+
+
+def test_reregistration_keeps_the_launch_record(tmp_path, monkeypatch):
+    """Every reopen path re-registers with nothing but a sid and an agent. The
+    launch is a property of the SESSION, so losing it there would put the row
+    straight back on the pane scan it was moved off."""
+    from jstack_host import managed
+    monkeypatch.setattr(managed, '_REG', tmp_path / 'open.json')
+    sid = 'facade05-0000-0000-0000-000000000000'
+    managed.record_open(sid, 'nova', engine='codex')
+    managed.record_launch(sid, '/Users/x/Agents/Nova/chat', 1756249199.0)
+    managed.record_open(sid, 'nova')
+
+    row = managed._reg_load()[sid]
+    assert row['cwd'] == '/Users/x/Agents/Nova/chat'
+    assert row['launched_at'] == 1756249199.0

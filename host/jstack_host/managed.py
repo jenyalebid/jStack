@@ -428,9 +428,34 @@ def record_open(sid: str, agent: str, name: str = "",
             entry["model"] = model or prior["model"]
         if tag or prior.get("tag"):
             entry["tag"] = tag or prior["tag"]
+        for carried in ("cwd", "launched_at"):
+            if prior.get(carried):
+                entry[carried] = prior[carried]
         d[sid] = entry
 
     _reg_mutate(_put)
+
+
+def record_launch(sid: str, cwd: str, launched_at: float) -> None:
+    """Where and when this session's pane started — the two facts that identify
+    an engine-owned transcript later.
+
+    A Codex rollout is matched to a board row by workspace and birth time, and
+    until now both were INFERRED at read time from `tmux list-panes`: the pane's
+    `session_created` stood in for the launch and `pane_current_path` for the
+    workspace. That made a file-matching problem depend on a tmux call that can
+    return late, non-zero, or not at all — and when it did, the card went blank
+    with a live session behind it and nothing said why.
+
+    They belong here because the spawn is the only witness to them at the moment
+    they are true, and because a recorded fact does not degrade: it is the same
+    answer after the tmux server is restarted, after the pane's cwd changes, and
+    after the host itself restarts and loses every in-process binder."""
+    def mutate(d: dict) -> None:
+        if sid in d:
+            d[sid]["cwd"] = cwd
+            d[sid]["launched_at"] = launched_at
+    _reg_mutate(mutate)
 
 
 def record_close(sid: str) -> None:
@@ -824,6 +849,13 @@ def open_managed(sid: str, cwd: str, resume: bool = True, displace=None,
     # other's CLI, so they are not interchangeable.
     if engine == "codex":
         from . import codex_transcript
+        # Recorded BEFORE the binder is started, because the binder is the
+        # optimistic half: Codex does not create its rollout when it starts, it
+        # creates it on the session's first turn, so a session opened from the
+        # phone and typed into minutes later has no file for the binder's whole
+        # polling window. The record is what lets the board bind it whenever it
+        # does appear, with no live process left to ask.
+        record_launch(sid, cwd, launched_at)
         codex_transcript.bind_open_session(sid, launched_at, cwd)
         _auto_skip_codex_update(name)
     else:
