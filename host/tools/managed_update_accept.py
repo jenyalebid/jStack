@@ -792,10 +792,17 @@ def arm_fault(guest: Guest, fault: str) -> subprocess.Popen:
 
 def read_fault(process: subprocess.Popen, *, timeout: int = 1800) -> dict:
     output, _ = process.communicate(timeout=timeout)
+    if process.returncode != 0:
+        raise AcceptanceFailure(f"the fault injector exited {process.returncode}: {output[-600:]}")
     records = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
-    if not records:
-        raise AcceptanceFailure(f"the fault injector reported nothing: {output[-400:]}")
-    return records[-1]
+    injected = next((record for record in records if record.get("injected")), None)
+    terminal = records[-1] if records else {}
+    if (not injected or not injected.get("job")
+            or terminal.get("job") != injected["job"]
+            or terminal.get("fault") != injected["injected"]
+            or terminal.get("state") != "rolled_back"):
+        raise AcceptanceFailure(f"the fault injector did not prove injection and recovery: {output[-600:]}")
+    return terminal
 
 
 # ── The run
