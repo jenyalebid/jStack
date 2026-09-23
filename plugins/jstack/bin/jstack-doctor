@@ -325,6 +325,71 @@ def check_hooks() -> dict:
     return _check("hooks", OK, f"{len(commands)} hook commands, all present and executable")
 
 
+def _load_engine(path: Path):
+    """Import an extensionless bin/ script as a module.
+
+    Loaded rather than shelled out to because the question is what the engine's
+    OWN config resolution answers — re-deriving it here would be a second copy
+    that can agree while the engine disagrees.
+    """
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    name = f"_doctor_{path.name.replace('-', '_')}"
+    spec = importlib.util.spec_from_loader(name, SourceFileLoader(name, str(path)))
+    mod = importlib.util.module_from_spec(spec)
+    # A doctor reports; it does not write. Executing the engine imports its
+    # dependencies, and a __pycache__ left behind is a path this run created.
+    prior, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = prior
+    return mod
+
+
+def check_review() -> dict:
+    """The session-end engine resolves THIS machine's sessions to an agent.
+
+    `hooks` already proves the SessionEnd hook exists and runs; it cannot prove
+    the engine behind it does anything. The engine skips a session it cannot
+    attribute, and "no agent match" is also the correct log line for a genuinely
+    unowned session — so an install whose agent_root pointed nowhere skipped
+    every session in a row and looked, from every other check here, healthy.
+    That is the failure this check exists for: reviews stop, nothing says so.
+    """
+    engine = PLUGIN_ROOT / "bin" / "session-review-spawn"
+    if not engine.is_file():
+        return _check("review", FAIL, f"no engine at {engine}",
+                      "reinstall the plugin — SessionEnd has nothing to call")
+    try:
+        mod = _load_engine(engine)
+    except Exception as e:  # noqa: BLE001 — a doctor never dies on a check
+        return _check("review", FAIL, f"engine will not load: {e}",
+                      f"run {engine} by hand to see the traceback")
+
+    action = mod.CFG.get("session_end_action")
+    if action == "off":
+        return _check("review", OK, "session_end_action: off — reviews disabled by config")
+    if os.environ.get("JSTACK_REVIEW_DISABLED") == "1":
+        return _check("review", WARN, "JSTACK_REVIEW_DISABLED=1 — every session end is a no-op",
+                      "unset it to let sessions write their own timeline entry")
+
+    agent_root = mod.CFG["agent_root"]
+    agents = mod.reviewable_agents(agent_root)
+    if not agents:
+        return _check("review", FAIL,
+                      f"engine resolves agent_root to {agent_root} — no agents there",
+                      "set `agent_root` in ~/.claude/jstack/review.json, or let it "
+                      "derive from $JSTACK_ROOT; until then every session end is skipped")
+    if agent_root != root.agents_dir():
+        return _check("review", WARN,
+                      f"engine reads {agent_root}, the rest of the stack reads "
+                      f"{root.agents_dir()}",
+                      "drop `agent_root` from review.json unless the split is deliberate")
+    return _check("review", OK,
+                  f"{action}: {len(agents)} agent(s) resolvable from {agent_root}")
+
+
 def check_bin() -> dict:
     """The adapters are only reachable if their dir is on PATH.
 
@@ -655,8 +720,8 @@ def check_versions() -> dict:
 
 CHECKS = (check_python, check_claude, check_git, check_dateutil, check_root,
           check_agents, check_timeline, check_rules, check_commands, check_hooks,
-          check_bin, check_config, check_scheduler, check_marketplace_source,
-          check_versions)
+          check_bin, check_config, check_review, check_scheduler,
+          check_marketplace_source, check_versions)
 
 
 def checks() -> list:
