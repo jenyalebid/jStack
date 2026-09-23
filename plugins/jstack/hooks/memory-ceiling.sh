@@ -23,14 +23,17 @@ deny() {
 }
 
 if [ "$tool" = "Write" ]; then
-  lines=$(printf '%s' "$input" | jq -r '.tool_input.content' | wc -l | tr -d ' ')
+  # awk's NR, not `wc -l`: the content is a string, not a file, so a final line
+  # without a newline is still a line — and `jq -r` appends a newline of its own,
+  # which `wc -l` counted as a 21st line in a 20-line index.
+  lines=$(printf '%s' "$input" | jq -j '.tool_input.content' | awk 'END{print NR}')
   if [ "${lines:-0}" -gt "$CEILING" ]; then
     deny "MEMORY.md ceiling is ${CEILING} lines; this write is ${lines}. It auto-loads into every agent session. Memory holds personal things about the user — a durable rule belongs in the layer of the walk-up that owns it (org CLAUDE.md, agent root, seat, or a path-scoped rule in ~/.claude/rules/), and a platform truth belongs in an on-demand file under ~/Research/. Move it there and drop it from here."
   fi
 fi
 
 if [ "$tool" = "Edit" ] || [ "$tool" = "MultiEdit" ]; then
-  cur=$(wc -l < "$path" 2>/dev/null | tr -d ' ')
+  cur=$(awk 'END{print NR}' "$path" 2>/dev/null)
   if [ "${cur:-0}" -ge "$CEILING" ]; then
     deny "MEMORY.md is already at ${cur} lines (ceiling ${CEILING}). Adding via Edit is blocked. Rewrite it with Write under the ceiling first — move anything that is really a rule into the walk-up layer that owns it, and delete what has aged out."
   fi
