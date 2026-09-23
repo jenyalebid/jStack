@@ -292,6 +292,33 @@ def promote(candidate: Path, receipts_dir: Path, feed: Path, private_key: bytes,
     return envelope
 
 
+def hub_token() -> str:
+    """The credential of the hub this Mac is serving, not of the state dir a
+    shell resolves by default.
+
+    A hub mounted into another server keeps its device store in the state dir
+    its marker declares; the package default under `~/.local/state/jremote` is
+    a directory that host never reads. A deployer started from a checkout
+    resolved that default, found a credential an earlier process had minted
+    there, and every call to the live hub answered "wrong secret for
+    host-internal" (ship 127-r2). `install_host` already adopts the marker
+    before any read command; the deployer adopts it the same way.
+    """
+    from . import hostenv
+    from .install_host import adopt_installed_environment
+    adopt_installed_environment()
+    store = sys.modules.get(f"{__package__}.store")
+    if store is not None and Path(store.DB_PATH).parent.resolve() != hostenv.state_dir().resolve():
+        raise releases.ReleaseError(
+            "the device store was bound before the hub's state dir was adopted; "
+            "set JREMOTE_STATE_DIR to the hub's state dir and retry")
+    from . import devices
+    token = devices.internal_token()
+    if not token:
+        raise releases.ReleaseError("this hub has revoked its own internal credential")
+    return token
+
+
 def deploy(release: str, *, port: int = 9090, timeout: int = 2700, poll: int = 15) -> dict:
     """Update this hub and its eligible leaves to a promoted release, and watch.
 
@@ -302,9 +329,8 @@ def deploy(release: str, *, port: int = 9090, timeout: int = 2700, poll: int = 1
     confirmation of the running release, not the leaf's own claim.
     """
     import httpx
-    from . import devices
     base = f"http://127.0.0.1:{port}/api/jremote/v1/updates"
-    headers = {"Authorization": "Bearer " + devices.internal_token()}
+    headers = {"Authorization": "Bearer " + hub_token()}
     with httpx.Client(timeout=30, trust_env=False) as client:
         def inventory() -> dict:
             answer = client.get(base + "/inventory", headers=headers)
@@ -390,6 +416,8 @@ def main():
     state = commands.add_parser("acceptance", help="what this candidate's receipts prove today")
     state.add_argument("candidate", type=Path)
     state.add_argument("--receipts", type=Path, required=True)
+    roll = commands.add_parser("deploy", help="update this hub and its leaves to the promoted release")
+    roll.add_argument("release", nargs="?", help="a promoted release; default: the feed's latest")
     whole = commands.add_parser("ship", help="qualify, promote and deploy one candidate")
     whole.add_argument("candidate", type=Path)
     whole.add_argument("--receipts", type=Path, required=True)
@@ -421,6 +449,12 @@ def main():
         state = acceptance.inspect(args.receipts, candidate_manifest(args.candidate, private))
         print(json.dumps({name: {"state": entry["state"], "detail": entry["detail"]}
                           for name, entry in state.items()}, indent=2))
+    elif args.action == "deploy":
+        release = args.release
+        if not release:
+            latest = json.loads((Path(config["feed_dir"]) / "latest.json").read_text())
+            release = latest["manifest"]["release"]
+        print(json.dumps(deploy(release, port=config.get("hub_port", 9090)), indent=1))
     elif args.action == "ship":
         print(json.dumps(ship(config, args.candidate, args.receipts, private,
                               deploy_after=args.deploy), indent=2))
