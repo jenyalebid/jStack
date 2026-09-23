@@ -112,17 +112,31 @@ class AppBackend(MacBackend):
         return bool(running) and bool(released) and running != released
 
     def recovery_status(self, job: dict) -> str:
-        """Judge an interrupted application by the installed artifact itself."""
+        """Judge an interrupted application by the transaction's own files.
+
+        apply() replaces each app in two renames: target -> backup, then
+        incoming -> target. Only those paths say how far it got. The installed
+        bundle's version cannot: two releases built on the same day carry the
+        same CFBundleVersion, so an untouched prior would pass as the copy.
+        """
         transaction = job.get("transaction", {})
-        record = transaction.get("apps", {}).get("menubar")
-        if not record:
+        apps = transaction.get("apps", {})
+        if "menubar" not in apps or not job.get("id"):
             return "unknown"
-        try:
-            self._check_app(Path(record["target"]),
-                            transaction["manifest"]["components"]["menubar"], "menubar")
-        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
-            return "unknown"
-        # The replacement finished before the journal advanced; verification
+        for kind, record in apps.items():
+            target, backup = Path(record["target"]), Path(record["backup"])
+            incoming = target.with_name(target.name + ".incoming-" + job["id"])
+            if incoming.exists():
+                return "unknown"  # the copy never finished, or the second rename never ran
+            if record.get("existed", True) and not backup.exists():
+                return "unknown"  # the swap never began; the running release is untouched
+            if not target.exists():
+                return "unknown"  # cut between the two renames
+            try:
+                self._check_app(target, transaction["manifest"]["components"][kind], kind)
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                return "unknown"
+        # Every replacement finished before the journal advanced; verification
         # decides whether the release stays.
         return "applied"
 

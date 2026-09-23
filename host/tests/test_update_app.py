@@ -58,24 +58,71 @@ def test_superseded_native_schema_is_rejected(tmp_path):
         update_app.AppBackend(tmp_path, {}).compatible({"schema": 2})
 
 
-@pytest.mark.parametrize("installed,expected", [
-    ("release", "applied"), ("different", "unknown"), (None, "unknown"),
+@pytest.mark.parametrize("layout,expected", [
+    # (target, backup, incoming) present on disk after the cut
+    ((True, True, False), "applied"),    # both renames done
+    ((True, False, True), "unknown"),    # frozen mid-copy: prior untouched, copy half-written
+    ((True, False, False), "unknown"),   # nothing began
+    ((False, True, True), "unknown"),    # cut between the renames
+    ((False, True, False), "unknown"),   # backup made, no bundle at all
+    ((True, True, True), "unknown"),     # copy left behind next to a finished swap
 ])
-def test_recovery_state_is_judged_by_the_installed_artifact(monkeypatch, tmp_path, installed, expected):
+def test_recovery_state_is_judged_by_the_transaction_files(monkeypatch, tmp_path, layout, expected):
+    app = tmp_path / "Hub.app"
+    backup = tmp_path / "Hub.app.previous-app-stage-x"
+    incoming = tmp_path / "Hub.app.incoming-job-1"
+    for path, present in zip((app, backup, incoming), layout):
+        if present:
+            path.mkdir()
+    backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
+    checked = []
+    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind: checked.append((path, kind)))
+    transaction = {"apps": {"menubar": {"target": str(app), "backup": str(backup), "existed": True}},
+                   "manifest": {"components": {"menubar": {"version": "20260923"}}}}
+    assert backend.recovery_status({"id": "job-1", "transaction": transaction}) == expected
+    assert checked == ([(app, "menubar")] if expected == "applied" else [])
+
+
+def test_recovery_ignores_a_same_version_prior_that_was_never_swapped(monkeypatch, tmp_path):
+    """Two releases built the same day share CFBundleVersion; the untouched
+    prior must not pass as the finished copy (jStack #127 reboot leg)."""
+    app = tmp_path / "Hub.app"
+    app.mkdir()
+    (tmp_path / "Hub.app.incoming-job-2").mkdir()
+    backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
+    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind: None)  # version matches
+    transaction = {"apps": {"menubar": {"target": str(app), "existed": True,
+                                        "backup": str(tmp_path / "Hub.app.previous-x")}},
+                   "manifest": {"components": {"menubar": {"version": "20260923"}}}}
+    assert backend.recovery_status({"id": "job-2", "transaction": transaction}) == "unknown"
+
+
+def test_recovery_judges_every_app_in_the_transaction(monkeypatch, tmp_path):
+    hub, client = tmp_path / "Hub.app", tmp_path / "jRemote.app"
+    hub.mkdir(); client.mkdir()
+    (tmp_path / "Hub.app.previous-x").mkdir()
+    backend = update_app.AppBackend(tmp_path, {"menubar_path": str(hub)})
+    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind: None)
+    transaction = {"apps": {
+        "menubar": {"target": str(hub), "backup": str(tmp_path / "Hub.app.previous-x"), "existed": True},
+        "client": {"target": str(client), "backup": str(tmp_path / "jRemote.app.previous-x"), "existed": True}},
+        "manifest": {"components": {"menubar": {"version": "1"}, "client": {"version": "2"}}}}
+    assert backend.recovery_status({"id": "job-3", "transaction": transaction}) == "unknown"
+    (tmp_path / "jRemote.app.previous-x").mkdir()
+    assert backend.recovery_status({"id": "job-3", "transaction": transaction}) == "applied"
+
+
+def test_recovery_of_a_first_install_needs_no_backup(monkeypatch, tmp_path):
     app = tmp_path / "Hub.app"
     backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
-
-    def check(path, component, kind):
-        assert path == app and kind == "menubar"
-        if installed != "release":
-            raise ValueError("installed app differs from the release")
-
-    monkeypatch.setattr(backend, "_check_app", check)
-    transaction = {"apps": {"menubar": {"target": str(app)}},
-                   "manifest": {"components": {"menubar": {"version": "42"}}}}
-    if installed is None:
-        transaction["apps"] = {}
-    assert backend.recovery_status({"transaction": transaction}) == expected
+    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind: None)
+    transaction = {"apps": {"menubar": {"target": str(app), "existed": False,
+                                        "backup": str(tmp_path / "Hub.app.previous-x")}},
+                   "manifest": {"components": {"menubar": {"version": "1"}}}}
+    assert backend.recovery_status({"id": "job-4", "transaction": transaction}) == "unknown"
+    app.mkdir()
+    assert backend.recovery_status({"id": "job-4", "transaction": transaction}) == "applied"
+    assert backend.recovery_status({"transaction": transaction}) == "unknown"
 
 
 def test_finalization_discards_the_retained_backup_bundle(tmp_path):
