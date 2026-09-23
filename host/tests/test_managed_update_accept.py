@@ -586,7 +586,7 @@ def _bypass_guest(runner, *, answers_after_nudge: bool, prompt_up: bool = True):
 
         def call(self, path, body=None, **kwargs):
             assert path == "/sessions/65e5d97c-1733/input" and "run pwd once" in body["text"]
-            assert state["accepted"], "a request typed under the warning is lost"
+            assert state["accepted"] or not prompt_up, "a request typed under the warning is lost"
             state["reprompted"].append(body["text"])
             state["answered"] = answers_after_nudge
             return {"status": 200, "body": "{}"}
@@ -684,3 +684,160 @@ def test_a_prior_whose_warning_was_answered_still_gets_its_request_delivered(run
     runner.new_session(guest, prior=True)
 
     assert state["nudged"] and state["reprompted"], "both halves of the prior's start are the runner's"
+
+
+def test_a_prior_that_shows_no_warning_still_gets_its_request_delivered(runner, monkeypatch):
+    """A guest that accepted the warning in an earlier journey opens straight
+    onto an empty prompt; the prior's typer is just as dead there (#116)."""
+    ticks = iter([0, 1, 10, 31, 32, 40, 41])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    monkeypatch.setattr(runner, "send_to_session", lambda guest, session: {"session": session})
+    guest, state = _bypass_guest(runner, answers_after_nudge=True, prompt_up=False)
+
+    session = runner.new_session(guest, prior=True)
+
+    assert session["nudged"] is False and state["nudged"] == []
+    assert session["reprompted"] is True and len(state["reprompted"]) == 1
+
+
+def test_a_request_already_on_screen_is_not_typed_twice(runner, monkeypatch):
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    calls = []
+    guest = SimpleNamespace(
+        sh=lambda command, **kwargs: "❯ Use the shell tool to run pwd once\nbypass permissions on\n",
+        call=lambda *args, **kwargs: calls.append(args))
+    assert runner.reprompt(guest, "65e5d97c-1733") is None
+    assert calls == []
+
+
+def _fault_fleet(runner, monkeypatch, *, fault_result, prior_release=PRIOR):
+    queued = []
+    hub = SimpleNamespace(queue=lambda machine, request: queued.append(request) or
+                          {"jobs": [{"id": "job-" + request.split("-")[1]}]},
+                          wait_for=lambda state, machine: {"state": state, "job": {}})
+    guest = SimpleNamespace(name="leaf", installed=lambda: {"release": prior_release,
+                                                             "client": "91", "menubar": "20260922"},
+                            sh=lambda command, **kwargs: "")
+    fleet = SimpleNamespace(leaves=[guest], hub=hub, machine=lambda _: "leaf-id", plan={})
+    monkeypatch.setattr(runner, "stage_prior", lambda fleet, guest: guest.installed())
+    monkeypatch.setattr(runner, "arm_fault", lambda guest, fault: fault)
+    monkeypatch.setattr(runner, "read_fault", lambda process: fault_result)
+    return fleet, guest, queued
+
+
+def test_a_kill_that_rolls_back_for_a_leftover_copy_is_not_recovery(runner, monkeypatch):
+    fleet, guest, queued = _fault_fleet(runner, monkeypatch, fault_result={
+        "state": "rolled_back", "job": "j1", "detail": "unfinished incoming app requires recovery"})
+    journey = acceptance.Journey("interruption")
+    with pytest.raises(runner.AcceptanceFailure, match="not from recovery"):
+        runner.interruption(journey, fleet, SimpleNamespace(release=CANDIDATE))
+    assert journey.observed == {}
+
+
+def test_a_rollback_caused_by_anything_but_the_withheld_client_fails(runner, monkeypatch):
+    fleet, guest, queued = _fault_fleet(runner, monkeypatch, fault_result={
+        "state": "rolled_back", "job": "j1", "detail": "unfinished incoming app requires recovery"})
+    journey = acceptance.Journey("rollback")
+    with pytest.raises(runner.AcceptanceFailure, match="not for the withheld client bundle"):
+        runner.rollback(journey, fleet, SimpleNamespace(release=CANDIDATE))
+    assert journey.observed == {}
+
+
+def test_the_prior_s_leftover_copy_is_recorded_and_removed_before_the_retry(runner, monkeypatch):
+    fleet, guest, queued = _fault_fleet(runner, monkeypatch, fault_result={
+        "state": "rolled_back", "job": "j1", "detail": "updated components failed verification"})
+    commands = []
+    listing = {"paths": "/Applications/jRemote.app.incoming-" + CANDIDATE + "\n"}
+    def shell(command, **kwargs):
+        commands.append(command)
+        if "ls -d" in command:
+            found, listing["paths"] = listing["paths"], ""
+            return found
+        return ""
+    guest.sh = shell
+    releases = iter([PRIOR, CANDIDATE])
+    guest.installed = lambda: {"release": next(releases)}
+    monkeypatch.setattr(runner, "reboot_mid_apply",
+                        lambda fleet, guest, machine, candidate: {"job": "j3", "state": "rolled_back"})
+    journey = acceptance.Journey("interruption")
+
+    runner.interruption(journey, fleet, SimpleNamespace(release=CANDIDATE))
+
+    assert any("rm -rf /Applications/*.incoming-*" in command for command in commands)
+    assert any("jRemote.app.incoming-" in line and "#117" in line for line in journey.lines)
+    assert journey.observed["retry_current"]["release"] == CANDIDATE
+    assert journey.missing == ()
+
+
+def _reboot_fleet(runner, monkeypatch, tmp_path, *, settled_detail, leftovers=""):
+    prior = tmp_path / "prior"
+    prior.mkdir()
+    offered, queued, power = [], [], []
+    monkeypatch.setattr(runner, "Candidate", lambda *args: SimpleNamespace(release=PRIOR))
+    monkeypatch.setattr(runner, "arm_fault", lambda guest, fault: fault)
+    monkeypatch.setattr(runner, "read_freeze", lambda process: {
+        "injected": "freeze", "job": "job-reboot", "pid": 41, "copies": ["/Applications/x.incoming-j"]})
+    hub = SimpleNamespace(
+        queue=lambda machine, request: queued.append(request) or {"jobs": [{"id": "job-" + request.split("-")[1]}]},
+        wait_for=lambda state, machine: {"state": state, "job": {"id": "job-reboot", "detail": settled_detail}})
+    installed = iter([{"release": CANDIDATE}, {"release": CANDIDATE}, {"release": PRIOR}])
+    guest = SimpleNamespace(name="leaf", installed=lambda: next(installed),
+                            stop=lambda: power.append("stop"), start=lambda: power.append("start"),
+                            sh=lambda command, **kwargs: leftovers if "ls -d" in command else "")
+    fleet = SimpleNamespace(prior=prior, hub=hub, offer=lambda c: offered.append(c.release))
+    return fleet, guest, offered, queued, power
+
+
+def test_a_reboot_mid_copy_rolls_back_keeps_the_release_and_the_next_request_lands(
+        runner, monkeypatch, tmp_path):
+    fleet, guest, offered, queued, power = _reboot_fleet(
+        runner, monkeypatch, tmp_path, settled_detail="recovered interrupted application")
+    candidate = SimpleNamespace(release=CANDIDATE, public_key="k")
+
+    result = runner.reboot_mid_apply(fleet, guest, "leaf-id", candidate)
+
+    assert power == ["stop", "start"]
+    assert result["state"] == "rolled_back" and result["release_kept"] == CANDIDATE
+    assert result["retry_release"] == PRIOR and result["frozen_copies"]
+    assert offered == [PRIOR, CANDIDATE], "the candidate offer comes back whatever happened"
+    assert [request.split("-")[1] for request in queued] == ["reboot", "reboot"]
+
+
+def test_a_reboot_that_settles_any_other_way_fails_by_its_detail(runner, monkeypatch, tmp_path):
+    fleet, guest, offered, queued, power = _reboot_fleet(
+        runner, monkeypatch, tmp_path, settled_detail="unfinished incoming app requires recovery")
+    with pytest.raises(runner.AcceptanceFailure, match="settled the job as 'unfinished incoming"):
+        runner.reboot_mid_apply(fleet, guest, "leaf-id", SimpleNamespace(release=CANDIDATE, public_key="k"))
+    assert offered == [PRIOR, CANDIDATE]
+
+
+def test_a_recovered_updater_that_leaves_a_copy_behind_fails(runner, monkeypatch, tmp_path):
+    fleet, guest, offered, queued, power = _reboot_fleet(
+        runner, monkeypatch, tmp_path, settled_detail="recovered interrupted application",
+        leftovers="/Applications/jStack Hub.app.incoming-job-reboot\n")
+    with pytest.raises(runner.AcceptanceFailure, match="left \\['/Applications/jStack Hub.app.incoming"):
+        runner.reboot_mid_apply(fleet, guest, "leaf-id", SimpleNamespace(release=CANDIDATE, public_key="k"))
+
+
+def test_the_reboot_leg_refuses_a_guest_not_on_the_candidate(runner, monkeypatch, tmp_path):
+    fleet, guest, offered, queued, power = _reboot_fleet(
+        runner, monkeypatch, tmp_path, settled_detail="recovered interrupted application")
+    guest.installed = lambda: {"release": PRIOR}
+    with pytest.raises(runner.AcceptanceFailure, match="needs the candidate's updater"):
+        runner.reboot_mid_apply(fleet, guest, "leaf-id", SimpleNamespace(release=CANDIDATE, public_key="k"))
+    assert offered == [] and power == []
+
+
+@pytest.mark.parametrize("output", [
+    "",
+    '{"armed": "freeze"}\n',
+    '{"injected": "freeze", "job": "j", "pid": 3, "copies": []}\n',
+])
+def test_read_freeze_wants_a_stopped_pid_and_a_copy_in_flight(runner, output):
+    process = SimpleNamespace(communicate=lambda timeout=None: (output, ""), returncode=0)
+    with pytest.raises(runner.AcceptanceFailure, match="did not prove a frozen"):
+        runner.read_freeze(process)
+    good = '{"injected": "freeze", "job": "j", "pid": 3, "copies": ["/Applications/a.incoming-j"]}\n'
+    assert runner.read_freeze(SimpleNamespace(communicate=lambda timeout=None: (good, ""),
+                                              returncode=0))["job"] == "j"

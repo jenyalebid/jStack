@@ -3,7 +3,9 @@
 Run before queueing a NEW job. Observes the real durable journal and launchd
 process; never rewrites update state or installs a fake backend. An interruption
 kills only this VM's updater after a bundle moves. A rollback fault temporarily
-withholds the staged client bundle while apply is paused. Production is refused.
+withholds the staged client bundle while apply is paused. A freeze stops the
+updater with an app copy half written and leaves it stopped, for the host to
+cut the VM under it. Production is refused.
 """
 import argparse
 import json
@@ -44,7 +46,7 @@ def updater_process(config, root):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("fault", choices=["interruption", "rollback"])
+    parser.add_argument("fault", choices=["interruption", "rollback", "freeze"])
     parser.add_argument("--timeout", type=int, default=600)
     args = parser.parse_args()
     root = Path.home() / ".local/state/jremote/updates"
@@ -75,13 +77,29 @@ def main():
                     return
             elif job.get("state") == "applying":
                 app = job["transaction"]["apps"]["menubar"]
+                target = Path(app["target"])
                 # The first fault waits until replacement really began. The
-                # second must withhold the client before its replacement.
+                # second must withhold the client before its replacement. The
+                # freeze wants the hub copy started and not yet swapped in.
                 if args.fault == "interruption" and not Path(app["backup"]).exists():
+                    time.sleep(.01)
+                    continue
+                copies = [str(path) for path in target.parent.glob(target.name + ".incoming-*")
+                          if path.is_dir()]
+                if args.fault == "freeze" and (not copies or Path(app["backup"]).exists()):
                     time.sleep(.01)
                     continue
                 updater = updater_process(config, root)
                 updater.send_signal(signal.SIGSTOP)
+                if args.fault == "freeze":
+                    current = json.loads(journal.read_text())
+                    if (current["id"] != job["id"] or current["state"] != "applying"
+                            or Path(app["backup"]).exists()):
+                        updater.send_signal(signal.SIGCONT)
+                        raise RuntimeError("missed the copy window")
+                    print(json.dumps({"injected": "freeze", "job": job["id"], "pid": updater.pid,
+                                      "copies": copies}), flush=True)
+                    return  # stopped on purpose: the VM is about to be cut under it
                 try:
                     current = json.loads(journal.read_text())
                     if current["id"] != job["id"] or current["state"] != "applying":

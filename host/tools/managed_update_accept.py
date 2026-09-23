@@ -430,6 +430,78 @@ def session_survival(journey, fleet: Fleet, candidate: Candidate) -> None:
                                               "bypass_prompt_nudged": fresh["nudged"]})
 
 
+RECOVERED = {"updated components failed verification", "recovered interrupted application"}
+RECOVERED_BY_REBOOT = "recovered interrupted application"
+
+
+def residue(guest: Guest) -> list[str]:
+    """Half-written app copies left next to the installed bundles."""
+    listing = guest.sh("/bin/ls -d /Applications/*.incoming-* 2>/dev/null || true")
+    return [line for line in listing.splitlines() if line.strip()]
+
+
+def sweep_prior_residue(journey, guest: Guest) -> list[str]:
+    """The published prior names its incoming copy per RELEASE and its rollback
+    never removes it (#117): an updater killed during the client copy leaves
+    `jRemote.app.incoming-<release>` behind, and every later attempt at that
+    release on that machine dies on "unfinished incoming app requires
+    recovery". The candidate names copies per job and removes them (71a018f,
+    ae87a9a). The rest of this journey measures the candidate, so the prior's
+    leftover is removed here and the receipt says what was found."""
+    found = residue(guest)
+    if found:
+        guest.sh("/bin/rm -rf /Applications/*.incoming-*")
+        journey.note("the prior's updater left " + json.dumps(found) + "; removed (#117)")
+    return found
+
+
+def reboot_mid_apply(fleet: Fleet, guest: Guest, machine: str, candidate: Candidate) -> dict:
+    """Cut the guest with the candidate's own updater frozen half-way through
+    an app copy, boot it, and read what the journal did.
+
+    The design under test (update_supervisor.tick): an apply interrupted by
+    reboot never resumes over a half-replaced installation — it is rolled back
+    as "recovered interrupted application", the release that was running stays
+    intact, the copy is removed, and the next request lands. The job installs
+    the PRIOR, because that is the only other signed release in the plan; what
+    is measured is the candidate's updater, which is what every machine runs
+    after this release ships.
+    """
+    state = guest.installed()
+    expect(state["release"] == candidate.release,
+           f"the reboot leg needs the candidate's updater; {guest.name} runs {state['release']}")
+    previous = Candidate(fleet.prior, candidate.public_key)
+    try:
+        fleet.offer(previous)
+        fault = arm_fault(guest, "freeze")
+        frozen = fleet.hub.queue(machine, request_id("reboot"))["jobs"][0]
+        injected = read_freeze(fault)
+        expect(injected.get("job") == frozen["id"],
+               f"the freeze landed on job {injected.get('job')}, not {frozen['id']}")
+        guest.stop()
+        guest.start()
+        settled = fleet.hub.wait_for("rolled_back", machine)
+        job = settled.get("job") or {}
+        expect(job.get("id") == frozen["id"], "the reboot settled a different job")
+        expect(job.get("detail") == RECOVERED_BY_REBOOT,
+               f"the reboot settled the job as {job.get('detail')!r}")
+        kept = guest.installed()
+        expect(kept["release"] == candidate.release,
+               f"the reboot left {kept['release']} in place of the candidate")
+        left = residue(guest)
+        expect(not left, f"the recovered updater left {left}")
+        retry = fleet.hub.queue(machine, request_id("reboot-retry"))["jobs"][0]
+        fleet.hub.wait_for("current", machine)
+        after = guest.installed()
+        expect(after["release"] == previous.release,
+               f"the request after the reboot left {after['release']}, not {previous.release}")
+    finally:
+        fleet.offer(candidate)
+    return {"job": frozen["id"], "state": settled["state"], "detail": job["detail"],
+            "frozen_copies": injected.get("copies"), "release_kept": kept["release"],
+            "retry_job": retry["id"], "retry_release": after["release"]}
+
+
 def interruption(journey, fleet: Fleet, candidate: Candidate) -> None:
     guest = fleet.leaves[0]
     machine = fleet.machine(guest)
@@ -439,20 +511,15 @@ def interruption(journey, fleet: Fleet, candidate: Candidate) -> None:
     result = read_fault(fault)
     expect(result.get("state") == "rolled_back",
            f"killing the updater mid-apply left {result.get('state')}")
+    expect(result.get("detail") in RECOVERED,
+           f"the killed job rolled back for {result.get('detail')!r}, not from recovery")
     journey.observe("interrupted_job", {"job": job["id"], "injected": result.get("job")})
     journey.observe("recovered_state", {"state": result["state"], "detail": result.get("detail")})
+    sweep_prior_residue(journey, guest)
     retry = fleet.hub.queue(machine, request_id("interrupt-retry"))["jobs"][0]
     fleet.hub.wait_for("current", machine)
     journey.observe("retry_current", {"job": retry["id"], "release": guest.installed()["release"]})
-    # A reboot must not resume onto a half-replaced installation.
-    stage_prior(fleet, guest)
-    resuming = fleet.hub.queue(machine, request_id("reboot"))["jobs"][0]
-    guest.stop()
-    guest.start()
-    settled = fleet.hub.wait_for("current", machine)
-    expect((settled.get("job") or {}).get("id") == resuming["id"],
-           "the job did not resume across the reboot")
-    journey.observe("reboot_resume", {"job": resuming["id"], "state": settled["state"]})
+    journey.observe("reboot_resume", reboot_mid_apply(fleet, guest, machine, candidate))
 
 
 def rollback(journey, fleet: Fleet, candidate: Candidate) -> None:
@@ -464,6 +531,9 @@ def rollback(journey, fleet: Fleet, candidate: Candidate) -> None:
     result = read_fault(fault)
     expect(result.get("state") == "rolled_back",
            f"a failed apply left {result.get('state')} instead of rolling back")
+    detail = str(result.get("detail") or "")
+    expect(detail.startswith("ditto failed") and "client/jRemote.app" in detail,
+           f"the job rolled back for {detail!r}, not for the withheld client bundle")
     journey.observe("failed_job", {"job": job["id"], "detail": result.get("detail")})
     journey.observe("rolled_back_state", result["state"])
     after = guest.installed()
@@ -778,9 +848,9 @@ def prompt_ready(guest: Guest, session: str) -> bool:
     return "bypass permissions on" in pane and "Yes, I accept" not in pane
 
 
-def reprompt(guest: Guest, session: str) -> dict:
+def reprompt(guest: Guest, session: str) -> dict | None:
     """Deliver the session's initial request again, through the product's own
-    input route. The published ffe85dc9 prior types it from a startup helper
+    input route; None when the request is already on screen. The published ffe85dc9 prior types it from a startup helper
     that never runs on the sealed bundle (unquoted bundled tmux, #116), so a
     prior whose warning the runner answered still sits at an empty prompt.
     The input route types with an argv, which is why it works where the
@@ -788,6 +858,9 @@ def reprompt(guest: Guest, session: str) -> dict:
     deadline = time.monotonic() + 30
     while not prompt_ready(guest, session) and time.monotonic() < deadline:
         time.sleep(1)
+    if "run pwd once" in guest.sh(f"{shlex.quote(GUEST_TMUX)} -L jremote capture-pane -p "
+                                  f"-t jr-{session[:8]} 2>/dev/null || true"):
+        return None  # the prior typed it after all; a second copy would be the runner's answer
     answer = guest.call(f"/sessions/{session}/input", {"text": INITIAL_REQUEST}, timeout=120)
     expect(answer["status"] == 200,
            f"the prior refused the re-delivered request: {answer['status']} {answer['body'][:200]}")
@@ -819,12 +892,15 @@ def new_session(guest: Guest, *, prior: bool = False) -> dict:
                        for message in proof.get("messages", []))
         if proof.get("session") == session and len(proof.get("holders", [])) == 1 and answered:
             break
-        if (prior and not nudged and time.monotonic() - started >= NUDGE_AFTER
-                and bypass_prompt_up(guest, session)):
-            accept_bypass_prompt(guest, session)
-            nudged = True
-            reprompt(guest, session)
-            reprompted = True
+        if prior and not reprompted and time.monotonic() - started >= NUDGE_AFTER:
+            # The warning is only up the first time a guest runs Claude; a
+            # guest that accepted it in an earlier journey goes straight to an
+            # empty prompt, and the prior's dead typer leaves it there just
+            # the same. The request is delivered either way; the receipt says so.
+            if bypass_prompt_up(guest, session):
+                accept_bypass_prompt(guest, session)
+                nudged = True
+            reprompted = reprompt(guest, session) is not None
     expect(proof.get("session") == session and len(proof.get("holders", [])) == 1,
            "the new session never acquired exactly one identified provider")
     if not answered and not prior and bypass_prompt_up(guest, session):
@@ -904,8 +980,21 @@ def refused_release(fleet: Fleet, guest: Guest, machine: str) -> dict:
 
 
 def arm_fault(guest: Guest, fault: str) -> subprocess.Popen:
+    guest.copy(Path(__file__).with_name("managed_update_fault.py"), GUEST_FAULT)
     return guest.background(" ".join(shlex.quote(part)
                                      for part in [GUEST_PYTHON, GUEST_FAULT, fault]))
+
+
+def read_freeze(process: subprocess.Popen, *, timeout: int = 900) -> dict:
+    """The injector's proof that it stopped the updater with a copy half written."""
+    output, _ = process.communicate(timeout=timeout)
+    if process.returncode != 0:
+        raise AcceptanceFailure(f"the freeze injector exited {process.returncode}: {output[-600:]}")
+    records = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
+    injected = next((record for record in records if record.get("injected") == "freeze"), None)
+    if not injected or not injected.get("job") or not injected.get("pid") or not injected.get("copies"):
+        raise AcceptanceFailure(f"the injector did not prove a frozen mid-copy updater: {output[-600:]}")
+    return injected
 
 
 def read_fault(process: subprocess.Popen, *, timeout: int = 1800) -> dict:
