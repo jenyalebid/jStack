@@ -1,0 +1,56 @@
+#!/bin/sh
+# jStack pre-push — the reachability gate.
+#
+# `tests/version-bump.sh` was written to run from here. Its own comment says
+# so: "The pre-push hook reads the refs being pushed and sets
+# JSTACK_PUSH_TO_MAIN". That hook never existed — not in this tree, not in
+# this repo's history — so the gate has only ever run when someone ran it by
+# hand, and nobody did. 0.69.9 was cut on 2026-09-22 and nine shipped plugin
+# commits landed on main behind it; every installed machine, this hub
+# included, kept running the 0.69.9 cache while `plugin update` answered
+# "already at the latest version". That is the exact failure the gate names,
+# reached because the gate was wired to nothing.
+#
+# Installed as .git/hooks/pre-push — a symlink into the versioned tree, the
+# same pattern as the identity gate. A fresh clone restores it with:
+#
+#   ln -s ../../plugins/jstack/githooks/pre-push .git/hooks/pre-push
+#
+# Scope: this runs the reachability gate only, not the whole tests/ suite.
+# A hook that runs everything jams every push in a shared checkout the moment
+# any unrelated test goes red, and a gate that gets bypassed is worth less
+# than no gate. One question, answerable, blocking: does the version on disk
+# cover every shipped change under it?
+
+set -u
+
+# Git invokes a hook by its path under .git/hooks, never through the symlink
+# target, so `dirname $0` is .git/hooks and walking up from it lands outside
+# the repo. Ask git where the worktree is instead.
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+GATE="$ROOT/plugins/jstack/tests/version-bump.sh"
+
+# A gate that cannot find itself must say so. Exiting 0 here would report a
+# green nobody checked, which is the failure this hook exists to end.
+if [ -z "$ROOT" ] || [ ! -x "$GATE" ]; then
+    echo "  pre-push: the reachability gate is missing at $GATE" >&2
+    echo "  Restore it, or push with --no-verify and bump by hand." >&2
+    exit 1
+fi
+
+# Which refs this push touches. A push that never reaches main cannot strand
+# an install, so the gate stands down for it — that is what lets work land on
+# a branch without minting a version per commit.
+to_main=0
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+    case "$remote_ref" in
+        refs/heads/main|refs/heads/master) to_main=1 ;;
+    esac
+done
+
+JSTACK_PUSH_TO_MAIN="$to_main" "$GATE" || {
+    echo
+    echo "  pre-push: refusing to strand this push. Bump, or push a branch instead." >&2
+    exit 1
+}
+exit 0
