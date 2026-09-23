@@ -197,7 +197,7 @@ def _remove_tunnel(runner, sudo: bool, root: Path) -> list[dict]:
 def detach(*, host_key: str = "", keep_tunnel: bool = False,
            tell_parent: bool = True, sudo: bool = True,
            poster=None, runner=None, root: Path | None = None,
-           state: Path | None = None) -> dict:
+           state: Path | None = None, home: Path | None = None) -> dict:
     """Leave the parent hub, and report every step by name.
 
     Returns `{"steps": [...], "detached": bool}`. `detached` is the answer to
@@ -233,6 +233,15 @@ def detach(*, host_key: str = "", keep_tunnel: bool = False,
 
     if tell_parent:
         steps.extend(_tell_parent(rec, host_key, poster))
+
+    # Shell access ends with the delegation it rode in on: the granted keys
+    # out of authorized_keys, the sudoers drop-in gone, Remote Login restored
+    # to what it was before the grant, this machine's identity destroyed.
+    from . import shell_access
+    steps.extend(shell_access.disable(
+        runner=runner, sudo=sudo, root=root, state=state,
+        authorized_keys=(Path(home) if home else Path.home())
+        / ".ssh" / "authorized_keys"))
 
     tunnel_gone = True
     if keep_tunnel:

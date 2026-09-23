@@ -150,6 +150,11 @@ def _tunnel_pairing_available() -> bool:
     return tunnel.can_pair()
 
 
+def _shell_access_available() -> bool:
+    from . import shell_access
+    return bool(shell_access.public_key())
+
+
 def _usage_caps_available() -> bool:
     # The same two conditions `/usage/caps` itself answers with. Importability
     # alone said True on any machine with the package installed — while the
@@ -168,10 +173,13 @@ def _usage_caps_available() -> bool:
 #: `tunnel_pairing` is here rather than in `_FEATURES` because the module always
 #: imports — what it needs is the hub's `wg_peer.py` beside it, which only the
 #: machine that owns the mesh has.
+#: `shell_access` is probed off the machine's own minted identity — the fact
+#: that decides whether `ssh` into or out of here can work at all.
 _PROBED_FEATURES = {"tags": _tags_available,
                     "tunnel_pairing": _tunnel_pairing_available,
                     "usage_caps": _usage_caps_available,
-                    "file_sharing": _file_sharing_available}
+                    "file_sharing": _file_sharing_available,
+                    "shell_access": _shell_access_available}
 
 
 def _probe(name: str) -> bool:

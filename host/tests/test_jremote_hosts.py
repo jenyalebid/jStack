@@ -78,7 +78,10 @@ def test_a_host_row_carries_no_column_a_credential_could_sit_in(store):
     store.upsert_host("host-key-aaaa", "Laptop", "10.66.0.7", 9090)
     columns = set(store.list_hosts()[0])
     assert columns == {"key", "name", "address", "port", "enrolled_at",
-                       "deleted", "updated_at", "seq", "device_id", "sees_home", "sees_leaves"}
+                       "deleted", "updated_at", "seq", "device_id", "sees_home",
+                       # Public halves only: the pubkey is the machine's to
+                       # show, the private key never left it (#131).
+                       "sees_leaves", "shell_pubkey", "shell_user"}
     assert not any(c in columns for c in ("token", "token_hash", "secret",
                                           "password", "key_hash"))
 

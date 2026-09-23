@@ -349,7 +349,8 @@ def _redeem(parent_url: str, payload: dict, poster) -> dict:
 def attach(code: str, parent_url: str, *, host_key: str,
            port: int = DEFAULT_PORT, dest_dir: Path | None = None,
            poster=None, runner=None, sudo: bool = True,
-           install_env: dict | None = None, prober=None) -> dict:
+           install_env: dict | None = None, prober=None,
+           home: Path | None = None) -> dict:
     """Redeem a host code on `parent_url` and stand up the leaf tunnel it hands
     back, turning this Mac into a managed hub of the parent.
 
@@ -397,6 +398,18 @@ def attach(code: str, parent_url: str, *, host_key: str,
     grants.revoke_issued()
     payload["grant_token"] = grants.issue(parent_url)
 
+    # The shell half of the same one-moment handshake (#131): the public key
+    # of an identity minted here, whose private half never crosses the wire,
+    # and the account a granted machine shells into. A mint that fails costs
+    # shell access, never the attach.
+    import getpass
+    from . import shell_access
+    try:
+        payload["ssh_pubkey"] = shell_access.identity()
+        payload["ssh_user"] = getpass.getuser()
+    except shell_access.ShellAccessError:
+        pass
+
     result = _redeem(parent_url, payload, poster)
 
     if result.get("kind") != "host":
@@ -435,6 +448,11 @@ def attach(code: str, parent_url: str, *, host_key: str,
                 "`sudo bash install_leaf.sh` from there")
         installer_output, installer_ran = (proc.stdout or "").strip(), True
 
+    shell_steps = _apply_shell(result.get("shell") or {},
+                               home=Path(home) if home else Path.home(),
+                               root=Path(env.get("LEAF_DEST") or "/"),
+                               runner=runner, sudo=sudo)
+
     return {
         "device": result.get("device") or {},
         "token": result.get("token", ""),
@@ -461,4 +479,46 @@ def attach(code: str, parent_url: str, *, host_key: str,
         # absent case has to mean "yes" or every existing parent starts
         # reporting a restriction it does not impose.
         "reachback": bool(result.get("reachback", True)),
+        # The graded shell-grant steps — [] when the parent answered no
+        # `shell`, which is a parent from before hub-held shell grants or a
+        # mint that failed here, and either way an attach exactly as it was.
+        "shell_steps": shell_steps,
     }
+
+
+def _apply_shell(shell: dict, *, home: Path, root: Path,
+                 runner, sudo: bool) -> list[dict]:
+    """Lay what the parent's `shell` answer grants, graded like detach's steps.
+
+    Runs after the tunnel is up, so a step that fails is reported beside the
+    attach that still succeeded — shell access is re-runnable via the joiner,
+    the enrolment code it would cost is not.
+    """
+    if not shell.get("authorized"):
+        return []
+    import getpass
+    from . import shell_access
+    steps: list[dict] = []
+    ssh_dir = home / ".ssh"
+    try:
+        shell_access.write_authorized_block(ssh_dir / "authorized_keys",
+                                            list(shell["authorized"]))
+        steps.append({"step": "authorized-keys", "ok": True,
+                      "note": f"{len(shell['authorized'])} granted "
+                              "key(s) may log in here"})
+    except OSError as exc:
+        steps.append({"step": "authorized-keys", "ok": False,
+                      "note": f"could not write authorized_keys: {exc}"})
+    steps += shell_access.enable(getpass.getuser(), runner=runner, sudo=sudo,
+                                 root=root)
+    try:
+        shell_access.write_ssh_config(ssh_dir / "config",
+                                      shell.get("peers") or [])
+        peers = len(shell.get("peers") or [])
+        steps.append({"step": "ssh-config", "ok": True,
+                      "note": (f"{peers} peer(s) reachable by name"
+                               if peers else "no peers granted yet")})
+    except (OSError, shell_access.ShellAccessError) as exc:
+        steps.append({"step": "ssh-config", "ok": False,
+                      "note": f"could not write the ssh config: {exc}"})
+    return steps

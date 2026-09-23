@@ -46,6 +46,15 @@ _RECORD = "shell_access.json"
 SYSTEMSETUP = "/usr/sbin/systemsetup"
 
 
+#: The exact shape of a bare authorized_keys line — type, blob, optional
+#: comment word. No options prefix and no second line, because these lines are
+#: written verbatim into OTHER machines' authorized_keys: an options field is
+#: a command, a newline is a smuggled second key.
+_PUBKEY = re.compile(
+    r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9-]+|sk-[a-z0-9.@-]+) "
+    r"[A-Za-z0-9+/=]+( [A-Za-z0-9._:@+-]+)?$")
+
+
 class ShellAccessError(Exception):
     """A grant input that must not reach a file other parsers trust."""
 
@@ -54,6 +63,14 @@ def _word(value: str, what: str) -> str:
     if not _SAFE_WORD.match(value or ""):
         raise ShellAccessError(f"{what} {value!r} cannot be written safely")
     return value
+
+
+def valid_pubkey(line: str) -> bool:
+    return bool(line) and len(line) <= 1024 and bool(_PUBKEY.match(line))
+
+
+def valid_user(name: str) -> bool:
+    return bool(_SAFE_WORD.match(name or ""))
 
 
 # ── identity ────────────────────────────────────────────────────────────────
@@ -253,7 +270,7 @@ def enable(user: str, *, runner=None, sudo: bool = True,
     return steps
 
 
-def disable(user: str, *, runner=None, sudo: bool = True,
+def disable(*, runner=None, sudo: bool = True,
             root: Path | None = None, state: Path | None = None,
             authorized_keys: Path | None = None) -> list[dict]:
     """Enable's full reverse, graded per step like detach — a machine that
@@ -294,10 +311,18 @@ def disable(user: str, *, runner=None, sudo: bool = True,
 
     ak = authorized_keys or Path.home() / ".ssh" / "authorized_keys"
     try:
-        if ak.exists():
+        text = ak.read_text()
+    except OSError:
+        text = ""
+    try:
+        # Only a file that carries the managed block is rewritten — a machine
+        # that never had a grant keeps its authorized_keys byte-untouched.
+        if MARK_BEGIN in text:
             write_authorized_block(ak, [])
-        steps.append({"step": "authorized-keys", "ok": True,
-                      "note": "no managed key can log in here any more"})
+            note = "no managed key can log in here any more"
+        else:
+            note = "no managed keys were present"
+        steps.append({"step": "authorized-keys", "ok": True, "note": note})
     except OSError as exc:
         steps.append({"step": "authorized-keys", "ok": False,
                       "note": f"could not rewrite {ak}: {exc}"})

@@ -203,7 +203,7 @@ def test_disable_restores_remote_login_only_if_enable_turned_it_on(tmp_path):
     shell_access.enable("jarvis", runner=runner, sudo=False, root=tmp_path)
 
     off = _Runner()
-    steps = shell_access.disable("jarvis", runner=off, sudo=False,
+    steps = shell_access.disable(runner=off, sudo=False,
                                  root=tmp_path,
                                  authorized_keys=tmp_path / "authorized_keys")
     assert any("-setremotelogin" in c and "off" in c for c in off.calls)
@@ -215,7 +215,7 @@ def test_disable_leaves_remote_login_up_when_it_predates_the_grant(tmp_path):
     shell_access.enable("jarvis", runner=runner, sudo=False, root=tmp_path)
 
     off = _Runner()
-    steps = shell_access.disable("jarvis", runner=off, sudo=False,
+    steps = shell_access.disable(runner=off, sudo=False,
                                  root=tmp_path,
                                  authorized_keys=tmp_path / "authorized_keys")
     assert not any("-setremotelogin" in c for c in off.calls)
@@ -230,7 +230,7 @@ def test_disable_removes_the_sudoers_drop_in_the_block_and_the_identity(tmp_path
     runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
     shell_access.enable("jarvis", runner=runner, sudo=False, root=tmp_path)
 
-    steps = shell_access.disable("jarvis", runner=_Runner(), sudo=False,
+    steps = shell_access.disable(runner=_Runner(), sudo=False,
                                  root=tmp_path, authorized_keys=ak)
 
     assert not (tmp_path / shell_access.SUDOERS_PATH).exists()
@@ -243,7 +243,7 @@ def test_disable_removes_the_sudoers_drop_in_the_block_and_the_identity(tmp_path
 
 
 def test_disable_on_a_machine_that_never_had_a_grant_is_clean(tmp_path):
-    steps = shell_access.disable("jarvis", runner=_Runner(), sudo=False,
+    steps = shell_access.disable(runner=_Runner(), sudo=False,
                                  root=tmp_path,
                                  authorized_keys=tmp_path / "authorized_keys")
     assert all(s["ok"] for s in steps)
@@ -280,3 +280,195 @@ def test_a_peer_name_that_cannot_be_an_ssh_alias_is_refused(tmp_path):
             tmp_path / "config",
             [{"name": "evil name\n  ProxyCommand x", "address": "10.66.0.9",
               "user": "jenya"}])
+
+
+# ── what a machine may claim as its pubkey ──────────────────────────────────
+
+def test_valid_pubkey_takes_real_key_lines_and_refuses_smuggling():
+    """These lines are written verbatim into other machines' authorized_keys.
+    A newline is a second key; an options prefix is a command."""
+    assert shell_access.valid_pubkey(LINE_A)
+    assert shell_access.valid_pubkey("ssh-ed25519 AAAAexampleA")
+    assert not shell_access.valid_pubkey("")
+    assert not shell_access.valid_pubkey(LINE_A + "\n" + LINE_B)
+    assert not shell_access.valid_pubkey(
+        'command="rm -rf /" ssh-ed25519 AAAAexampleA x')
+    assert not shell_access.valid_pubkey("ssh-ed25519 AAAA" + "x" * 2000)
+
+
+# ── the adoption handshake carries it ───────────────────────────────────────
+
+@pytest.fixture
+def hub(tmp_path, monkeypatch):
+    """A hub's store, wired the way the enrolment tests wire theirs, with the
+    live tunnel and the announce path both stubbed out."""
+    from jstack_host import devices, enrolment, tunnel
+    from jstack_host.store import SessionStore
+    s = SessionStore(db_path=tmp_path / "hub.sqlite")
+    monkeypatch.setattr(devices, "_store", lambda: s)
+    monkeypatch.setattr(enrolment, "_store", lambda: s)
+    monkeypatch.setattr(tunnel, "can_pair", lambda: False)
+    monkeypatch.setattr("jstack_host.hostenv.security_alert", lambda *a: None)
+    return s
+
+
+def _redeem_host(hub, host_key, **kw):
+    from jstack_host import enrolment
+    out = enrolment.mint_code("work-mac", "", 600, kind=enrolment.KIND_HOST)
+    return enrolment.redeem(enrolment.normalize(out["code"]), "198.51.100.4",
+                            host_key=host_key, port=9090, **kw)
+
+
+LEAF_LINE = "ssh-ed25519 AAAAleafkey work-key1"
+
+
+def test_redeem_stores_the_machines_key_and_answers_with_the_hubs(hub):
+    result = _redeem_host(hub, "work-key1",
+                          ssh_pubkey=LEAF_LINE, ssh_user="jenya")
+
+    row = hub.host_row("work-key1")
+    assert row["shell_pubkey"] == LEAF_LINE
+    assert row["shell_user"] == "jenya"
+    # The hub's own identity comes back as the one line the leaf must
+    # authorize — minted on first adoption, stable ever after.
+    assert result["shell"]["authorized"] == [shell_access.identity()]
+    assert result["shell"]["peers"] == []
+
+
+def test_redeem_carries_granted_siblings_in_both_directions(hub):
+    hub.upsert_host("sib-key1", "Work Temp", "10.66.0.21", 9090)
+    hub.set_host_shell("sib-key1", LINE_B, "jenya")
+    hub.set_shell_grant("sib-key1", "work-key1", True)
+    hub.set_shell_grant("work-key1", "sib-key1", True)
+
+    result = _redeem_host(hub, "work-key1",
+                          ssh_pubkey=LEAF_LINE, ssh_user="jenya")
+
+    assert LINE_B in result["shell"]["authorized"]
+    assert result["shell"]["peers"] == [
+        {"name": "work-temp", "address": "10.66.0.21", "user": "jenya"}]
+
+
+def test_a_flipped_off_grant_stops_riding_the_handshake(hub):
+    hub.upsert_host("sib-key1", "Work Temp", "10.66.0.21", 9090)
+    hub.set_host_shell("sib-key1", LINE_B, "jenya")
+    hub.set_shell_grant("sib-key1", "work-key1", True)
+    hub.set_shell_grant("sib-key1", "work-key1", False)
+
+    result = _redeem_host(hub, "work-key1",
+                          ssh_pubkey=LEAF_LINE, ssh_user="jenya")
+    assert LINE_B not in result["shell"]["authorized"]
+
+
+def test_an_old_leaf_sending_no_pubkey_gets_no_shell_and_loses_nothing(hub):
+    result = _redeem_host(hub, "work-key1")
+    assert result["shell"] == {}
+    assert hub.host_row("work-key1")["shell_pubkey"] == ""
+    assert result["token"], "the enrolment itself must be untouched"
+
+
+def test_a_pubkey_that_would_smuggle_options_is_dropped_not_stored(hub):
+    result = _redeem_host(hub, "work-key1",
+                          ssh_pubkey='command="x" ssh-ed25519 AAAA k',
+                          ssh_user="jenya")
+    assert hub.host_row("work-key1")["shell_pubkey"] == ""
+    assert result["shell"] == {}
+
+
+# ── attach applies what the parent answered ─────────────────────────────────
+
+def _attach(tmp_path, response, runner=None, posts=None, home=None):
+    import subprocess
+    from jstack_host import attach_parent
+
+    def poster(url, payload):
+        if posts is not None:
+            posts.append((url, payload))
+        return 200, response
+
+    def ok_runner(argv, cwd=None, env=None, **kw):
+        return subprocess.CompletedProcess(argv, 0, stdout="installed",
+                                           stderr="")
+
+    return attach_parent.attach(
+        "ABCD-1234", "http://studio.local:9090", host_key="test-host-0001",
+        dest_dir=tmp_path / "bundle", poster=poster,
+        runner=runner or ok_runner, sudo=False,
+        install_env={"LEAF_DEST": str(tmp_path / "root")},
+        home=home or tmp_path / "home")
+
+
+def _host_response(**extra):
+    from jstack_host import tunnel
+    bundle = {name: f"contents of {name}\n" for name in tunnel.LEAF_FILES}
+    return {"device": {"id": "dev_new", "name": "studio", "revoked": False},
+            "token": "TOKEN-FROM-PARENT", "kind": "host",
+            "tunnel": {"device": "studio", "bundle": bundle, "created": True},
+            "tunnel_note": "", "host": {"key": "test-host-0001"},
+            "superseded": False, **extra}
+
+
+def test_attach_mints_and_presents_this_machines_key(tmp_path):
+    import getpass
+    posts = []
+    _attach(tmp_path, _host_response(), posts=posts)
+    payload = posts[0][1]
+    assert payload["ssh_pubkey"] == shell_access.public_key()
+    assert payload["ssh_pubkey"].startswith("ssh-ed25519 ")
+    assert payload["ssh_user"] == getpass.getuser()
+
+
+def test_attach_applies_the_shell_the_parent_answered(tmp_path):
+    shell = {"authorized": [LINE_A],
+             "peers": [{"name": "work-temp", "address": "10.66.0.21",
+                        "user": "jenya"}]}
+    runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
+    result = _attach(tmp_path, _host_response(shell=shell), runner=runner)
+
+    home = tmp_path / "home"
+    assert shell_access.read_authorized_block(
+        home / ".ssh" / "authorized_keys") == [LINE_A]
+    assert (tmp_path / "root" / shell_access.SUDOERS_PATH).is_file()
+    assert any("-setremotelogin" in c for c in runner.calls)
+    assert "Host work-temp" in (home / ".ssh" / "config").read_text()
+    assert all(s["ok"] for s in result["shell_steps"])
+    assert result["shell_steps"], "the steps are the report"
+
+
+def test_a_parent_without_shell_answers_changes_nothing(tmp_path):
+    result = _attach(tmp_path, _host_response())
+    assert result["shell_steps"] == []
+    assert not (tmp_path / "home" / ".ssh").exists()
+    assert not (tmp_path / "root" / shell_access.SUDOERS_PATH).exists()
+
+
+# ── detach takes it all back ────────────────────────────────────────────────
+
+def test_detach_reverses_shell_access(tmp_path):
+    from jstack_host import detach_parent
+    state = hostenv.state_dir()
+    home = tmp_path / "home"
+    shell_access.identity()
+    ak = home / ".ssh" / "authorized_keys"
+    shell_access.write_authorized_block(ak, [LINE_A])
+    runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
+    shell_access.enable("jenya", runner=runner, sudo=False, root=tmp_path)
+
+    result = detach_parent.detach(root=tmp_path, state=state, home=home,
+                                  runner=_Runner(), poster=lambda u, t: (200, {}),
+                                  sudo=False)
+
+    assert not (tmp_path / shell_access.SUDOERS_PATH).exists()
+    assert shell_access.read_authorized_block(ak) == []
+    assert shell_access.public_key() == ""
+    for name in ("remote-login", "sudoers", "authorized-keys", "identity"):
+        assert _step(result["steps"], name)["ok"] is True, name
+
+
+# ── the capability is probed, not assumed ───────────────────────────────────
+
+def test_shell_access_is_a_probed_host_capability():
+    from jstack_host import router
+    assert router._probe("shell_access") is False
+    shell_access.identity()
+    assert router._probe("shell_access") is True

@@ -331,7 +331,8 @@ def _check_host_claim(host_key: str, port: int) -> int:
 def redeem(raw_code: str, client_ip: str, host_key: str = "",
            port: int = DEFAULT_PORT, device_token: str = "",
            grant_token: str = "", identity: str = "", *,
-           parent_port: int = DEFAULT_PORT) -> dict:
+           parent_port: int = DEFAULT_PORT,
+           ssh_pubkey: str = "", ssh_user: str = "") -> dict:
     """Spend a code: a device token, and a peer config where one applies.
 
     `device_token` is the credential the redeemer already holds on this host,
@@ -478,6 +479,40 @@ def redeem(raw_code: str, client_ip: str, host_key: str = "",
         parent_identity = {"key": hostenv.host_id(), "name": hostenv.host_name(),
                            "address": _own_mesh_address(), "port": parent_port}
 
+    # The shell half of the handshake (#131): the machine's public key is
+    # stored on its row, and the answer carries everything its joiner must
+    # authorize — this hub's own identity plus every granted sibling's key —
+    # and every peer the grant matrix lets it reach. A machine sending no key
+    # (or one that fails `valid_pubkey`, which would smuggle options into a
+    # sibling's authorized_keys) gets `{}` and joins exactly as before.
+    # Degrades past the consume like everything else here.
+    shell: dict = {}
+    if kind == KIND_HOST and ssh_pubkey:
+        from . import shell_access
+        try:
+            if shell_access.valid_pubkey(ssh_pubkey):
+                user = ssh_user if shell_access.valid_user(ssh_user) else ""
+                store.set_host_shell(host_key, ssh_pubkey, user)
+                authorized = [shell_access.identity()]
+                for src in store.shell_sources_for(host_key):
+                    srow = store.host_row(src)
+                    if srow and not srow["deleted"] and srow["shell_pubkey"]:
+                        authorized.append(srow["shell_pubkey"])
+                peers = []
+                for dst in store.shell_targets_for(host_key):
+                    drow = store.host_row(dst)
+                    if (drow and not drow["deleted"] and drow["address"]
+                            and drow["shell_user"]):
+                        peers.append({"name": peer_name(drow["name"]) or dst,
+                                      "address": drow["address"],
+                                      "user": drow["shell_user"]})
+                shell = {"authorized": authorized, "peers": peers}
+        except Exception as exc:  # noqa: BLE001 — never lose the enrolment
+            shell = {}
+            note = (note + "; " if note else "") + (
+                f"shell access could not be set up ({type(exc).__name__}) — "
+                "re-run the joiner to retry")
+
     _announce(row, device_row, client_ip, kind, rekeyed is not None)
     return {"device": device_row, "token": token,
             "tunnel": peer, "tunnel_note": note,
@@ -496,6 +531,9 @@ def redeem(raw_code: str, client_ip: str, host_key: str = "",
             # code, which has no machine to carry either one back to.
             "leaf_grant": leaf_grant,
             "parent_identity": parent_identity,
+            # What the joiner authorizes and reaches — empty for a device
+            # code, or a machine that presented no usable key.
+            "shell": shell,
             # Which of the two happened, said out loud. The app can tell from
             # the id, but only if it kept one; a caller pairing by hand cannot
             # tell a fresh credential from a replaced one at all, and "your old
