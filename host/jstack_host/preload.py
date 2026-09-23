@@ -46,6 +46,7 @@ MODULES = (
     "jstack_host.desk",
     "jstack_host.fileshare",
     "jstack_host.grants",
+    "jstack_host.audit",
     "jstack_host.mode",
     "jstack_host.store",
     "jstack_host.timeline",

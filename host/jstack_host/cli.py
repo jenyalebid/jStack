@@ -826,6 +826,39 @@ def _cmd_leaves(args) -> int:
     return 0
 
 
+def _cmd_history(args) -> int:
+    """Who forgot a machine, revoked a grant, or cut a credential (audit.py).
+
+    A machine argument matches by key or name, forgotten rows included, and
+    pulls in the device credentials that belong to it — a leaf's removal is a
+    tile, a grant and a device row, and one question should show all three.
+    """
+    _adopt(args)
+    from . import grants
+    from .store import get_store
+    store = get_store()
+    targets = store.machine_targets(args.machine) if args.machine else None
+    rows = store.access_history(targets, limit=args.limit)
+    if getattr(args, "json", False):
+        import json
+        print(json.dumps(rows))
+        return 0
+    if not rows:
+        print(f"no access changes recorded{' for ' + args.machine if args.machine else ''}.")
+        return 0
+    for r in rows:
+        who = r["actor_name"] or r["actor"] or "?"
+        print(f"{grants.stamp(r['at'])}  {r['action']:<20} "
+              f"{r['target_name'] or r['target']}")
+        print(f"    by {who} via {r['via']} from {r['origin'] or '?'}")
+        extra = {k: v for k, v in r["detail"].items() if k != "argv"}
+        if r["user_agent"]:
+            extra["user_agent"] = r["user_agent"]
+        for k, v in extra.items():
+            print(f"    {k}: {' > '.join(v) if isinstance(v, list) else v}")
+    return 0
+
+
 def _cmd_token(args) -> int:
     _adopt(args)
     path = hostenv.token_path()
@@ -1181,6 +1214,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--state-dir", default=None)
     p.set_defaults(fn=_cmd_leaves)
 
+    p = sub.add_parser("history",
+                       help="who forgot machines and revoked grants or devices")
+    p.add_argument("machine", nargs="?", default="",
+                   help="a machine key or name, forgotten ones included")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--state-dir", default=None)
+    p.set_defaults(fn=_cmd_history)
+
     p = sub.add_parser("welcome",
                        help="open the app on a session that checks this install")
     p.add_argument("--agent", default="",
@@ -1284,7 +1326,9 @@ def main(argv: list[str] | None = None) -> int:
         from . import spawn
         return spawn.main(argv[1:])
     args = build_parser().parse_args(argv)
-    return args.fn(args) or 0
+    from . import audit
+    with audit.acting(audit.from_cli(args.cmd)):
+        return args.fn(args) or 0
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .auth import current_device, require_token
-from . import board, devices, docfence, hostenv, plugin_paths
+from . import audit, board, devices, docfence, hostenv, plugin_paths
 from . import managed_access
 from .turns import stream_turn, TurnError
 from .messages import _blocks_to_segments, _flatten, _is_noise
@@ -723,8 +723,9 @@ def revoke_device(device_id: str, request: Request,
         raise HTTPException(
             status_code=403,
             detail="a device can disconnect only itself; removing another device is a hub menu-bar action")
-    if not devices.revoke(device_id):
-        raise HTTPException(status_code=404, detail="unknown or already revoked device")
+    with audit.acting(audit.from_request(request, caller)):
+        if not devices.revoke(device_id):
+            raise HTTPException(status_code=404, detail="unknown or already revoked device")
     return {"revoked": device_id, "self": device_id == caller}
 
 
@@ -988,10 +989,11 @@ def forget_host(key: str, request: Request, device_id: str = Depends(current_dev
     from . import grants
     from .store import get_store
     managed_access.require_console(request)
-    if not get_store().forget_host(key):
-        raise HTTPException(status_code=404,
-                            detail="unknown or already forgotten host")
-    return {"forgotten": key, "grant_dropped": grants.forget(key)}
+    with audit.acting(audit.from_request(request, device_id)):
+        if not get_store().forget_host(key):
+            raise HTTPException(status_code=404,
+                                detail="unknown or already forgotten host")
+        return {"forgotten": key, "grant_dropped": grants.forget(key)}
 
 
 class HostGrantRequest(BaseModel):
@@ -1111,10 +1113,11 @@ def managed_authorize(body: ManagedAuthorizeRequest,
 
 
 @router.post("/device/disconnect")
-def disconnect_self(device_id: str = Depends(current_device)):
+def disconnect_self(request: Request, device_id: str = Depends(current_device)):
     if not managed_access.can_disconnect(device_id):
         raise HTTPException(403, "the host's own credential cannot disconnect itself")
-    devices.revoke(device_id)
+    with audit.acting(audit.from_request(request, device_id)):
+        devices.revoke(device_id)
     return {"disconnected": True}
 
 #

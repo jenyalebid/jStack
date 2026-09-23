@@ -316,6 +316,24 @@ CREATE TABLE IF NOT EXISTS parent_grants (
   minted INTEGER NOT NULL DEFAULT 0,
   revoked_at INTEGER
 );
+-- Who took access away (audit.py). One row per forget/revoke/delete that
+-- changed something, written in the mutation's own transaction. Host-only and
+-- never synced, like the credentials it describes; append-only.
+CREATE TABLE IF NOT EXISTS access_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at INTEGER NOT NULL,
+  action TEXT NOT NULL,
+  target_kind TEXT NOT NULL,
+  target TEXT NOT NULL,
+  target_name TEXT NOT NULL DEFAULT '',
+  via TEXT NOT NULL DEFAULT '',
+  actor TEXT NOT NULL DEFAULT '',
+  actor_name TEXT NOT NULL DEFAULT '',
+  origin TEXT NOT NULL DEFAULT '',
+  user_agent TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS access_audit_target ON access_audit(target, at DESC);
 CREATE TABLE IF NOT EXISTS session_closes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL DEFAULT '',
@@ -1130,11 +1148,14 @@ class SessionStore:
     def revoke_device(self, device_id: str) -> bool:
         """Stamp revoked_at on a live row. False = unknown or already revoked
         (idempotent — a second tap on Revoke is not an error)."""
+        now = int(time.time())
         with self._write_lock, self._conn() as db:
             cur = db.execute(
                 "UPDATE devices SET revoked_at=? "
-                "WHERE id=? AND revoked_at IS NULL",
-                (int(time.time()), device_id))
+                "WHERE id=? AND revoked_at IS NULL", (now, device_id))
+            if cur.rowcount > 0:
+                self._audit(db, now, "device.revoke", "device",
+                            [(device_id, self._device_name(db, device_id))])
             return cur.rowcount > 0
 
     def delete_device(self, device_id: str) -> bool:
@@ -1156,7 +1177,11 @@ class SessionStore:
         exposes it starts from a primitive that is already tested.
         """
         with self._write_lock, self._conn() as db:
+            name = self._device_name(db, device_id)
             cur = db.execute("DELETE FROM devices WHERE id=?", (device_id,))
+            if cur.rowcount > 0:
+                self._audit(db, int(time.time()), "device.delete", "device",
+                            [(device_id, name)])
             return cur.rowcount > 0
 
     def touch_device(self, device_id: str) -> None:
@@ -1389,7 +1414,74 @@ class SessionStore:
             cur = db.execute(
                 "UPDATE hosts SET deleted=1, updated_at=?, seq=? "
                 "WHERE key=? AND deleted=0", (time.time(), seq, key))
+            if cur.rowcount > 0:
+                self._audit(db, int(time.time()), "host.forget", "host",
+                            [(key, self._host_name(db, key))])
             return cur.rowcount > 0
+
+    # ── access audit (audit.py) ──
+
+    @staticmethod
+    def _audit(db, at: int, action: str, kind: str,
+               targets: list[tuple[str, str]]) -> None:
+        """One row per target, inside the caller's transaction. Never raises:
+        a revocation the audit could block is worse than one it failed to name."""
+        if not targets:
+            return
+        try:
+            from . import audit
+            a = audit.current()
+            detail = json.dumps(a.get("detail") or {}, sort_keys=True)[:2000]
+            db.executemany(
+                "INSERT INTO access_audit (at, action, target_kind, target, "
+                "target_name, via, actor, actor_name, origin, user_agent, detail) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [(at, action, kind, t, name or "", a.get("via", "")[:120],
+                  a.get("actor", "")[:120], a.get("actor_name", "")[:120],
+                  a.get("origin", "")[:240], a.get("user_agent", "")[:200], detail)
+                 for t, name in targets])
+        except Exception:  # noqa: BLE001
+            pass
+
+    @staticmethod
+    def _host_name(db, key: str) -> str:
+        row = db.execute("SELECT name FROM hosts WHERE key=?", (key,)).fetchone()
+        return row[0] if row else ""
+
+    @staticmethod
+    def _device_name(db, device_id: str) -> str:
+        row = db.execute("SELECT name FROM devices WHERE id=?", (device_id,)).fetchone()
+        return row[0] if row else ""
+
+    def access_history(self, targets: list[str] | None = None,
+                       limit: int = 100) -> list[dict]:
+        """Newest-first audit rows, optionally only those naming `targets`."""
+        sql, params = "SELECT * FROM access_audit", []
+        if targets:
+            sql += f" WHERE target IN ({','.join('?' * len(targets))})"
+            params = list(targets)
+        sql += " ORDER BY at DESC, id DESC LIMIT ?"
+        with self._conn() as db:
+            rows = db.execute(sql, params + [limit]).fetchall()
+        return [{**dict(r), "detail": json.loads(r["detail"] or "{}")} for r in rows]
+
+    def machine_targets(self, machine: str) -> list[str]:
+        """Every audit target that belongs to a machine named by key or name —
+        forgotten ones included, since those are the ones anyone asks about:
+        its host key and the device credentials bound to or named like it."""
+        with self._conn() as db:
+            hosts = db.execute("SELECT key, name, device_id FROM hosts "
+                               "WHERE key=? OR name=?", (machine, machine)).fetchall()
+            names = {h["name"] for h in hosts if h["name"]} or {machine}
+            devs = db.execute(
+                f"SELECT id FROM devices WHERE name IN ({','.join('?' * len(names))})",
+                list(names)).fetchall()
+            logged = db.execute(
+                f"SELECT DISTINCT target FROM access_audit WHERE target_name IN "
+                f"({','.join('?' * len(names))})", list(names)).fetchall()
+        out = [h["key"] for h in hosts] + [h["device_id"] for h in hosts if h["device_id"]]
+        out += [d[0] for d in devs] + [r[0] for r in logged]
+        return list(dict.fromkeys(out)) or [machine]
 
     # ── grants: the two ends of delegated minting ──
     #
@@ -1444,11 +1536,14 @@ class SessionStore:
         """Stop being able to mint on that machine. Local only — the credential
         stays live on the machine that issued it until IT revokes, which is the
         honest shape: authority is revoked where it is verified."""
+        now = int(time.time())
         with self._write_lock, self._conn() as db:
             cur = db.execute(
                 "UPDATE host_grants SET revoked_at=? "
-                "WHERE host_key=? AND revoked_at IS NULL",
-                (int(time.time()), host_key))
+                "WHERE host_key=? AND revoked_at IS NULL", (now, host_key))
+            if cur.rowcount > 0:
+                self._audit(db, now, "host_grant.revoke", "host",
+                            [(host_key, self._host_name(db, host_key))])
             return cur.rowcount > 0
 
     def put_parent_grant(self, token_hash: str, parent: str) -> None:
@@ -1486,11 +1581,17 @@ class SessionStore:
         """Revoke the grants this machine issued — one parent's, or all of them
         when `parent` is empty. Detaching takes the second form: a machine that
         left a mesh has not authorized anybody there to mint on it."""
-        sql = ("UPDATE parent_grants SET revoked_at=? WHERE revoked_at IS NULL"
-               + (" AND parent=?" if parent else ""))
-        params = (int(time.time()),) + ((parent,) if parent else ())
+        live = ("WHERE revoked_at IS NULL" + (" AND parent=?" if parent else ""))
+        now = int(time.time())
+        params = (parent,) if parent else ()
         with self._write_lock, self._conn() as db:
-            return db.execute(sql, params).rowcount
+            rows = db.execute(f"SELECT token_hash, parent FROM parent_grants {live}",
+                              params).fetchall()
+            n = db.execute(f"UPDATE parent_grants SET revoked_at=? {live}",
+                           (now,) + params).rowcount
+            self._audit(db, now, "parent_grant.revoke", "parent_grant",
+                        [(r[0][:12], r[1]) for r in rows])
+            return n
 
     def revoke_parent_authority(self) -> tuple[int, list[str]]:
         """Close a managed role before removing the record enforcing it.
@@ -1503,12 +1604,18 @@ class SessionStore:
         now = int(time.time())
         with self._write_lock, self._conn() as db:
             db.execute("BEGIN IMMEDIATE")
+            granted = db.execute("SELECT token_hash, parent FROM parent_grants "
+                                 "WHERE revoked_at IS NULL").fetchall()
             grants = db.execute(
                 "UPDATE parent_grants SET revoked_at=? WHERE revoked_at IS NULL", (now,)).rowcount
-            revoked = [r[0] for r in db.execute(
-                "SELECT id FROM devices WHERE id<>? AND revoked_at IS NULL", (INTERNAL_ID,))]
+            live = db.execute("SELECT id, name FROM devices WHERE id<>? AND revoked_at IS NULL",
+                              (INTERNAL_ID,)).fetchall()
+            revoked = [r[0] for r in live]
             db.execute("UPDATE devices SET revoked_at=? WHERE id<>? AND revoked_at IS NULL",
                        (now, INTERNAL_ID))
+            self._audit(db, now, "parent_grant.revoke", "parent_grant",
+                        [(r[0][:12], r[1]) for r in granted])
+            self._audit(db, now, "device.revoke", "device", [(r[0], r[1]) for r in live])
             db.execute("INSERT OR IGNORE INTO devices (id,name,token_hash,created_at,revoked_at) "
                        "VALUES (?,?,?,?,?)", (LEGACY_ID, "legacy", "", now, now))
             return grants, revoked
