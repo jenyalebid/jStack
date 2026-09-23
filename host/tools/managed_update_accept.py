@@ -569,9 +569,12 @@ def install_candidate(guest: Guest, candidate: Candidate, *, fresh: bool = False
         guest.copy(candidate.file(name), f"{remote}/{candidate.file(name).name}")
     guest.sh(f"/bin/mkdir ~/jStack && "
              f"/usr/bin/tar -xzf {remote}/{candidate.file('stack').name} -C ~/jStack", timeout=900)
+    # The menu bar installs through the one installer — its own install.sh is
+    # an internal step that refuses a direct call. The built bundle is then
+    # replaced below with the candidate's notarized bytes, keeping the launchd
+    # registration the installer made.
     guest.sh("cd ~/jStack && JSTACK_CHECKOUT=$HOME/jStack /bin/bash install.sh --yes "
-             "--no-claude --no-app --no-menubar", timeout=2400)
-    guest.sh("/bin/bash ~/jStack/host/menubar/install.sh", timeout=600)
+             "--no-claude --no-app", timeout=2400)
     # Resolve the actual installed bundle from launchd, never make a second
     # registration under Applications. Keep the old bundle outside the .app
     # namespace for recovery, then relaunch the exact signed candidate.

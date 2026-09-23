@@ -313,7 +313,10 @@ def test_candidate_installer_preserves_errors_and_uses_registered_menu(runner, c
     assert not any("| /usr/bin/tail" in command for command in commands)
     assert any("ProgramArguments" in command and "app.parent" in command for command in commands)
     assert not any("ditto -x -k" in command and "~/Applications" in command for command in commands)
-    assert any("--no-app --no-menubar" in command for command in commands)
+    # The one installer does the menu bar too; its own install.sh is an
+    # internal step that refuses a direct call.
+    assert any("--no-claude --no-app" in command for command in commands)
+    assert not any("menubar/install.sh" in command for command in commands)
 
 
 def test_new_session_with_a_provider_but_no_reply_fails(runner, monkeypatch):

@@ -28,6 +28,8 @@ def main():
     parser.add_argument("--parent-address")
     parser.add_argument("--parent-port", type=int)
     parser.add_argument("--agent")
+    parser.add_argument("--engine", help="pin the session engine; the agent's "
+                        "host-side default decides when this is absent")
     parser.add_argument("--path", help="local API path for call, e.g. /updates/queue")
     parser.add_argument("--body", help="JSON body; its absence makes call a GET")
     parser.add_argument("--timeout", type=int, default=60)
@@ -193,10 +195,17 @@ def main():
     if args.action == "spawn":
         if not args.agent or not args.agent.startswith("update-proof"):
             parser.error("spawn is limited to the update-proof fixture agent")
-        result = httpx.post(config["local_url"] + "/api/jremote/v1/sessions/open-new", headers=headers,
-                            json={"agent_id": args.agent, "engine": "codex",
-                                  "text": "Use the shell tool to run pwd once, then report the path. "
-                                          "Do not modify files or make network requests."}, timeout=60)
+        # No hard-coded engine: the host's `resolve()` is the single fallback
+        # point, and it picks the agent's default — the CLI this disposable
+        # guest actually has installed. Pinning codex here spawned sessions on
+        # guests that never carried a codex binary.
+        body = {"agent_id": args.agent,
+                "text": "Use the shell tool to run pwd once, then report the path. "
+                        "Do not modify files or make network requests."}
+        if args.engine:
+            body["engine"] = args.engine
+        result = httpx.post(config["local_url"] + "/api/jremote/v1/sessions/open-new",
+                            headers=headers, json=body, timeout=60)
     elif args.action == "queue":
         result = httpx.post(base + "/queue", headers=headers,
                             json={"target": args.target, "request_id": args.request}, timeout=20)
