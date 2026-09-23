@@ -173,8 +173,34 @@ class Fleet:
         self.fresh = Guest(plan["fresh"], tool, run=run) if plan.get("fresh") else None
         self.prior = Path(plan["prior_candidate"]).expanduser() if plan.get("prior_candidate") else None
         self.off_lan = plan.get("off_lan")
+        self.slots = int(plan.get("vm_slots") or 0)
         self._ids: dict[str, str] = {}
         self.candidate: Candidate | None = None
+
+    def guests(self) -> list[Guest]:
+        return [self.hub, *self.leaves, *([self.fresh] if self.fresh else [])]
+
+    def cast(self, *wanted: Guest | None) -> None:
+        """Fit one journey's cast into the host's concurrent-VM slots.
+
+        Apple's Virtualization framework boots two guests at a time, and the
+        update contract never asked for simultaneous uptime — a parked Mac
+        reports pending/offline and catches up on the same queued job, which
+        is itself contract behavior (offline_catchup). A plan that declares
+        vm_slots gets every guest outside the cast stopped before the cast is
+        booted; a plan without it keeps every guest running, as before.
+        """
+        cast = [guest for guest in wanted if guest is not None]
+        if self.slots:
+            if len(cast) > self.slots:
+                raise AcceptanceFailure(
+                    f"this journey needs {len(cast)} live guests; the host has {self.slots} slots")
+            names = {guest.name for guest in cast}
+            for guest in self.guests():
+                if guest.name not in names:
+                    guest.stop()
+        for guest in cast:
+            guest.start()
 
     def machine(self, guest: Guest) -> str:
         if guest.name not in self._ids:
@@ -275,6 +301,7 @@ def fleet_journey(journey, fleet: Fleet, candidate: Candidate) -> None:
     fleet.hub.wait_for("current", leaf_machine)
     expect(first.installed()["release"] == candidate.release, "the leaf did not reach the candidate")
     journey.observe("leaf_local_update", {"machine": leaf_machine, "job": local["jobs"][0]["id"]})
+    fleet.cast(fleet.hub, second)
     other = fleet.machine(second)
     journey.observe("leaf_remote_update", update_to_candidate(fleet, second, other, candidate))
     request = request_id("update-all")
@@ -282,6 +309,11 @@ def fleet_journey(journey, fleet: Fleet, candidate: Candidate) -> None:
     machines = {job["machine"]: job["id"] for job in everything["jobs"]}
     expect(set(machines) >= {hub_machine, leaf_machine, other},
            f"Update All reached {sorted(machines)}, not the whole fleet")
+    for machine in (hub_machine, other):
+        fleet.hub.wait_for("current", machine)
+    # The parked leaf comes back to find the same queued job and catches up —
+    # never a second job minted for the same request.
+    fleet.cast(fleet.hub, first)
     for machine in machines:
         fleet.hub.wait_for("current", machine)
     journey.observe("update_all", {"request": request, "jobs": machines})
@@ -502,6 +534,18 @@ JOURNEYS = {"fresh_install": fresh_install, "upgrade": upgrade, "fleet": fleet_j
             "offline_catchup": offline_catchup, "session_survival": session_survival,
             "interruption": interruption, "rollback": rollback, "revocation": revocation,
             "off_network": off_network}
+
+# The guests each journey drives; everyone else may be parked on a
+# slot-limited host. The fleet journey swaps its own leaves mid-flight.
+CAST = {"fresh_install": lambda f: (f.hub, f.fresh),
+        "upgrade": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
+        "fleet": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
+        "offline_catchup": lambda f: (f.hub, f.leaves[-1] if f.leaves else None),
+        "session_survival": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
+        "interruption": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
+        "rollback": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
+        "revocation": lambda f: (f.hub, f.leaves[-1] if f.leaves else None),
+        "off_network": lambda f: (f.hub, f.leaves[-1] if f.leaves else None)}
 
 
 # ── Operations the journeys are written in terms of
@@ -739,8 +783,9 @@ def main() -> int:
     print(f"Acceptance for {candidate.release} over {plan['hub']} "
           f"and {len(fleet.leaves)} managed Macs", flush=True)
     fleet.hub.start()
-    for leaf in fleet.leaves:
-        leaf.start()
+    if not fleet.slots:
+        for leaf in fleet.leaves:
+            leaf.start()
     fleet.offer(candidate)
     for name in JOURNEYS:
         if args.only and name not in args.only:
@@ -750,6 +795,7 @@ def main() -> int:
             run.skip(name, reason)
             continue
         with run.journey(name) as journey:
+            fleet.cast(*CAST[name](fleet))
             JOURNEYS[name](journey, fleet, candidate)
     state = acceptance.inspect(args.receipts, candidate.manifest)
     summary = {"release": candidate.release,

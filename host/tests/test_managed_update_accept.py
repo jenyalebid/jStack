@@ -179,6 +179,56 @@ def test_one_leaf_cannot_stand_in_for_the_contract_s_two(runner, candidate, tmp_
     assert runner.unsupported(fleet, "upgrade") is None
 
 
+class SlotCountingFleet(ScriptedFleet):
+    """Tracks which guests are booted, and the most that ever ran at once."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.booted: set[str] = set()
+        self.peak = 0
+
+    def __call__(self, argv, **kwargs):
+        _, action, name, *_ = argv
+        if action == "gui":
+            self.booted.add(name)
+            self.peak = max(self.peak, len(self.booted))
+        elif action == "stop":
+            self.booted.discard(name)
+        return super().__call__(argv, **kwargs)
+
+
+def test_a_two_slot_host_never_boots_a_third_guest(runner, candidate, tmp_path):
+    scripted = SlotCountingFleet()
+    fleet = build(runner, scripted, vm_slots=2)
+    run = acceptance.Run(tmp_path / "receipts", candidate.manifest)
+    with run.journey("fleet") as journey:
+        fleet.cast(*runner.CAST["fleet"](fleet))
+        runner.JOURNEYS["fleet"](journey, fleet, candidate)
+    assert run.results["fleet"] == "passed"
+    assert scripted.peak <= 2, "the fleet journey booted more guests than the host has slots"
+    assert any(call[1] == "stop" for call in scripted.calls), \
+        "a two-slot plan must park a leaf to make room for the other"
+
+
+def test_a_cast_larger_than_the_slots_is_refused(runner):
+    scripted = SlotCountingFleet()
+    fleet = build(runner, scripted, vm_slots=2)
+    with pytest.raises(runner.AcceptanceFailure):
+        fleet.cast(fleet.hub, fleet.leaves[0], fleet.leaves[1])
+
+
+def test_a_plan_without_slots_keeps_every_guest_running(runner, candidate, tmp_path):
+    scripted = SlotCountingFleet()
+    fleet = build(runner, scripted)
+    run = acceptance.Run(tmp_path / "receipts", candidate.manifest)
+    with run.journey("fleet") as journey:
+        fleet.cast(*runner.CAST["fleet"](fleet))
+        runner.JOURNEYS["fleet"](journey, fleet, candidate)
+    assert run.results["fleet"] == "passed"
+    assert not any(call[1] == "stop" for call in scripted.calls), \
+        "without vm_slots nothing may be parked"
+
+
 def test_a_plan_that_is_not_marked_disposable_is_refused(runner, tmp_path, candidate, monkeypatch):
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps({"vm_tool": "/bin/vm.sh", "hub": "production-hub"}))
