@@ -916,3 +916,26 @@ def test_internal_token_refuses_to_re_key_from_a_dir_no_host_serves(
     assert str(served) in str(caught.value)
     assert store.device(devices.INTERNAL_ID) is None, "it minted a row anyway"
     assert not (tmp_path / "internal-token").exists(), "it wrote a secret anyway"
+
+
+@pytest.mark.parametrize("repair", ["mint", "rekey"])
+def test_repair_rotates_out_of_old_lock_and_retired_retries_cannot_relock(store, monkeypatch, repair):
+    monkeypatch.setattr('jstack_host.hostenv.security_alert', lambda _: None)
+    ip = '192.168.1.81'
+    row, old = devices.mint('phone', 'same-phone')
+    for _ in range(5):
+        with pytest.raises(Exception):
+            auth._gate(ip, f"Bearer jr1.{row['id']}.guess")
+    repaired, new = (devices.mint('phone repaired', 'same-phone')
+                     if repair == 'mint' else devices.rekey(old))
+    assert repaired['id'] == row['id']
+    assert auth._gate(ip, 'Bearer ' + new) == row['id']
+    for _ in range(60):
+        with pytest.raises(Exception) as exc:
+            auth._gate(ip, 'Bearer ' + old)
+        assert exc.value.status_code == 401
+    assert auth._gate(ip, 'Bearer ' + new) == row['id']
+    reopened = SessionStore(db_path=store.db_path)
+    monkeypatch.setattr(devices, '_store', lambda: reopened)
+    assert devices.cancelled(old)
+    assert not devices.cancelled(f"jr1.{row['id']}.guess")

@@ -102,6 +102,15 @@ def _limiter_exempt(client_ip: str) -> bool:
     return addr.is_loopback
 
 
+def credential_rotated(device_id: str) -> None:
+    """Authorized re-pairing replaces this credential's lock, never the IP spray lock."""
+    with _limiter_lock:
+        for table in (_failures, _locked_until):
+            for key in list(table):
+                if key.endswith("|" + device_id):
+                    del table[key]
+
+
 def _scope(client_ip: str, presented: str) -> str:
     """The credential this attempt is guessing at, as a lockout key.
 

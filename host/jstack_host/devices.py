@@ -180,7 +180,7 @@ def deny_reason(presented: str) -> str:
 
 
 def cancelled(presented: str) -> bool:
-    """True when this token is a real mint whose only fault is a revoked row.
+    """True when this token is a real mint whose secret was revoked or retired by rotation.
 
     The distinction the rate limiter needs. A correct secret for a known row
     cannot be arrived at by guessing — presenting it proves the holder was
@@ -198,6 +198,8 @@ def cancelled(presented: str) -> bool:
     device_id, secret = parse(presented)
     if not device_id:
         return False
+    if _store().retired_device_token(device_id, _hash(secret)):
+        return True
     row = _store().device(device_id)
     if row is None or row["revoked_at"] is None:
         return False
@@ -368,6 +370,8 @@ def mint(name: str, identity: str | None = None) -> tuple[dict, str]:
             settled = _store().upsert_device_identity(
                 device_id, name, _hash(secret), identity)
             if settled is not None:
+                from . import auth
+                auth.credential_rotated(settled)
                 return (_store().device(settled),
                         f"{TOKEN_PREFIX}.{settled}.{secret}")
         raise RuntimeError("could not mint a device id")  # 3 uuid collisions
@@ -417,6 +421,8 @@ def rekey(presented: str) -> tuple[dict, str] | None:
     new_secret = secrets.token_urlsafe(32)
     if not _store().set_device_hash(device_id, _hash(new_secret)):
         return None      # revoked between the compare and the write
+    from . import auth
+    auth.credential_rotated(device_id)
     return (_store().device(device_id),
             f"{TOKEN_PREFIX}.{device_id}.{new_secret}")
 

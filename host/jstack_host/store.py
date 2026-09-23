@@ -252,6 +252,11 @@ CREATE TABLE IF NOT EXISTS devices (
   authority_grant TEXT NOT NULL DEFAULT '',
   authority_device TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS retired_device_tokens (
+  device_id TEXT NOT NULL,
+  token_hash TEXT NOT NULL,
+  PRIMARY KEY(device_id, token_hash)
+);
 -- One-time enrolment codes (docs/multi-host-access.md, P3). Host-only, and it
 -- never syncs for the same reason `devices` never does — a code is a
 -- credential-in-waiting, and a table of them pooling across hosts would let
@@ -1080,8 +1085,10 @@ class SessionStore:
         of one device racing here cannot leave two rows behind."""
         with self._write_lock, self._conn() as db:
             row = db.execute(
-                "SELECT id FROM devices WHERE identity=?", (identity,)).fetchone()
+                "SELECT id, token_hash FROM devices WHERE identity=?", (identity,)).fetchone()
             if row is not None:
+                db.execute("INSERT OR IGNORE INTO retired_device_tokens VALUES (?,?)",
+                           (row["id"], row["token_hash"]))
                 db.execute(
                     "UPDATE devices SET token_hash=?, name=?, revoked_at=NULL "
                     "WHERE id=?", (token_hash, name, row["id"]))
@@ -1101,10 +1108,18 @@ class SessionStore:
         credential after losing the plaintext). Refuses revoked rows: a re-key
         that resurrected one would be revocation quietly undone."""
         with self._write_lock, self._conn() as db:
+            db.execute("INSERT OR IGNORE INTO retired_device_tokens "
+                       "SELECT id, token_hash FROM devices WHERE id=? AND revoked_at IS NULL",
+                       (device_id,))
             cur = db.execute(
                 "UPDATE devices SET token_hash=? "
                 "WHERE id=? AND revoked_at IS NULL", (token_hash, device_id))
             return cur.rowcount > 0
+
+    def retired_device_token(self, device_id: str, token_hash: str) -> bool:
+        with self._conn() as db:
+            return db.execute("SELECT 1 FROM retired_device_tokens WHERE device_id=? AND token_hash=?",
+                              (device_id, token_hash)).fetchone() is not None
 
     def rename_device(self, device_id: str, name: str) -> bool:
         with self._write_lock, self._conn() as db:
