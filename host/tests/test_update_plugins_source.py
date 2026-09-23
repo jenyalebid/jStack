@@ -131,3 +131,104 @@ def test_nothing_registered_discovers_nothing(home):
     (home / ".claude/plugins").mkdir(parents=True)
     (home / ".claude/plugins/known_marketplaces.json").write_text("{}")
     assert update_plugins.discover() == []
+
+
+# ── the release path, end to end on a machine that develops jStack ──────────
+
+def test_staging_and_applying_a_release_leaves_a_checkout_registration_untouched(home, monkeypatch):
+    """jarvis#168: prepare() is what staging runs and install()/rollback() are
+    what applying and recovering run. On a checkout none of them may write a
+    byte of either engine's registration, nor drive either CLI."""
+    repo, stack = _checkout(home), _shipped(home)
+    _claude(home, repo)
+    _codex(home, repo)
+    (home / ".codex/config.toml").write_text(
+        (home / ".codex/config.toml").read_text()
+        + f'[[hooks.SessionStart.hooks]]\ncommand = "{repo}/plugins/jstack/hooks/s.py"\n')
+    files = [home / ".claude/plugins/known_marketplaces.json", home / ".codex/config.toml"]
+    before = [f.read_bytes() for f in files]
+    ran = []
+    monkeypatch.setattr(update_plugins, "run", lambda argv: ran.append(argv) or "")
+    monkeypatch.setattr(update_plugins.Path, "home", staticmethod(lambda: home))
+
+    providers = update_plugins.prepare()
+    update_plugins.install(providers, stack)
+    update_plugins.rollback(providers, stack)
+
+    assert providers == [] and ran == []
+    assert [f.read_bytes() for f in files] == before
+
+
+# ── codex_setup: the documented repair takes the registration back ───────────
+
+def _setup_module():
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "tools/codex_setup.py"
+    spec = importlib.util.spec_from_file_location("codex_setup_168", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _fake_codex(module, monkeypatch, config: Path):
+    """Codex's own semantics, observed on the real CLI: `add` refuses a name
+    already added from another source; `remove` drops only the table."""
+    calls = []
+
+    def run(argv, check=False, **_):
+        calls.append(argv[1:])
+        if argv[1:4] == ["plugin", "marketplace", "remove"]:
+            text = config.read_text()
+            start = text.index("[marketplaces.jstack]")
+            end = text.find("\n[", start + 1)
+            config.write_text(text[:start] + (text[end + 1:] if end != -1 else ""))
+        elif argv[1:4] == ["plugin", "marketplace", "add"]:
+            if "[marketplaces.jstack]" in config.read_text():
+                raise AssertionError("marketplace 'jstack' is already added from a different source")
+            config.write_text(config.read_text()
+                              + f'[marketplaces.jstack]\nsource_type = "local"\nsource = "{argv[4]}"\n')
+    monkeypatch.setattr(module.subprocess, "run", run)
+    return calls
+
+
+def test_setup_takes_the_registration_back_from_a_release_stage(home, monkeypatch):
+    module = _setup_module()
+    repo, stage = _checkout(home), _shipped(home)
+    config = home / ".codex/config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(f'[mcp_servers.job_monitor]\nargs = ["{stage}/host/tools/job_monitor.py", "mcp"]\n'
+                      f'[[hooks.SessionStart.hooks]]\ncommand = "{stage}/plugins/jstack/hooks/s.py"\n'
+                      f'[marketplaces.jstack]\nsource_type = "local"\nsource = "{stage}"\n')
+    calls = _fake_codex(module, monkeypatch, config)
+
+    module.register_marketplace(repo, config)
+
+    import tomllib
+    parsed = tomllib.loads(config.read_text())
+    assert parsed["marketplaces"]["jstack"]["source"] == str(repo)
+    assert str(stage) not in config.read_text()
+    assert parsed["hooks"]["SessionStart"]["hooks"][0]["command"] == f"{repo}/plugins/jstack/hooks/s.py"
+    assert calls == [["plugin", "marketplace", "remove", "jstack"],
+                     ["plugin", "marketplace", "add", str(repo)]]
+
+
+def test_setup_is_a_no_op_on_its_own_registration(home, monkeypatch):
+    module = _setup_module()
+    repo = _checkout(home)
+    _codex(home, repo)
+    config = home / ".codex/config.toml"
+    before = config.read_bytes()
+    calls = _fake_codex(module, monkeypatch, config)
+    module.register_marketplace(repo, config)
+    assert calls == [] and config.read_bytes() == before
+
+
+def test_setup_will_not_take_the_registration_from_another_checkout(home, monkeypatch):
+    module = _setup_module()
+    repo, other = _checkout(home), _checkout(home, "jStack-worktree")
+    _codex(home, other)
+    config = home / ".codex/config.toml"
+    calls = _fake_codex(module, monkeypatch, config)
+    with pytest.raises(SystemExit, match=str(other)):
+        module.register_marketplace(repo, config)
+    assert calls == []

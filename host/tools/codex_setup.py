@@ -99,6 +99,39 @@ def shell_config(text, plugin, path):
     return text + "\n" + block + values + "# END jstack shell\n"
 
 
+def registered_source(config):
+    """Where `[marketplaces.jstack]` points today, or None."""
+    import tomllib
+    if not config.exists():
+        return None
+    entry = tomllib.loads(config.read_text()).get("marketplaces", {}).get("jstack") or {}
+    return entry.get("source")
+
+
+def register_marketplace(checkout, config):
+    """Serve jStack from this checkout, taking the registration back from a copy.
+
+    `marketplace add` refuses a name already added from another source, so a
+    machine whose registration a managed release moved to its stage could not
+    be repaired by this tool (jarvis#168). A shipped copy has no claim: its
+    registration and every path into it move here, the inverse of the move
+    `update_plugins.install` makes. Another checkout is somebody's working
+    tree, so that stays a refusal, naming both.
+    """
+    old = registered_source(config)
+    if old and old != str(checkout):
+        if (Path(old) / ".git").exists():
+            sys.exit(f"jstack marketplace is registered to the checkout {old}; "
+                     f"remove it before installing from {checkout}")
+        subprocess.run(["codex", "plugin", "marketplace", "remove", "jstack"], check=True)
+        text = config.read_text()
+        config.write_text(text.replace(old + "/", str(checkout) + "/")
+                          .replace(json.dumps(old), json.dumps(str(checkout))))
+        print(f"moved the jstack marketplace from {old} to {checkout}")
+    if registered_source(config) != str(checkout):
+        subprocess.run(["codex", "plugin", "marketplace", "add", str(checkout)], check=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path)
@@ -110,7 +143,7 @@ def main():
     home = Path.home()
     codex = Path(os.environ.get("CODEX_HOME", home / ".codex"))
     codex.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["codex", "plugin", "marketplace", "add", str(checkout)], check=True)
+    register_marketplace(checkout, codex / "config.toml")
     subprocess.run(["codex", "plugin", "add", "jstack@jstack"], check=True)
     link_skills(home / ".claude/skills", home / ".agents/skills")
     link_commands(home / ".claude/commands", home / ".agents/skills")
