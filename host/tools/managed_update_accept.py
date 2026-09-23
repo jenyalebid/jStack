@@ -329,14 +329,21 @@ def fleet_journey(journey, fleet: Fleet, candidate: Candidate) -> None:
         fleet.hub.wait_for("current", machine)
     # The parked leaf comes back to find the same queued job and catches up —
     # never a second job minted for the same request.
-    fleet.cast(fleet.hub, first)
-    for machine in machines:
-        fleet.hub.wait_for("current", machine)
+    completed = {hub_machine, other}
+    for guest in [first, *([fleet.fresh] if fleet.fresh else [])]:
+        fleet.cast(fleet.hub, guest)
+        machine = fleet.machine(guest)
+        if machine in machines:
+            fleet.hub.wait_for("current", machine)
+            completed.add(machine)
+    expect(completed == set(machines),
+           f"Update All includes machines outside this fixture: {sorted(set(machines) - completed)}")
     journey.observe("update_all", {"request": request, "jobs": machines})
     repeated = fleet.hub.queue("all", request)
     again = {job["machine"]: job["id"] for job in repeated["jobs"]}
     expect(again == machines, f"repeating one request changed its jobs: {again} vs {machines}")
     journey.observe("duplicate_request", again)
+    fleet.cast(fleet.hub, first)
     journey.observe("denied_authority", denied(fleet, first))
 
 

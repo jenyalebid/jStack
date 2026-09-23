@@ -239,6 +239,34 @@ def test_a_cast_larger_than_the_slots_is_refused(runner):
         fleet.cast(fleet.hub, fleet.leaves[0], fleet.leaves[1])
 
 
+def test_update_all_wakes_the_mac_enrolled_by_fresh_install(runner, candidate, tmp_path):
+    class WithFresh(SlotCountingFleet):
+        def __call__(self, argv, **kwargs):
+            result = super().__call__(argv, **kwargs)
+            command = argv[3] if len(argv) > 3 else ""
+            if "--target all" in command:
+                body = json.loads(result.stdout)
+                request = command.split("--request ")[1].split()[0]
+                body["jobs"].append({"id": f"job-{request}-machine-fresh", "machine": "machine-fresh"})
+                self.queued.append("machine-fresh")
+                result.stdout = json.dumps(body)
+            return result
+    scripted = WithFresh()
+    fleet = build(runner, scripted, vm_slots=2, fresh="fresh")
+    wait = fleet.hub.wait_for
+    def checked_wait(state, machine, **kwargs):
+        if machine == "machine-fresh":
+            assert "fresh" in scripted.booted, "waiting for a parked fresh Mac cannot finish"
+        return wait(state, machine, **kwargs)
+    fleet.hub.wait_for = checked_wait
+    run = acceptance.Run(tmp_path / "receipts", candidate.manifest)
+    with run.journey("fleet") as journey:
+        fleet.cast(*runner.CAST["fleet"](fleet))
+        runner.fleet_journey(journey, fleet, candidate)
+    assert run.results["fleet"] == "passed"
+    assert scripted.peak <= 2
+
+
 def test_a_plan_without_slots_keeps_every_guest_running(runner, candidate, tmp_path):
     scripted = SlotCountingFleet()
     fleet = build(runner, scripted)
