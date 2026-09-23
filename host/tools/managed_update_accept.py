@@ -35,6 +35,13 @@ GUEST_HOME = "/Users/admin"
 GUEST_TOOL = GUEST_HOME + "/update-vm.py"
 GUEST_FAULT = GUEST_HOME + "/update-fault.py"
 GUEST_PYTHON = "/Applications/jStack Hub.app/Contents/MacOS/JStackPython"
+GUEST_TMUX = "/Applications/jStack Hub.app/Contents/MacOS/tmux"
+#: How long a spawned session gets to answer on its own before the runner looks
+#: at its pane. Releases before ca7cf89 left the bypass warning on screen (the
+#: watcher ran an unquoted tmux path), so a session on such a PRIOR never
+#: starts; answering it is the runner standing in for that fixed watcher, and
+#: the receipt says so. A CANDIDATE session is never helped.
+NUDGE_AFTER = 30
 SETTLE = 8
 
 
@@ -375,8 +382,9 @@ def session_survival(journey, fleet: Fleet, candidate: Candidate) -> None:
     guest = fleet.leaves[0]
     machine = fleet.machine(guest)
     stage_prior(fleet, guest)
-    session = new_session(guest)
-    journey.observe("session_pid", {"session": session["session"], "pid": session["pid"]})
+    session = new_session(guest, prior=True)
+    journey.observe("session_pid", {"session": session["session"], "pid": session["pid"],
+                                    "bypass_prompt_nudged": session["nudged"]})
     update_to_candidate(fleet, guest, machine, candidate)
     after = guest.tool_call("session-proof", "--session", session["session"])
     expect(after.get("session") == session["session"] and
@@ -388,6 +396,12 @@ def session_survival(journey, fleet: Fleet, candidate: Candidate) -> None:
     state = guest.installed()
     expect(state["menubar_pids"], "the menu bar did not relaunch after the update")
     journey.observe("app_relaunch", {"menubar": state["menubar_pids"], "client": state["client_pids"]})
+    # The candidate's own start path: a brand-new session on the updated Mac
+    # answers with nobody touching its pane, or the release still wedges a
+    # remote start on the bypass warning.
+    fresh = new_session(guest)
+    journey.observe("candidate_new_session", {"session": fresh["session"], "pid": fresh["pid"],
+                                              "bypass_prompt_nudged": fresh["nudged"]})
 
 
 def interruption(journey, fleet: Fleet, candidate: Candidate) -> None:
@@ -713,13 +727,35 @@ def adopt(fleet: Fleet, guest: Guest) -> str:
     return machine
 
 
-def new_session(guest: Guest) -> dict:
-    """A real session opened through the product's own API, executing a tool."""
+def bypass_prompt_up(guest: Guest, session: str) -> bool:
+    """Whether the session's pane is sitting on Claude's bypass warning."""
+    pane = guest.sh(f"{shlex.quote(GUEST_TMUX)} -L jremote capture-pane -p -t jr-{session[:8]} "
+                    "2>/dev/null || true")
+    return "Yes, I accept" in pane
+
+
+def accept_bypass_prompt(guest: Guest, session: str) -> None:
+    """The keys the product's watcher sends, from the runner instead."""
+    target = f"jr-{session[:8]}"
+    guest.sh(f"{shlex.quote(GUEST_TMUX)} -L jremote send-keys -t {target} Down; "
+             f"{shlex.quote(GUEST_TMUX)} -L jremote send-keys -t {target} Enter")
+
+
+def new_session(guest: Guest, *, prior: bool = False) -> dict:
+    """A real session opened through the product's own API, executing a tool.
+
+    `prior` marks a session on the release being upgraded FROM. A prior that
+    leaves the bypass warning up gets it answered here after NUDGE_AFTER, and
+    the answer returns `nudged` so the receipt carries it. The candidate never
+    gets that help: a session on it that needs the runner's keys is a failure.
+    """
     answer = guest.tool_call("spawn", "--agent", "update-proof-chat", timeout=900)
     session = answer.get("session_id") or answer.get("session") or answer.get("id")
     expect(session, f"opening a session returned no identity: {answer}")
-    deadline = time.monotonic() + 240
+    started = time.monotonic()
+    deadline = started + 240
     proof = {}
+    nudged = False
     while time.monotonic() < deadline:
         time.sleep(SETTLE)
         proof = guest.tool_call("session-proof", "--session", session)
@@ -728,12 +764,19 @@ def new_session(guest: Guest) -> dict:
                        for message in proof.get("messages", []))
         if proof.get("session") == session and len(proof.get("holders", [])) == 1 and answered:
             break
+        if (prior and not nudged and time.monotonic() - started >= NUDGE_AFTER
+                and bypass_prompt_up(guest, session)):
+            accept_bypass_prompt(guest, session)
+            nudged = True
     expect(proof.get("session") == session and len(proof.get("holders", [])) == 1,
            "the new session never acquired exactly one identified provider")
+    if not answered and not prior and bypass_prompt_up(guest, session):
+        raise AcceptanceFailure("the candidate left a new session on the bypass warning; "
+                                "its startup watcher never answered it")
     expect(answered, "the new session did not answer its initial pwd request")
     reply = send_to_session(guest, session)
     return {"session": session, "pid": proof["holders"][0]["pid"],
-            "holders": proof["holders"], "reply": reply}
+            "holders": proof["holders"], "reply": reply, "nudged": nudged}
 
 
 def send_to_session(guest: Guest, session: str) -> dict:

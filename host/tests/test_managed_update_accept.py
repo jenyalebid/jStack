@@ -556,3 +556,69 @@ def test_a_hub_that_never_answers_again_fails_at_the_deadline(runner):
     hub = runner.Guest("hub", Path("/bin/vm.sh"), run=run)
     with pytest.raises(runner.AcceptanceFailure, match="stopped answering"):
         hub.wait_for("current", "machine-hub", timeout=0.2, poll=0)
+
+
+def _bypass_guest(runner, *, answers_after_nudge: bool, prompt_up: bool = True):
+    """A guest whose spawned session sits on Claude's bypass warning until
+    something presses Down+Enter in its pane — the published ffe85dc9 prior."""
+    state = {"nudged": [], "answered": False}
+
+    class Guest:
+        def tool_call(self, action, *args, **kwargs):
+            if action == "spawn":
+                return {"session": "65e5d97c-1733"}
+            messages = ([{"role": "assistant", "text": "/Users/admin/Agents/update-proof"}]
+                        if state["answered"] else [])
+            return {"session": "65e5d97c-1733", "holders": [{"pid": 1676, "started": 1}],
+                    "messages": messages}
+
+        def sh(self, command, **kwargs):
+            assert "-L jremote" in command and "jr-65e5d97c" in command
+            if "capture-pane" in command:
+                return ("  ❯ No, exit\n    Yes, I accept\n"
+                        if prompt_up and not state["answered"] else "bypass permissions on\n")
+            assert "send-keys" in command and "Down" in command and "Enter" in command
+            state["nudged"].append(command)
+            state["answered"] = answers_after_nudge
+            return ""
+
+    return Guest(), state
+
+
+def test_a_prior_stuck_on_the_bypass_warning_is_answered_and_recorded(runner, monkeypatch):
+    ticks = iter([0, 1, 10, 31, 32, 40, 41])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    monkeypatch.setattr(runner, "send_to_session", lambda guest, session: {"session": session})
+    guest, state = _bypass_guest(runner, answers_after_nudge=True)
+
+    session = runner.new_session(guest, prior=True)
+
+    assert session["nudged"] is True and len(state["nudged"]) == 1
+    assert session["pid"] == 1676
+
+
+def test_a_candidate_session_left_on_the_bypass_warning_fails_by_name(runner, monkeypatch):
+    ticks = iter([0, 1, 10, 31, 241, 242])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    guest, state = _bypass_guest(runner, answers_after_nudge=True)
+
+    with pytest.raises(runner.AcceptanceFailure, match="startup watcher never answered"):
+        runner.new_session(guest)
+    assert state["nudged"] == [], "the runner must never press keys into a candidate's session"
+
+
+def test_a_prior_is_not_nudged_before_the_grace_period(runner, monkeypatch):
+    ticks = iter([0, 1, 5, 10, 20, 241, 242])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    guest, state = _bypass_guest(runner, answers_after_nudge=True)
+
+    with pytest.raises(runner.AcceptanceFailure, match="initial pwd request"):
+        runner.new_session(guest, prior=True)
+    assert state["nudged"] == []
+
+
+def test_session_survival_requires_an_unaided_session_on_the_candidate(runner):
+    assert "candidate_new_session" in acceptance.REQUIRED["session_survival"]
