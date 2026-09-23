@@ -121,6 +121,15 @@ def test_a_live_peer_that_does_not_answer_still_gets_the_file(hub, monkeypatch):
     assert hub.carried, "a wiped Mac was refused the only route it has left"
 
 
+def test_a_carried_file_honours_a_ttl_past_the_typed_window(hub, monkeypatch):
+    """The offline mint asks for the carried cap; the printed line does not."""
+    _mesh(monkeypatch, peers=[])
+    assert cli._cmd_adopt(_adopt(name="New Mac", offline=True, ttl=43200)) == 0
+    assert hub.minted[-1]["expires_in"] == 43200
+    assert cli._cmd_adopt(_adopt(name="New Mac", ttl=43200)) == 0
+    assert hub.minted[-1]["expires_in"] == enrolment.MAX_TTL
+
+
 def test_a_machine_with_no_peer_at_all_gets_the_file(hub, monkeypatch):
     """A Mac that was never adopted — the ordinary first-contact case."""
     _mesh(monkeypatch, set())

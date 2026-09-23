@@ -73,6 +73,11 @@ GROUP = 4             # displayed XXXX-XXXX; grouping is display, never content
 DEFAULT_TTL = 600     # ten minutes — the doc's number, and long enough to walk
 MIN_TTL = 60
 MAX_TTL = 3600
+# A carried code is not typed within the hour: the file it rides in is walked
+# to another building, often the next day. That file already holds the
+# machine's permanent private key, so a longer-lived code inside it adds no
+# exposure the file did not already carry. Only `adopt --offline` asks for it.
+MAX_OFFLINE_TTL = 7 * 86400
 
 # The limiter scope redemption counts under. Not a device id — there is no
 # device yet, which is the whole point — so every redemption from one address
@@ -163,14 +168,16 @@ def display(code: str) -> str:
 # ── minting ──
 
 def mint_code(name: str, created_by: str, ttl: int = DEFAULT_TTL,
-              kind: str = KIND_DEVICE) -> dict:
+              kind: str = KIND_DEVICE, max_ttl: int | None = None) -> dict:
     """A new code for a device to be called `name`. Returned once, never stored.
 
     The name travels with the code rather than being chosen at redemption: the
     person minting it knows which machine it is for, and a redeemer that got to
     name itself could enrol under the name of a device the user already trusts,
     in the very registry they read to decide what to revoke. `kind` travels for
-    the same reason, and a harder one — see the constants above.
+    the same reason, and a harder one — see the constants above. `max_ttl`
+    lifts the clamp for a carried code (`MAX_OFFLINE_TTL`); left None, the
+    typed-in window `MAX_TTL` applies.
     """
     if kind not in (*KINDS, KIND_LOCAL):
         raise EnrolmentError(f"unknown enrolment kind {kind!r}")
@@ -178,7 +185,7 @@ def mint_code(name: str, created_by: str, ttl: int = DEFAULT_TTL,
         ttl = int(ttl)
     except (TypeError, ValueError):
         ttl = DEFAULT_TTL
-    ttl = max(MIN_TTL, min(MAX_TTL, ttl))
+    ttl = max(MIN_TTL, min(MAX_TTL if max_ttl is None else int(max_ttl), ttl))
     now = int(time.time())
     store = _store()
     store.sweep_enrolment_codes(now)

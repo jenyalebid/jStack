@@ -664,10 +664,14 @@ def _cmd_adopt(args) -> int:
         return 1
 
     # A carried file may need to install dependencies on a fresh Mac first.
-    # Give that normal path an hour; explicit shorter TTLs are still honored.
+    # Give that normal path an hour; explicit shorter TTLs are still honored,
+    # and longer ones up to `MAX_OFFLINE_TTL` — the file is carried to the
+    # machine, and the walk is not always the same day (2026-09-23: a joiner
+    # minted for the next morning with `--ttl 43200` was silently cut to 3600).
     ttl = args.ttl if args.ttl is not None else (3600 if offline else ADOPT_TTL)
-    row = enrolment.mint_code(args.name, created_by="", ttl=ttl,
-                              kind=enrolment.KIND_HOST)
+    row = enrolment.mint_code(
+        args.name, created_by="", ttl=ttl, kind=enrolment.KIND_HOST,
+        max_ttl=enrolment.MAX_OFFLINE_TTL if offline else None)
 
     if offline:
         return _adopt_offline(args.name, row, port,
@@ -1144,7 +1148,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="write a folder to carry to a Mac that cannot reach "
                         "this hub yet (off-LAN, never on the mesh)")
     p.add_argument("--ttl", type=int, default=None,
-                   help="seconds the code stays good (default 600)")
+                   help="seconds the code stays good (default 600, at most "
+                        "3600; with --offline default 3600, at most 7 days)")
     p.add_argument("--port", type=int, default=None,
                    help="the port THIS Mac serves on, for the address printed")
     p.add_argument("--json", action="store_true",

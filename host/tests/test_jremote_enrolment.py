@@ -88,6 +88,20 @@ def test_ttl_is_clamped_to_the_declared_window(store):
     assert _mint(store, ttl="nonsense")[1]["expires_in"] == enrolment.DEFAULT_TTL
 
 
+def test_a_carried_code_may_outlive_the_typed_window(store):
+    """`adopt --offline --ttl 43200` minted 3600 on 2026-09-23 — the clamp
+    meant for a code read off a screen was cutting down a code sealed in a
+    file that already carries the machine's permanent key."""
+    row = enrolment.mint_code("work", "", ttl=43200, kind=enrolment.KIND_HOST,
+                              max_ttl=enrolment.MAX_OFFLINE_TTL)
+    assert row["expires_in"] == 43200
+    row = enrolment.mint_code("work", "", ttl=99 * 86400, kind=enrolment.KIND_HOST,
+                              max_ttl=enrolment.MAX_OFFLINE_TTL)
+    assert row["expires_in"] == enrolment.MAX_OFFLINE_TTL
+    # The typed-in path is unchanged.
+    assert enrolment.mint_code("work", "", ttl=43200)["expires_in"] == enrolment.MAX_TTL
+
+
 # ── redemption ───────────────────────────────────────────────────────────────
 
 def test_redeeming_yields_a_working_token_named_by_the_code(store):

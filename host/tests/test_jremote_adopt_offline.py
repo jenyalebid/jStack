@@ -59,7 +59,7 @@ def test_cli_joiner_accepts_the_name_shown_in_the_adopt_dialog(
     assert Path(answer["file"]).is_file()
 
 
-def _run_join(bundle, tmp_path, capable=True):
+def _run_join(bundle, tmp_path, capable=True, installed=None, installer=False):
     """Run join.sh for real against fakes, and return what it invoked, in order.
 
     Asserted by RUNNING it rather than by reading it. The first version of this
@@ -69,12 +69,31 @@ def _run_join(bundle, tmp_path, capable=True):
     went green against a script with the two steps deliberately swapped. A
     probe that cannot observe the thing it is named for is worse than none.
     """
+    import json
     import os
     import subprocess
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     calls = tmp_path / "calls.log"
+
+    # `installed` is the release the far Mac's Hub bundle names in its identity
+    # file — the layout the sealed installer leaves, under a fake /Applications.
+    hub_app = tmp_path / "hub-app"
+    if installed is not None:
+        packages = hub_app / "Contents" / "Resources" / "packages"
+        packages.mkdir(parents=True)
+        (packages / "release-identity.json").write_text(json.dumps(
+            {"sha": "c" * 40, "release": installed, "version": "0.60.0"}))
+
+    # With `installer`, the download "succeeds" and hands back a runnable
+    # installer that logs itself; without it, the download fails (exit 9), and
+    # the join dies there — enough to prove the order, nothing else runs.
+    if installer:
+        curl = ('echo "download" >> "$CALLS"\n'
+                'printf \'#!/bin/bash\\necho "install:jstack-install.sh" >> "$CALLS"\\n\' > "$4"')
+    else:
+        curl = 'echo "download" >> "$CALLS"; exit 9'
 
     for name, body in (
         # `sudo <path>/install_leaf.sh` — the tunnel step, logged by what it ran.
@@ -87,7 +106,8 @@ def _run_join(bundle, tmp_path, capable=True):
          f'  {"printf \'managed-access-v1\\nmanaged-app-v1\\n\'" if capable else "exit 2"}\n'
          'fi'),
         ("ping", 'echo "ping" >> "$CALLS"'),
-        ("curl", 'echo "download" >> "$CALLS"; exit 9'),
+        ("curl", curl),
+        ("brew", 'echo "brew:$*" >> "$CALLS"'),
         # Present only so the prereq gate passes; never invoked.
         ("wireguard-go", "true"),
         ("wg", "true"),
@@ -96,7 +116,8 @@ def _run_join(bundle, tmp_path, capable=True):
         p.write_text(f'#!/bin/bash\n{body}\nexit 0\n')
         p.chmod(0o755)
 
-    env = dict(os.environ, PATH=f"{fake_bin}:/usr/bin:/bin", CALLS=str(calls))
+    env = dict(os.environ, PATH=f"{fake_bin}:/usr/bin:/bin", CALLS=str(calls),
+               JSTACK_HUB_APP=str(hub_app))
     subprocess.run(["/bin/bash", str(bundle / "join.sh")],
                    env=env, capture_output=True, text=True, timeout=60)
     return calls.read_text().splitlines() if calls.exists() else []
@@ -141,6 +162,90 @@ def test_a_host_too_old_to_delegate_is_refused_before_it_attaches(bundle,
         f"the tunnel must still go up — it is the half that survives: {calls}")
     assert not any(c.startswith("jstack-host:attach") for c in calls), (
         f"attached with a host that cannot hand back a grant: {calls}")
+
+
+HUB = "2026-09-23-ae87a9a3-4710384de5c26738"
+
+
+def test_a_host_on_another_release_is_reinstalled_before_it_attaches(
+        bundle, tmp_path, monkeypatch):
+    """The live 2026-09-23 rehearsal, as a gate.
+
+    A work Mac on the 76-era stack passed the capability probe — it IS
+    manageable — so the joiner attached it as it stood. Its own updater then
+    refused every release the hub publishes (the acceptance-receipt set had
+    moved under it), leaving a machine that joined cleanly and could never be
+    updated. And the cure could not come second: the installer resets the
+    host's local state, which discards the attachment with it.
+
+    So the joiner carries the hub's release and compares before it spends the
+    code: tunnel, then install, then attach — the install strictly between.
+    """
+    monkeypatch.setattr(adopt_offline, "_hub_release", lambda: HUB)
+    adopt_offline.emit("work-mac", "PQ4V-LUGA", 9090)
+    calls = _run_join(bundle, tmp_path, installed="76-68c646f7", installer=True)
+
+    assert "install:jstack-install.sh" in calls, f"never reinstalled: {calls}"
+    tunnel = calls.index("install:install_leaf.sh")
+    install = calls.index("install:jstack-install.sh")
+    attach = next(i for i, c in enumerate(calls) if c.startswith("jstack-host:attach"))
+    assert tunnel < install < attach, f"wrong order: {calls}"
+
+
+def test_a_host_on_the_hub_release_is_left_alone(bundle, tmp_path, monkeypatch):
+    """A reinstall is not free — it resets the host's state — so it is not
+    done to a machine that already runs what the hub runs."""
+    monkeypatch.setattr(adopt_offline, "_hub_release", lambda: HUB)
+    adopt_offline.emit("work-mac", "PQ4V-LUGA", 9090)
+    calls = _run_join(bundle, tmp_path, installed=HUB, installer=True)
+
+    assert "download" not in calls and "install:jstack-install.sh" not in calls, calls
+    assert any(c.startswith("jstack-host:attach") for c in calls), calls
+
+
+def test_a_host_with_no_identity_file_counts_as_another_release(
+        bundle, tmp_path, monkeypatch):
+    """A manageable host that cannot say what it runs predates the identity
+    file, which is older than anything the hub still publishes."""
+    monkeypatch.setattr(adopt_offline, "_hub_release", lambda: HUB)
+    adopt_offline.emit("work-mac", "PQ4V-LUGA", 9090)
+    calls = _run_join(bundle, tmp_path, installed=None, installer=True)
+
+    assert calls.index("install:jstack-install.sh") < next(
+        i for i, c in enumerate(calls) if c.startswith("jstack-host:attach")), calls
+
+
+def test_a_joiner_from_a_checkout_gates_on_capabilities_alone(
+        bundle, tmp_path, monkeypatch):
+    """No release identity to bake (a checkout) — the older gate stands, and a
+    capable host is attached without a reinstall it cannot be compared for."""
+    monkeypatch.setattr(adopt_offline, "_hub_release", lambda: "")
+    adopt_offline.emit("work-mac", "PQ4V-LUGA", 9090)
+    calls = _run_join(bundle, tmp_path, installed="76-68c646f7", installer=True)
+
+    assert "install:jstack-install.sh" not in calls, calls
+    assert any(c.startswith("jstack-host:attach") for c in calls), calls
+
+
+def test_a_checkout_on_a_hub_machine_bakes_what_the_hub_observes(tmp_path, monkeypatch):
+    """The production hub mints with the checkout's CLI against its own state
+    dir; the checkout has no identity, the hub's updater has written one."""
+    import json
+    from jstack_host import hostenv, sourcestamp
+    monkeypatch.setattr(sourcestamp, "capture", lambda: {"sha": "x", "dirty": False})
+    state = tmp_path / "state"
+    (state / "updates").mkdir(parents=True)
+    monkeypatch.setattr(hostenv, "state_dir", lambda: state)
+    assert adopt_offline._hub_release() == ""
+    (state / "updates" / "observed.json").write_text(json.dumps(
+        {"release": HUB, "host_source": {"release": HUB}}))
+    assert adopt_offline._hub_release() == HUB
+
+
+def test_the_joiner_bakes_the_hub_release_it_was_minted_on(bundle, monkeypatch):
+    monkeypatch.setattr(adopt_offline, "_hub_release", lambda: HUB)
+    adopt_offline.emit("work-mac", "PQ4V-LUGA", 9090)
+    assert f"HUB_RELEASE={HUB}" in (bundle / "join.sh").read_text()
 
 
 def test_the_join_script_carries_the_code_and_the_mesh_parent(bundle):
@@ -337,6 +442,7 @@ def test_an_offline_code_gets_the_longest_life_the_mint_allows():
     from jstack_host import enrolment
 
     assert enrolment.MAX_TTL > enrolment.DEFAULT_TTL
+    assert enrolment.MAX_OFFLINE_TTL >= 86400, "a file minted tonight must survive the morning"
 
 
 def test_an_installed_hub_can_name_the_installer_without_git(tmp_path, monkeypatch):

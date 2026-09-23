@@ -65,6 +65,30 @@ def _installer_url() -> str:
     return f"https://raw.githubusercontent.com/{repo}/main/install.sh"
 
 
+def _hub_release() -> str:
+    """The release this hub runs, baked into the joiner at mint time.
+
+    The far Mac cannot ask the hub what it runs — it is minted a joiner
+    precisely because it cannot reach the hub yet — so the answer travels in
+    the file. A sealed Hub answers from its own identity. A checkout run on a
+    hub machine (`--state-dir` at the hub's state) answers from what the hub's
+    updater last observed itself serving — the release the far Mac has to
+    match is the hub's, not the checkout's. Neither present: empty, and the
+    joiner falls back to the capability probe alone, which is what it always
+    did.
+    """
+    import json
+    from . import hostenv, sourcestamp
+    if release := sourcestamp.capture().get("release"):
+        return release
+    observed = hostenv.state_dir() / "updates" / "observed.json"
+    try:
+        data = json.loads(observed.read_text())
+    except (OSError, ValueError):
+        return ""
+    return (data.get("host_source") or {}).get("release") or data.get("release") or ""
+
+
 def _join_script(name: str, code: str, port: int, hub: str) -> str:
     """The folder form — `join.sh` sitting beside the files it installs."""
     return (f'#!/bin/bash\n'
@@ -85,11 +109,16 @@ def _join_body(name: str, code: str, port: int, hub: str) -> str:
     parent = f"http://{hub}:{port}"
     import shlex
     installer = shlex.quote(_installer_url())
+    hub_release = shlex.quote(_hub_release())
     return f'''
 CODE="{code}"
 PARENT="{parent}"
 HUB="{hub}"
 INSTALLER={installer}
+# What the hub runs, as of minting. A Mac on any other release is reinstalled
+# BEFORE it attaches — see step 3.
+HUB_RELEASE={hub_release}
+HUB_APP="${{JSTACK_HUB_APP:-/Applications/jStack Hub.app}}"
 export PATH="$PATH:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin"
 
 say() {{ printf '\\n== %s\\n' "$1"; }}
@@ -150,8 +179,31 @@ managed_ready() {{
     printf '%s\\n' "$caps" | grep -qx managed-access-v1 &&
         printf '%s\\n' "$caps" | grep -qx managed-app-v1
 }}
+# The release this Mac runs, read off the installed Hub's own identity file —
+# `version` cannot say (0.1.0 on every build), and the capability probe is
+# satisfied by any build new enough to be managed, including one whose updater
+# refuses every release the hub now publishes (its acceptance-receipt set moved
+# under it). Empty when no Hub is installed, or it predates the identity file.
+installed_release() {{
+    local f
+    f="$(find "$HUB_APP/Contents/Resources" -maxdepth 3 -name release-identity.json 2>/dev/null | head -1)"
+    [ -n "$f" ] || return 0
+    sed -n 's/.*"release": *"\\([^"]*\\)".*/\\1/p' "$f" | head -1
+}}
+needs_install=""
 if ! managed_ready; then
-    say "Installing or updating jStack and jRemote"
+    needs_install="no host here that the hub can manage"
+elif [ -n "$HUB_RELEASE" ]; then
+    have="$(installed_release)"
+    if [ "$have" != "$HUB_RELEASE" ]; then
+        needs_install="this Mac runs ${{have:-an unknown release}}; the hub runs $HUB_RELEASE"
+    fi
+fi
+# Installed BEFORE attaching, never after: the installer resets the host's
+# local state, and an attachment made before it would be reset with it — the
+# hub keeps a row for a machine that no longer exists (2026-09-23, work-proof).
+if [ -n "$needs_install" ]; then
+    say "Installing or updating jStack and jRemote ($needs_install)"
     curl -fsSL "$INSTALLER" -o "$SRC/jstack-install.sh" \\
         || die "could not download the jStack installer"
     if ! command -v brew >/dev/null 2>&1; then
@@ -301,8 +353,11 @@ redeems the enrolment code, and connects the local app automatically.
    endpoint — nothing listens here, no port is forwarded, no inbound path is
    opened. It works from any network with internet.
 2. Waits for `{hub}` to answer, which it can only do once step 1 is up.
-3. Installs any missing dependencies and updates both host and app to support
-   managed access. An old app cannot silently pass the readiness check.
+3. Installs any missing dependencies and, when this Mac has no manageable
+   host or runs a different release than the hub, reinstalls both host and app
+   from the published installer. This happens before anything is redeemed: the
+   installer resets the host's local state, so an attachment made first would
+   not survive it.
 4. Redeems `{code}` against `http://{hub}:{port}` and introduces the local app.
    Only the parent hub manages devices and the two leaf visibility settings.
 
