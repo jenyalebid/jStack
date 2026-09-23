@@ -217,7 +217,8 @@ def main():
                             json={"target": args.target, "request_id": args.request}, timeout=20)
     else:
         result = httpx.get(base + "/inventory", headers=headers, timeout=20)
-    result.raise_for_status()
+    if not result.is_success:
+        raise RuntimeError(f"{args.action}: HTTP {result.status_code}: {result.text[:600]}")
     print(json.dumps(result.json(), indent=2))
 
 
