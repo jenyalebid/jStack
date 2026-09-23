@@ -75,6 +75,39 @@ def test_publication_checks_uploaded_bytes_before_exposing_release(tmp_path, rel
             assert calls[0][calls[0].index("--target") + 1] == "a" * 40
 
 
+@pytest.mark.parametrize("channel", [None, "stable", "issue-109"])
+def test_branch_publication_is_a_prerelease_and_leaves_the_installer_tag(tmp_path, release, monkeypatch, channel):
+    import shutil
+    import subprocess
+    from jstack_host import release_channel, update_macos
+    key, public, envelope = release
+    if channel:
+        envelope = releases.sign({**envelope["manifest"], "channel": {"name": channel}},
+                                 key.private_bytes_raw())
+    atomic_json(tmp_path / "manifest.json", envelope)
+    for item in envelope["manifest"]["components"].values():
+        (tmp_path / item["file"]).write_bytes(b"artifact")
+    monkeypatch.setattr(release_channel.subprocess, "run", lambda *a, **k:
+                        subprocess.CompletedProcess(a[0], 1, "", "HTTP 404"))
+    calls = []
+    def command(argv, **kwargs):
+        calls.append(argv)
+        if argv[1:3] == ["release", "download"]:
+            name = argv[argv.index("--pattern") + 1]
+            shutil.copy2(tmp_path / name, Path(argv[argv.index("--dir") + 1]) / name)
+        return ""
+    monkeypatch.setattr(update_macos, "command", command)
+    release_channel.publish(tmp_path, "example/stack", public)
+    edit = next(c for c in calls if c[1:3] == ["release", "edit"])
+    app_tags = [c[3] for c in calls if c[1:3] == ["release", "create"] and c[3].startswith("mac-app-")]
+    if channel in (None, "stable"):
+        assert "--prerelease=false" in edit
+        assert app_tags == ["mac-app-1.0-1"]
+    else:
+        assert "--prerelease=true" in edit
+        assert app_tags == []
+
+
 def test_signature_rejects_payload_and_trust_key_substitution(release):
     key, public, envelope = release
     assert releases.verify(envelope, public)["release"] == "test-1"

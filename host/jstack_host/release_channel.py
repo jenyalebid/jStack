@@ -208,10 +208,17 @@ def publish(directory: Path, repo: str, public_key: str) -> None:
                      "--pattern", path.name, "--dir", str(downloaded)], timeout=900)
             if releases.digest(downloaded / path.name) != releases.digest(path):
                 raise releases.ReleaseError("uploaded artifact differs from qualified bytes")
-    command(["gh", "release", "edit", tag, "--repo", repo, "--draft=false", "--latest=false"])
+    # A branch release goes out as a prerelease: the stable filter drops those
+    # before it reads a manifest, so a hub that never asked is never offered one.
+    stable = (manifest.get("channel", {}).get("name") or releases.STABLE_CHANNEL) == releases.STABLE_CHANNEL
+    command(["gh", "release", "edit", tag, "--repo", repo, "--draft=false", "--latest=false",
+             "--prerelease=" + ("false" if stable else "true")])
+    if not stable:
+        return
     # One release action feeds every install door. The Mac app installer reads
     # the newest mac-app-* tag; leaving it behind is how a promoted stack
-    # release still hands a five-day-old client to a fresh install.
+    # release still hands a five-day-old client to a fresh install. Only the
+    # stable line moves it, or a fresh install would get a branch client.
     client = manifest["components"]["client"]
     app_tag = "mac-app-1.0-" + str(client["version"])
     probe = subprocess.run(["gh", "api", f"repos/{repo}/releases/tags/{app_tag}"],
