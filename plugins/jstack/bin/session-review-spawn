@@ -39,7 +39,7 @@ Stack requirements (conventions this engine assumes exist):
     puts its own bin/ on the spawned PATH.
 
 Config keys (all optional):
-  agent_root            default "~/Agents"
+  agent_root            default: derived from the root ({JSTACK_ROOT}/Agents)
   default_agent         agent owning $HOME-cwd sessions (default: none → skip)
   project_dir_map       {encoded-project-dir: agent} for non-workspace sessions
   session_end_action    "selfwrite" (default) | "review" | "off"
@@ -216,7 +216,13 @@ def is_session_limit(output: str) -> bool:
     return bool(output) and SESSION_LIMIT_MARKER in output
 
 DEFAULTS = {
-    "agent_root": "~/Agents",
+    # None → derived (root.agents_dir), the same answer every other tool gives.
+    # A literal here is a second opinion about where the tree is: on a machine
+    # whose root is not $HOME, this engine alone resolved into a directory that
+    # did not exist, found no agents, and skipped every session — while mail,
+    # injection and repo-seat all resolved correctly off the root. Silent,
+    # because "no agent match" is also what a genuinely unowned session logs.
+    "agent_root": None,
     "default_agent": None,
     "project_dir_map": {},
     "skill_invocation": "/jstack:post-session-review",
@@ -303,6 +309,17 @@ def _default_timeline_dir() -> Path:
     return Path.home() / "Logs" / "Timeline"
 
 
+def _default_agent_root() -> Path:
+    """Where agent workspaces live when review.json does not say.
+
+    Asks root for the same reason bin/repo-seat does: the tree has one
+    declaration and this engine is not entitled to a private one.
+    """
+    if _root is not None:
+        return _root.agents_dir()
+    return Path.home() / "Agents"
+
+
 def load_config() -> dict:
     cfg = dict(DEFAULTS)
     path = Path(os.environ.get(
@@ -316,7 +333,10 @@ def load_config() -> dict:
                 cfg.update({k: v for k, v in user.items() if k in DEFAULTS})
         except (json.JSONDecodeError, OSError) as e:
             print(f"session-review-spawn: bad config {path}: {e}", file=sys.stderr)
-    cfg["agent_root"] = Path(cfg["agent_root"]).expanduser()
+    cfg["agent_root"] = (
+        Path(cfg["agent_root"]).expanduser() if cfg["agent_root"]
+        else _default_agent_root()
+    )
     cfg["timeline_dir"] = (
         Path(cfg["timeline_dir"]).expanduser() if cfg["timeline_dir"]
         else _default_timeline_dir()
