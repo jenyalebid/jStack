@@ -434,10 +434,17 @@ RECOVERED = {"updated components failed verification", "recovered interrupted ap
 RECOVERED_BY_REBOOT = "recovered interrupted application"
 
 
+RESIDUE_LISTING = "/usr/bin/find /Applications -maxdepth 1 -name '*.incoming-*' -print"
+
+
 def residue(guest: Guest) -> list[str]:
-    """Half-written app copies left next to the installed bundles."""
-    listing = guest.sh("/bin/ls -d /Applications/*.incoming-* 2>/dev/null || true")
-    return [line for line in listing.splitlines() if line.strip()]
+    """Half-written app copies left next to the installed bundles.
+
+    find, not a shell glob: the guest's login shell is zsh, which aborts a
+    command line whose glob matches nothing, so the same pattern reads as
+    "no copies" on the listing and as a failure on the removal."""
+    listing = guest.sh(RESIDUE_LISTING)
+    return sorted(line for line in listing.splitlines() if line.startswith("/Applications/"))
 
 
 def sweep_prior_residue(journey, guest: Guest) -> list[str]:
@@ -450,8 +457,16 @@ def sweep_prior_residue(journey, guest: Guest) -> list[str]:
     leftover is removed here and the receipt says what was found."""
     found = residue(guest)
     if found:
-        guest.sh("/bin/rm -rf /Applications/*.incoming-*")
-        journey.note("the prior's updater left " + json.dumps(found) + "; removed (#117)")
+        quoted = " ".join(shlex.quote(path) for path in found)
+        # What was there goes on the record before anything touches it.
+        shape = guest.sh(f"/bin/ls -lad -- {quoted} 2>&1; "
+                         f"/usr/bin/find {quoted} -type f 2>/dev/null | /usr/bin/wc -l").strip()
+        journey.note("the prior's updater left " + json.dumps(found) + " (#117): "
+                     + " | ".join(line.strip() for line in shape.splitlines() if line.strip()))
+        guest.sh(f"/bin/rm -rf -- {quoted}")
+        remaining = residue(guest)
+        expect(not remaining, f"leftover copies survived removal: {remaining}")
+        journey.note("removed " + json.dumps(found))
     return found
 
 

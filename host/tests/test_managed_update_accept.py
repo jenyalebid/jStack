@@ -751,7 +751,7 @@ def test_the_prior_s_leftover_copy_is_recorded_and_removed_before_the_retry(runn
     listing = {"paths": "/Applications/jRemote.app.incoming-" + CANDIDATE + "\n"}
     def shell(command, **kwargs):
         commands.append(command)
-        if "ls -d" in command:
+        if command == runner.RESIDUE_LISTING:
             found, listing["paths"] = listing["paths"], ""
             return found
         return ""
@@ -764,8 +764,11 @@ def test_the_prior_s_leftover_copy_is_recorded_and_removed_before_the_retry(runn
 
     runner.interruption(journey, fleet, SimpleNamespace(release=CANDIDATE))
 
-    assert any("rm -rf /Applications/*.incoming-*" in command for command in commands)
+    import shlex
+    assert "/bin/rm -rf -- " + shlex.quote("/Applications/jRemote.app.incoming-" + CANDIDATE) in commands
+    assert not any("/Applications/*" in command for command in commands), "no shell globs reach the guest's zsh"
     assert any("jRemote.app.incoming-" in line and "#117" in line for line in journey.lines)
+    assert commands.index(next(c for c in commands if c.startswith("/bin/rm"))) > 0
     assert journey.observed["retry_current"]["release"] == CANDIDATE
     assert journey.missing == ()
 
@@ -784,7 +787,7 @@ def _reboot_fleet(runner, monkeypatch, tmp_path, *, settled_detail, leftovers=""
     installed = iter([{"release": CANDIDATE}, {"release": CANDIDATE}, {"release": PRIOR}])
     guest = SimpleNamespace(name="leaf", installed=lambda: next(installed),
                             stop=lambda: power.append("stop"), start=lambda: power.append("start"),
-                            sh=lambda command, **kwargs: leftovers if "ls -d" in command else "")
+                            sh=lambda command, **kwargs: leftovers if command == runner.RESIDUE_LISTING else "")
     fleet = SimpleNamespace(prior=prior, hub=hub, offer=lambda c: offered.append(c.release))
     return fleet, guest, offered, queued, power
 
