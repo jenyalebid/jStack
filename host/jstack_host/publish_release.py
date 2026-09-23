@@ -5,6 +5,7 @@ import argparse
 import base64
 import copy
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -53,15 +54,16 @@ def allocate_client_build(candidates: Path, minimum: int) -> int:
 
 
 def release_date() -> str:
-    """The day this release is cut, as its own identity — no counter to reserve.
-
-    The old allocate_build() held a lock so two builds could never claim the
-    same number. Nothing needs reserving now: two releases cut on one day are
-    still distinct, because the source hash is the other half of the identity,
-    and two builds of the *same* hash on the same day are the same release.
-    """
+    """Calendar date for the release, independent of the client build counter."""
     from datetime import date
     return date.today().isoformat()
+
+
+def source_identity(date: str, stack: str, client: str, dependencies: dict) -> str:
+    # Fleet jobs key by release: a client-only fix must not look already installed.
+    sources = {"stack": stack, "client": client, "dependencies": dependencies}
+    fingerprint = hashlib.sha256(releases.canonical(sources)).hexdigest()[:16]
+    return f"{date}-{stack[:8]}-{fingerprint}"
 
 
 def sign_hub(stack: Path, output: Path, version: str, config: dict) -> None:
@@ -106,7 +108,7 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
     # Deriving a Hub number from jRemote's project file is what made the two
     # products' versions look comparable when they count different things.
     date = release_date()
-    release_id = f"{date}-" + stack_sha[:8]
+    release_id = source_identity(date, stack_sha, client_sha, dependencies)
     output = work / release_id
     output.mkdir()
     version = json.loads((stack / "plugins/jstack/.claude-plugin/plugin.json").read_text())["version"]

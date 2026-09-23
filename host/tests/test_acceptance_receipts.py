@@ -17,6 +17,15 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from jstack_host import acceptance, publish_release, release_manifest as releases
 
 
+def test_client_and_dependency_fixes_cannot_reuse_an_installed_release_identity():
+    identify = publish_release.source_identity
+    first = identify("2026-09-22", "a" * 40, "b" * 40, {"kit": "c" * 40})
+    assert first != identify("2026-09-22", "a" * 40, "d" * 40, {"kit": "c" * 40})
+    assert first != identify("2026-09-22", "a" * 40, "b" * 40, {"kit": "e" * 40})
+    assert first == identify("2026-09-22", "a" * 40, "b" * 40, {"kit": "c" * 40})
+    assert releases.identifier(first) == first
+
+
 def test_build_reservations_are_unique_and_survive_failed_builds(tmp_path):
     from concurrent.futures import ThreadPoolExecutor
 
