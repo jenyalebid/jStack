@@ -123,14 +123,21 @@ def _run_join(bundle, tmp_path, capable=True, installed=None, installer=False):
     return calls.read_text().splitlines() if calls.exists() else []
 
 
-def test_the_join_script_installs_the_tunnel_before_it_redeems(bundle, tmp_path):
+def test_the_join_script_installs_the_tunnel_before_it_redeems(
+        bundle, tmp_path, monkeypatch):
     """The whole point, asserted as an order — by running it.
 
     Reversed, every other assertion in this file still passes and the bundle is
     still useless: `attach` would be asked to reach a mesh address from a
     machine that is not yet on the mesh, which is the exact deadlock this
     feature exists to break.
+
+    The release gate is someone else's test: a sealed build tree carries its
+    own identity, so an unpinned joiner minted there would call the fake Mac
+    "another release" and die at the installer download before it attached —
+    green in a checkout, red in every release build (2026-09-23).
     """
+    monkeypatch.setattr(adopt_offline, "_hub_release", lambda: "")
     adopt_offline.emit("work-mac", "PQ4V-LUGA", 9090)
     calls = _run_join(bundle, tmp_path)
 
@@ -300,17 +307,23 @@ def test_emit_refuses_when_the_tunnel_half_was_never_written(tmp_path, monkeypat
     assert "tunnel half" in str(exc.value)
 
 
-def test_the_packed_file_is_one_executable_that_carries_everything(bundle, tmp_path):
+def test_the_packed_file_is_one_executable_that_carries_everything(
+        bundle, tmp_path, monkeypatch):
     """What a person actually carries — one file, not a folder of eight.
 
     A folder is eight things, and the one that has to be run is not obviously
     the one to run. Asserted by unpacking and running the packed file, because
     a payload that base64-decodes but does not contain the installer is a file
     that fails on the machine you travelled to.
+
+    Unpinned, this test read the Hub installed under /Applications on the
+    machine running it against the release a sealed tree bakes into the
+    joiner, and died at the installer download in every release build.
     """
     import os
     import subprocess
 
+    monkeypatch.setattr(adopt_offline, "_hub_release", lambda: "")
     adopt_offline.emit("work-mac", "PQ4V-LUGA", 9090)
     packed = adopt_offline.pack("work-mac", "PQ4V-LUGA", 9090)
 
