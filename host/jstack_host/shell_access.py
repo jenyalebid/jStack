@@ -1,0 +1,320 @@
+"""Shell access on a managed machine — identity, keys, root steps, config.
+
+The leaf-side primitives behind hub-held shell grants (#131): a per-machine
+SSH identity whose private key never leaves the machine that minted it, a
+marked block in `authorized_keys` this module owns outright — rewritten in
+place on every grant change, gone when the list empties, the user's own keys
+untouched — the two root steps a grant needs (Remote Login, a sudoers
+drop-in) graded like detach's step lists, and a marked `~/.ssh/config` block
+so a granted peer is `ssh <name>` with nothing to set up.
+
+Every external edge is injectable (`runner`, `root`, `state`) the same way
+attach_parent's and detach_parent's are, so all of it runs in tests against a
+fake root with no root rights and nothing enabled for real.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+from . import hostenv
+
+MARK_BEGIN = "# >>> jremote managed keys >>>"
+MARK_END = "# <<< jremote managed keys <<<"
+CONFIG_BEGIN = "# >>> jremote managed hosts >>>"
+CONFIG_END = "# <<< jremote managed hosts <<<"
+
+#: Relative to the machine root, so tests run it under `root=tmp_path` and a
+#: real machine resolves it to /etc/sudoers.d — the same seam detach uses.
+SUDOERS_PATH = "etc/sudoers.d/jremote-managed"
+
+KEY_FILE = "ssh/id_jremote"
+
+#: What survives being an unquoted word in sudoers or an ssh_config Host
+#: alias. Anything outside this set could smuggle a directive into a file
+#: another parser reads as configuration.
+_SAFE_WORD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+
+_RECORD = "shell_access.json"
+
+SYSTEMSETUP = "/usr/sbin/systemsetup"
+
+
+class ShellAccessError(Exception):
+    """A grant input that must not reach a file other parsers trust."""
+
+
+def _word(value: str, what: str) -> str:
+    if not _SAFE_WORD.match(value or ""):
+        raise ShellAccessError(f"{what} {value!r} cannot be written safely")
+    return value
+
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+def identity(state: Path | None = None, *, keygen=None) -> str:
+    """This machine's SSH public key, minting the keypair on first call.
+
+    ed25519, comment = the machine's own host id, so every authorized_keys
+    line this key lands in names exactly one leaf — revocation finds its line
+    by that name. Re-calling returns the existing key; nothing ever rotates
+    it implicitly, because the pubkey has already been handed to a parent.
+    """
+    state = state or hostenv.state_dir()
+    key = state / KEY_FILE
+    pub = key.with_suffix(".pub")
+    if pub.is_file():
+        return pub.read_text().strip()
+    key.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(key.parent, 0o700)
+    run = keygen or subprocess.run
+    proc = run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "",
+                "-C", hostenv.host_id(), "-f", str(key)],
+               capture_output=True, text=True)
+    if proc.returncode != 0 or not pub.is_file():
+        raise ShellAccessError(
+            "ssh-keygen could not mint this machine's identity: "
+            + ((proc.stderr or proc.stdout or "").strip() or "no output"))
+    os.chmod(key, 0o600)
+    return pub.read_text().strip()
+
+
+def public_key(state: Path | None = None) -> str:
+    """The minted public key, or "" — never mints as a side effect."""
+    pub = (state or hostenv.state_dir()) / KEY_FILE
+    try:
+        return pub.with_suffix(".pub").read_text().strip()
+    except OSError:
+        return ""
+
+
+# ── the managed blocks ──────────────────────────────────────────────────────
+
+def _splice(text: str, begin: str, end: str, block: list[str]) -> str:
+    lines, kept, inside = text.splitlines(), [], False
+    for line in lines:
+        if line.strip() == begin:
+            inside = True
+            continue
+        if line.strip() == end:
+            inside = False
+            continue
+        if not inside:
+            kept.append(line)
+    while kept and not kept[-1].strip():
+        kept.pop()
+    if block:
+        kept += ([""] if kept else []) + [begin] + block + [end]
+    return ("\n".join(kept) + "\n") if kept else ""
+
+
+def _write_marked(path: Path, begin: str, end: str, block: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    try:
+        existing = path.read_text()
+    except OSError:
+        existing = ""
+    path.write_text(_splice(existing, begin, end, block))
+    os.chmod(path, 0o600)
+
+
+def write_authorized_block(path: Path, lines: list[str]) -> None:
+    """Make the managed block exactly `lines` — the whole grant list every
+    time, never a delta, so a flip that removes a grant removes its key."""
+    _write_marked(path, MARK_BEGIN, MARK_END, list(lines))
+
+
+def read_authorized_block(path: Path) -> list[str]:
+    try:
+        text = path.read_text()
+    except OSError:
+        return []
+    out, inside = [], False
+    for line in text.splitlines():
+        if line.strip() == MARK_BEGIN:
+            inside = True
+        elif line.strip() == MARK_END:
+            inside = False
+        elif inside:
+            out.append(line)
+    return out
+
+
+def write_ssh_config(path: Path, peers: list[dict],
+                     key_path: Path | None = None) -> None:
+    """`ssh <name>` for every reachable peer — HostName, user, this machine's
+    identity, keepalives tuned for a mesh that drops idle flows."""
+    key_path = key_path or hostenv.state_dir() / KEY_FILE
+    block: list[str] = []
+    for peer in peers:
+        block += [
+            f"Host {_word(peer.get('name', ''), 'a peer name')}",
+            f"  HostName {_word(peer.get('address', ''), 'a peer address')}",
+            f"  User {_word(peer.get('user', ''), 'a peer user')}",
+            f"  IdentityFile {key_path}",
+            "  ServerAliveInterval 30",
+            "  ServerAliveCountMax 4",
+            "  StrictHostKeyChecking accept-new",
+        ]
+    _write_marked(path, CONFIG_BEGIN, CONFIG_END, block)
+
+
+# ── the root steps ──────────────────────────────────────────────────────────
+
+def sudoers_content(user: str) -> str:
+    return f"{_word(user, 'a sudoers account')} ALL=(ALL) NOPASSWD: ALL\n"
+
+
+def _defaults(runner, root, state):
+    return (runner or subprocess.run,
+            Path(root) if root else Path(os.environ.get("LEAF_DEST") or "/"),
+            state or hostenv.state_dir())
+
+
+def _record_path(state: Path) -> Path:
+    return state / _RECORD
+
+
+def enabled_remote_login(state: Path | None = None) -> bool:
+    """Whether a grant turned Remote Login on — the fact disable restores."""
+    try:
+        rec = json.loads(_record_path(state or hostenv.state_dir()).read_text())
+        return rec.get("remote_login_enabled") is True
+    except (OSError, ValueError):
+        return False
+
+
+def _remote_login_record(state: Path) -> bool | None:
+    try:
+        rec = json.loads(_record_path(state).read_text())
+        return bool(rec.get("remote_login_enabled"))
+    except (OSError, ValueError):
+        return None
+
+
+def enable(user: str, *, runner=None, sudo: bool = True,
+           root: Path | None = None, state: Path | None = None) -> list[dict]:
+    """The joiner's root moment: Remote Login on, passwordless sudo in.
+
+    Remote Login's prior state is probed first and recorded, because turning
+    it on is only this grant's to undo if it was off before — a Mac whose
+    owner already ran SSH keeps it on a later detach.
+    """
+    runner, root, state = _defaults(runner, root, state)
+    prefix = ["sudo"] if sudo else []
+    steps: list[dict] = []
+
+    probe = runner(prefix + [SYSTEMSETUP, "-getremotelogin"],
+                   capture_output=True, text=True)
+    already_on = "On" in (probe.stdout or "")
+    turned_on, ok = False, True
+    if already_on:
+        note = "Remote Login was already on — left as it was"
+    else:
+        proc = runner(prefix + [SYSTEMSETUP, "-setremotelogin", "on"],
+                      capture_output=True, text=True)
+        ok = proc.returncode == 0
+        turned_on = ok
+        note = ("Remote Login turned on" if ok else
+                "systemsetup could not turn Remote Login on: "
+                + ((proc.stderr or proc.stdout or "").strip() or "no output"))
+    steps.append({"step": "remote-login", "ok": ok, "note": note})
+    state.mkdir(parents=True, exist_ok=True)
+    _record_path(state).write_text(
+        json.dumps({"remote_login_enabled": turned_on}))
+
+    target = root / SUDOERS_PATH
+    content = sudoers_content(user)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+        os.chmod(target, 0o440)
+        wrote, err = True, ""
+    except OSError:
+        # Root-owned on a real machine; staged as the user, installed as root.
+        with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
+            tmp.write(content)
+        proc = runner(prefix + ["/usr/bin/install", "-m", "0440", "-o", "root",
+                                "-g", "wheel", tmp.name, str(target)],
+                      capture_output=True, text=True)
+        os.unlink(tmp.name)
+        wrote, err = proc.returncode == 0, (proc.stderr or "").strip()
+    steps.append({
+        "step": "sudoers", "ok": wrote,
+        "note": (f"passwordless sudo for {user} installed" if wrote else
+                 f"could not install the sudoers drop-in: {err or 'no detail'}")})
+    return steps
+
+
+def disable(user: str, *, runner=None, sudo: bool = True,
+            root: Path | None = None, state: Path | None = None,
+            authorized_keys: Path | None = None) -> list[dict]:
+    """Enable's full reverse, graded per step like detach — a machine that
+    still answers `sudo -n true` for a revoked parent is the failure mode."""
+    runner, root, state = _defaults(runner, root, state)
+    prefix = ["sudo"] if sudo else []
+    steps: list[dict] = []
+
+    record = _remote_login_record(state)
+    if record:
+        # -f, because systemsetup asks for confirmation on the way off.
+        proc = runner(prefix + [SYSTEMSETUP, "-f", "-setremotelogin", "off"],
+                      capture_output=True, text=True)
+        ok = proc.returncode == 0
+        steps.append({"step": "remote-login", "ok": ok,
+                      "note": ("Remote Login restored to off" if ok else
+                               "systemsetup could not turn Remote Login off — "
+                               "turn it off by hand if it should be")})
+    elif record is None:
+        steps.append({"step": "remote-login", "ok": True,
+                      "note": "no grant ever enabled it — left alone"})
+    else:
+        steps.append({"step": "remote-login", "ok": True,
+                      "note": "it was on before the grant — left on"})
+
+    target = root / SUDOERS_PATH
+    ok, err = True, ""
+    if target.exists():
+        try:
+            target.unlink()
+        except OSError:
+            proc = runner(prefix + ["/bin/rm", "-f", str(target)],
+                          capture_output=True, text=True)
+            ok, err = proc.returncode == 0, (proc.stderr or "").strip()
+    steps.append({"step": "sudoers", "ok": ok,
+                  "note": ("the sudoers drop-in is gone" if ok else
+                           f"could not remove {target}: {err or 'no detail'}")})
+
+    ak = authorized_keys or Path.home() / ".ssh" / "authorized_keys"
+    try:
+        if ak.exists():
+            write_authorized_block(ak, [])
+        steps.append({"step": "authorized-keys", "ok": True,
+                      "note": "no managed key can log in here any more"})
+    except OSError as exc:
+        steps.append({"step": "authorized-keys", "ok": False,
+                      "note": f"could not rewrite {ak}: {exc}"})
+
+    try:
+        shutil.rmtree((state / KEY_FILE).parent, ignore_errors=False)
+        note = "this machine's shell identity is destroyed"
+    except FileNotFoundError:
+        note = "no shell identity was ever minted"
+    except OSError as exc:
+        steps.append({"step": "identity", "ok": False,
+                      "note": f"could not remove the keypair: {exc}"})
+    else:
+        steps.append({"step": "identity", "ok": True, "note": note})
+
+    try:
+        _record_path(state).unlink()
+    except OSError:
+        pass
+    return steps
