@@ -454,8 +454,9 @@ def test_revocation_failure_restores_the_fixture_supervisor(runner, monkeypatch)
     fleet = SimpleNamespace(leaves=[guest], machine=lambda _: "leaf", hub=hub)
     with pytest.raises(runner.AcceptanceFailure, match="revocation failed"):
         runner.revocation(SimpleNamespace(observe=lambda *args: None), fleet, None)
-    assert "bootout" in commands[0]
-    assert "bootstrap" in commands[-1]
+    assert commands[0].endswith("unregister updater")
+    assert commands[-2].endswith("register updater")
+    assert "launchctl print" in commands[-1]
 
 
 def test_a_hub_restarting_into_the_candidate_survives_refused_polls(runner):

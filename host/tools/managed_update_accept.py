@@ -434,19 +434,17 @@ def revocation(journey, fleet: Fleet, candidate: Candidate) -> None:
     guest = fleet.leaves[-1]
     machine = fleet.machine(guest)
     stage_prior(fleet, guest)
-    guest.sh("/bin/launchctl bootout gui/$(id -u)/live.jstack.hub.updater || true")
+    guest.sh("'/Applications/jStack Hub.app/Contents/MacOS/JStackHub' unregister updater")
     try:
         job = fleet.hub.queue(machine, request_id("revoked"))["jobs"][0]
         journey.observe("revoked_device", fleet.hub.tool_call("revoke", "--machine", machine))
         row = fleet.hub.wait_for("cancelled", machine, timeout=300, poll=5)
         journey.observe("cancelled_job", {"job": job["id"], "state": row["state"]})
     finally:
-        guest.sh("/bin/launchctl bootstrap gui/$(id -u) "
-                 "'/Applications/jStack Hub.app/Contents/Library/LaunchAgents/"
-                 "live.jstack.hub.updater.plist' || true")
+        guest.sh("'/Applications/jStack Hub.app/Contents/MacOS/JStackHub' register updater")
+        guest.sh("/bin/launchctl print gui/$(id -u)/live.jstack.hub.updater")
     time.sleep(SETTLE * 4)
-    log = guest.sh("/usr/bin/tail -n 40 ~/.local/state/jremote/updates/logs/supervisor.err "
-                   "~/.local/state/jremote/updates/logs/supervisor.out 2>/dev/null || true")
+    log = guest.sh("/usr/bin/tail -n 40 ~/.local/state/jremote/logs/updater.log")
     expect("401" in log or "not authoriz" in log or "cancelled" in log,
            "the restarted updater did not record a rejected request")
     journey.observe("rejected_request", log.strip().splitlines()[-3:])
