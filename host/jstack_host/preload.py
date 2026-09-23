@@ -40,6 +40,7 @@ MODULES = (
     "jstack_host.plugin_paths",
     "jstack_host.doctor",
     "jstack_host.allowance",
+    "jstack_host.claude_settings",
     "jstack_host.attach_parent",
     "jstack_host.auth",
     "jstack_host.board_watch",

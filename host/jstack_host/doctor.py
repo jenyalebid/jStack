@@ -190,15 +190,45 @@ def check_scheduler() -> dict:
 
 
 def check_allowance() -> dict:
-    from . import allowance
-    sample = allowance.cli_cache_sample()
-    if sample is None:
-        return _check("allowance", OK, "no usage reading cached yet — the "
-                      "Usage bars fill in after one interactive claude session")
+    """What the Usage bars would draw right now, and why if the answer is
+    nothing.
+
+    Reads the merged store rather than one tier: this check used to look only
+    at the Claude CLI's cache, so on a host whose bars were being kept fresh
+    by the status-line sampler it reported "no usage reading cached yet" while
+    the app drew a live meter — a check that says the opposite of the thing it
+    checks. It also has to name the missing writer, because "no reading" and
+    "no sampler installed" are repaired by completely different actions.
+    """
     import time
-    age = int(time.time() - float(sample.get("sampled_at") or 0))
-    pcts = ", ".join(f"{w['label']} {w['pct']:.0f}%" for w in sample["windows"])
-    return _check("allowance", OK, f"{pcts} (cached {age}s ago)")
+    from . import allowance
+    from .claude_settings import statusline_state
+
+    state = allowance.read()["providers"]
+    lines, missing = [], []
+    for pid, p in state.items():
+        if p is None:
+            missing.append(pid)
+            continue
+        pcts = ", ".join(f"{w['label']} {w['pct']:.0f}%"
+                         for w in p["windows"] if w.get("pct") is not None)
+        age = int(p.get("age_seconds") or 0)
+        lines.append(f"{p['label']} {pcts or 'no windows'} "
+                     f"({p.get('source')}, {age}s ago"
+                     f"{', STALE' if p.get('stale') else ''})")
+
+    wired, detail = statusline_state()
+    if "claude" in missing and not wired:
+        return _check("allowance", WARN,
+                      "no Claude reading, and nothing on this machine samples "
+                      "one", f"{detail} — run host/tools/claude_setup.py to "
+                      "wire the status-line sampler, or the Usage bars stay "
+                      "empty until someone runs /usage by hand")
+    if not lines:
+        return _check("allowance", OK, "sampler wired, no reading yet — the "
+                      "Usage bars fill in on the next status-line render")
+    note = f"not connected: {', '.join(missing)}" if missing else ""
+    return _check("allowance", OK, "; ".join(lines), note)
 
 
 def check_repos() -> dict:

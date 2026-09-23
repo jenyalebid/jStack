@@ -845,6 +845,18 @@ link_stage() {
 link_stage "$PLUGIN/rules-stage"    "$HOME/.claude/rules"    "rules"
 link_stage "$PLUGIN/commands-stage" "$HOME/.claude/commands" "bare commands"
 
+# Claude Code reads statusLine from user scope only, so the allowance sampler
+# cannot ride the plugin the way everything else does. Unwired, the Usage bars
+# have no writer and a fresh hub draws nothing (#133). The sampler prints
+# nothing, so this is not a change to the terminal — an existing statusLine of
+# the user's own is left alone and said so.
+if [ "$DRY_RUN" = "1" ]; then
+    would "wire the Claude allowance sampler into $HOME/.claude/settings.json"
+else
+    ok "$(python3 "$CHECKOUT/host/tools/claude_setup.py" --checkout "$CHECKOUT" \
+        2>&1 || echo "Claude settings wiring failed — Usage bars will stay empty")"
+fi
+
 if command -v codex >/dev/null 2>&1; then
     step "Codex plugin and shared skills"
     run python3 "$CHECKOUT/host/tools/codex_setup.py" --workspace "$AGENT_ROOT" \

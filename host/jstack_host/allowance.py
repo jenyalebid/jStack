@@ -14,20 +14,26 @@ same payload the app already decodes.
 
 ## Where the numbers come from
 
-Two tiers, and a host has the first one the moment Claude Code is installed:
+Three tiers, in the order that actually keeps a bar honest:
 
-1. **The CLI's own cache.** Claude Code fetches the account's utilization for
-   its `/usage` screen and keeps the answer in `~/.claude.json`
-   (`cachedUsageUtilization`: `five_hour` and `seven_day`, each a percentage
-   and a reset clock, stamped when fetched). Every interactive session
-   refreshes it. Free, no auth, no hook to wire — the reason a fresh install
-   shows bars without anyone configuring anything.
+1. **The status-line sampler.** `statusline.py`, wired into
+   `~/.claude/settings.json` by `host/tools/claude_setup.py` at install, is
+   handed `rate_limits` by Claude Code on every render and calls `record()`.
+   Every live session is a sampler, so the Claude bars are seconds old
+   whenever anyone is working. **This is the tier the bars run on** — the
+   others are what is left when nobody is.
 2. **Codex rollout events.** The CLI records account `rate_limits` alongside
    token counts. Their own timestamps, percentages, and reset clocks feed the
    Codex bars without another login or an API credential.
-3. **A recorded sample.** `record()` stores what a sampler saw — a status-line
-   hook handed `rate_limits` on every render, a poll of the provider's usage
-   endpoint. Whichever tier's sample is newest is the one served.
+3. **The Claude CLI's own cache.** `~/.claude.json`'s `cachedUsageUtilization`
+   — a percentage and a reset clock per window, stamped when fetched. A
+   backstop and nothing more: Claude Code writes it from its `/usage` screen
+   and from no other path an ordinary session takes, so on a machine where
+   nobody has run `/usage` the key is simply absent, and where somebody has it
+   is fifteen minutes from stale for good. jStack #133 — the bars used to be
+   documented as riding this, which is why a fresh hub drew nothing.
+
+Whichever tier's sample is newest is the one served.
 
 Refusals are a third fact, deliberately not merged with either: the provider
 actually turned a request away. jStack's scheduler already sees that from a
