@@ -69,6 +69,7 @@ from pathlib import Path
 from .hostenv import spawn_path
 from . import hostenv
 
+
 def _bundled_tmux() -> str | None:
     """The tmux the Hub shipped, next to its own Python. A clean Mac has no
     tmux on PATH, so a managed session can only spawn if we use the one in the
@@ -93,6 +94,21 @@ _REG = hostenv.state_dir() / "jremote_open.json"
 # The user's live sessions.
 _SOCK = os.environ.get("JREMOTE_TMUX_SOCK", "jremote")
 _PATH = spawn_path()
+
+# The embedding Hub runs its own interpreter with PYTHONPATH pinned to the
+# app's sealed packages (and PYTHONDONTWRITEBYTECODE). A tmux server spawned
+# with that environment hands it to every agent shell it ever opens, and any
+# python those shells run — session hooks, the dev checkout, a stray script —
+# then imports the app's compiled extensions ahead of its own and dies on a
+# version mismatch. The server gets the caller's environment minus the
+# interpreter's private variables; PATH is pinned as before.
+_INTERPRETER_PRIVATE = ("PYTHONPATH", "PYTHONHOME", "PYTHONDONTWRITEBYTECODE")
+
+
+def _server_env() -> dict:
+    env = {k: v for k, v in os.environ.items() if k not in _INTERPRETER_PRIVATE}
+    env["PATH"] = _PATH
+    return env
 
 # Set in the environment of the phone's `tmux attach` client (pty.py) so window
 # truth can tell a mirror from a window. Read back off the live client process,
@@ -710,7 +726,7 @@ def open_managed(sid: str, cwd: str, resume: bool = True, displace=None,
     prior = _reg_load().get(sid) or {}
     engine = engine or prior.get("engine") or "claude"
     model = model or prior.get("model") or ""
-    env = {**os.environ, "PATH": _PATH}
+    env = _server_env()
     # The sealed Hub bundles Homebrew's tmux, whose ncurses looks for terminfo
     # in a Homebrew prefix a clean Mac doesn't have; without this every session
     # spawns spewing "can't find terminfo database". The system database is
