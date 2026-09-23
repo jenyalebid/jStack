@@ -1,0 +1,117 @@
+"""Our hooks, in Codex's spelling, installed where root's word is trust enough.
+
+Holds the rules so `jstack-doctor` can grade them; `host/tools/codex_setup.py`
+is the CLI over it. The hook definitions themselves live in the plugin's
+`hooks/hooks.json` and are not restated here — one definition, two engines.
+"""
+
+import json
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+
+# Hooks, and the trust they need. Codex skips a hook it has not been told to
+# trust, and it skips it in SILENCE — no warning, no error, exit 0. Every
+# surface is gated the same way: the plugin's own manifest, `[[hooks.*]]` in
+# config.toml, and the hooks.json beside it. So a machine this script installed
+# carried all fifteen of our hooks and ran none of them: no walk-up, no seat
+# timeline, no path rules, no stop guards, no session review. This Mac only
+# ever worked because a human approved them here once, by hand.
+#
+# A trust entry is a hash Codex computes and persists after that approval, so
+# it is not something an installer can write. What an installer CAN do is
+# install the hooks as the machine's operator, which is what
+# /etc/codex/managed_config.toml is for: hooks declared there are trusted
+# because root put them there, and need no per-machine approval at all.
+MANAGED_CONFIG = Path("/etc/codex/managed_config.toml")
+
+# Codex's own event names. A name it does not know is not an error either — the
+# hook simply never runs, which is the same silence again, so we translate only
+# what it will actually honour and say out loud what we dropped.
+CODEX_EVENTS = ("PreToolUse", "PostToolUse", "PreCompact", "PostCompact",
+                "SessionStart", "SessionEnd", "UserPromptSubmit", "Stop",
+                "SubagentStart", "SubagentStop", "PermissionRequest", "Interrupt")
+
+# Per-hook fields Codex reads, in its spelling. PascalCase is load-bearing here
+# exactly as the event names are.
+HOOK_FIELDS = ("timeout", "statusMessage", "additionalContextLimit", "async")
+
+
+def managed_hooks(manifest, plugin):
+    """Translate the plugin's hook manifest into an operator-owned TOML block.
+
+    One implementation, two engines: these are the same scripts Claude Code
+    runs, named here so Codex can find them. The logic — which rules match a
+    path, which timeline window a seat injects — exists once. A second copy
+    would be a second truth, and the copy is the one that goes stale.
+    """
+    lines, dropped = [], []
+    for event, groups in (manifest.get("hooks") or {}).items():
+        if event not in CODEX_EVENTS:
+            dropped.append(event)
+            continue
+        for group in groups:
+            lines.append(f"[[hooks.{event}]]")
+            if group.get("matcher"):
+                lines.append("matcher = " + json.dumps(group["matcher"]))
+            for handler in group.get("hooks") or []:
+                if handler.get("type") != "command":
+                    dropped.append(f"{event}:{handler.get('type')}")
+                    continue
+                lines.append(f"[[hooks.{event}.hooks]]")
+                lines.append('type = "command"')
+                command = handler["command"].replace("${CLAUDE_PLUGIN_ROOT}", str(plugin))
+                lines.append("command = " + json.dumps(command))
+                for field in HOOK_FIELDS:
+                    if handler.get(field) is not None:
+                        lines.append(f"{field} = " + json.dumps(handler[field]))
+            lines.append("")
+    return "\n".join(lines).strip() + "\n", dropped
+
+
+def managed_config(plugin, manifest_path=None):
+    """The whole file, header and all. Written by root, read by every session."""
+    manifest = json.loads((manifest_path or (plugin / "hooks/hooks.json")).read_text())
+    body, dropped = managed_hooks(manifest, plugin)
+    header = ("# Managed by jStack. Rewritten on every install — edit the plugin's\n"
+              "# hooks/hooks.json instead, which is the one definition both engines read.\n"
+              "#\n"
+              "# These hooks are trusted because root installed them. Codex skips an\n"
+              "# untrusted hook in silence, so the alternative was fifteen hooks that\n"
+              "# looked wired on every machine and fired on none.\n\n")
+    return header + body, dropped
+
+
+def install_managed_config(plugin, path=None, runner=None, manifest_path=None):
+    """Put our hooks where root's word is trust enough, and say what happened.
+
+    Not writable by us on a normal machine, which is the whole point of the
+    location — so the write goes through sudo, once, during an install a person
+    is already sitting in front of. An unchanged file is not rewritten, so a
+    re-install asks for nothing.
+    """
+    path = MANAGED_CONFIG if path is None else path
+    runner = subprocess.run if runner is None else runner
+    text, dropped = managed_config(plugin, manifest_path)
+    note = f" (skipped: {', '.join(dropped)})" if dropped else ""
+    try:
+        if path.read_text() == text:
+            return f"hooks already active for every Codex session{note}"
+    except OSError:
+        pass
+    staged = path.parent / f".{path.name}.jstack" if os.access(path.parent, os.W_OK) \
+        else Path(tempfile.mkdtemp()) / path.name
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_text(text)
+    if os.access(path.parent, os.W_OK) or os.geteuid() == 0:
+        staged.replace(path)
+    else:
+        print("Codex hooks need one sudo write to /etc/codex — without it a "
+              "session gets no timeline, no rules and no session review.")
+        for command in (["sudo", "mkdir", "-p", str(path.parent)],
+                        ["sudo", "cp", str(staged), str(path)],
+                        ["sudo", "chmod", "644", str(path)]):
+            if runner(command).returncode != 0:
+                return f"hooks NOT installed — {' '.join(command)} failed{note}"
+    return f"hooks active for every Codex session on this machine{note}"

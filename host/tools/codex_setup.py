@@ -12,6 +12,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from jstack_host.codex_hooks import install_managed_config  # noqa: E402
+
 
 _SKIP_TREES = {"pad", "git", "scratch", "node_modules", "__pycache__", ".venv",
                "venv", "build", "DerivedData", ".build", "dist", ".git", ".agents",
@@ -135,6 +139,8 @@ def shell_config(text, plugin, path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path)
+    parser.add_argument("--no-managed-hooks", action="store_true",
+                        help="Leave /etc/codex alone; hooks then need per-machine approval")
     parser.add_argument("--job-monitor", action="store_true",
                         help="Install the opt-in background shell job MCP server")
     args = parser.parse_args()
@@ -157,6 +163,8 @@ def main():
     entries = [p for p in entries if "/.codex/tmp/" not in p and not p.endswith("/codex-path")]
     text = shell_config(text, plugin, os.pathsep.join(dict.fromkeys(entries)))
     config.write_text(doc_config(text))
+    if not args.no_managed_hooks:
+        print(install_managed_config(plugin))
     # Preserve local post-write tooling (for example a workspace's Swift lint).
     settings = home / ".claude/settings.json"
     claude_settings = json.loads(settings.read_text()) if settings.exists() else {}

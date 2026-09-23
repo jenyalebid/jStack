@@ -261,3 +261,109 @@ def test_the_walkup_block_is_written_once():
     once = module.doc_config("model = \"chosen\"\n")
     assert module.doc_config(once) == once
     assert once.count("project_doc_max_bytes") == 1
+
+
+def test_managed_config_carries_every_hook_the_plugin_declares():
+    """The manifest is the one definition; this is only its Codex spelling. A
+    hook that fails to translate is a hook that silently never runs."""
+    import tomllib
+    from jstack_host import codex_hooks as module
+    text, dropped = module.managed_config(PLUGIN)
+    assert dropped == []
+    parsed = tomllib.loads(text)
+    declared = json.loads((PLUGIN / "hooks/hooks.json").read_text())["hooks"]
+    for event, groups in declared.items():
+        written = [h["command"] for group in parsed["hooks"][event] for h in group["hooks"]]
+        for group in groups:
+            for handler in group["hooks"]:
+                assert handler["command"].replace("${CLAUDE_PLUGIN_ROOT}", str(PLUGIN)) in written
+
+
+def test_managed_config_keeps_codex_event_spelling_and_drops_what_it_cannot_run():
+    """Codex ignores an event name it does not know without warning, so a name
+    it would not honour must never reach the file."""
+    import tomllib
+    from jstack_host import codex_hooks as module
+    manifest = {"hooks": {
+        "SessionStart": [{"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/a.py",
+                                     "timeout": 7, "additionalContextLimit": 900}]}],
+        "Notification": [{"hooks": [{"type": "command", "command": "/never.py"}]}]}}
+    text, dropped = module.managed_hooks(manifest, Path("/plug"))
+    parsed = tomllib.loads(text)
+    assert list(parsed["hooks"]) == ["SessionStart"]
+    assert dropped == ["Notification"]
+    handler = parsed["hooks"]["SessionStart"][0]["hooks"][0]
+    assert handler["command"] == "/plug/a.py"
+    assert (handler["timeout"], handler["additionalContextLimit"]) == (7, 900)
+
+
+def test_a_matcher_rides_the_group_and_not_the_handler():
+    import tomllib
+    from jstack_host import codex_hooks as module
+    manifest = {"hooks": {"PreToolUse": [{"matcher": "Edit|Write",
+                                          "hooks": [{"type": "command", "command": "/x.py"}]}]}}
+    group = tomllib.loads(module.managed_hooks(manifest, Path("/plug"))[0])["hooks"]["PreToolUse"][0]
+    assert group["matcher"] == "Edit|Write"
+    assert "matcher" not in group["hooks"][0]
+
+
+def test_a_handler_codex_cannot_run_is_reported_not_written():
+    from jstack_host import codex_hooks as module
+    manifest = {"hooks": {"Stop": [{"hooks": [{"type": "prompt", "prompt": "hi"}]}]}}
+    text, dropped = module.managed_hooks(manifest, Path("/plug"))
+    assert "prompt" not in text
+    assert dropped == ["Stop:prompt"]
+
+
+def test_a_writable_managed_path_needs_no_sudo(tmp_path):
+    from jstack_host import codex_hooks as module
+    calls = []
+    target = tmp_path / "managed_config.toml"
+    message = module.install_managed_config(PLUGIN, target, lambda cmd, **kw: calls.append(cmd))
+    assert calls == []
+    assert "active" in message
+    assert "hooks/session-start-inject.py" in target.read_text()
+
+
+def test_an_unchanged_managed_file_is_not_rewritten(tmp_path):
+    """A re-install must ask a person for nothing."""
+    from jstack_host import codex_hooks as module
+    target = tmp_path / "managed_config.toml"
+    module.install_managed_config(PLUGIN, target, lambda cmd, **kw: None)
+    before = target.stat().st_mtime_ns
+    calls = []
+    message = module.install_managed_config(PLUGIN, target, lambda cmd, **kw: calls.append(cmd))
+    assert (calls, target.stat().st_mtime_ns) == ([], before)
+    assert "already active" in message
+
+
+def test_an_unwritable_managed_path_goes_through_sudo(tmp_path):
+    from jstack_host import codex_hooks as module
+    unwritable = tmp_path / "etc"
+    unwritable.mkdir(mode=0o500)
+    calls = []
+
+    class Result:
+        returncode = 0
+
+    def runner(cmd, **kw):
+        calls.append(cmd[:2])
+        return Result()
+
+    message = module.install_managed_config(PLUGIN, unwritable / "managed_config.toml", runner)
+    assert calls == [["sudo", "mkdir"], ["sudo", "cp"], ["sudo", "chmod"]]
+    assert "active" in message
+
+
+def test_a_refused_sudo_is_reported_as_hooks_not_installed(tmp_path):
+    """Silence is the failure mode this whole file exists to end."""
+    from jstack_host import codex_hooks as module
+    unwritable = tmp_path / "etc"
+    unwritable.mkdir(mode=0o500)
+
+    class Result:
+        returncode = 1
+
+    message = module.install_managed_config(PLUGIN, unwritable / "managed_config.toml",
+                                            lambda cmd, **kw: Result())
+    assert "NOT installed" in message

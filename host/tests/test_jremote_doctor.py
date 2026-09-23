@@ -35,7 +35,7 @@ def test_every_check_answers_with_a_grade(machine):
     names = [r["name"] for r in results]
     assert names == ["python", "claude", "tmux", "websocket", "open files", "token",
                      "profile", "agents", "registry", "timeline", "transcripts",
-                     "scheduler", "allowance", "repos", "service", "source", "app",
+                     "scheduler", "allowance", "codex hooks", "repos", "service", "source", "app",
                      "files"]
     assert all(r["grade"] in (doctor.OK, doctor.WARN, doctor.FAIL) for r in results)
     by = {r["name"]: r for r in results}

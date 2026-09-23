@@ -231,6 +231,42 @@ def check_allowance() -> dict:
     return _check("allowance", OK, "; ".join(lines), note)
 
 
+def check_codex_hooks() -> dict:
+    """Whether a Codex session on this machine gets our hooks at all.
+
+    Codex skips a hook it has not been told to trust, and it skips it in
+    silence — so "the manifest ships fifteen hooks" says nothing about whether
+    any of them run. What can be observed is whether the operator-owned file
+    exists and still matches what the plugin declares, which is the only thing
+    this reports.
+    """
+    from . import codex_hooks
+
+    if not _which("codex"):
+        return _check("codex hooks", OK, "codex not installed — nothing to wire")
+    plugin = hostenv.package_root().parent / "plugins/jstack"
+    try:
+        wanted, dropped = codex_hooks.managed_config(plugin)
+    except OSError as exc:
+        return _check("codex hooks", WARN, f"cannot read the hook manifest: {exc}")
+    hooks = sum(1 for line in wanted.splitlines() if line.endswith(".hooks]]"))
+    try:
+        live = codex_hooks.MANAGED_CONFIG.read_text()
+    except OSError:
+        return _check("codex hooks", WARN,
+                      f"{hooks} hooks declared, none active — a session gets no "
+                      "seat timeline, no path rules and no session review",
+                      f"run host/tools/codex_setup.py; it needs one sudo write to "
+                      f"{codex_hooks.MANAGED_CONFIG}")
+    if live != wanted:
+        return _check("codex hooks", WARN,
+                      f"{codex_hooks.MANAGED_CONFIG} no longer matches the plugin's "
+                      "manifest, so some hooks run stale and some not at all",
+                      "re-run host/tools/codex_setup.py")
+    note = f"not translated: {', '.join(dropped)}" if dropped else ""
+    return _check("codex hooks", OK, f"{hooks} hooks active for every session", note)
+
+
 def check_repos() -> dict:
     repos = hostenv.repos()
     if not repos:
@@ -423,7 +459,8 @@ def check_file_sharing() -> dict:
 
 CHECKS = (check_python, check_claude, check_tmux, check_websocket, check_fd_limit,
           check_token, check_profile, check_agents, check_registry, check_timeline,
-          check_transcripts, check_scheduler, check_allowance, check_repos,
+          check_transcripts, check_scheduler, check_allowance, check_codex_hooks,
+          check_repos,
           check_service, check_source, check_app, check_file_sharing)
 
 
