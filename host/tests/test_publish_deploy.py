@@ -78,3 +78,48 @@ def test_deploy_refuses_a_hub_that_revoked_its_own_credential(monkeypatch):
     monkeypatch.setattr(devices, "internal_token", lambda: "")
     with pytest.raises(ValueError, match="revoked its own internal credential"):
         publish_release.hub_token()
+
+
+class _RestartingClient(_Client):
+    """A hub that is itself in the fleet: its own apply restarts the server
+    under the poller, so the inventory that follows the queue is refused."""
+
+    def __init__(self, calls, refusals):
+        super().__init__(calls)
+        self.refusals = refusals
+
+    def get(self, url, headers=None):
+        if self.calls and self.refusals:
+            self.refusals -= 1
+            import httpx
+            raise httpx.ConnectError("[Errno 61] Connection refused")
+        return super().get(url, headers=headers)
+
+
+def _hub_credential(monkeypatch):
+    from jstack_host import devices, install_host
+    monkeypatch.setattr(install_host, "adopt_installed_environment", lambda path=None: None)
+    monkeypatch.setattr(publish_release, "sys", type("S", (), {"modules": {}}))
+    monkeypatch.setattr(devices, "internal_token", lambda: "hub-secret")
+
+
+def test_deploy_outlasts_the_hubs_own_restart(monkeypatch):
+    _hub_credential(monkeypatch)
+    import httpx
+    calls = []
+    monkeypatch.setattr(httpx, "Client", lambda **kw: _RestartingClient(calls, refusals=2))
+    clients = []
+    monkeypatch.setattr(httpx, "Client", lambda **kw: clients.append(_RestartingClient(calls, refusals=2)) or clients[-1])
+    result = publish_release.deploy("r1", port=9090, timeout=5, poll=0)
+    assert result["states"] == {"m1": "current"}
+    assert clients[-1].refusals == 0, "both refused polls were retried"
+    assert [m for m, _, _ in calls] == ["GET", "POST", "GET"]
+
+
+def test_deploy_gives_up_on_a_hub_that_stays_down(monkeypatch):
+    _hub_credential(monkeypatch)
+    import httpx
+    calls = []
+    monkeypatch.setattr(httpx, "Client", lambda **kw: _RestartingClient(calls, refusals=10 ** 6))
+    with pytest.raises(httpx.ConnectError):
+        publish_release.deploy("r1", port=9090, timeout=0, poll=0)

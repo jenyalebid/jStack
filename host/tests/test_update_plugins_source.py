@@ -131,3 +131,58 @@ def test_nothing_registered_discovers_nothing(home):
     (home / ".claude/plugins").mkdir(parents=True)
     (home / ".claude/plugins/known_marketplaces.json").write_text("{}")
     assert update_plugins.discover() == []
+
+
+# ── where the provider CLI is looked for ─────────────────────────────────────
+#
+# The updater is a catalogued capability under the signed owner, whose PATH is
+# the bare system one. A codex installed with `npm -g` sits in Homebrew's bin
+# and is invisible from there, so a leaf that had registered the native
+# marketplace refused every managed update with "codex CLI is missing" while
+# `codex` answered in any of its terminals (work Mac, 2026-09-23). The hub had
+# only ever survived through a hand-written shim in ~/.local/bin.
+
+def _service_environment(monkeypatch, home: Path):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    monkeypatch.setenv("HOME", str(home))  # no ~/.local/bin shim of this machine's
+
+
+def _brew_codex(tmp_path: Path) -> Path:
+    prefix = tmp_path / "homebrew/bin"
+    prefix.mkdir(parents=True)
+    tool = prefix / "codex"
+    tool.write_text("#!/bin/sh\necho \"$PATH\"\n")
+    tool.chmod(0o755)
+    return prefix
+
+
+def test_a_provider_cli_off_the_service_path_is_found_on_the_spawn_path(home, monkeypatch, tmp_path):
+    _service_environment(monkeypatch, home)
+    prefix = _brew_codex(tmp_path)
+    from jstack_host import hostenv
+    monkeypatch.setattr(hostenv, "spawn_path",
+                        lambda *pre, inherit=None: f"{prefix}:{inherit or ''}")
+    _codex(home, _shipped(home))
+    [provider] = update_plugins.prepare()
+    assert provider["binary"] == str(prefix / "codex")
+
+
+def test_a_provider_cli_runs_with_its_own_directories_on_path(home, monkeypatch, tmp_path):
+    """`#!/usr/bin/env node` must resolve too, not just the CLI itself."""
+    _service_environment(monkeypatch, home)
+    prefix = _brew_codex(tmp_path)
+    from jstack_host import hostenv
+    monkeypatch.setattr(hostenv, "spawn_path",
+                        lambda *pre, inherit=None: f"{prefix}:{inherit or ''}")
+    seen = update_plugins.run([str(prefix / "codex")]).strip().split(":")
+    assert seen[0] == str(prefix) and "/usr/bin" in seen
+
+
+def test_a_missing_provider_cli_names_where_it_looked(home, monkeypatch, tmp_path):
+    _service_environment(monkeypatch, home)
+    from jstack_host import hostenv
+    monkeypatch.setattr(hostenv, "spawn_path",
+                        lambda *pre, inherit=None: f"{tmp_path / 'empty'}:{inherit or ''}")
+    _codex(home, _shipped(home))
+    with pytest.raises(update_plugins.ReleaseError, match="codex CLI is missing.*empty"):
+        update_plugins.prepare()

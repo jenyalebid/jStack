@@ -351,7 +351,18 @@ def deploy(release: str, *, port: int = 9090, timeout: int = 2700, poll: int = 1
         deadline = time.monotonic() + timeout
         states: dict[str, str] = {}
         while True:
-            rows = {row["machine"]: row for row in inventory()["machines"]}
+            try:
+                rows = {row["machine"]: row for row in inventory()["machines"]}
+            except httpx.TransportError:
+                # The hub is one of the machines being updated: its own apply
+                # restarts the server this loop is asking, and the connection
+                # is refused for the seconds it takes to come back. That is
+                # the deploy working, not failing; keep asking until the
+                # deadline, which is the only judge of a hub that stays down.
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(poll)
+                continue
             states = {machine: rows.get(machine, {}).get("state", "unknown")
                       for machine in eligible}
             settled = all(state in ("current", "failed", "rolled_back", "cancelled")

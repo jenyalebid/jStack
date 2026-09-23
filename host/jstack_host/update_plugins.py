@@ -14,8 +14,24 @@ from pathlib import Path
 from .release_manifest import ReleaseError
 
 
+def tool_path() -> str:
+    """Where a provider CLI and its interpreter are looked for.
+
+    The updater runs as a catalogued capability under the signed owner, whose
+    environment is a bare `/usr/bin:/bin:/usr/sbin:/sbin` — no Homebrew, no
+    `~/.local/bin`. A CLI installed the ordinary way (`npm -g`, the native
+    installer) lives exactly there, and a Node CLI's `#!/usr/bin/env node`
+    needs the same directories again to find its interpreter. Resolving and
+    running providers on the host's spawn path answers both; anything the
+    service did inherit stays behind it.
+    """
+    from . import hostenv
+    return hostenv.spawn_path(inherit=os.environ.get("PATH"))
+
+
 def run(argv: list[str]) -> str:
-    result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    env = dict(os.environ, PATH=tool_path())
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=120, env=env)
     if result.returncode:
         raise ReleaseError(f"plugin installation failed: {result.stderr[-1000:]}")
     return result.stdout
@@ -55,7 +71,7 @@ def discover() -> list[dict]:
             if entry.get("source", {}).get("source") != "directory":
                 raise ReleaseError("convert the jStack marketplace to a local source before managed updates")
             root = entry["source"]["path"]
-            binary = shutil.which("claude") or str(home / ".local/bin/claude")
+            binary = shutil.which("claude", path=tool_path()) or str(home / ".local/bin/claude")
             if serves_a_checkout(root):
                 pinned("claude", root)
             else:
@@ -70,7 +86,7 @@ def discover() -> list[dict]:
             if entry.get("source_type") != "local":
                 raise ReleaseError("convert the native jStack marketplace to a local source before managed updates")
             root = entry["source"]
-            binary = shutil.which("codex") or str(home / ".local/bin/codex")
+            binary = shutil.which("codex", path=tool_path()) or str(home / ".local/bin/codex")
             if serves_a_checkout(root):
                 pinned("codex", root)
             else:
@@ -145,7 +161,8 @@ def prepare() -> list[dict]:
     result = discover()
     for provider in result:
         if not Path(provider["binary"]).is_file():
-            raise ReleaseError(f"{provider['kind']} CLI is missing")
+            raise ReleaseError(f"{provider['kind']} CLI is missing: nothing at "
+                               f"{provider['binary']} and none on {tool_path()}")
         if provider["kind"] == "claude":
             provider["previous_entries"] = json.loads(Path(provider["ledger"]).read_text())["plugins"]["jstack@jStack"]
     return result
