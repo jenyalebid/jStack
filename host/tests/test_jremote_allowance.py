@@ -209,3 +209,17 @@ def test_codex_ignores_unrelated_quota_and_malformed_last_line(state, monkeypatc
     with path.open('a') as fh:
         fh.write('{"partial":')
     assert allowance.read()['providers']['codex']['windows'][0]['pct'] == 15
+
+
+def test_availability_stops_after_observing_one_rollout_sample(state, monkeypatch):
+    from jstack_host import codex_transcript
+    monkeypatch.setattr(allowance, "CODEX_SESSIONS", state / "sessions")
+    for i in range(80):
+        _codex_sample(state / "sessions" / f"rollout-{i:03}.jsonl", time.time())
+    calls = []
+    def observed(path):
+        calls.append(path)
+        return {"rate_sample": {"sampled_at": 1, "windows": [{"pct": 1}]}}
+    monkeypatch.setattr(codex_transcript, "summary", observed)
+    assert allowance.available()
+    assert len(calls) == 1

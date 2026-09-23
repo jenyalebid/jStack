@@ -49,6 +49,7 @@ def test_cli_joiner_accepts_the_name_shown_in_the_adopt_dialog(
     if folder != bundle:
         bundle.rename(folder)
     monkeypatch.setattr(tunnel, "can_pair", lambda: True)
+    monkeypatch.setattr(tunnel, "live_peers", lambda: {peer})
     row = {"name": display_name, "code": "TEST-CODE", "expires_in": 600,
            "kind": enrolment.KIND_HOST}
     assert cli._adopt_offline(display_name, row, 9090, as_json=True) == 0

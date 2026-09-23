@@ -422,10 +422,15 @@ def read() -> dict:
 def available() -> bool:
     """Can this host say anything at all — a sample on file, or a CLI cache
     to read. Nothing on either is the one case the screen is honest to hide."""
-    if cli_cache_sample() is not None or codex_rollout_sample() is not None:
+    if cli_cache_sample() is not None:
         return True
-    return any(p and (p.get("windows") or p.get("refusal"))
-               for p in _read_raw()["providers"].values())
+    if any(p and (p.get("windows") or p.get("refusal"))
+           for p in _read_raw()["providers"].values()):
+        return True
+    from .codex_transcript import summary
+    # Availability needs one observed sample, not the newest account reading.
+    return any(summary(path).get("rate_sample") is not None
+               for path in CODEX_SESSIONS.glob("**/rollout-*.jsonl"))
 
 
 # ------------------------------------------------- headless tier: scheduler
