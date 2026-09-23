@@ -623,7 +623,7 @@ def install_candidate(guest: Guest, candidate: Candidate, *, fresh: bool = False
     # installer treats as a publisher snapshot: exact local bytes, no fetch.
     guest.sh(f"/bin/mkdir ~/jStack && "
              f"/usr/bin/tar -xzf {remote}/{candidate.file('stack').name} -C ~/jStack", timeout=900)
-    gateway = guest.sh("/usr/sbin/route -n get default | /usr/bin/awk '/gateway/{print $2}'").strip()
+    gateway = guest.sh("/sbin/route -n get default | /usr/bin/awk '/gateway/{print $2}'").strip()
     expect(gateway, f"{guest.name}: no default gateway — cannot reach the host's candidate server")
     with candidate_repo(candidate) as port:
         guest.sh(f"cd ~/jStack && JSTACK_CHECKOUT=$HOME/jStack "

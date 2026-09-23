@@ -47,7 +47,9 @@ def main():
     # which is exactly the machine a fresh-install journey has to observe.
     if args.action != "probe" and not (Path.home() / "update-lab-adoption.json").is_file():
         raise RuntimeError("operation requires the disposable candidate-test VM fixture")
-    for path in reversed(config["runtime_imports"]):
+    # The legacy generation named its import roots in config; the sealed one
+    # runs this under JStackPython, whose own packages already resolve.
+    for path in reversed(config.get("runtime_imports", [])):
         if not Path(path).resolve().is_relative_to(root):
             raise RuntimeError("runtime is outside the fixture")
         sys.path.insert(0, path)
