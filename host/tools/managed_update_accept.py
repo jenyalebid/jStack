@@ -42,6 +42,7 @@ GUEST_TMUX = "/Applications/jStack Hub.app/Contents/MacOS/tmux"
 #: starts; answering it is the runner standing in for that fixed watcher, and
 #: the receipt says so. A CANDIDATE session is never helped.
 NUDGE_AFTER = 30
+API_BOOT = 180
 SETTLE = 8
 
 
@@ -100,7 +101,31 @@ class Guest:
 
     def start(self) -> str:
         """GUI, because the menu bar and the client app are part of the proof."""
-        return self.vm("gui", self.name, timeout=600).strip()
+        booted = self.vm("gui", self.name, timeout=600).strip()
+        self.await_api()
+        return booted
+
+    def await_api(self, timeout: int = API_BOOT) -> str:
+        """The guest's own host API answering, or a failure that names it.
+
+        `gui` returns on sshd; the host daemon is a login agent that comes up
+        tens of seconds later (27s measured on acc-leaf1), and a call landing
+        in that gap reads as a dead daemon. A guest with no installed host has
+        no API to wait for; a guest whose API never comes up is a real finding.
+        """
+        script = (
+            "cfg=~/.local/state/jremote/updates/config.json; "
+            "[ -f \"$cfg\" ] || { echo no-host; exit 0; }; "
+            "url=$(grep -o '\"local_url\": *\"[^\"]*\"' \"$cfg\" | cut -d'\"' -f4); "
+            f"for i in $(seq 1 {int(timeout)}); do "
+            "code=$(curl -s -o /dev/null -m 2 -w '%{http_code}' \"$url/api/jremote/v1/host\"); "
+            "[ \"$code\" != 000 ] && { echo \"up $code ${i}s\"; exit 0; }; sleep 1; done; "
+            "echo down; exit 3")
+        try:
+            return self.sh(script, timeout=timeout + 60).strip()
+        except AcceptanceFailure as exc:
+            raise AcceptanceFailure(
+                f"{self.name}: booted, but its host API never answered within {timeout}s") from exc
 
     def stop(self) -> None:
         self.vm("stop", self.name, timeout=300)

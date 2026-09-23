@@ -622,3 +622,40 @@ def test_a_prior_is_not_nudged_before_the_grace_period(runner, monkeypatch):
 
 def test_session_survival_requires_an_unaided_session_on_the_candidate(runner):
     assert "candidate_new_session" in acceptance.REQUIRED["session_survival"]
+
+
+def _booting_guest(runner, answers):
+    """vm.sh for a guest whose `gui` returns on sshd; the API poll in the
+    guest answers from `answers` (the script's own stdout), or exits 3."""
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if argv[1] == "gui":
+            return subprocess.CompletedProcess(argv, 0, "acc-leaf1 up at 192.168.2.54\n", "")
+        assert argv[1] == "ssh" and "local_url" in argv[3] and "/api/jremote/v1/host" in argv[3]
+        answer = answers.pop(0)
+        if answer == "down":
+            return subprocess.CompletedProcess(argv, 3, "down\n", "")
+        return subprocess.CompletedProcess(argv, 0, answer + "\n", "")
+
+    return runner.Guest("acc-leaf1", Path("/bin/vm.sh"), run=run), calls
+
+
+def test_start_returns_only_once_the_guest_api_answers(runner):
+    guest, calls = _booting_guest(runner, ["up 401 27s"])
+    assert guest.start() == "acc-leaf1 up at 192.168.2.54"
+    assert [argv[1] for argv in calls] == ["gui", "ssh"]
+    assert "seq 1 180" in calls[1][3]
+
+
+def test_start_names_a_host_api_that_never_comes_up(runner):
+    guest, _ = _booting_guest(runner, ["down"])
+    with pytest.raises(runner.AcceptanceFailure, match="host API never answered within 180s"):
+        guest.start()
+
+
+def test_start_of_a_guest_without_a_host_does_not_wait(runner):
+    guest, calls = _booting_guest(runner, ["no-host"])
+    guest.start()
+    assert len(calls) == 2 and 'exit 0' in calls[1][3]
