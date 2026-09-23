@@ -77,6 +77,10 @@ class FleetStore:
                 state TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
                 created REAL NOT NULL, updated REAL NOT NULL,
                 UNIQUE(request, machine));
+              CREATE TABLE IF NOT EXISTS requests (
+                request TEXT NOT NULL, machine TEXT NOT NULL, job TEXT NOT NULL,
+                PRIMARY KEY(request, machine));
+              INSERT OR IGNORE INTO requests SELECT request, machine, id FROM jobs;
             """)
 
     @contextmanager
@@ -94,7 +98,8 @@ class FleetStore:
         release = envelope["manifest"]["release"]
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            old = db.execute("SELECT * FROM jobs WHERE request=? AND machine=?",
+            old = db.execute("SELECT jobs.* FROM jobs JOIN requests ON jobs.id=requests.job "
+                             "WHERE requests.request=? AND requests.machine=?",
                              (request, machine)).fetchone()
             if old:
                 if old["release"] != release or old["authority"] != authority:
@@ -107,11 +112,13 @@ class FleetStore:
             if current and report and time.time() - report["seen"] < STALE_SECONDS:
                 observation = json.loads(report["report"])
                 if observation.get("verified") is True and observation.get("release") == release:
+                    db.execute("INSERT INTO requests VALUES (?,?,?)", (request, machine, current["id"]))
                     return dict(current)
             busy = db.execute("SELECT * FROM jobs WHERE machine=? AND state IN "
                               "('pending','downloading','applying','verifying')", (machine,)).fetchone()
             if busy:
                 if busy["release"] == release and busy["authority"] == authority:
+                    db.execute("INSERT INTO requests VALUES (?,?,?)", (request, machine, busy["id"]))
                     return dict(busy)
                 raise releases.ReleaseError("machine already has an active update")
             now = time.time()
@@ -121,6 +128,7 @@ class FleetStore:
                    "created": now, "updated": now}
             db.execute("INSERT INTO jobs VALUES (:id,:request,:machine,:authority,:release,"
                        ":envelope,:state,:detail,:created,:updated)", job)
+            db.execute("INSERT INTO requests VALUES (?,?,?)", (request, machine, job["id"]))
             return job
 
     def latest(self, machine: str) -> dict | None:

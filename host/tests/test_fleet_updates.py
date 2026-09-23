@@ -69,7 +69,8 @@ def test_publication_checks_uploaded_bytes_before_exposing_release(tmp_path, rel
         if existing == "published":
             assert all(c[1:3] == ["release", "download"] for c in calls)
         else:
-            assert calls[-1][1:3] == ["release", "edit"]
+            stack_calls = [c for c in calls if c[3] == "stack-release-test-1"]
+            assert stack_calls[-1][1:3] == ["release", "edit"]
         if existing is None:
             assert calls[0][calls[0].index("--target") + 1] == "a" * 40
 
@@ -875,3 +876,22 @@ def test_asking_before_updates_are_enabled_says_so(tmp_path, monkeypatch):
     monkeypatch.delenv("JREMOTE_STATE_DIR", raising=False)
     code, _, err = _channel_cli(tmp_path)
     assert code == 1 and "updates enable" in err
+
+
+@pytest.mark.parametrize("initial_state", ["pending", "current"])
+def test_reused_request_keeps_its_job_after_state_and_inventory_change(tmp_path, release, initial_state):
+    path = tmp_path / "fleet.sqlite"
+    store = fleet.FleetStore(path)
+    job = store.queue("leaf", "credential", release[2], "original")
+    if initial_state == "current":
+        for state in ("downloading", "applying", "verifying", "current"):
+            store.transition(job["id"], "leaf", state, verified=True)
+        store.report("leaf", {"verified": True, "release": "test-1"})
+    assert store.queue("leaf", "credential", release[2], "update-all")["id"] == job["id"]
+    if initial_state == "pending":
+        store.transition(job["id"], "leaf", "failed")
+    store.report("leaf", {"verified": False, "release": "old"})
+    reopened = fleet.FleetStore(path)
+    assert reopened.queue("leaf", "credential", release[2], "update-all")["id"] == job["id"]
+    with pytest.raises(releases.ReleaseError, match="different update"):
+        reopened.queue("leaf", "other-credential", release[2], "update-all")
