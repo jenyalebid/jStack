@@ -1,6 +1,7 @@
 """Cross-provider contracts: patches, deterministic commands and delivery guards."""
 import importlib.util
 import json
+import pathlib
 import os
 import shlex
 import subprocess
@@ -61,10 +62,65 @@ def test_remote_commands_reach_hooks_without_model():
 
 
 def test_delivery_never_treats_a_draft_as_empty():
-    assert compact_delivery.empty_composer("old output\n› Ask Codex to do anything\n\n  model", "codex")
-    assert not compact_delivery.empty_composer("› User draft\n", "codex")
-    assert not compact_delivery.empty_composer("› \n  second line of draft\n", "codex")
-    assert not compact_delivery.empty_composer("loading", "codex")
+    """Codex draws no box, so the row under the prompt glyph is either a draft's second
+    line or nothing. Claude's is its own border, which is why `boxed` exists."""
+    empty = lambda screen: compact_delivery.composer_line(screen, "codex") == ""
+    assert empty("old output\n› Ask Codex to do anything\n\n  model")
+    assert not empty("› User draft\n")
+    assert not empty("› \n  second line of draft\n")
+    assert compact_delivery.composer_line("loading", "codex") is None
+    # Measured on a live idle pane: the row below `❯` is the composer's bottom border.
+    assert compact_delivery.composer_line("❯\u00a0\n" + "─" * 70 + "\n") == ""
+    assert compact_delivery.composer_line("❯\u00a0half a message\n" + "─" * 70) == "half a message"
+
+
+FIXTURES = pathlib.Path(__file__).parent / "fixtures"
+
+
+def test_delivery_reads_a_real_codex_pane():
+    """Against two captures of a live codex pane (v0.156.1, `capture-pane -p -e`), with the
+    account-advisory and desktop-app rows removed and nothing else touched.
+
+    The draft capture is the case the whole rule exists for: the composer's FIRST line is
+    empty and the words are on the row below it, so a reader that looks only at the glyph
+    row calls that box empty and types `/compact` onto the end of somebody's message."""
+    idle = (FIXTURES / "codex-pane-idle.txt").read_text()
+    draft = (FIXTURES / "codex-pane-draft.txt").read_text()
+    # The placeholder is drawn dim, so it is the CLI's text and the box is empty.
+    assert compact_delivery.composer_line(idle, "codex") == ""
+    assert compact_delivery.composer_line(draft, "codex") == "second line only"
+    # Idleness is the rollout's answer, never this pane's: nothing on screen survives
+    # typing well enough to be matched.
+    assert compact_delivery.pane_is_ready(idle, "codex", turn="idle")
+    assert not compact_delivery.pane_is_ready(idle, "codex", turn="working")
+    assert not compact_delivery.pane_is_ready(idle, "codex", turn="")
+    assert not compact_delivery.pane_is_ready(draft, "codex", turn="idle")
+    assert compact_delivery.took_effect(idle, "codex", turn="working")
+    # A pane with no composer row at all — launching, or a dialog in its place — is never
+    # ready, whatever the rollout says.
+    assert not compact_delivery.pane_is_ready("1. Review hooks\n2. Trust all", "codex", turn="idle")
+
+
+def test_delivery_never_types_into_a_leftover_command_of_somebody_elses():
+    """Whether codex re-arms its box on an aborted `/compact` is NOT measured here — claude
+    does, and this only pins that the reader would recognise it. The composer row is built
+    by putting solid text where the real capture draws its dim placeholder, because solid
+    is the whole difference between the CLI's words and a person's (`_typed`).
+
+    It could not have worked while readiness needed a footer, which is why it is a test:
+    typing removes codex's only idle marker, so a box with anything in it had nothing left
+    to match and every armed command read as "not idle, leave it"."""
+    idle = (FIXTURES / "codex-pane-idle.txt").read_text()
+    placeholder = "\x1b[2mAsk Codex to do anything\x1b[0m"
+    assert placeholder in idle, "the fixture no longer draws its placeholder dim"
+    armed = idle.replace(placeholder, "/compact")
+    assert compact_delivery.composer_line(armed, "codex") == "/compact"
+    assert compact_delivery.was_aborted(armed, "/compact", "codex", turn="idle")
+    # Somebody has started arguing with it. Damaged, but theirs: never wiped.
+    mine = idle.replace(placeholder, "/compact rewrite it my way")
+    assert not compact_delivery.was_aborted(mine, "/compact", "codex", turn="idle")
+    # And a dim placeholder is never mistaken for a leftover command.
+    assert not compact_delivery.was_aborted(idle, "/compact", "codex", turn="idle")
 
 
 def test_native_session_facts_and_compaction(tmp_path):
@@ -77,9 +133,12 @@ def test_native_session_facts_and_compaction(tmp_path):
         {"type": "compacted", "payload": {}},
     ]
     path.write_text("\n".join(map(json.dumps, rows)) + "\n")
-    facts = compact_delivery.facts(path, "codex")
-    assert facts["turn"] == "idle" and facts["turn_id"] == "turn-1"
-    assert facts["open_tasks"] and facts["boundary"] == 1
+    assert compact_delivery.turn_state(str(path), "codex") == "idle"
+    # The boundary is the `compacted` row, and it is the newest thing on file.
+    assert compact_delivery.resume_state(str(path), 0, "codex") == "landed"
+    assert compact_delivery.freshly_compacted(str(path), "codex")
+    # Codex keeps no per-session task dir; its plan is the same fact, in band.
+    assert compact_delivery.docket("native", str(path), "codex") == "open"
     assert runtime.engine({"transcript_path": str(path)}) == "codex"
     assert runtime.user_text({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "steering"}]}}) == "steering"
 
@@ -273,6 +332,9 @@ def test_managed_config_carries_every_hook_the_plugin_declares():
     parsed = tomllib.loads(text)
     declared = json.loads((PLUGIN / "hooks/hooks.json").read_text())["hooks"]
     for event, groups in declared.items():
+        # An event only one engine has is carried under the other's spelling, never
+        # dropped — see `CODEX_ALIASES`.
+        event = module.CODEX_ALIASES.get(event, event)
         written = [h["command"] for group in parsed["hooks"][event] for h in group["hooks"]]
         for group in groups:
             for handler in group["hooks"]:
@@ -287,11 +349,17 @@ def test_managed_config_keeps_codex_event_spelling_and_drops_what_it_cannot_run(
     manifest = {"hooks": {
         "SessionStart": [{"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/a.py",
                                      "timeout": 7, "additionalContextLimit": 900}]}],
-        "Notification": [{"hooks": [{"type": "command", "command": "/never.py"}]}]}}
+        "Notification": [{"hooks": [{"type": "command", "command": "/dot-up.py"}]}],
+        "SomethingOnlyClaudeWillEverFire": [
+            {"hooks": [{"type": "command", "command": "/never.py"}]}]}}
     text, dropped = module.managed_hooks(manifest, Path("/plug"))
     parsed = tomllib.loads(text)
-    assert list(parsed["hooks"]) == ["SessionStart"]
-    assert dropped == ["Notification"]
+    # Notification has a Codex spelling and is carried under it; a name with no
+    # counterpart at all is dropped, and said out loud.
+    assert sorted(parsed["hooks"]) == ["PermissionRequest", "SessionStart"]
+    assert parsed["hooks"]["PermissionRequest"][0]["hooks"][0]["command"] == "/dot-up.py"
+    assert dropped == ["SomethingOnlyClaudeWillEverFire"]
+    assert "/never.py" not in text
     handler = parsed["hooks"]["SessionStart"][0]["hooks"][0]
     assert handler["command"] == "/plug/a.py"
     assert (handler["timeout"], handler["additionalContextLimit"]) == (7, 900)

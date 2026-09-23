@@ -33,6 +33,22 @@ CODEX_EVENTS = ("PreToolUse", "PostToolUse", "PreCompact", "PostCompact",
                 "SessionStart", "SessionEnd", "UserPromptSubmit", "Stop",
                 "SubagentStart", "SubagentStop", "PermissionRequest", "Interrupt")
 
+# Where an event one engine has lands on the other. Not a convenience: a hook
+# dropped here is a hook that never runs on Codex, silently, and both of these
+# are halves of one mechanism — the waiting dot goes up when a session needs a
+# person and comes down when it gets one. Ship the "up" without the "down" and
+# the dot is a lie for the rest of the session's life.
+#
+#   Notification    -> PermissionRequest. Claude's is "I need you"; Codex asks
+#                      the same question by asking for approval.
+#   PermissionDenied -> Interrupt. Not the same words, the same fact: the wait
+#                      ended without the session getting what it asked for, so
+#                      whatever went up comes down.
+#
+# Named, not guessed at the call site: an alias is a claim about two engines'
+# semantics, and it belongs where the event list it edits is written.
+CODEX_ALIASES = {"Notification": "PermissionRequest", "PermissionDenied": "Interrupt"}
+
 # Per-hook fields Codex reads, in its spelling. PascalCase is load-bearing here
 # exactly as the event names are.
 HOOK_FIELDS = ("timeout", "statusMessage", "additionalContextLimit", "async")
@@ -48,6 +64,7 @@ def managed_hooks(manifest, plugin):
     """
     lines, dropped = [], []
     for event, groups in (manifest.get("hooks") or {}).items():
+        event = CODEX_ALIASES.get(event, event)
         if event not in CODEX_EVENTS:
             dropped.append(event)
             continue
