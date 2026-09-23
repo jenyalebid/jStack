@@ -395,14 +395,9 @@ class DefaultProfile:
         return package_root() / "scripts" / "wireguard" / "wg_peer.py"
 
     def wireguard_dir(self) -> Path:
-        """The mesh's own state — `wg0.conf`, the server keys, the endpoint.
-
-        `<package>/Credentials/wireguard`, and deliberately not
-        `credentials_dir()`: `install_hub.sh` runs under `sudo`, where `$HOME`
-        is root's, so it lands the keys beside the code it derives from `$0`.
-        `wg_peer.py` mirrors that by resolving `Credentials/wireguard` from its
-        own location, and this is the third reader of the one location.
-        """
+        """Signed apps keep mutable mesh state outside their resource seal."""
+        if str(package_root()).endswith(".app/Contents/Resources/packages"):
+            return credentials_dir() / "wireguard"
         return package_root() / "Credentials" / "wireguard"
 
     def security_alert(self, body: str) -> None:

@@ -90,10 +90,21 @@ fi
 # still wrote the real endpoint file — which is how this store's endpoint came
 # back as `hub.example.com:51820` on 2026-09-22.
 #
-# The derivation stays as the default because under sudo $HOME is root's, so the
-# keys must land beside the host code that reads them whoever ran the installer.
-WG_DIR="${WG_PEER_DIR:-$(cd "$SRC/../.." && pwd)/Credentials/wireguard}"
 OWNER="${SUDO_USER:-$(id -un)}"
+TREE="$(cd "$SRC/../.." && pwd)"
+DEFAULT_WG_DIR="$TREE/Credentials/wireguard"
+# Writes inside a signed app invalidate every subsequent runtime launch.
+case "$TREE" in
+    *.app/Contents/Resources/packages)
+        OWNER_HOME="$HOME"
+        if [ -n "${SUDO_USER:-}" ]; then
+            OWNER_HOME="$(/usr/bin/dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory | /usr/bin/sed 's/^NFSHomeDirectory: //')"
+            [ -n "$OWNER_HOME" ] || { echo "cannot resolve home for $SUDO_USER" >&2; exit 1; }
+        fi
+        DEFAULT_WG_DIR="${JREMOTE_CREDENTIALS_DIR:-$OWNER_HOME/.local/share/jremote/credentials}/wireguard"
+        ;;
+esac
+WG_DIR="${WG_PEER_DIR:-$DEFAULT_WG_DIR}"
 
 install -d -m 0700 "$WG_DIR"
 if [ ! -f "$WG_DIR/server.key" ]; then

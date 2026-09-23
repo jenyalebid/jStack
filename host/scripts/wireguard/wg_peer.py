@@ -41,16 +41,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Where this hub keeps its tunnel state, derived from this script's own
-# location — `scripts/wireguard/` sits two levels under a tree that has
-# `Credentials/` at its root, in the checkout here and in the installed host
-# payload alike. A home-relative default names one machine's directory layout
-# inside a file that ships to machines which do not have it, and lands as
-# "missing wg0.conf" on a hub whose config is sitting right beside the script.
-WG_DIR = Path(os.environ.get(
-    "WG_PEER_DIR",
-    Path(__file__).resolve().parents[2] / "Credentials" / "wireguard",
-))
+_tree = Path(__file__).resolve().parents[2]
+_default_credentials = _tree / "Credentials"
+if str(_tree).endswith(".app/Contents/Resources/packages"):
+    _default_credentials = Path(os.environ.get(
+        "JREMOTE_CREDENTIALS_DIR", Path.home() / ".local/share/jremote/credentials"))
+WG_DIR = Path(os.environ.get("WG_PEER_DIR", _default_credentials / "wireguard"))
 WG_BIN = os.environ.get("WG_BIN", "/opt/homebrew/bin/wg")
 SUBNET_PREFIX = os.environ.get("WG_SUBNET_PREFIX", "10.66.0")  # server = .1
 # Every issued tunnel pins a conservative MTU: at wireguard-go's 1420 default,
