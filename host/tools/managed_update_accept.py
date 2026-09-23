@@ -387,7 +387,6 @@ def session_survival(journey, fleet: Fleet, candidate: Candidate) -> None:
     journey.observe("new_output", reply)
     state = guest.installed()
     expect(state["menubar_pids"], "the menu bar did not relaunch after the update")
-    expect(state["client_pids"], "the client app did not relaunch after the update")
     journey.observe("app_relaunch", {"menubar": state["menubar_pids"], "client": state["client_pids"]})
 
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 
@@ -285,6 +286,11 @@ class AppBackend(MacBackend):
             self._stop_services(app, self._statuses(app))
         for kind, record in transaction["apps"].items():
             target, backup = Path(record["target"]), Path(record["backup"])
+            incoming = target.with_name(target.name + ".incoming-" + job["id"])
+            if incoming.is_dir():
+                shutil.rmtree(incoming)
+            elif incoming.exists():
+                incoming.unlink()
             if not backup.exists():
                 continue
             if kind == "client":

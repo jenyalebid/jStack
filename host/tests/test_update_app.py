@@ -38,7 +38,7 @@ def test_interrupted_copy_does_not_block_a_new_job_for_the_same_release(monkeypa
     monkeypatch.setattr(update_app, "command", lambda argv: shutil.copytree(argv[-2], argv[-1]))
     backend.apply({"id": "retry-job", "transaction": transaction})
     assert (app / "version").read_text() == "new"
-    assert (tmp_path / "Hub.app.incoming-interrupted-job" / "partial").exists()
+    assert not (tmp_path / "Hub.app.incoming-interrupted-job").exists()
 
 
 def test_disabled_services_are_never_registered_or_unregistered(monkeypatch, tmp_path):
