@@ -168,15 +168,28 @@ def record_blocked(session_id: str, ids: set) -> bool:
         return False
 
 
-def _body_lines(r: dict) -> list:
-    out = [f"  {r['subject']}"]
-    if r.get("body"):
-        body = r["body"].strip().splitlines()
-        out.extend("  " + ln for ln in body[:6])
-        if len(body) > 6:
-            out.append(f"  … ({len(body) - 6} more lines — msg read {r['id']})")
-    for att in json.loads(r.get("attachments") or "[]"):
-        out.append(f"  attached: {att}")
+#: How much of a subject line is a useful handle. Past this it is prose.
+SUBJECT_CHARS = 100
+
+
+def _subject(r: dict) -> str:
+    s = " ".join(str(r.get("subject") or "").split())
+    return s if len(s) <= SUBJECT_CHARS else s[:SUBJECT_CHARS - 1].rstrip() + "…"
+
+
+def _row_lines(r: dict) -> list:
+    """A pointer, never the message.
+
+    The block is a notification, and a notification that carries its payload
+    is not one — it is the message pasted into a terminal a person is reading.
+    Subject plus the command that fetches it: the content then arrives where
+    every other piece of content this session handles arrives, as a tool
+    result it chose to run, and it costs the session one command to get it."""
+    out = [f"  {_subject(r)}"]
+    atts = json.loads(r.get("attachments") or "[]")
+    if atts:
+        out.append(f"  {len(atts)} attachment{'s' if len(atts) != 1 else ''}")
+    out.append(f"  read it:  {PLUGIN_BIN}/msg read {r['id']}")
     return out
 
 
@@ -198,7 +211,7 @@ def build_reason(rows: list, seat: str) -> str:
             if r.get("reply_to"):
                 head += f" · answering your #{r['reply_to']}"
             lines.append(head)
-            lines += _body_lines(r)
+            lines += _row_lines(r)
             lines.append("")
         lines += load_prompt("stop-inbox-guard.md", "replies-coda").format(
             plugin_bin=PLUGIN_BIN).splitlines() + [""]
@@ -210,7 +223,7 @@ def build_reason(rows: list, seat: str) -> str:
             s2="s" if n != 1 else "").splitlines() + [""]
         for r in injects:
             lines.append(f"[#{r['id']}] from {r['from_seat']}")
-            lines += _body_lines(r)
+            lines += _row_lines(r)
             lines.append("")
         lines += load_prompt(
             "stop-inbox-guard.md", "injects-coda").splitlines() + [""]
@@ -222,7 +235,7 @@ def build_reason(rows: list, seat: str) -> str:
             have="have" if n != 1 else "has").splitlines() + [""]
         for r in tasks:
             lines.append(f"[#{r['id']}] from {r['from_seat']}")
-            lines += _body_lines(r)
+            lines += _row_lines(r)
             lines.append("")
         lines += load_prompt("stop-inbox-guard.md", "tasks-coda").format(
             plugin_bin=PLUGIN_BIN).splitlines() + [""]

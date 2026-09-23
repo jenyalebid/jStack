@@ -361,6 +361,15 @@ def inbox_updates(seat: str) -> list:
         return []
 
 
+#: How much of a subject line is a useful handle. Past this it is prose.
+SUBJECT_CHARS = 100
+
+
+def _subject(r: dict) -> str:
+    s = " ".join(str(r.get("subject") or "").split())
+    return s if len(s) <= SUBJECT_CHARS else s[:SUBJECT_CHARS - 1].rstrip() + "…"
+
+
 def build_inbox(seat: str, rows: list) -> str:
     """Updates another seat sent — news, shown once, then gone.
 
@@ -378,14 +387,11 @@ def build_inbox(seat: str, rows: list) -> str:
         if r.get("reply_to"):
             head += f" · answering your #{r['reply_to']}"
         lines.append(head)
-        lines.append(f"  {r['subject']}")
-        if r.get("body"):
-            body = str(r["body"]).strip().splitlines()
-            lines.extend("  " + ln for ln in body[:4])
-            if len(body) > 4:
-                lines.append(f"  … msg read {r['id']}")
-        for att in json.loads(r.get("attachments") or "[]"):
-            lines.append(f"  attached: {att}")
+        lines.append(f"  {_subject(r)}")
+        atts = json.loads(r.get("attachments") or "[]")
+        if atts:
+            lines.append(f"  {len(atts)} attachment{'s' if len(atts) != 1 else ''}")
+        lines.append(f"  read it:  {PLUGIN_BIN}/msg read {r['id']}")
         lines.append("")
     lines.append("</jstack-updates>")
     return "\n".join(lines)

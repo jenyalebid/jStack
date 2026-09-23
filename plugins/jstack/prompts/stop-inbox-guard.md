@@ -8,6 +8,8 @@ lines by the hook, so their layout here is the injected layout.
 
 {n} answer{s} to what this session sent {have} come back. This is the reply you asked for — use it before the turn ends.
 
+Each row below names a message; it does not carry it. Run the `read it` command under the one you need — that is where the content is.
+
 ## replies-coda
 
 Carry on with whatever you sent it for. If it answers the question, the exchange is over — say nothing back; a message acknowledging a message is traffic, not work. If it does not, the follow-up goes into the same conversation on their side:
@@ -17,6 +19,8 @@ Carry on with whatever you sent it for. If it answers the question, the exchange
 
 {n} comment{s} landed on GitHub issue{s2} this conversation created.
 
+Each row below names a message; it does not carry it. Run the `read it` command under the one you need — that is where the content is.
+
 ## injects-coda
 
 You are the issue's creator. If a comment asks you something or the work has gone wrong, answer on the issue itself — `gh issue comment <N> -R <owner/repo> --body "…"` — digest form, a few lines; the operator reads these. A progress note that needs nothing gets nothing back.
@@ -24,6 +28,8 @@ You are the issue's creator. If a comment asks you something or the work has gon
 ## tasks-head
 
 {n} task{s} {were} handed to this session and {have} no answer yet. The sender is blocked waiting on it — answer before the turn ends.
+
+Each row below names a message; it does not carry it. Run the `read it` command under the one you need — that is where the content is.
 
 ## tasks-coda
 

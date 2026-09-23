@@ -152,7 +152,7 @@ CLAUDE_CODE_SESSION_ID="$B1" JSTACK_MAIL_FROM=bob/chat \
 out=$(run "$A1" "$TMP/user.jsonl" "$ALICE")
 [[ "$(printf '%s' "$out" | decision)" == "block" ]] \
   && pass "the session that asked is handed its answer" || fail "the session that asked is handed its answer"
-[[ "$out" == *"the crash is OOM"* ]] && pass "the answer itself is in the block" || fail "the answer itself is in the block"
+[[ "$out" == *"the crash is OOM"* ]] && pass "the block names the answer" || fail "the block names the answer"
 [[ "$out" == *"answer"* && "$out" == *"asked for"* ]] \
   && pass "the block reads as an answer, not a demand" || fail "the block reads as an answer, not a demand"
 [[ "$out" != *"no answer yet"* ]] \
@@ -167,13 +167,22 @@ out=$(run "$A1" "$TMP/user.jsonl" "$ALICE")
 #    itself: `msg reply` aims at a seat, and github is not one.
 A2=aaaa3333-aaaa-3333-aaaa-333333333333
 transcript "$A2" "$ALICE"
-"$MSG" inject "$A2" "Tests are red on CI, need a call." \
+"$MSG" inject "$A2" "Tests are red on CI, need a call.
+SECOND-LINE-SENTINEL and a great deal more prose besides." \
   --issue "Acme/widgets#12" --author acme-agent >/dev/null
 out=$(run "$A2" "$TMP/user.jsonl" "$ALICE")
 [[ "$(printf '%s' "$out" | decision)" == "block" ]] \
   && pass "the creator session is handed the comment" || fail "the creator session is handed the comment"
-[[ "$out" == *"Tests are red on CI"* ]] \
-  && pass "the comment itself is in the block" || fail "the comment itself is in the block"
+
+# 8b. THE BLOCK IS A NOTIFICATION, NOT THE MESSAGE. A Stop block is rendered
+#     into the terminal a person is reading; a body pasted there is the mail
+#     system shouting over them. The row names the message and hands over the
+#     command that fetches it — and nothing else.
+[[ "$out" != *"SECOND-LINE-SENTINEL"* ]] \
+  && pass "the body is NOT in the block" || fail "the body is NOT in the block"
+[[ "$out" == *"msg read"* ]] \
+  && pass "the block hands over the read command instead" \
+  || fail "the block hands over the read command instead"
 [[ "$out" == *"gh issue comment"* ]] \
   && pass "the block's answer path is the issue" || fail "the block's answer path is the issue"
 [[ "$out" == *"Acme/widgets#12"* ]] \

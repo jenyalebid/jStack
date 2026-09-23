@@ -18,3 +18,4 @@ Injected on entry by jStack. Your working directory is a repo that {agent} owns,
 ## updates-head
 
 {n} note{s} sent to {seat} since your last session. Context only — nobody is waiting on any of it, there is nothing to close, and you will not see it again. Act on one only if it changes what you are about to do.
+Only the subject is here. If one looks like it bears on what you are about to do, run its `read it` command; otherwise leave it.
