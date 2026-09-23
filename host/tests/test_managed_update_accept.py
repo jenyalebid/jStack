@@ -33,11 +33,35 @@ def test_off_network_requires_a_working_lan_before_isolation(runner, monkeypatch
     fleet = SimpleNamespace(leaves=[guest], hub=object(), off_lan="192.168.2.250",
                             machine=lambda _: "leaf-id")
     monkeypatch.setattr(runner, "mesh_address", lambda _: "10.66.0.1")
+    monkeypatch.setattr(runner, "lan_address", lambda _: "192.168.2.250")
     with pytest.raises(runner.AcceptanceFailure, match="not usable before isolation"):
         runner.off_network(SimpleNamespace(observe=lambda *args: None), fleet, None)
     assert len(commands) == 1
     assert "http://192.168.2.250:9090" in commands[0]
     assert not any("route -n add" in command for command in commands)
+
+
+def test_off_network_failure_releases_only_its_firewall_reference(runner, monkeypatch):
+    commands = []
+    responses = iter(["200", "200"])
+    def shell(command):
+        commands.append(command)
+        if "curl" in command:
+            return next(responses)
+        if "pfctl -E" in command:
+            return "pf enabled\nToken : 12345\n"
+        return ""
+    guest = SimpleNamespace(name="leaf", sh=shell)
+    fleet = SimpleNamespace(leaves=[guest], hub=object(), machine=lambda _: "leaf-id")
+    monkeypatch.setattr(runner, "mesh_address", lambda _: "10.66.0.1")
+    monkeypatch.setattr(runner, "lan_address", lambda _: "192.168.2.36")
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    with pytest.raises(runner.AcceptanceFailure, match="still open"):
+        runner.off_network(SimpleNamespace(observe=lambda *args: None), fleet, None)
+    assert commands[-1] == "sudo /sbin/pfctl -X 12345"
+    assert "-F rules" in commands[-2]
+    assert any("proto tcp" in c and "port 9090" in c for c in commands)
+    assert not any("route -n" in c or "pfctl -d" in c for c in commands)
 
 
 def test_credential_revocation_is_the_last_journey(runner):

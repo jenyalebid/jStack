@@ -21,6 +21,7 @@ import argparse
 import contextlib
 import http.server
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -462,27 +463,15 @@ def revocation(journey, fleet: Fleet, candidate: Candidate) -> None:
 
 
 def off_network(journey, fleet: Fleet, candidate: Candidate) -> None:
-    """A Mac that cannot reach the hub on the LAN still works, through the tunnel.
+    """Cut direct Hub HTTP access while retaining WireGuard's UDP underlay.
 
-    This journey used to be called `cellular` and was a bare `raise` — nobody
-    had written it, and because `gate` needs all nine, that one line refused
-    every candidate from the day the gate shipped.
-
-    The name was the reason it stayed unwritten: it read as "borrow a phone,
-    take it off Wi-Fi", which needs a human holding hardware. But LTE is not
-    what the product depends on. WireGuard dials a UDP endpoint; it cannot tell
-    a carrier from a hotel Wi-Fi. What has to be true is only this — when the
-    local path to the hub is gone, the mesh path carries the work. A guest with
-    the LAN route to the hub blackholed proves exactly that, unattended.
-
-    What a phone on LTE would additionally exercise is carrier-grade NAT, which
-    is harsher than this. That is a NAT-traversal question, it is worth its own
-    check, and it is not what this journey claims.
+    A host-route blackhole also cuts the tunnel when both use the same IP.
+    This isolates the service path, not carrier NAT or a phone's radio.
     """
     guest = fleet.leaves[-1]
     machine = fleet.machine(guest)
 
-    hub_lan = fleet.off_lan or lan_address(fleet.hub)
+    hub_lan = lan_address(fleet.hub)
     hub_mesh = mesh_address(fleet.hub)
     expect(hub_mesh != hub_lan, "the hub's mesh and LAN addresses are the same host route")
     journey.observe("device", {"machine": machine, "guest": guest.name,
@@ -493,11 +482,15 @@ def off_network(journey, fleet: Fleet, candidate: Candidate) -> None:
         f"http://{hub_lan}:9090/api/health || true").strip()
     expect(baseline == "200", f"the LAN path was not usable before isolation ({baseline})")
 
-    # Blackhole the LAN route only. The tunnel rides a different destination, so
-    # this removes the local shortcut without touching the path under test.
-    guest.sh(f"sudo /sbin/route -n delete -host {hub_lan} >/dev/null 2>&1 || true")
-    guest.sh(f"sudo /sbin/route -n add -host {hub_lan} 127.0.0.1 -blackhole")
+    anchor = "com.apple/jstack-accept-" + uuid.uuid4().hex
+    token = None
     try:
+        rule = f"block drop out quick inet proto tcp from any to {hub_lan} port 9090\n"
+        guest.sh(f"printf %s {shlex.quote(rule)} | sudo /sbin/pfctl -a {anchor} -f -")
+        enabled = guest.sh("sudo /sbin/pfctl -E 2>&1")
+        match = re.search(r"Token\s*:\s*(\d+)", enabled)
+        expect(match is not None, "pfctl did not return its enable reference")
+        token = match.group(1)
         lan_probe = guest.sh(
             f"/usr/bin/curl -s -m 8 -o /dev/null -w '%{{http_code}}' "
             f"http://{hub_lan}:9090/api/health || true").strip()
@@ -511,8 +504,7 @@ def off_network(journey, fleet: Fleet, candidate: Candidate) -> None:
                f"with the LAN path cut the hub is unreachable over the mesh ({mesh_probe})")
         journey.observe("transport", {"lan_target": hub_lan, "lan_http": lan_probe or "000",
                                       "mesh_target": hub_mesh, "mesh_http": mesh_probe,
-                                      "route": guest.sh(f"/usr/sbin/netstat -rn -f inet "
-                                                        f"| /usr/bin/grep {hub_lan} || true").strip()})
+                                      "filter": guest.sh(f"sudo /sbin/pfctl -a {anchor} -sr").strip()})
 
         # The release has to be visible from out here, not just installable.
         row = fleet.hub.row(machine)
@@ -528,7 +520,11 @@ def off_network(journey, fleet: Fleet, candidate: Candidate) -> None:
 
         journey.observe("session_journey", new_session(guest))
     finally:
-        guest.sh(f"sudo /sbin/route -n delete -host {hub_lan} >/dev/null 2>&1 || true")
+        try:
+            guest.sh(f"sudo /sbin/pfctl -a {anchor} -F rules")
+        finally:
+            if token is not None:
+                guest.sh(f"sudo /sbin/pfctl -X {token}")
         time.sleep(SETTLE)
 
 
