@@ -133,6 +133,11 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
     channel = command(["git", "-C", str(config["stack_repo"]), "rev-parse",
                        "--abbrev-ref", "HEAD"]).strip()
     channel = releases.STABLE_CHANNEL if channel in ("main", "HEAD") else channel
+    # Said out loud because nothing downstream does: a candidate built from a
+    # side branch qualifies exactly like one from main, and only this name
+    # decides whether any hub is ever offered it.
+    print(f"Release channel: {channel}" + ("" if channel in offerable(config) else
+          " — not an offerable channel; promote will refuse it without --channel"), flush=True)
     from .sourcestamp import fingerprint
     (stack / "host/release-identity.json").write_text(json.dumps({
         "release": release_id, "sha": stack_sha, "version": version, "date": date,
@@ -218,6 +223,33 @@ def seal(work: Path, config: dict, notes: str) -> Path:
     return output
 
 
+def offerable(config: dict) -> list[str]:
+    """The channels this publisher's hubs follow; a release off them reaches no one."""
+    return list(config.get("channels") or [releases.STABLE_CHANNEL])
+
+
+def channel_of(manifest: dict) -> str:
+    return manifest.get("channel", {}).get("name") or releases.STABLE_CHANNEL
+
+
+def check_channel(manifest: dict, channels: list[str], explicit: str | None) -> str:
+    """Refuse to publish onto a line no hub follows unless it was named on purpose.
+
+    Candidate 104 was built from a worktree on a fix branch and carried that
+    branch as its channel. It could pass all nine journeys and still never be
+    offered to a production hub, because they all follow `stable`.
+    """
+    name = channel_of(manifest)
+    if explicit is not None and explicit != name:
+        raise releases.ReleaseError(
+            f"candidate is on channel {name!r}, not the requested {explicit!r}")
+    if name not in channels and explicit is None:
+        raise releases.ReleaseError(
+            f"candidate is on channel {name!r}, which no configured hub channel "
+            f"({', '.join(channels)}) follows; pass --channel {name} to publish it anyway")
+    return name
+
+
 def candidate_manifest(candidate: Path, private_key: bytes) -> dict:
     """The signed candidate's own manifest — never a manifest handed to us."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -239,6 +271,7 @@ def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -
         raise releases.ReleaseError(
             "configure 'acceptance' with the acceptance runner's command line")
     manifest = candidate_manifest(candidate, private_key)
+    print(channel_line(manifest, offerable(config)), flush=True)
     receipts.mkdir(parents=True, exist_ok=True)
     argv = [*runner, "--candidate", str(candidate), "--receipts", str(receipts)]
     print("Running acceptance: " + " ".join(argv), flush=True)
@@ -252,9 +285,17 @@ def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -
     return state
 
 
+def channel_line(manifest: dict, channels: list[str]) -> str:
+    name = channel_of(manifest)
+    return f"Release channel: {name}" + ("" if name in channels else
+                                         f" — NOT offerable (hubs follow {', '.join(channels)})")
+
+
 def promote(candidate: Path, receipts_dir: Path, feed: Path, private_key: bytes,
-            *, local_components: str | None = None) -> dict:
+            *, local_components: str | None = None,
+            channels: list[str] | None = None, channel: str | None = None) -> dict:
     manifest = candidate_manifest(candidate, private_key)
+    check_channel(manifest, channels or [releases.STABLE_CHANNEL], channel)
     # One door. Every journey is a genuine pass over these exact artifacts, or
     # this raises and names the ones that are not.
     manifest["receipts"] = acceptance.gate(receipts_dir, manifest)
@@ -344,16 +385,19 @@ def deploy(release: str, *, port: int = 9090, timeout: int = 2700, poll: int = 1
 
 
 def ship(config: dict, candidate: Path, receipts: Path, private_key: bytes,
-         *, deploy_after: bool) -> dict:
+         *, deploy_after: bool, channel: str | None = None) -> dict:
     """The one release action: qualify the exact candidate, promote, deploy.
 
     Nothing is published on a green unit suite. `qualify` produces receipts and
     `promote` re-reads them through the same gate every installing machine
     trusts, so an interrupted or partial acceptance run stops here.
     """
+    # Refused before the gate is spent, not after six hours of journeys.
+    check_channel(candidate_manifest(candidate, private_key), offerable(config), channel)
     qualify(config, candidate, receipts, private_key)
     envelope = promote(candidate, receipts, Path(config["feed_dir"]), private_key,
-                       local_components=config.get("local_components"))
+                       local_components=config.get("local_components"),
+                       channels=offerable(config), channel=channel)
     release = envelope["manifest"]["release"]
     result = {"promoted": release}
     github_repo = config.get("github_repo") or envelope["manifest"].get("channel", {}).get("github_repo")
@@ -384,6 +428,7 @@ def main():
     publish = commands.add_parser("promote")
     publish.add_argument("candidate", type=Path)
     publish.add_argument("--receipts", type=Path, required=True)
+    publish.add_argument("--channel", help="publish a candidate on a channel no configured hub follows")
     prove = commands.add_parser("qualify", help="run the acceptance runner over a candidate")
     prove.add_argument("candidate", type=Path)
     prove.add_argument("--receipts", type=Path, required=True)
@@ -393,6 +438,7 @@ def main():
     whole = commands.add_parser("ship", help="qualify, promote and deploy one candidate")
     whole.add_argument("candidate", type=Path)
     whole.add_argument("--receipts", type=Path, required=True)
+    whole.add_argument("--channel", help="publish a candidate on a channel no configured hub follows")
     whole.add_argument("--deploy", action="store_true",
                        help="after promotion, update this hub and its eligible leaves")
     args = parser.parse_args()
@@ -418,15 +464,19 @@ def main():
         state = qualify(config, args.candidate, args.receipts, private)
         print(json.dumps({name: entry["state"] for name, entry in state.items()}, indent=2))
     elif args.action == "acceptance":
-        state = acceptance.inspect(args.receipts, candidate_manifest(args.candidate, private))
+        manifest = candidate_manifest(args.candidate, private)
+        # stderr: stdout stays the JSON it always was.
+        print(channel_line(manifest, offerable(config)), file=sys.stderr)
+        state = acceptance.inspect(args.receipts, manifest)
         print(json.dumps({name: {"state": entry["state"], "detail": entry["detail"]}
                           for name, entry in state.items()}, indent=2))
     elif args.action == "ship":
         print(json.dumps(ship(config, args.candidate, args.receipts, private,
-                              deploy_after=args.deploy), indent=2))
+                              deploy_after=args.deploy, channel=args.channel), indent=2))
     else:
         result = promote(args.candidate, args.receipts, Path(config["feed_dir"]), private,
-                         local_components=config.get("local_components"))
+                         local_components=config.get("local_components"),
+                         channels=offerable(config), channel=args.channel)
         print(json.dumps({"promoted": result["manifest"]["release"]}))
 
 

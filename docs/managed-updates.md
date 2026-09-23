@@ -31,6 +31,13 @@ name is read from the signed manifest rather than the release tag. Moving a
 hub between lines is not a downgrade: the old count means nothing on the new
 history, so the sequence guard does not apply across a switch.
 
+`build` resolves the channel from the branch `stack_repo` has checked out
+(`main` is `stable`) and prints it. The release configuration's `channels`
+lists the lines the publisher's hubs follow (default `["stable"]`);
+`qualify` and `acceptance` name the candidate's channel and flag one outside
+that list, and `promote`/`ship` refuse it unless `--channel <name>` names it
+on purpose — before `ship` spends the acceptance gate.
+
 Info displays version/build/source and
 observed running status in a native macOS form, with the jRemote icon/version,
 Open or Download, and actionable update state.

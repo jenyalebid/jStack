@@ -252,6 +252,59 @@ def test_promotion_publishes_the_candidate_with_its_evidence(tmp_path, candidate
     assert (feed / release / "receipts/fleet.log").is_file()
 
 
+def branch_candidate(candidate, name="fix/fleet-request-reuse"):
+    """Re-sign the fixture as candidate 104 was built: off a side branch."""
+    manifest = {**candidate["manifest"], "channel": {"github_repo": "example/stack", "name": name}}
+    (candidate["dir"] / "candidate.json").write_text(
+        json.dumps(releases.sign(manifest, candidate["private"], promoted=False)))
+    return manifest
+
+
+def test_promotion_refuses_a_candidate_no_hub_follows(tmp_path, candidate):
+    manifest = branch_candidate(candidate)
+    receipts = tmp_path / "receipts"
+    pass_everything(acceptance.Run(receipts, manifest))
+    with pytest.raises(releases.ReleaseError, match="'fix/fleet-request-reuse'.*--channel"):
+        publish_release.promote(candidate["dir"], receipts, tmp_path / "feed", candidate["private"])
+    with pytest.raises(releases.ReleaseError, match="not the requested 'stable'"):
+        publish_release.promote(candidate["dir"], receipts, tmp_path / "feed", candidate["private"],
+                                channel="stable")
+    assert not (tmp_path / "feed").exists()
+    envelope = publish_release.promote(candidate["dir"], receipts, tmp_path / "feed",
+                                       candidate["private"], channel="fix/fleet-request-reuse")
+    assert envelope["manifest"]["channel"]["name"] == "fix/fleet-request-reuse"
+
+
+def test_a_configured_channel_promotes_without_naming_it(tmp_path, candidate):
+    manifest = branch_candidate(candidate, "beta")
+    receipts = tmp_path / "receipts"
+    pass_everything(acceptance.Run(receipts, manifest))
+    publish_release.promote(candidate["dir"], receipts, tmp_path / "feed", candidate["private"],
+                            channels=["stable", "beta"])
+    assert (tmp_path / "feed/latest.json").is_file()
+
+
+def test_ship_refuses_an_unoffered_channel_before_spending_the_gate(tmp_path, candidate, monkeypatch):
+    branch_candidate(candidate)
+    ran = []
+    monkeypatch.setattr(publish_release.subprocess, "run", lambda *a, **k: ran.append(a))
+    with pytest.raises(releases.ReleaseError, match="no configured hub channel"):
+        publish_release.ship({"acceptance": ["runner"], "feed_dir": str(tmp_path / "feed")},
+                             candidate["dir"], tmp_path / "receipts", candidate["private"],
+                             deploy_after=False)
+    assert ran == []
+
+
+def test_qualify_names_the_channel_before_the_run(tmp_path, candidate, monkeypatch, capsys):
+    branch_candidate(candidate)
+    monkeypatch.setattr(publish_release.subprocess, "run",
+                        lambda argv, **k: __import__("subprocess").CompletedProcess(argv, 1))
+    publish_release.qualify({"acceptance": ["runner"]}, candidate["dir"], tmp_path / "receipts",
+                            candidate["private"])
+    first = capsys.readouterr().out.splitlines()[0]
+    assert first == "Release channel: fix/fleet-request-reuse — NOT offerable (hubs follow stable)"
+
+
 def test_qualify_reports_what_a_runner_that_died_left_behind(tmp_path, candidate, monkeypatch):
     receipts = tmp_path / "receipts"
 
