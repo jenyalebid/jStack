@@ -560,8 +560,10 @@ def test_a_hub_that_never_answers_again_fails_at_the_deadline(runner):
 
 def _bypass_guest(runner, *, answers_after_nudge: bool, prompt_up: bool = True):
     """A guest whose spawned session sits on Claude's bypass warning until
-    something presses Down+Enter in its pane — the published ffe85dc9 prior."""
-    state = {"nudged": [], "answered": False}
+    something presses Down+Enter in its pane, and then at an empty prompt
+    until something delivers the request — the published ffe85dc9 prior,
+    whose startup helpers never run on the sealed bundle."""
+    state = {"nudged": [], "reprompted": [], "answered": False, "accepted": False}
 
     class Guest:
         def tool_call(self, action, *args, **kwargs):
@@ -576,11 +578,18 @@ def _bypass_guest(runner, *, answers_after_nudge: bool, prompt_up: bool = True):
             assert "-L jremote" in command and "jr-65e5d97c" in command
             if "capture-pane" in command:
                 return ("  ❯ No, exit\n    Yes, I accept\n"
-                        if prompt_up and not state["answered"] else "bypass permissions on\n")
+                        if prompt_up and not state["accepted"] else "bypass permissions on\n")
             assert "send-keys" in command and "Down" in command and "Enter" in command
             state["nudged"].append(command)
-            state["answered"] = answers_after_nudge
+            state["accepted"] = True
             return ""
+
+        def call(self, path, body=None, **kwargs):
+            assert path == "/sessions/65e5d97c-1733/input" and "run pwd once" in body["text"]
+            assert state["accepted"], "a request typed under the warning is lost"
+            state["reprompted"].append(body["text"])
+            state["answered"] = answers_after_nudge
+            return {"status": 200, "body": "{}"}
 
     return Guest(), state
 
@@ -595,6 +604,7 @@ def test_a_prior_stuck_on_the_bypass_warning_is_answered_and_recorded(runner, mo
     session = runner.new_session(guest, prior=True)
 
     assert session["nudged"] is True and len(state["nudged"]) == 1
+    assert session["reprompted"] is True and len(state["reprompted"]) == 1
     assert session["pid"] == 1676
 
 
@@ -607,6 +617,7 @@ def test_a_candidate_session_left_on_the_bypass_warning_fails_by_name(runner, mo
     with pytest.raises(runner.AcceptanceFailure, match="startup watcher never answered"):
         runner.new_session(guest)
     assert state["nudged"] == [], "the runner must never press keys into a candidate's session"
+    assert state["reprompted"] == [], "the runner must never feed a candidate's session either"
 
 
 def test_a_prior_is_not_nudged_before_the_grace_period(runner, monkeypatch):
@@ -659,3 +670,17 @@ def test_start_of_a_guest_without_a_host_does_not_wait(runner):
     guest, calls = _booting_guest(runner, ["no-host"])
     guest.start()
     assert len(calls) == 2 and 'exit 0' in calls[1][3]
+
+
+def test_a_prior_whose_warning_was_answered_still_gets_its_request_delivered(runner, monkeypatch):
+    """The nudge alone leaves the prior at an empty prompt (105 run 4): the
+    request has to go in through the product's input route afterwards."""
+    ticks = iter([0, 1, 10, 31, 32, 33, 40, 41])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    monkeypatch.setattr(runner, "send_to_session", lambda guest, session: {"session": session})
+    guest, state = _bypass_guest(runner, answers_after_nudge=True)
+
+    runner.new_session(guest, prior=True)
+
+    assert state["nudged"] and state["reprompted"], "both halves of the prior's start are the runner's"

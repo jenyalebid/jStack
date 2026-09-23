@@ -409,7 +409,8 @@ def session_survival(journey, fleet: Fleet, candidate: Candidate) -> None:
     stage_prior(fleet, guest)
     session = new_session(guest, prior=True)
     journey.observe("session_pid", {"session": session["session"], "pid": session["pid"],
-                                    "bypass_prompt_nudged": session["nudged"]})
+                                    "bypass_prompt_nudged": session["nudged"],
+                                    "request_redelivered": session["reprompted"]})
     update_to_candidate(fleet, guest, machine, candidate)
     after = guest.tool_call("session-proof", "--session", session["session"])
     expect(after.get("session") == session["session"] and
@@ -766,13 +767,42 @@ def accept_bypass_prompt(guest: Guest, session: str) -> None:
              f"{shlex.quote(GUEST_TMUX)} -L jremote send-keys -t {target} Enter")
 
 
+INITIAL_REQUEST = ("Use the shell tool to run pwd once, then report the path. "
+                   "Do not modify files or make network requests.")
+
+
+def prompt_ready(guest: Guest, session: str) -> bool:
+    """Whether the session's pane is at Claude's input box with bypass on."""
+    pane = guest.sh(f"{shlex.quote(GUEST_TMUX)} -L jremote capture-pane -p -t jr-{session[:8]} "
+                    "2>/dev/null || true")
+    return "bypass permissions on" in pane and "Yes, I accept" not in pane
+
+
+def reprompt(guest: Guest, session: str) -> dict:
+    """Deliver the session's initial request again, through the product's own
+    input route. The published ffe85dc9 prior types it from a startup helper
+    that never runs on the sealed bundle (unquoted bundled tmux, #116), so a
+    prior whose warning the runner answered still sits at an empty prompt.
+    The input route types with an argv, which is why it works where the
+    helper does not."""
+    deadline = time.monotonic() + 30
+    while not prompt_ready(guest, session) and time.monotonic() < deadline:
+        time.sleep(1)
+    answer = guest.call(f"/sessions/{session}/input", {"text": INITIAL_REQUEST}, timeout=120)
+    expect(answer["status"] == 200,
+           f"the prior refused the re-delivered request: {answer['status']} {answer['body'][:200]}")
+    return answer
+
+
 def new_session(guest: Guest, *, prior: bool = False) -> dict:
     """A real session opened through the product's own API, executing a tool.
 
     `prior` marks a session on the release being upgraded FROM. A prior that
-    leaves the bypass warning up gets it answered here after NUDGE_AFTER, and
-    the answer returns `nudged` so the receipt carries it. The candidate never
-    gets that help: a session on it that needs the runner's keys is a failure.
+    leaves the bypass warning up gets it answered here after NUDGE_AFTER and
+    its initial request re-delivered (its own typer never ran either), and
+    both `nudged` and `reprompted` come back so the receipt carries them. The
+    candidate never gets that help: a session on it that needs the runner's
+    keys is a failure.
     """
     answer = guest.tool_call("spawn", "--agent", "update-proof-chat", timeout=900)
     session = answer.get("session_id") or answer.get("session") or answer.get("id")
@@ -780,7 +810,7 @@ def new_session(guest: Guest, *, prior: bool = False) -> dict:
     started = time.monotonic()
     deadline = started + 240
     proof = {}
-    nudged = False
+    nudged = reprompted = False
     while time.monotonic() < deadline:
         time.sleep(SETTLE)
         proof = guest.tool_call("session-proof", "--session", session)
@@ -793,6 +823,8 @@ def new_session(guest: Guest, *, prior: bool = False) -> dict:
                 and bypass_prompt_up(guest, session)):
             accept_bypass_prompt(guest, session)
             nudged = True
+            reprompt(guest, session)
+            reprompted = True
     expect(proof.get("session") == session and len(proof.get("holders", [])) == 1,
            "the new session never acquired exactly one identified provider")
     if not answered and not prior and bypass_prompt_up(guest, session):
@@ -801,7 +833,8 @@ def new_session(guest: Guest, *, prior: bool = False) -> dict:
     expect(answered, "the new session did not answer its initial pwd request")
     reply = send_to_session(guest, session)
     return {"session": session, "pid": proof["holders"][0]["pid"],
-            "holders": proof["holders"], "reply": reply, "nudged": nudged}
+            "holders": proof["holders"], "reply": reply, "nudged": nudged,
+            "reprompted": reprompted}
 
 
 def send_to_session(guest: Guest, session: str) -> dict:
