@@ -893,20 +893,22 @@ def _inner_command(sid: str, resume: bool, extra: str = "",
     rollout the board row was folded from; empty means resume `sid` itself,
     which is right for Claude and for a Codex spawn that was handed its own id.
 
-    Trust is said TWICE for Codex, and both spellings are load-bearing. Codex
-    gates hooks behind a trust prompt keyed to each hook's content hash, so
-    editing any hook script re-arms it; unanswered, our timeline injection and
-    guardrails simply do not run, and a phone has no way to answer. The CLI
-    flag covers the invocation, but observed behaviour is that it leans on
-    already-persisted trust — a first run against a fresh or freshly-edited
-    hook set can still skip the hooks. `-c bypass_hook_trust=true` sets it as
-    config, which does not. Belt and braces on purpose: the failure here is
-    silent and total, and a session that runs with no guardrails looks exactly
-    like one that runs with them. Sandbox and approvals are already set in
+    Trust is said for Codex, and it is said ONCE. Codex gates hooks behind a
+    prompt keyed to each hook's content hash, so editing any hook script
+    re-arms it; unanswered, our timeline injection and guardrails simply do not
+    run, and a phone has no way to answer — a silent, total failure that looks
+    exactly like a session running with them. This carried `-c
+    bypass_hook_trust=true` as well, on a belief that the CLI flag leaned on
+    already-persisted trust and would skip a freshly-edited hook set. It does
+    not: measured 2026-09-22 against 0.156, a config at a path none of its
+    `[hooks.state]` keys matched — so every hook in it untrusted, including one
+    never run before — had all of them fire under the flag alone. The setting
+    is not a config key either; Codex answers `bypass_hook_trust is ignored`
+    and warns twice a session. Sandbox and approvals are already set in
     ~/.codex/config.toml, so only trust needs saying on the command line."""
     target = resume_id or sid
     if engine == "codex":
-        flags = "--dangerously-bypass-hook-trust -c bypass_hook_trust=true"
+        flags = "--dangerously-bypass-hook-trust"
         inner = f"codex resume {target} {flags}" if resume else f"codex {flags}"
     else:
         flags = "--permission-mode bypassPermissions"

@@ -218,9 +218,11 @@ def test_inner_command_pins_the_model_for_both_engines():
     codex = managed._inner_command("SID", resume=False, engine="codex",
                                    model="gpt-5.6-terra")
     assert "-m 'gpt-5.6-terra'" in codex
-    # The trust flags are load-bearing and must survive the addition.
+    # The trust flag is load-bearing and must survive the addition. Its former
+    # companion `-c bypass_hook_trust=true` is pinned OUT: Codex 0.156 rejects it
+    # as an unrecognised session flag and warns twice a session for nothing.
     assert "--dangerously-bypass-hook-trust" in codex
-    assert "-c bypass_hook_trust=true" in codex
+    assert "bypass_hook_trust=true" not in codex
 
 
 def test_inner_command_without_a_model_is_byte_identical_to_before():
