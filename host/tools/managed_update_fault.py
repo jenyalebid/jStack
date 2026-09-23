@@ -10,10 +10,36 @@ import json
 import os
 import pwd
 from pathlib import Path
+import re
 import signal
+import subprocess
 import time
 
 import psutil
+
+
+def updater_process(config, root):
+    if config.get("service_model") == "app":
+        label = f"gui/{os.getuid()}/live.jstack.hub.updater"
+        result = subprocess.run(["/bin/launchctl", "print", label],
+                                check=True, capture_output=True, text=True, timeout=10)
+        match = re.search(r"^\s*pid = (\d+)\s*$", result.stdout, re.MULTILINE)
+        if not match:
+            raise RuntimeError("the fixture updater service has no running process")
+        process = psutil.Process(int(match.group(1)))
+        if process.uids().real != os.getuid() or "updater" not in process.cmdline():
+            raise RuntimeError("the fixture updater service has an unexpected process")
+        return process
+    candidates = []
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        cmd = proc.info["cmdline"] or []
+        if str(root.parent) in cmd and any(
+                part.endswith("update_dispatcher.py") or part == "jstack_host.update_supervisor"
+                for part in cmd):
+            candidates.append(proc)
+    if len(candidates) != 1:
+        raise RuntimeError(f"expected one fixture updater, got {len(candidates)}")
+    return candidates[0]
 
 
 def main():
@@ -54,16 +80,7 @@ def main():
                 if args.fault == "interruption" and not Path(app["backup"]).exists():
                     time.sleep(.01)
                     continue
-                candidates = []
-                for proc in psutil.process_iter(["pid", "cmdline"]):
-                    cmd = proc.info["cmdline"] or []
-                    if (str(root.parent) in cmd and any(
-                            part.endswith("update_dispatcher.py") or part == "jstack_host.update_supervisor"
-                            for part in cmd)):
-                        candidates.append(proc)
-                if len(candidates) != 1:
-                    raise RuntimeError(f"expected one fixture updater, got {len(candidates)}")
-                updater = candidates[0]
+                updater = updater_process(config, root)
                 updater.send_signal(signal.SIGSTOP)
                 try:
                     current = json.loads(journal.read_text())
