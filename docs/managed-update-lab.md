@@ -88,6 +88,15 @@ fewer than two leaves, no pristine guest, no wired test phone — is recorded as
 skipped with that reason, which keeps promotion closed exactly like a failure.
 `--only` is the same: everything unselected is recorded unrun, not assumed.
 
+`vm.sh reset` hands back a pristine clone with none of the lab's fixtures on
+it. Before every journey the runner copies its own guest tools
+(`update-vm.py`, `update-fault.py`) onto each guest in the cast. The plan's
+`fixtures` lists the other guest paths the journeys need (the adopt script, the
+lab's env agent); if any is absent, the runner runs the plan's `provision`
+host command, with `{guest}` replaced by the guest's name, and checks again. A
+fixture still missing after that gives the journey a `harness` receipt, not
+`failed`: the product was never tested. The gate still refuses it.
+
 ## Evidence boundaries
 
 - A menu test clicks the actual Update action, not just `/updates/queue`.
