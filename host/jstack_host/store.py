@@ -1395,6 +1395,13 @@ class SessionStore:
             return [r[0] for r in db.execute(
                 "SELECT dst FROM shell_grants WHERE src=? ORDER BY dst", (src,))]
 
+    def drop_shell_grants(self, key: str) -> None:
+        """Every pair `key` is half of, both directions — forgetting a machine
+        ends its reach and its reachability; a re-adoption starts from none."""
+        with self._write_lock, self._conn() as db:
+            db.execute("DELETE FROM shell_grants WHERE src=? OR dst=?",
+                       (key, key))
+
     def is_host_credential(self, device_id: str) -> bool:
         """Recognize old adoption tokens even when their machine was renamed."""
         with self._conn() as db:

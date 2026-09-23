@@ -183,6 +183,33 @@ def write_ssh_config(path: Path, peers: list[dict],
     _write_marked(path, CONFIG_BEGIN, CONFIG_END, block)
 
 
+def apply_material(shell: dict, home: Path) -> list[dict]:
+    """The user-writable half of a grant, graded: the authorized block and
+    the peer config. The root half (Remote Login, the sudoers drop-in) was
+    spent at adoption — which is what lets a live refresh run without it."""
+    steps: list[dict] = []
+    ssh_dir = Path(home) / ".ssh"
+    authorized = list(shell.get("authorized") or [])
+    try:
+        write_authorized_block(ssh_dir / "authorized_keys", authorized)
+        steps.append({"step": "authorized-keys", "ok": True,
+                      "note": f"{len(authorized)} granted key(s) may log "
+                              "in here"})
+    except OSError as exc:
+        steps.append({"step": "authorized-keys", "ok": False,
+                      "note": f"could not write authorized_keys: {exc}"})
+    peers = list(shell.get("peers") or [])
+    try:
+        write_ssh_config(ssh_dir / "config", peers)
+        steps.append({"step": "ssh-config", "ok": True,
+                      "note": (f"{len(peers)} peer(s) reachable by name"
+                               if peers else "no peers granted yet")})
+    except (OSError, ShellAccessError) as exc:
+        steps.append({"step": "ssh-config", "ok": False,
+                      "note": f"could not write the ssh config: {exc}"})
+    return steps
+
+
 # ── the root steps ──────────────────────────────────────────────────────────
 
 def sudoers_content(user: str) -> str:

@@ -498,27 +498,7 @@ def _apply_shell(shell: dict, *, home: Path, root: Path,
         return []
     import getpass
     from . import shell_access
-    steps: list[dict] = []
-    ssh_dir = home / ".ssh"
-    try:
-        shell_access.write_authorized_block(ssh_dir / "authorized_keys",
-                                            list(shell["authorized"]))
-        steps.append({"step": "authorized-keys", "ok": True,
-                      "note": f"{len(shell['authorized'])} granted "
-                              "key(s) may log in here"})
-    except OSError as exc:
-        steps.append({"step": "authorized-keys", "ok": False,
-                      "note": f"could not write authorized_keys: {exc}"})
+    steps = shell_access.apply_material(shell, home)
     steps += shell_access.enable(getpass.getuser(), runner=runner, sudo=sudo,
                                  root=root)
-    try:
-        shell_access.write_ssh_config(ssh_dir / "config",
-                                      shell.get("peers") or [])
-        peers = len(shell.get("peers") or [])
-        steps.append({"step": "ssh-config", "ok": True,
-                      "note": (f"{peers} peer(s) reachable by name"
-                               if peers else "no peers granted yet")})
-    except (OSError, shell_access.ShellAccessError) as exc:
-        steps.append({"step": "ssh-config", "ok": False,
-                      "note": f"could not write the ssh config: {exc}"})
     return steps

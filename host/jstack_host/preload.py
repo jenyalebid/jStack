@@ -41,6 +41,7 @@ MODULES = (
     "jstack_host.doctor",
     "jstack_host.allowance",
     "jstack_host.attach_parent",
+    "jstack_host.shell_access",
     "jstack_host.auth",
     "jstack_host.board_watch",
     "jstack_host.desk",

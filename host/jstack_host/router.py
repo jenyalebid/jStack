@@ -914,11 +914,17 @@ def redeem_enrolment_code(body: EnrolmentRedeemRequest, request: Request):
 # that could push a host row could invent a machine.
 
 def _serve_host(row: dict, delegated: bool = False, *, policy: bool = False) -> dict:
+    # Shell material stays off the device wire: the pubkey and account are
+    # public halves, but devices have no use for them and the console does.
     public = {k: v for k, v in row.items()
-              if k not in ("device_id", "sees_home", "sees_leaves")}
+              if k not in ("device_id", "sees_home", "sees_leaves",
+                           "shell_pubkey", "shell_user")}
     if policy:
+        from .store import get_store
         public.update(sees_home=bool(row.get("sees_home", True)),
-                      sees_leaves=bool(row.get("sees_leaves", True)))
+                      sees_leaves=bool(row.get("sees_leaves", True)),
+                      shell_user=row.get("shell_user", ""),
+                      shell_sources=get_store().shell_sources_for(row["key"]))
     return {**public, "deleted": bool(row["deleted"]), "delegated": delegated,
             "managed_access": True}
 
@@ -993,13 +999,14 @@ def forget_host(key: str, request: Request, device_id: str = Depends(current_dev
     The tombstone hides it from clients and rejects its control credential,
     so cached projected credentials on the withdrawn leaf also stop working.
     """
-    from . import grants
+    from . import grants, shell_grants
     from .store import get_store
     managed_access.require_console(request)
     if not get_store().forget_host(key):
         raise HTTPException(status_code=404,
                             detail="unknown or already forgotten host")
-    return {"forgotten": key, "grant_dropped": grants.forget(key)}
+    return {"forgotten": key, "grant_dropped": grants.forget(key),
+            "shell_steps": shell_grants.machine_forgotten(key)}
 
 
 class HostGrantRequest(BaseModel):
@@ -1059,6 +1066,23 @@ def set_leaf_visibility(key: str, body: LeafVisibilityRequest, request: Request)
     return {"key": key, **body.model_dump()}
 
 
+class LeafShellGrantRequest(BaseModel):
+    #: The machine whose agents get (or lose) shell on `{key}` — the same
+    #: parent-held per-pair shape as sees-leaves, one pair per call.
+    src: str
+    allowed: bool
+
+
+@router.post("/hosts/{key}/shell")
+def set_host_shell_grant(key: str, body: LeafShellGrantRequest, request: Request):
+    managed_access.require_console(request)
+    from . import shell_grants
+    try:
+        return shell_grants.flip(body.src, key, body.allowed)
+    except shell_grants.ShellGrantError as exc:
+        raise HTTPException(404, str(exc))
+
+
 def _managed_leaf(device_id: str) -> dict:
     leaf = managed_access.leaf_for_device(device_id)
     if managed_access.is_leaf() or leaf is None or leaf["deleted"]:
@@ -1116,6 +1140,28 @@ def managed_authorize(body: ManagedAuthorizeRequest,
                       device_id: str = Depends(current_device)):
     leaf = _managed_leaf(device_id)
     return {"allowed": managed_access.may_reach(body.device_id, leaf["key"])}
+
+
+@router.post("/managed/shell")
+def managed_shell(device_id: str = Depends(current_device)):
+    """A machine pulls its own shell set — the same compute the adoption
+    handshake answered, so a flip and a joiner run can never disagree."""
+    from . import shell_grants
+    return shell_grants.leaf_shell(_managed_leaf(device_id)["key"])
+
+
+@router.post("/shell/refresh")
+def shell_refresh(device_id: str = Depends(current_device)):
+    """A poke, not a payload: the poked machine pulls its set from the parent
+    and rewrites the user-writable half. Key material never rides the poke,
+    and no root is spent — that happened once, at adoption."""
+    from . import shell_access
+    if not managed_access.is_leaf():
+        raise HTTPException(409, "only a managed machine refreshes shell grants")
+    shell = managed_access.parent_shell()
+    if not shell.get("authorized"):
+        return {"steps": []}
+    return {"steps": shell_access.apply_material(shell, Path.home())}
 
 
 @router.post("/device/disconnect")

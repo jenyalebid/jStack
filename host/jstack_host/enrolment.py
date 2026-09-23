@@ -480,33 +480,22 @@ def redeem(raw_code: str, client_ip: str, host_key: str = "",
                            "address": _own_mesh_address(), "port": parent_port}
 
     # The shell half of the handshake (#131): the machine's public key is
-    # stored on its row, and the answer carries everything its joiner must
-    # authorize — this hub's own identity plus every granted sibling's key —
-    # and every peer the grant matrix lets it reach. A machine sending no key
-    # (or one that fails `valid_pubkey`, which would smuggle options into a
-    # sibling's authorized_keys) gets `{}` and joins exactly as before.
-    # Degrades past the consume like everything else here.
+    # stored on its row, and the answer carries `shell_grants.leaf_shell` —
+    # the same compute a live pull gets, so adoption and a flip can never
+    # disagree. A machine sending no key (or one that fails `valid_pubkey`,
+    # which would smuggle options into a sibling's authorized_keys) gets `{}`
+    # and joins exactly as before. Degrades past the consume like everything
+    # else here.
     shell: dict = {}
     if kind == KIND_HOST and ssh_pubkey:
-        from . import shell_access
+        from . import shell_access, shell_grants
         try:
             if shell_access.valid_pubkey(ssh_pubkey):
                 user = ssh_user if shell_access.valid_user(ssh_user) else ""
                 store.set_host_shell(host_key, ssh_pubkey, user)
-                authorized = [shell_access.identity()]
-                for src in store.shell_sources_for(host_key):
-                    srow = store.host_row(src)
-                    if srow and not srow["deleted"] and srow["shell_pubkey"]:
-                        authorized.append(srow["shell_pubkey"])
-                peers = []
-                for dst in store.shell_targets_for(host_key):
-                    drow = store.host_row(dst)
-                    if (drow and not drow["deleted"] and drow["address"]
-                            and drow["shell_user"]):
-                        peers.append({"name": peer_name(drow["name"]) or dst,
-                                      "address": drow["address"],
-                                      "user": drow["shell_user"]})
-                shell = {"authorized": authorized, "peers": peers}
+                shell = shell_grants.leaf_shell(host_key)
+                # The hub can now `ssh` the machine it just adopted.
+                shell_grants.refresh_hub_config()
         except Exception as exc:  # noqa: BLE001 — never lose the enrolment
             shell = {}
             note = (note + "; " if note else "") + (

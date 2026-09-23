@@ -45,10 +45,12 @@ def store(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_live_tunnel_and_no_alerts(monkeypatch):
+def _no_live_tunnel_and_no_alerts(monkeypatch, tmp_path):
     """This Mac ships wg_peer.py; an unguarded redemption would add a real peer
-    to the live tunnel. The tests that need a peer stub `issue` themselves."""
+    to the live tunnel. The tests that need a peer stub `issue` themselves.
+    HOME is faked too: forgetting a machine rewrites the hub's ~/.ssh/config."""
     monkeypatch.setattr(tunnel, "can_pair", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path / "test-home"))
     sent = []
     monkeypatch.setattr("jstack_host.hostenv.security_alert", sent.append)
     return sent

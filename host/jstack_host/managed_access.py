@@ -99,6 +99,10 @@ def parent_grant(key: str) -> dict:
     return _post_parent("grant", {"key": key})
 
 
+def parent_shell() -> dict:
+    return _post_parent("shell", {})
+
+
 def device_allowed(device_id: str, *, local: bool = False) -> bool:
     from . import devices, grants
     row = devices.row(device_id)

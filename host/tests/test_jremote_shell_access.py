@@ -31,6 +31,9 @@ from jstack_host import hostenv, shell_access
 def _own_state_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("JREMOTE_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("JREMOTE_HOST_ID", "test-host-0001")
+    # Redeeming a shell-bearing enrolment writes the hub's own ~/.ssh/config;
+    # HOME must never resolve to the real home under test.
+    monkeypatch.setenv("HOME", str(tmp_path / "test-home"))
 
 
 class _Runner:
@@ -307,6 +310,7 @@ def hub(tmp_path, monkeypatch):
     s = SessionStore(db_path=tmp_path / "hub.sqlite")
     monkeypatch.setattr(devices, "_store", lambda: s)
     monkeypatch.setattr(enrolment, "_store", lambda: s)
+    monkeypatch.setattr("jstack_host.store.get_store", lambda: s)
     monkeypatch.setattr(tunnel, "can_pair", lambda: False)
     monkeypatch.setattr("jstack_host.hostenv.security_alert", lambda *a: None)
     return s
@@ -373,6 +377,220 @@ def test_a_pubkey_that_would_smuggle_options_is_dropped_not_stored(hub):
                           ssh_user="jenya")
     assert hub.host_row("work-key1")["shell_pubkey"] == ""
     assert result["shell"] == {}
+
+
+# ── the hub's grant flip, applied live ──────────────────────────────────────
+
+@pytest.fixture
+def fleet(hub):
+    """Two adopted machines with shell material and held grants — the smallest
+    fleet a leaf→leaf flip can exist on. Nothing keys on there being two."""
+    hub.upsert_host("src-key1", "Work Main", "10.66.0.16", 9090)
+    hub.upsert_host("dst-key1", "Work Temp", "10.66.0.21", 9090)
+    hub.set_host_shell("src-key1", LINE_A, "jenya")
+    hub.set_host_shell("dst-key1", LINE_B, "jenya")
+    hub.put_host_grant("src-key1", "jrg1.aa.src-secret")
+    hub.put_host_grant("dst-key1", "jrg1.bb.dst-secret")
+    return hub
+
+
+def _wire(log, down=()):
+    """A poster that answers both legs of a poke — the delegated mint and the
+    refresh — and plays dead for any address in `down`."""
+    from jstack_host import grants
+
+    def poster(url, payload, token):
+        log.append((url, payload, token))
+        if any(host in url for host in down):
+            return 503, {"detail": "unreachable"}
+        if url.endswith(grants.MINT_PATH):
+            return 200, {"device": {"name": "shell refresh"},
+                         "token": "jr1.projected.tok"}
+        return 200, {"steps": [{"step": "authorized-keys", "ok": True,
+                                "note": ""}]}
+    return poster
+
+
+def test_flip_records_the_grant_and_pokes_both_machines(fleet):
+    from jstack_host import shell_grants
+    log = []
+    out = shell_grants.flip("src-key1", "dst-key1", True, poster=_wire(log))
+
+    assert fleet.shell_sources_for("dst-key1") == ["src-key1"]
+    refreshes = [u for u, _, _ in log if u.endswith(shell_grants.REFRESH_PATH)]
+    assert any("10.66.0.21" in u for u in refreshes), "dst: its keys changed"
+    assert any("10.66.0.16" in u for u in refreshes), "src: its reach changed"
+    assert len(out["steps"]) == 2 and all(s["ok"] for s in out["steps"])
+
+
+def test_flip_off_removes_the_row_and_still_pokes_both(fleet):
+    from jstack_host import shell_grants
+    shell_grants.flip("src-key1", "dst-key1", True, poster=_wire([]))
+    log = []
+    shell_grants.flip("src-key1", "dst-key1", False, poster=_wire(log))
+
+    assert fleet.shell_sources_for("dst-key1") == []
+    assert len([u for u, _, _ in log
+                if u.endswith(shell_grants.REFRESH_PATH)]) == 2
+
+
+def test_an_unreachable_machine_keeps_the_flip_and_says_so(fleet):
+    from jstack_host import shell_grants
+    out = shell_grants.flip("src-key1", "dst-key1", True,
+                            poster=_wire([], down=("10.66.0.21",)))
+
+    assert fleet.shell_sources_for("dst-key1") == ["src-key1"], \
+        "the store is the truth; the poke is best-effort"
+    failed = [s for s in out["steps"] if not s["ok"]]
+    assert len(failed) == 1 and "dst-key1" in failed[0]["step"]
+
+
+def test_flip_refuses_unknown_machines_and_self_grants(fleet):
+    from jstack_host import shell_grants
+    with pytest.raises(shell_grants.ShellGrantError):
+        shell_grants.flip("nobody-key", "dst-key1", True, poster=_wire([]))
+    with pytest.raises(shell_grants.ShellGrantError):
+        shell_grants.flip("src-key1", "src-key1", True, poster=_wire([]))
+    assert fleet.shell_sources_for("dst-key1") == []
+
+
+def test_the_parent_answers_a_pull_with_the_machines_current_set(fleet):
+    from jstack_host import shell_grants
+    shell_grants.flip("src-key1", "dst-key1", True, poster=_wire([]))
+
+    shell = shell_grants.leaf_shell("dst-key1")
+    assert shell["authorized"] == [shell_access.identity(), LINE_A]
+    assert shell["peers"] == []
+    src = shell_grants.leaf_shell("src-key1")
+    assert src["peers"] == [{"name": "work-temp", "address": "10.66.0.21",
+                             "user": "jenya"}]
+
+
+def test_a_machine_that_never_presented_a_key_pulls_nothing(fleet):
+    from jstack_host import shell_grants
+    fleet.upsert_host("old-key1", "Old Mac", "10.66.0.30", 9090)
+    assert shell_grants.leaf_shell("old-key1") == {}
+
+
+# ── the hub's own ssh config ────────────────────────────────────────────────
+
+def test_the_hub_writes_a_config_entry_for_every_machine_it_can_reach(fleet, tmp_path):
+    from jstack_host import shell_grants
+    fleet.upsert_host("old-key1", "Old Mac", "10.66.0.30", 9090)
+    path = tmp_path / "hub-ssh-config"
+    shell_grants.refresh_hub_config(path)
+
+    text = path.read_text()
+    assert "Host work-main" in text and "Host work-temp" in text
+    assert "10.66.0.30" not in text, "no shell account there — no entry"
+
+
+def test_adopting_a_machine_lands_it_in_the_hubs_ssh_config(hub, monkeypatch):
+    # The stubbed tunnel gives the row no mesh address; a machine without one
+    # is unreachable and correctly earns no entry, so hand it one.
+    from jstack_host import enrolment
+    monkeypatch.setattr(enrolment, "mesh_address", lambda peer: "10.66.0.44")
+    _redeem_host(hub, "work-key1", ssh_pubkey=LEAF_LINE, ssh_user="jenya")
+    cfg = Path(os.environ["HOME"]) / ".ssh" / "config"
+    text = cfg.read_text()
+    assert "Host work-mac" in text and "10.66.0.44" in text
+
+
+# ── a poked machine pulls and applies without root ──────────────────────────
+
+def test_apply_material_writes_both_files_and_needs_no_runner(tmp_path):
+    home = tmp_path / "leaf-home"
+    steps = shell_access.apply_material(
+        {"authorized": [LINE_A],
+         "peers": [{"name": "work-temp", "address": "10.66.0.21",
+                    "user": "jenya"}]}, home)
+
+    assert shell_access.read_authorized_block(
+        home / ".ssh" / "authorized_keys") == [LINE_A]
+    assert "Host work-temp" in (home / ".ssh" / "config").read_text()
+    assert len(steps) == 2 and all(s["ok"] for s in steps)
+
+
+def test_refresh_route_pulls_from_the_parent_and_applies(tmp_path, monkeypatch):
+    from jstack_host import managed_access, router
+    monkeypatch.setattr(managed_access, "is_leaf", lambda: True)
+    monkeypatch.setattr(managed_access, "parent_shell",
+                        lambda: {"authorized": [LINE_A], "peers": []})
+    out = router.shell_refresh(device_id="ignored")
+
+    assert shell_access.read_authorized_block(
+        Path(os.environ["HOME"]) / ".ssh" / "authorized_keys") == [LINE_A]
+    assert out["steps"] and all(s["ok"] for s in out["steps"])
+
+
+def test_refresh_route_with_no_material_touches_nothing(monkeypatch):
+    from jstack_host import managed_access, router
+    monkeypatch.setattr(managed_access, "is_leaf", lambda: True)
+    monkeypatch.setattr(managed_access, "parent_shell", lambda: {})
+    assert router.shell_refresh(device_id="ignored") == {"steps": []}
+    assert not (Path(os.environ["HOME"]) / ".ssh").exists()
+
+
+def test_refresh_route_on_a_hub_refuses(monkeypatch):
+    from fastapi import HTTPException
+    from jstack_host import managed_access, router
+    monkeypatch.setattr(managed_access, "is_leaf", lambda: False)
+    with pytest.raises(HTTPException):
+        router.shell_refresh(device_id="ignored")
+
+
+# ── what the console sees, and what devices never do ────────────────────────
+
+def test_devices_see_no_key_material_and_the_console_sees_the_grants(fleet):
+    from jstack_host import router, shell_grants
+    shell_grants.flip("src-key1", "dst-key1", True, poster=_wire([]))
+    row = fleet.host_row("dst-key1")
+
+    public = router._serve_host(row)
+    assert "shell_pubkey" not in public and "shell_user" not in public
+    console = router._serve_host(row, policy=True)
+    assert console["shell_sources"] == ["src-key1"]
+    assert console["shell_user"] == "jenya"
+
+
+def test_forgetting_a_machine_ends_its_reach_and_its_reachability(fleet):
+    from jstack_host import shell_grants
+    shell_grants.flip("src-key1", "dst-key1", True, poster=_wire([]))
+    shell_grants.flip("dst-key1", "src-key1", True, poster=_wire([]))
+    fleet.forget_host("src-key1")
+
+    log = []
+    steps = shell_grants.machine_forgotten("src-key1", poster=_wire(log))
+    assert fleet.shell_sources_for("dst-key1") == []
+    assert fleet.shell_targets_for("src-key1") == []
+    # The one counterpart is poked; the forgotten machine is not — its own
+    # cleanup is detach's job on the machine itself.
+    refreshed = [s["step"] for s in steps if s["step"].startswith("refresh:")]
+    assert refreshed == ["refresh:dst-key1"]
+    cfg = (Path(os.environ["HOME"]) / ".ssh" / "config").read_text()
+    assert "work-main" not in cfg
+
+
+def test_the_console_route_flips_and_maps_unknown_to_404(fleet, monkeypatch):
+    from fastapi import HTTPException
+    from jstack_host import managed_access, router
+    monkeypatch.setattr(managed_access, "require_console", lambda r: None)
+    monkeypatch.setattr(
+        "jstack_host.shell_grants.refresh_on",
+        lambda key, *, poster=None: {"step": f"refresh:{key}", "ok": True,
+                                     "note": ""})
+    out = router.set_host_shell_grant(
+        "dst-key1", router.LeafShellGrantRequest(src="src-key1", allowed=True),
+        request=None)
+    assert fleet.shell_sources_for("dst-key1") == ["src-key1"]
+    assert all(s["ok"] for s in out["steps"])
+
+    with pytest.raises(HTTPException) as caught:
+        router.set_host_shell_grant(
+            "nope-key", router.LeafShellGrantRequest(src="src-key1",
+                                                     allowed=True),
+            request=None)
+    assert caught.value.status_code == 404
 
 
 # ── attach applies what the parent answered ─────────────────────────────────
