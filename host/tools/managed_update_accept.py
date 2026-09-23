@@ -153,9 +153,18 @@ class Guest:
     def wait_for(self, state: str, machine: str, *, timeout: int = 1800, poll: int = 10) -> dict:
         """Wait on the hub's own row for a machine. A leaf's claim is not a state."""
         deadline = time.monotonic() + timeout
-        last = {}
+        last, refused = {}, None
         while time.monotonic() < deadline:
-            last = self.row(machine)
+            # A hub updating itself restarts its own API mid-wait; a refused
+            # poll during that window is the update happening, not a verdict.
+            # The deadline decides — only an answered poll can fail the wait.
+            try:
+                last = self.row(machine)
+            except AcceptanceFailure as exc:
+                refused = exc
+                time.sleep(poll)
+                continue
+            refused = None
             if last["state"] == state:
                 return last
             if last["state"] in {"failed", "rolled_back", "cancelled"} and last["state"] != state:
@@ -163,6 +172,9 @@ class Guest:
                     f"{machine} settled on {last['state']} waiting for {state}: "
                     + str((last.get("job") or {}).get("detail", "")))
             time.sleep(poll)
+        if refused is not None:
+            raise AcceptanceFailure(
+                f"{machine} never reached {state}; the hub stopped answering: {refused}")
         raise AcceptanceFailure(f"{machine} never reached {state}; last was {last.get('state')}")
 
 

@@ -456,3 +456,28 @@ def test_revocation_failure_restores_the_fixture_supervisor(runner, monkeypatch)
         runner.revocation(SimpleNamespace(observe=lambda *args: None), fleet, None)
     assert "bootout" in commands[0]
     assert "bootstrap" in commands[-1]
+
+
+def test_a_hub_restarting_into_the_candidate_survives_refused_polls(runner):
+    fleet = ScriptedFleet(state="current")
+    polls = {"refused": 2}
+
+    def run(argv, **kwargs):
+        if "inventory" in (argv[3] if len(argv) > 3 else "") and polls["refused"]:
+            polls["refused"] -= 1
+            return subprocess.CompletedProcess(argv, 1, "", "[Errno 61] Connection refused")
+        return fleet(argv, **kwargs)
+
+    hub = runner.Guest("hub", Path("/bin/vm.sh"), run=run)
+    row = hub.wait_for("current", "machine-hub", timeout=5, poll=0)
+    assert row["state"] == "current"
+    assert polls["refused"] == 0
+
+
+def test_a_hub_that_never_answers_again_fails_at_the_deadline(runner):
+    def run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "[Errno 61] Connection refused")
+
+    hub = runner.Guest("hub", Path("/bin/vm.sh"), run=run)
+    with pytest.raises(runner.AcceptanceFailure, match="stopped answering"):
+        hub.wait_for("current", "machine-hub", timeout=0.2, poll=0)
