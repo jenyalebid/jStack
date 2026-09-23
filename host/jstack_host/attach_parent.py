@@ -19,7 +19,21 @@ This is that sequence, made one deliberate action:
   2. take the leaf bundle the parent hands back (`response["tunnel"]["bundle"]`,
      the six `tunnel.LEAF_FILES`), write it out, and
   3. run `install_leaf.sh` from inside it — which installs the leaf daemons and
-     brings the tunnel up.
+     brings the tunnel up — unless that exact tunnel is already installed and
+     shaking hands, in which case the installer is left alone (jStack#127).
+
+The skip in step 3 exists because attach is not always the first thing to bring
+the tunnel up. The offline joiner (`adopt_offline.py`) installs the carried
+bundle FIRST, so the far Mac has a route to the hub, and redeems second; the
+redeem then hands back the same bundle, and running the installer again boots
+the live daemon out and back in for nothing. That restart is not free: the
+installer reads the utun name the old daemon left in `/var/run/wireguard`
+before the new one has replaced it, waits twenty seconds for a handshake on an
+interface that no longer exists, and reports "the leaf installer failed" about
+a tunnel the hub was receiving heartbeats from the whole time. So when the
+installed conf and env are byte-identical to what the parent just handed back
+and the tunnel has a handshake under three minutes old, there is nothing to
+install and attach says so instead.
 
 Deliberate, never inferred. Attaching to a parent changes what off-network
 devices can reach; it is a thing a person chooses and types a code for, not a
@@ -182,6 +196,62 @@ def _prior_token(state: Path) -> str:
         return ""
 
 
+#: The probe behind the step-3 skip, run as root on a real machine (the conf
+#: is 0600 root and so is the utun name file). Exit 0 with `<iface> <age>` on
+#: stdout when the bundle at $1/$2 is the tunnel already installed and carrying;
+#: 3 when the installed files differ (or are absent); 4 when they match but the
+#: tunnel is not shaking hands, which is the case a re-install is FOR. Arguments
+#: rather than environment, because `sudo` drops the environment. $3 is the
+#: install root — empty on a real machine, `LEAF_DEST` under test, the same
+#: seam `install_leaf.sh` documents — and $4 a `wg` to prefer.
+_LEAF_PROBE = r"""
+set -u
+conf="$1"; env_="$2"; root="${3:-}"; wg_pref="${4:-}"
+cmp -s "$conf" "$root/etc/wireguard/jrleaf.conf" || exit 3
+cmp -s "$env_" "$root/Library/Application Support/jRemote Leaf/leaf.env" || exit 3
+iface="$(cat "$root/var/run/wireguard/jremote-wg.name" 2>/dev/null || true)"
+[ -n "$iface" ] || exit 4
+wg=""
+for cand in "$wg_pref" "$(command -v wg 2>/dev/null || true)" /opt/homebrew/bin/wg /usr/local/bin/wg; do
+    if [ -n "$cand" ] && [ -x "$cand" ]; then wg="$cand"; break; fi
+done
+[ -n "$wg" ] || exit 4
+hs="$("$wg" show "$iface" latest-handshakes 2>/dev/null | awk 'NR==1 {print $2}' || true)"
+case "$hs" in ''|*[!0-9]*) exit 4;; esac
+[ "$hs" -gt 0 ] || exit 4
+age=$(( $(date +%s) - hs ))
+[ "$age" -le 180 ] || exit 4
+echo "$iface $age"
+"""
+
+
+def _tunnel_already_up(dest: Path, *, sudo: bool, env: dict, prober) -> str | None:
+    """The note to report instead of running the installer — or None, run it.
+
+    Byte-identical installed files AND a handshake under three minutes old. The
+    second half is what keeps this from being a way to skip a repair: a Mac
+    whose conf matches but whose tunnel is dead gets the installer, restart and
+    all, exactly as before. A probe that cannot run at all (no bash, no sudo
+    right) reads as "not up" for the same reason — the installer is the
+    conservative answer.
+    """
+    root = env.get("LEAF_DEST", "")
+    argv = (["sudo"] if sudo and not root else []) + [
+        "bash", "-c", _LEAF_PROBE, "leaf-probe",
+        str(dest / "jrleaf.conf"), str(dest / "leaf.env"), root, env.get("WG", "")]
+    try:
+        proc = prober(argv, cwd=str(dest), env=env, capture_output=True, text=True)
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    iface, _, age = (proc.stdout or "").strip().partition(" ")
+    if not iface:
+        return None
+    return (f"tunnel already up on {iface} (handshake {age}s ago) with this "
+            "exact bundle — installer not re-run")
+
+
 def _write_bundle(bundle: dict, dest: Path) -> Path:
     """Write the six leaf files to `dest`, each with the mode its job needs.
 
@@ -279,7 +349,7 @@ def _redeem(parent_url: str, payload: dict, poster) -> dict:
 def attach(code: str, parent_url: str, *, host_key: str,
            port: int = DEFAULT_PORT, dest_dir: Path | None = None,
            poster=None, runner=None, sudo: bool = True,
-           install_env: dict | None = None) -> dict:
+           install_env: dict | None = None, prober=None) -> dict:
     """Redeem a host code on `parent_url` and stand up the leaf tunnel it hands
     back, turning this Mac into a managed hub of the parent.
 
@@ -295,6 +365,7 @@ def attach(code: str, parent_url: str, *, host_key: str,
     """
     poster = poster or _httpx_post
     runner = runner or subprocess.run
+    prober = prober or subprocess.run
 
     if not HOST_KEY_RE.match(host_key or ""):
         raise AttachError(
@@ -348,16 +419,21 @@ def attach(code: str, parent_url: str, *, host_key: str,
     _write_bundle(peer["bundle"], dest)
     _record_parent(state, parent_url, result)
 
-    argv = (["sudo"] if sudo else []) + ["bash", str(dest / "install_leaf.sh")]
     env = dict(install_env) if install_env is not None else dict(os.environ)
-    proc = runner(argv, cwd=str(dest), env=env,
-                  capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise AttachError(
-            "the leaf installer failed: "
-            + ((proc.stderr or proc.stdout or "").strip() or "no output")
-            + f"\nthe bundle is at {dest} — fix the cause and re-run "
-            "`sudo bash install_leaf.sh` from there")
+    already = _tunnel_already_up(dest, sudo=sudo, env=env, prober=prober)
+    if already is not None:
+        installer_output, installer_ran = already, False
+    else:
+        argv = (["sudo"] if sudo else []) + ["bash", str(dest / "install_leaf.sh")]
+        proc = runner(argv, cwd=str(dest), env=env,
+                      capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise AttachError(
+                "the leaf installer failed: "
+                + ((proc.stderr or proc.stdout or "").strip() or "no output")
+                + f"\nthe bundle is at {dest} — fix the cause and re-run "
+                "`sudo bash install_leaf.sh` from there")
+        installer_output, installer_ran = (proc.stdout or "").strip(), True
 
     return {
         "device": result.get("device") or {},
@@ -367,7 +443,10 @@ def attach(code: str, parent_url: str, *, host_key: str,
         "tunnel_note": result.get("tunnel_note", ""),
         "bundle_dir": str(dest),
         "parent_url": parent_url,
-        "installer_output": (proc.stdout or "").strip(),
+        "installer_output": installer_output,
+        # False when the tunnel this bundle describes was already installed and
+        # carrying, so nothing was (re)started — the offline joiner's case.
+        "installer_ran": installer_ran,
         # Whether the parent kept the grant — read from the parent's own answer,
         # never from the fact that one was sent. A parent running a build from
         # before delegated minting ignores the field entirely, and this machine

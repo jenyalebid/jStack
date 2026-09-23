@@ -139,8 +139,17 @@ cat > "$DAEMONS/com.jremote.leaf-watch.plist" <<EOF
 </plist>
 EOF
 
+# The utun name file outlives the daemon that wrote it: bootout kills
+# wireguard-go, nothing removes the file, and the fresh daemon's own `rm -f`
+# (wg_up.sh) runs a beat after `bootstrap` returns. Read in that beat, the
+# stale name pointed the handshake wait at a utun the old daemon had already
+# released, so a re-install reported "no handshake in 20s" about a tunnel that
+# was up the whole time (jStack#127). Clear it here, so the wait below can only
+# ever see the name the new daemon writes.
+NAME_FILE="$DEST/var/run/wireguard/jremote-wg.name"
 for name in com.jremote.leaf com.jremote.leaf-watch; do
     "$LAUNCHCTL" bootout system "$DAEMONS/$name.plist" 2>/dev/null || true
+    [ "$name" != com.jremote.leaf ] || rm -f "$NAME_FILE"
     "$LAUNCHCTL" bootstrap system "$DAEMONS/$name.plist"
     echo "installed $name"
 done
@@ -149,7 +158,6 @@ done
 # real hub on the real network.
 [ -z "$DEST" ] || exit 0
 
-NAME_FILE=/var/run/wireguard/jremote-wg.name
 IFACE=""
 for _ in $(seq 1 20); do
     IFACE="$(cat "$NAME_FILE" 2>/dev/null || true)"
@@ -167,6 +175,9 @@ for _ in $(seq 1 20); do
     # stderr already sent to /dev/null, so the caller gets a bare exit 1 and
     # `attach` reports "the leaf installer failed" about a tunnel that came up
     # a moment later.
+    # Re-read the name each pass: launchd may respawn the daemon inside this
+    # window (ThrottleInterval, a first-try failure), and it lands on a new utun.
+    IFACE="$(cat "$NAME_FILE" 2>/dev/null || echo "$IFACE")"
     HS="$("$WG_BIN" show "$IFACE" latest-handshakes 2>/dev/null \
           | awk 'NR==1 {print $2}' || true)"
     if [ -n "$HS" ] && [ "$HS" -gt 0 ]; then break; fi
