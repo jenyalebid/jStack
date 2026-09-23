@@ -465,10 +465,11 @@ def _adopt_offline(name: str, row: dict, port: int, as_json: bool = False) -> in
     machine joins this mesh. `adopt_offline.emit` adds the ordered runner, so
     what lands on the far Mac is one command rather than a README of steps.
     """
-    from . import adopt_offline, tunnel
+    from . import adopt_offline, enrolment, tunnel
 
+    peer = enrolment.peer_name(name)
     try:
-        issued = tunnel.issue(name, leaf=True)
+        issued = tunnel.issue(peer, leaf=True)
         reused = "" if issued.get("created") else " (its existing peer, reused)"
     except (tunnel.PairingUnsupported, tunnel.PairingRefused,
             tunnel.TunnelError) as exc:
@@ -482,15 +483,15 @@ def _adopt_offline(name: str, row: dict, port: int, as_json: bool = False) -> in
                   file=sys.stderr)
             return 1
         try:
-            adopt_offline.relift(name)
+            adopt_offline.relift(peer)
         except tunnel.TunnelError as rebuild:
             print(f"could not rebuild the tunnel half for {name}: {rebuild}",
                   file=sys.stderr)
             return 1
         reused = " (rebuilt from its existing peer — keys unchanged)"
 
-    adopt_offline.emit(name, row["code"], port)
-    joiner = adopt_offline.pack(name, row["code"], port)
+    adopt_offline.emit(peer, row["code"], port)
+    joiner = adopt_offline.pack(peer, row["code"], port)
     mins = row["expires_in"] // 60
 
     if as_json:

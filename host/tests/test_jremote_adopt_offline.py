@@ -37,6 +37,27 @@ def bundle(tmp_path, monkeypatch):
     return folder
 
 
+@pytest.mark.parametrize("display_name,peer", [("Work Mac", "work-mac"),
+                                               ("New Mac", "new-mac")])
+def test_cli_joiner_accepts_the_name_shown_in_the_adopt_dialog(
+        bundle, monkeypatch, capsys, display_name, peer):
+    import json
+    from pathlib import Path
+    from jstack_host import cli, enrolment, tunnel
+
+    folder = bundle.with_name(peer + "-leaf")
+    if folder != bundle:
+        bundle.rename(folder)
+    monkeypatch.setattr(tunnel, "can_pair", lambda: True)
+    row = {"name": display_name, "code": "TEST-CODE", "expires_in": 600,
+           "kind": enrolment.KIND_HOST}
+    assert cli._adopt_offline(display_name, row, 9090, as_json=True) == 0
+    answer = json.loads(capsys.readouterr().out)
+    assert answer["name"] == display_name
+    assert (folder / "join.sh").is_file()
+    assert Path(answer["file"]).is_file()
+
+
 def _run_join(bundle, tmp_path, capable=True):
     """Run join.sh for real against fakes, and return what it invoked, in order.
 
