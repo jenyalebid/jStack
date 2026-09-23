@@ -739,13 +739,27 @@ def test_a_leaf_with_no_updater_process_fails_before_any_fault(runner):
         runner.ensure_true_updater(acceptance.Journey("rollback"), guest)
 
 
-def test_the_reboot_leg_refuses_a_stale_updater_on_the_candidate(runner, monkeypatch, tmp_path):
+def test_the_reboot_leg_reboots_a_stale_updater_on_the_candidate_and_records_it(runner, monkeypatch, tmp_path):
+    fleet, guest, offered, queued, power = _reboot_fleet(
+        runner, monkeypatch, tmp_path, settled_detail="recovered interrupted application")
+    bundles = iter([STALE_UPDATER, TRUE_UPDATER])
+    guest.sh = lambda command, **kwargs: next(bundles) if command == runner.UPDATER_BUNDLE else ""
+    journey = acceptance.Journey("interruption")
+    result = runner.reboot_mid_apply(journey, fleet, guest, "leaf-id",
+                                     SimpleNamespace(release=CANDIDATE, public_key="k"))
+    assert power == ["stop", "start", "stop", "start"], "one reboot to shed the stale updater, one mid-copy"
+    assert any("#119" in line and ".failed-job-x" in line for line in journey.lines)
+    assert result["state"] == "rolled_back" and result["retry_release"] == PRIOR
+
+
+def test_the_reboot_leg_fails_when_the_stale_updater_survives_its_reboot(runner, monkeypatch, tmp_path):
     fleet, guest, offered, queued, power = _reboot_fleet(
         runner, monkeypatch, tmp_path, settled_detail="recovered interrupted application")
     guest.sh = lambda command, **kwargs: STALE_UPDATER if command == runner.UPDATER_BUNDLE else ""
-    with pytest.raises(runner.AcceptanceFailure, match="the live one runs from"):
-        runner.reboot_mid_apply(fleet, guest, "leaf-id", SimpleNamespace(release=CANDIDATE, public_key="k"))
-    assert offered == [] and power == []
+    with pytest.raises(runner.AcceptanceFailure, match="after a reboot the updater still runs from"):
+        runner.reboot_mid_apply(acceptance.Journey("interruption"), fleet, guest, "leaf-id",
+                                SimpleNamespace(release=CANDIDATE, public_key="k"))
+    assert offered == [], "nothing is offered until the candidate's own updater is the live one"
 
 
 def _fault_fleet(runner, monkeypatch, *, fault_result, prior_release=PRIOR):
@@ -800,7 +814,7 @@ def test_the_prior_s_leftover_copy_is_recorded_and_removed_before_the_retry(runn
     releases = iter([PRIOR, CANDIDATE])
     guest.installed = lambda: {"release": next(releases)}
     monkeypatch.setattr(runner, "reboot_mid_apply",
-                        lambda fleet, guest, machine, candidate: {"job": "j3", "state": "rolled_back"})
+                        lambda journey, fleet, guest, machine, candidate: {"job": "j3", "state": "rolled_back"})
     journey = acceptance.Journey("interruption")
 
     runner.interruption(journey, fleet, SimpleNamespace(release=CANDIDATE))
@@ -841,7 +855,7 @@ def test_a_reboot_mid_copy_rolls_back_keeps_the_release_and_the_next_request_lan
         runner, monkeypatch, tmp_path, settled_detail="recovered interrupted application")
     candidate = SimpleNamespace(release=CANDIDATE, public_key="k")
 
-    result = runner.reboot_mid_apply(fleet, guest, "leaf-id", candidate)
+    result = runner.reboot_mid_apply(acceptance.Journey("interruption"), fleet, guest, "leaf-id", candidate)
 
     assert power == ["stop", "start"]
     assert result["state"] == "rolled_back" and result["release_kept"] == CANDIDATE
@@ -854,7 +868,7 @@ def test_a_reboot_that_settles_any_other_way_fails_by_its_detail(runner, monkeyp
     fleet, guest, offered, queued, power = _reboot_fleet(
         runner, monkeypatch, tmp_path, settled_detail="unfinished incoming app requires recovery")
     with pytest.raises(runner.AcceptanceFailure, match="settled the job as 'unfinished incoming"):
-        runner.reboot_mid_apply(fleet, guest, "leaf-id", SimpleNamespace(release=CANDIDATE, public_key="k"))
+        runner.reboot_mid_apply(acceptance.Journey("interruption"), fleet, guest, "leaf-id", SimpleNamespace(release=CANDIDATE, public_key="k"))
     assert offered == [PRIOR, CANDIDATE]
 
 
@@ -863,7 +877,7 @@ def test_a_recovered_updater_that_leaves_a_copy_behind_fails(runner, monkeypatch
         runner, monkeypatch, tmp_path, settled_detail="recovered interrupted application",
         leftovers="/Applications/jStack Hub.app.incoming-job-reboot\n")
     with pytest.raises(runner.AcceptanceFailure, match="left \\['/Applications/jStack Hub.app.incoming"):
-        runner.reboot_mid_apply(fleet, guest, "leaf-id", SimpleNamespace(release=CANDIDATE, public_key="k"))
+        runner.reboot_mid_apply(acceptance.Journey("interruption"), fleet, guest, "leaf-id", SimpleNamespace(release=CANDIDATE, public_key="k"))
 
 
 def test_the_reboot_leg_refuses_a_guest_not_on_the_candidate(runner, monkeypatch, tmp_path):
@@ -871,7 +885,7 @@ def test_the_reboot_leg_refuses_a_guest_not_on_the_candidate(runner, monkeypatch
         runner, monkeypatch, tmp_path, settled_detail="recovered interrupted application")
     guest.installed = lambda: {"release": PRIOR}
     with pytest.raises(runner.AcceptanceFailure, match="needs the candidate's updater"):
-        runner.reboot_mid_apply(fleet, guest, "leaf-id", SimpleNamespace(release=CANDIDATE, public_key="k"))
+        runner.reboot_mid_apply(acceptance.Journey("interruption"), fleet, guest, "leaf-id", SimpleNamespace(release=CANDIDATE, public_key="k"))
     assert offered == [] and power == []
 
 

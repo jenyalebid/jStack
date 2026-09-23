@@ -506,7 +506,7 @@ def sweep_prior_residue(journey, guest: Guest) -> list[str]:
     return found
 
 
-def reboot_mid_apply(fleet: Fleet, guest: Guest, machine: str, candidate: Candidate) -> dict:
+def reboot_mid_apply(journey, fleet: Fleet, guest: Guest, machine: str, candidate: Candidate) -> dict:
     """Cut the guest with the candidate's own updater frozen half-way through
     an app copy, boot it, and read what the journal did.
 
@@ -521,9 +521,10 @@ def reboot_mid_apply(fleet: Fleet, guest: Guest, machine: str, candidate: Candid
     state = guest.installed()
     expect(state["release"] == candidate.release,
            f"the reboot leg needs the candidate's updater; {guest.name} runs {state['release']}")
-    running = updater_bundle(guest)
-    expect(running.startswith(INSTALLED_BUNDLE),
-           f"the reboot leg needs the candidate's updater; the live one runs from {running!r} (#119)")
+    # After the kill leg's rollback the relaunched supervisor keeps running the
+    # candidate's code from `.failed-<job>` (#119); the reboot leg must read the
+    # installed bundle's own updater, so a stale one is rebooted and recorded.
+    ensure_true_updater(journey, guest)
     previous = Candidate(fleet.prior, candidate.public_key)
     try:
         fleet.offer(previous)
@@ -574,7 +575,7 @@ def interruption(journey, fleet: Fleet, candidate: Candidate) -> None:
     retry = fleet.hub.queue(machine, request_id("interrupt-retry"))["jobs"][0]
     fleet.hub.wait_for("current", machine)
     journey.observe("retry_current", {"job": retry["id"], "release": guest.installed()["release"]})
-    journey.observe("reboot_resume", reboot_mid_apply(fleet, guest, machine, candidate))
+    journey.observe("reboot_resume", reboot_mid_apply(journey, fleet, guest, machine, candidate))
 
 
 def rollback(journey, fleet: Fleet, candidate: Candidate) -> None:
