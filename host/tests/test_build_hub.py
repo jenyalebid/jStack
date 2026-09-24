@@ -280,3 +280,29 @@ def test_a_build_input_is_found_where_it_lives_not_only_on_path(monkeypatch, tmp
     tmux.chmod(0o644)
     with pytest.raises(ValueError, match="not on PATH and not in"):
         build_hub.build_tool("tmux", "JSTACK_BUILD_TMUX")
+
+
+def _signed(monkeypatch, tmp_path, config):
+    calls = []
+    monkeypatch.setattr(build_hub, "command", lambda argv, **kw: calls.append(argv) or "")
+    app = tmp_path / "jStack Hub.app"
+    (app / "Contents/MacOS").mkdir(parents=True)
+    (app / "Contents/MacOS/JStackRuntime").write_bytes(next(iter(build_hub.MAGICS)) + b"\0" * 12)
+    build_hub.sign(app, config)
+    return [argv for argv in calls if argv[0] == "/usr/bin/codesign" and "--verify" not in argv]
+
+
+def test_ad_hoc_build_is_not_hardened(monkeypatch, tmp_path):
+    # A hardened process maps only libraries signed by Apple or its own Team
+    # ID; an ad-hoc signature has none, so a hardened ad-hoc Hub cannot load
+    # the ad-hoc Python framework beside it and dies in dyld at first launch.
+    signing = _signed(monkeypatch, tmp_path, None)
+    assert signing
+    assert all("--options" not in argv for argv in signing)
+    assert all(argv[argv.index("--sign") + 1] == "-" for argv in signing)
+
+
+def test_developer_id_build_is_hardened_for_notarization(monkeypatch, tmp_path):
+    signing = _signed(monkeypatch, tmp_path, {"sign_keychain": "k", "sign_identity": "Developer ID"})
+    assert signing
+    assert all(argv[argv.index("--options") + 1] == "runtime" for argv in signing)
