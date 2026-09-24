@@ -160,6 +160,38 @@ def _usage_caps_available() -> bool:
     return mod is not None and _has_allowance(mod)
 
 
+#: The tables each Work screen reads: the environment layers, and the plan
+#: rows. Both arrive by `store._SCHEMA` auto-migration, so what varies between
+#: hosts is not whether this package can import them but whether the store this
+#: process opens has been migrated yet.
+_ENV_TABLES = ("session_env", "agent_env")
+_WORK_TABLES = ("plans", "plan_sessions", "stages", "stage_tasks", "stage_proofs")
+
+
+def _tables_read(names) -> bool:
+    """True only once a `SELECT ... LIMIT 1` has come back from EVERY one of them.
+
+    A query and not a name in `sqlite_master`, because the question the app is
+    asking is "can this screen be drawn", and a store this process cannot open
+    — locked, unreadable, half-migrated — fails that for reasons a name lookup
+    would answer yes to. `_probe` turns any raise into False, so all of those
+    collapse to the one honest answer instead of a 500 on the screen.
+    """
+    from .store import get_store
+    with get_store().conn() as db:
+        for name in names:
+            db.execute(f"SELECT 1 FROM {name} LIMIT 1").fetchone()
+    return True
+
+
+def _session_env_available() -> bool:
+    return _tables_read(_ENV_TABLES)
+
+
+def _work_available() -> bool:
+    return _tables_read(_WORK_TABLES)
+
+
 #: Features backed by something other than an importable module, probed the way
 #: they are actually used. Tags come from jStack's `log_event` binary, so
 #: `_optional()` — which asks the import system — could only ever answer for the
@@ -167,11 +199,15 @@ def _usage_caps_available() -> bool:
 #: capability map, and each probe stays the same call the route itself makes.
 #: `tunnel_pairing` is here rather than in `_FEATURES` because the module always
 #: imports — what it needs is the hub's `wg_peer.py` beside it, which only the
-#: machine that owns the mesh has.
+#: machine that owns the mesh has. `session_env` and `work` are here for a third
+#: shape of the same problem: their modules always import too, and what a host
+#: may be missing is the migration that put their tables in the store.
 _PROBED_FEATURES = {"tags": _tags_available,
                     "tunnel_pairing": _tunnel_pairing_available,
                     "usage_caps": _usage_caps_available,
-                    "file_sharing": _file_sharing_available}
+                    "file_sharing": _file_sharing_available,
+                    "session_env": _session_env_available,
+                    "work": _work_available}
 
 
 def _probe(name: str) -> bool:
@@ -1772,6 +1808,238 @@ def session_tag_write(sid: str, payload: SessionTagBody):
                             detail=(r.stderr or r.stdout or "log_event refused").strip())
     _board_changed()
     return {"ok": True}
+
+
+# ── Work: the session environment, the plans, the stages ──
+#
+# Deliberately absent from `changes_since`: none of these tables carries a
+# `seq`, and the device-sync path is a wire contract whose `MetaSync.tableEpoch`
+# would have to be reset to grow one. Every screen here is asked for by hand.
+
+#: What the Work view keys its three states on. Explicit in the payload, not
+#: inferred, because "no plan" and "a plan with no stages yet" are the same two
+#: empty collections to a client and draw entirely different screens.
+#:
+#:   none        — this session is not on a plan
+#:   planning    — a plan is open and has no stages yet
+#:   stages      — the plan has stages; this is the working screen
+#:   unavailable — this host cannot answer, and never appears with `available: true`
+WORK_MODES = ("none", "planning", "stages", "unavailable")
+
+
+class EnvBody(BaseModel):
+    """One setting, one layer. A `null` or empty value CLEARS it.
+
+    One key per call: the picker moves one row at a time, and a batch that
+    failed halfway would leave the screen rendering a state no single call
+    produced. Clearing is a value rather than a verb of its own because the
+    control that clears is the same control that sets — it just has nothing
+    selected.
+    """
+    key: str = ""
+    value: str | None = None
+
+
+def _env_rows(*, session_id: str = "", agent_id: str = "") -> list[dict]:
+    """Every setting, the value in force at this layer, and where it came from.
+
+    One model for both layers and for the Work view, so the client decodes one
+    thing. Every setting always appears: a key missing from the list reads to
+    the app as a feature this host does not have, which is the sentence
+    `available: false` exists to say and must not be said by accident.
+    """
+    from . import environment
+    if session_id:
+        resolved = environment.resolve(session_id)
+    else:
+        # Nothing sits above the agent layer but the registry, so the agent's
+        # own row is the only thing that can shadow a default. A stored value
+        # the registry no longer offers counts as unset, which is what
+        # `environment._layer` does for a session — the two layers must not
+        # disagree about what is in force.
+        resolved = {}
+        for s in environment.SETTINGS:
+            raw = environment.get(s.key, agent_id=agent_id)
+            resolved[s.key] = ((raw, "agent") if raw in s.values
+                               else (s.default, "default"))
+    rows = []
+    for pref in environment.prefs():
+        value, source = resolved[pref["key"]]
+        rows.append({**pref, "value": value, "source": source})
+    return rows
+
+
+def _write_env(payload: EnvBody, **layer) -> None:
+    """The write both POSTs share: refuse, store, repaint.
+
+    `set_value`'s ValueError is a 400 and never a 500. An unknown key and a
+    value outside the enum are the same fault — a picker that has drifted from
+    this host's registry — and the message is surfaced verbatim because it
+    already names the key and the values that would have worked.
+    """
+    from . import environment
+    key = (payload.key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="setting key required")
+    try:
+        environment.set_value(key, payload.value, **layer)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    _board_changed()
+
+
+@router.get("/sessions/{sid}/env")
+def get_session_env(sid: str):
+    """How this session runs — every setting, its value, and whose value it is.
+
+    `source` is the whole reason this is not a flat dictionary: it is what lets
+    the screen draw an inherited setting as inherited rather than as one
+    somebody set on this sitting, and the only honest basis for offering to
+    clear a row.
+
+    An unindexed session id is not an error. `resolve` answers defaults for
+    one on purpose — a session can be live before the index has caught up with
+    it, and a settings screen that 404'd there would be wrong for a few
+    seconds at exactly the moment it is first opened.
+    """
+    _check_sid(sid)
+    if not _probe("session_env"):
+        return _unavailable("the session environment", env=[])
+    return {"available": True, "env": _env_rows(session_id=sid)}
+
+
+@router.post("/sessions/{sid}/env")
+def set_session_env(sid: str, payload: EnvBody):
+    """Set or clear one setting on this session; answer the whole list back.
+
+    The stored truth rather than an echo of the request: a cleared row's new
+    value is the agent's or the registry's, and the caller neither knows it
+    nor should have to compute it to redraw itself.
+    """
+    _check_sid(sid)
+    if not _probe("session_env"):
+        raise HTTPException(
+            status_code=503,
+            detail="this host has no session environment to set")
+    _write_env(payload, session_id=sid)
+    return {"available": True, "env": _env_rows(session_id=sid)}
+
+
+@router.get("/agents/{agent_id}/env")
+def get_agent_env(agent_id: str):
+    """The agent-default layer — what every session of this agent inherits."""
+    if not _probe("session_env"):
+        return _unavailable("the session environment", env=[])
+    return {"available": True, "env": _env_rows(agent_id=agent_id)}
+
+
+@router.post("/agents/{agent_id}/env")
+def set_agent_env(agent_id: str, payload: EnvBody):
+    """Move an agent's default. Every session of that agent that has not set
+    its own value reads the new one from its next resolve — including the ones
+    already running, which is the point of the layer."""
+    if not _probe("session_env"):
+        raise HTTPException(
+            status_code=503,
+            detail="this host has no agent environment to set")
+    _write_env(payload, agent_id=agent_id)
+    return {"available": True, "env": _env_rows(agent_id=agent_id)}
+
+
+@router.get("/sessions/{sid}/work")
+def get_session_work(sid: str):
+    """The Work view in one call: the mode, the plan, its stages and tasks, and
+    the environment the stages would be dispatched with.
+
+    One call because the alternative is three whose answers can disagree — a
+    stage list read before a re-parse beside tasks read after it renders as
+    tasks belonging to nothing. `plans.work` composes the plan side; this route
+    adds the environment rather than letting the client fetch it separately,
+    which is the same hazard one screen further out.
+
+    The environment rides along in the shape the env routes serve, so the
+    client decodes one model; and the guard covers both families because this
+    payload carries both, so a host that can answer for one and not the other
+    has nothing to say here either.
+    """
+    _check_sid(sid)
+    if not (_probe("work") and _probe("session_env")):
+        return _unavailable("the work harness", mode="unavailable", plan=None,
+                            stages=[], tasks={}, env=[])
+    from . import plans
+    state = plans.work(sid)
+    if state["plan"] is None:
+        mode = "none"
+    else:
+        mode = "stages" if state["stages"] else "planning"
+    return {"available": True, "mode": mode, "plan": state["plan"],
+            "stages": state["stages"], "tasks": state["tasks"],
+            "env": _env_rows(session_id=sid)}
+
+
+@router.get("/plans")
+def get_plans(limit: int = 50, include_done: bool = True):
+    """Every plan this host knows, most recently touched first."""
+    if not _probe("work"):
+        return _unavailable("the work harness", plans=[])
+    from . import plans
+    return {"available": True,
+            "plans": plans.list_plans(limit=limit, include_done=include_done)}
+
+
+@router.get("/plans/{plan_id}")
+def get_plan(plan_id: str):
+    """One plan, its stages, and what each stage's evidence and order of work say.
+
+    Proofs and tasks are keyed by stage rather than flattened: the screen draws
+    them under the stage they belong to, and a flat list would only make the
+    client re-group rows it was just handed.
+    """
+    if not _probe("work"):
+        return _unavailable("the work harness", plan=None, stages=[],
+                            proofs={}, tasks={})
+    from . import plans
+    row = plans.plan(plan_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no such plan: {plan_id!r}")
+    rows = plans.stages(plan_id)
+    return {"available": True, "plan": row, "stages": rows,
+            "proofs": {s["id"]: plans.proofs(s["id"]) for s in rows},
+            "tasks": {s["id"]: plans.tasks(s["id"]) for s in rows}}
+
+
+@router.get("/plans/{plan_id}/document")
+def get_plan_document(plan_id: str):
+    """The plan's markdown, through the same fence every other document takes.
+
+    `docfence`, not an open read of `plan_file`: this is a token-authenticated
+    read route on a machine that also stores credentials, and a path out of a
+    row is no more trustworthy than one off the wire — whatever authored the
+    plan wrote that column. `/context/file` answers the same three ways for
+    the same reasons, and asking the one module is how the two stay agreed.
+
+    A 503 rather than an `available: false` body, unlike the screens above:
+    the product of this route is a document, and there is no empty document
+    that does not read as a plan whose text is gone.
+    """
+    if not _probe("work"):
+        raise HTTPException(status_code=503,
+                            detail="this host has no plans to read a document from")
+    from . import plans
+    row = plans.plan(plan_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no such plan: {plan_id!r}")
+    if not (row.get("plan_file") or "").strip():
+        raise HTTPException(status_code=404,
+                            detail="this plan has no document on disk")
+    try:
+        return docfence.file_text(row["plan_file"])
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── File drops (phone → Mac) ──
