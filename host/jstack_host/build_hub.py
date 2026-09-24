@@ -168,6 +168,32 @@ def _is_date(value) -> bool:
 #: package, because that is where the readers already look.
 MESH_TOOLS = "scripts"
 
+#: Where the installer puts the audited CPython 3.12 it requires.
+FRAMEWORK_PYTHON = "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"
+
+
+def build_python() -> str:
+    """An interpreter that can run pip, which the Hub's own runtime cannot.
+
+    A hub rebuilds itself by calling `build()` from inside JStackPython, the
+    sealed runtime, and that runtime ships the `jstack_host` package and its
+    dependencies — never pip. `sys.executable -m pip` there dies with "No
+    module named pip", so install worked (the installer builds under the
+    venv it made) and update could never move a single machine forward.
+
+    The framework interpreter is the installer's own hard requirement, so a
+    Mac that could install can always build.
+    """
+    for candidate in (os.environ.get("JSTACK_BUILD_PYTHON"), FRAMEWORK_PYTHON, sys.executable):
+        if not candidate:
+            continue
+        found = subprocess.run([candidate, "-c", "import pip"], capture_output=True, timeout=120)
+        if found.returncode == 0:
+            return candidate
+    raise RuntimeError(
+        "no interpreter here can run pip — install python.org's macOS 3.12 package, "
+        "or set JSTACK_BUILD_PYTHON to a 3.12 interpreter that has it")
+
 
 def stage_mesh_tools(stack: Path, packages: Path) -> Path:
     """Put the mesh scripts where `hostenv.peer_script()` reads them.
@@ -251,7 +277,7 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
         package_source = Path(temporary) / "host"
         shutil.copytree(stack / "host", package_source,
                         ignore=shutil.ignore_patterns(".venv", "build", "*.egg-info", "__pycache__"))
-        command([sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--no-compile",
+        command([build_python(), "-m", "pip", "install", "--disable-pip-version-check", "--no-compile",
                  "--target", str(packages), "--report", str(resources / "dependency-resolution.json"),
                  str(package_source)], timeout=900)
     report_path = resources / "dependency-resolution.json"

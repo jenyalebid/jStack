@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -181,3 +182,33 @@ def test_a_present_peer_table_is_not_blamed_for_a_missing_tool(tmp_path, monkeyp
     monkeypatch.setattr(tunnel, "HUB_CONF", conf)
     monkeypatch.setattr(tunnel, "PEER_SCRIPT", tmp_path / "gone/wg_peer.py")
     assert tunnel.missing_for_pairing() == [tmp_path / "gone/wg_peer.py"]
+
+
+def test_a_hub_rebuilding_itself_finds_an_interpreter_that_has_pip(monkeypatch):
+    """The sealed runtime has no pip, and a hub rebuilds itself from inside it.
+
+    `sys.executable -m pip` there is "No module named pip", which made install
+    work — the installer builds under the venv it created — and update fail on
+    every machine: `jstack-host updates build` runs under JStackPython.
+    """
+    from jstack_host import build_hub
+    asked = []
+
+    def probe(argv, **kwargs):
+        asked.append(argv[0])
+        return subprocess.CompletedProcess(argv, 0 if argv[0] == build_hub.FRAMEWORK_PYTHON else 1)
+
+    monkeypatch.delenv("JSTACK_BUILD_PYTHON", raising=False)
+    monkeypatch.setattr(build_hub.subprocess, "run", probe)
+    assert build_hub.build_python() == build_hub.FRAMEWORK_PYTHON
+    assert asked[0] == build_hub.FRAMEWORK_PYTHON
+
+    monkeypatch.setenv("JSTACK_BUILD_PYTHON", "/opt/python3")
+    asked.clear()
+    assert build_hub.build_python() == build_hub.FRAMEWORK_PYTHON
+    assert asked == ["/opt/python3", build_hub.FRAMEWORK_PYTHON]
+
+    monkeypatch.setattr(build_hub.subprocess, "run",
+                        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1))
+    with pytest.raises(RuntimeError, match="no interpreter here can run pip"):
+        build_hub.build_python()
