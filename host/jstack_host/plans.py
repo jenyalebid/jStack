@@ -22,7 +22,7 @@ import subprocess
 import time
 import uuid
 
-from . import store
+from . import environment, plan_parse, store
 
 #: How much of a command's combined output a proof row keeps, from the END.
 #: A proof is evidence that a check ran and what it said, not an archive of it:
@@ -35,6 +35,13 @@ OUTPUT_TAIL = 4000
 #: Stage statuses that count as still open work, and plan statuses that mean a
 #: plan is still somebody's current job.
 OPEN_PLAN_STATUS = ("planning", "active")
+
+#: The most plans one `list_plans` call will ever return. The clamp lives in
+#: the reader and not at the route because the route is not the only caller and
+#: the next one would have to remember: `LIMIT -1` is SQLite for no limit at
+#: all, so a query string reaching the parameter unchecked turns the board's
+#: poll into a full scan of every plan this host has ever held.
+MAX_LIST = 500
 
 
 class VerificationMissing(ValueError):
@@ -50,9 +57,10 @@ def _field(src: object, name: str, default=None):
 
     The parser hands back `plan_parse.Stage` objects; the API layer and the
     tests hand back plain dicts of the same fields. Reading both by duck-type
-    keeps this module from importing the parser at all, which matters because
-    the two are edited independently and a hard import makes a parse-side syntax
-    error look like the plan store being broken.
+    keeps this module off the parser's dataclass, so a field moving there is a
+    field this one stops finding rather than a store that will not import. The
+    one thing taken from `plan_parse` is `KINDS`, a tuple of strings: the set of
+    proof kinds has to have exactly one definition, and it is the parser's.
     """
     if isinstance(src, dict):
         return src.get(name, default)
@@ -131,16 +139,32 @@ def set_stages(plan_id: str, parsed_stages) -> None:
     `done`, `running` or `blocked` stage past the end simply stays, visibly
     beyond the plan, rather than being silently rewritten out of it.
 
+    A `verify_kind` outside `plan_parse.KINDS` — including the empty string the
+    parser leaves on a line it could not read — RAISES, and the whole call
+    writes nothing. It used to fall back to `none`, which is the one kind
+    `stage_done` closes on nobody's evidence: an author who typed a gate and
+    misspelled it got a stage that reads as gated, is not, and reports done on
+    no receipts. Unreadable must never resolve to needs-no-proof. `none` is
+    available and is a deliberate declaration; it has to be that word.
+
     Accepts `plan_parse.Stage` objects or plain dicts carrying the same fields.
     """
     incoming = []
     for i, src in enumerate(parsed_stages or []):
         raw = _field(src, "ordinal")
+        ordinal = i + 1 if raw is None else int(raw)
+        title = str(_field(src, "title", "") or "")
+        kind = str(_field(src, "verify_kind", "none") or "")
+        if kind not in plan_parse.KINDS:
+            raise ValueError(
+                f"stage #{ordinal} {title!r}: verify_kind {kind!r} is not a "
+                f"proof kind; use one of {', '.join(plan_parse.KINDS)}. Nothing "
+                f"was written — fix the `Verify:` line and parse the plan again.")
         incoming.append({
-            "ordinal": i + 1 if raw is None else int(raw),
-            "title": str(_field(src, "title", "") or ""),
+            "ordinal": ordinal,
+            "title": title,
             "body": str(_field(src, "body", "") or ""),
-            "verify_kind": str(_field(src, "verify_kind", "none") or "none"),
+            "verify_kind": kind,
             "verify_spec": str(_field(src, "verify_spec", "") or ""),
         })
     last = max((s["ordinal"] for s in incoming), default=0)
@@ -171,13 +195,53 @@ def set_stages(plan_id: str, parsed_stages) -> None:
 def stage_start(stage_id: str, *, session_id: str = "", env=None) -> None:
     """Mark a stage running, recording which session took it and the environment
     it was dispatched with — a snapshot, so a later settings change cannot
-    rewrite the answer to "how was this run"."""
+    rewrite the answer to "how was this run".
+
+    `env=None` means RESOLVE the named session's environment, not store nothing.
+    A caller that forgets the snapshot is exactly the caller whose stage later
+    needs explaining, and an empty column cannot say whether the work was taken
+    inline or handed to a subagent. Pass a dict to record something else; pass
+    `{}` to record deliberately nothing.
+
+    `environment.resolve` is reached through the module rather than bound at
+    import for `store`'s reason: both are resolved per call, so a test or an
+    embedding process can put its own in front of this one.
+    """
+    if env is None:
+        env = {k: v for k, (v, _) in environment.resolve(session_id).items()}
     now = _now()
     with store.get_store().conn() as db:
-        db.execute(
+        changed = db.execute(
             "UPDATE stages SET status = 'running', session_id = ?, env = ?,"
             " blocked_reason = '', started_at = ?, updated_at = ? WHERE id = ?",
-            (session_id or "", json.dumps(env or {}), now, now, stage_id))
+            (session_id or "", json.dumps(env or {}), now, now, stage_id)).rowcount
+    if not changed:
+        raise ValueError(f"no such stage: {stage_id!r}")
+
+
+def stage_env(stage) -> dict[str, str]:
+    """A stage's dispatch snapshot, decoded — the reader half of `stage_start`.
+
+    It exists so the API and the CLI do not each re-derive the column's format
+    from the writer; whoever holds the row passes the row, whoever holds only an
+    id passes the id, the same two shapes `_field` exists for.
+
+    An undecodable column reads as an empty snapshot rather than raising. The
+    snapshot is evidence ABOUT a stage, not part of its state machine, and a
+    board poll that fails over one malformed row hides every good row behind it.
+    """
+    if isinstance(stage, dict):
+        raw = stage.get("env") or ""
+    else:
+        with store.get_store().conn() as db:
+            row = db.execute("SELECT env FROM stages WHERE id = ?",
+                             (stage,)).fetchone()
+        raw = (row["env"] if row else "") or ""
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
 
 
 def stage_done(stage_id: str) -> None:
@@ -209,29 +273,63 @@ def stage_done(stage_id: str) -> None:
 def _refusal(row) -> str:
     """The message a refused close leaves behind.
 
-    It names the stage, what it declared, and the one call that would satisfy it,
-    because the reader is an agent mid-turn that has to act on it without going
-    to read this file.
+    It names the stage, what it declared, and the one command that would satisfy
+    it, because the reader is an agent mid-turn that has to act on it without
+    going to read this file. The remedy is a CLI line and not a Python call for
+    the same reason: that reader is standing in a shell, and a remedy they
+    cannot run sends them into the source, which is what the message exists to
+    save them.
     """
     kind = row["verify_kind"]
     spec = row["verify_spec"] or ""
+    stage_id = row["id"]
+    by_hand = f"jstack-host plan proof {stage_id} --kind"
     remedy = {
-        "command": f"run_verify({row['id']!r}) — or add_proof(..., 'command', True, exit_code=0)",
-        "commit": "add_proof(..., 'commit', True, detail=<sha>)",
-        "artifact": "add_proof(..., 'artifact', True, detail=<path>)",
-        "manual": "add_proof(..., 'manual', True, detail=<what the user confirmed>)",
-    }.get(kind, f"add_proof(..., {kind!r}, True, detail=…)")
+        "command": f"jstack-host plan verify {stage_id} — or {by_hand} command --ok",
+        "commit": f"{by_hand} commit --ok --detail <sha>",
+        "artifact": f"{by_hand} artifact --ok --detail <path>",
+        "manual": f"{by_hand} manual --ok --detail <what the user confirmed>",
+    }.get(kind, f"{by_hand} {kind} --ok --detail …")
     return (f"stage {row['id']} (#{row['ordinal']} {row['title']!r}) declares "
             f"verify_kind={kind!r} spec={spec!r} and has no passing proof; "
             f"it stays open. To satisfy it: {remedy}.")
 
 
+def subagent_env(stage_id: str) -> dict[str, str]:
+    """The variables a per-stage subagent is spawned with.
+
+    Three names that two sides have to agree on letter for letter — the spawner
+    sets them, the hooks read them to know this sitting is working one stage of
+    one plan — so they are spelled once, here, next to the rows they point at.
+    The plan id travels with them because the stage row already knows it and a
+    spawner would otherwise query for it itself.
+    """
+    with store.get_store().conn() as db:
+        row = db.execute("SELECT plan_id FROM stages WHERE id = ?",
+                         (stage_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"no such stage: {stage_id!r}")
+    return {"JSTACK_PLAN_ID": row["plan_id"],
+            "JSTACK_STAGE_ID": stage_id,
+            "JSTACK_PLAN_SUBAGENT": "1"}
+
+
 def stage_block(stage_id: str, reason: str) -> None:
+    """Park a stage with a reason — or refuse, like every other writer here.
+
+    The rowcount is the existence check: an UPDATE that matched nothing has
+    written nothing, so there is no read to race and nothing to undo. Silence
+    here was a `plan block <typo>` reporting a stage parked that is still
+    running, which the next reader acts on.
+    """
     now = _now()
     with store.get_store().conn() as db:
-        db.execute(
+        changed = db.execute(
             "UPDATE stages SET status = 'blocked', blocked_reason = ?,"
-            " updated_at = ? WHERE id = ?", (reason or "", now, stage_id))
+            " updated_at = ? WHERE id = ?",
+            (reason or "", now, stage_id)).rowcount
+    if not changed:
+        raise ValueError(f"no such stage: {stage_id!r}")
 
 
 # ── proofs ───────────────────────────────────────────────────────────────────
@@ -244,8 +342,17 @@ def add_proof(stage_id: str, kind: str, ok, *, detail: str = "", output: str = "
     `detail`, `artifact` the path, `manual` the user's own word. Proofs are
     append-only — a stage that failed twice before passing keeps all three rows,
     because the history of a check is part of the evidence.
+
+    An unknown `stage_id` raises. `stage_proofs.stage_id` carries no foreign
+    key, so a mistyped id used to insert cleanly and return a row id: a green
+    receipt filed against nothing, which no stage will ever read and which looks
+    from the call site exactly like diligence. The check shares the insert's
+    transaction so the stage cannot be deleted between them.
     """
     with store.get_store().conn() as db:
+        if db.execute("SELECT 1 FROM stages WHERE id = ?",
+                      (stage_id,)).fetchone() is None:
+            raise ValueError(f"no such stage: {stage_id!r}")
         cur = db.execute(
             "INSERT INTO stage_proofs (stage_id, kind, ok, detail, output,"
             " exit_code, duration_ms, created_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -372,17 +479,33 @@ def plan(plan_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def stage(stage_id: str) -> dict | None:
+    """One stage by id — what the API and the CLI need to show or check a
+    stage they were handed the id of, without reading its whole plan."""
+    with store.get_store().conn() as db:
+        row = db.execute("SELECT * FROM stages WHERE id = ?", (stage_id,)).fetchone()
+    return dict(row) if row else None
+
+
 def stages(plan_id: str) -> list[dict]:
     with store.get_store().conn() as db:
-        return _rows(db.execute(
-            "SELECT * FROM stages WHERE plan_id = ? ORDER BY ordinal", (plan_id,)))
+        return _stage_rows(db, plan_id)
+
+
+def _stage_rows(db, plan_id: str) -> list[dict]:
+    return _rows(db.execute(
+        "SELECT * FROM stages WHERE plan_id = ? ORDER BY ordinal", (plan_id,)))
 
 
 def tasks(stage_id: str) -> list[dict]:
     with store.get_store().conn() as db:
-        return _rows(db.execute(
-            "SELECT * FROM stage_tasks WHERE stage_id = ? ORDER BY ordinal",
-            (stage_id,)))
+        return _task_rows(db, stage_id)
+
+
+def _task_rows(db, stage_id: str) -> list[dict]:
+    return _rows(db.execute(
+        "SELECT * FROM stage_tasks WHERE stage_id = ? ORDER BY ordinal",
+        (stage_id,)))
 
 
 def proofs(stage_id: str) -> list[dict]:
@@ -392,13 +515,19 @@ def proofs(stage_id: str) -> list[dict]:
 
 
 def list_plans(*, limit: int = 50, include_done: bool = True) -> list[dict]:
+    """The newest plans first, never more than `MAX_LIST` of them.
+
+    The limit is clamped rather than validated: a caller asking for nonsense
+    gets the nearest sane page, because the reader is a board poll and failing
+    it gives a screen with nothing on it over a query string.
+    """
     sql = "SELECT * FROM plans WHERE deleted = 0"
     args: list = []
     if not include_done:
         sql += " AND status IN (?, ?)"
         args += list(OPEN_PLAN_STATUS)
     sql += " ORDER BY updated_at DESC LIMIT ?"
-    args.append(int(limit))
+    args.append(max(1, min(int(limit), MAX_LIST)))
     with store.get_store().conn() as db:
         return _rows(db.execute(sql, args))
 
@@ -418,24 +547,38 @@ def open_plan_for_session(session_id: str) -> dict | None:
     `active` is work in front of it, and the statusline has room for one.
     """
     with store.get_store().conn() as db:
-        row = db.execute(
-            "SELECT p.* FROM plans p JOIN plan_sessions s ON s.plan_id = p.id"
-            " WHERE s.session_id = ? AND p.deleted = 0 AND p.status IN (?, ?)"
-            " ORDER BY p.updated_at DESC LIMIT 1",
-            (session_id, *OPEN_PLAN_STATUS)).fetchone()
+        return _open_plan_row(db, session_id)
+
+
+def _open_plan_row(db, session_id: str) -> dict | None:
+    row = db.execute(
+        "SELECT p.* FROM plans p JOIN plan_sessions s ON s.plan_id = p.id"
+        " WHERE s.session_id = ? AND p.deleted = 0 AND p.status IN (?, ?)"
+        " ORDER BY p.updated_at DESC LIMIT 1",
+        (session_id, *OPEN_PLAN_STATUS)).fetchone()
     return dict(row) if row else None
 
 
 def work(session_id: str) -> dict:
-    """Everything a session's Work view needs, in one call.
+    """Everything a session's Work view needs, from ONE read of the store.
 
     One function because the API layer's alternative is three round trips whose
     answers can disagree — a stage list from before a `set_stages` beside tasks
     from after it renders as tasks belonging to nothing.
+
+    One connection is not enough on its own to make that true, which is why the
+    `BEGIN` is here: Python's sqlite3 opens a transaction before a write and
+    NOT before a SELECT, so three reads on one connection are three autocommit
+    reads of whatever is committed at the time of each. The explicit begin takes
+    one WAL read snapshot and holds every read in this call against it; the
+    `conn()` block closes it. Nothing here writes, so there is no implicit
+    begin to collide with.
     """
-    p = open_plan_for_session(session_id)
-    if p is None:
-        return {"plan": None, "stages": [], "tasks": {}}
-    rows = stages(p["id"])
-    return {"plan": p, "stages": rows,
-            "tasks": {s["id"]: tasks(s["id"]) for s in rows}}
+    with store.get_store().conn() as db:
+        db.execute("BEGIN")
+        p = _open_plan_row(db, session_id)
+        if p is None:
+            return {"plan": None, "stages": [], "tasks": {}}
+        rows = _stage_rows(db, p["id"])
+        return {"plan": p, "stages": rows,
+                "tasks": {s["id"]: _task_rows(db, s["id"]) for s in rows}}
