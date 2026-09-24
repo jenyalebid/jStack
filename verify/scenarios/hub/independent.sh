@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh \
 sleep 5
 
 echo "== verdict: this is an independent hub =="
-rel="$(sed -n 's/.*"release": "\([^"]*\)".*/\1/p' ~/jStack/host/release-identity.json 2>/dev/null)"
+rel="$(sed -n 's/.*"release": "\([^"]*\)".*/\1/p' "/Applications/jStack Hub.app/Contents/Resources/packages/release-identity.json" 2>/dev/null)"
 [ -n "$rel" ] && echo "OK installed release: $rel" || echo "FAIL no release identity"
 
 # 1. It calls itself LOCAL. Not managed, not open. This is the screenshot bug.
