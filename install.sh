@@ -1202,6 +1202,17 @@ HOST_INSTALLER="$CHECKOUT/host/install.sh"
 # do are the two with a source worth trusting, and each is checked the way
 # `app/install.sh` checks the Mac app — who signed it, and whether Apple
 # notarized it — rather than taken on the strength of the URL.
+# `run_long` backgrounds what it runs, and a background process that reads the
+# terminal is stopped by SIGTTIN rather than answered — so a `sudo` that
+# prompts inside it hangs forever instead of asking. The password is taken
+# here, in the foreground, once; the privileged command itself then runs
+# non-interactively inside the progress wrapper.
+sudo_authorize() {
+    sudo -n true 2>/dev/null && return 0
+    [ "$DRY_RUN" = "1" ] && return 0
+    sudo -p "admin password ($1): " -v 2>/dev/null
+}
+
 PSF_TEAM="BMM5U3QVKW"
 PY_VERSION="3.12.10"
 PY_PKG_URL="https://www.python.org/ftp/python/$PY_VERSION/python-$PY_VERSION-macos11.pkg"
@@ -1227,9 +1238,9 @@ install_framework_python() {
            rm -rf "$dir"; return 1 ;;
     esac
     ok "python.org package — Python Software Foundation ($PSF_TEAM), notarized by Apple"
-    run_long "installing CPython $PY_VERSION (admin password may be asked)" \
-        sudo -p "admin password (installing CPython $PY_VERSION): " \
-             installer -pkg "$pkg" -target / || { rm -rf "$dir"; return 1; }
+    sudo_authorize "installing CPython $PY_VERSION" || { rm -rf "$dir"; return 1; }
+    run_long "installing CPython $PY_VERSION" \
+        sudo -n installer -pkg "$pkg" -target / || { rm -rf "$dir"; return 1; }
     rm -rf "$dir"
     [ -x "$FRAMEWORK_PY" ]
 }
@@ -1245,9 +1256,8 @@ install_command_line_tools() {
         | sed -n 's/^\* Label: \(Command Line Tools for Xcode.*\)$/\1/p' \
         | sort -V | tail -1)"
     if [ -z "$label" ]; then rm -f "$marker"; return 1; fi
-    run_long "installing $label (admin password may be asked)" \
-        sudo -p "admin password (installing the Command Line Tools): " \
-             softwareupdate --install "$label"
+    sudo_authorize "installing the Command Line Tools" || { rm -f "$marker"; return 1; }
+    run_long "installing $label" sudo -n softwareupdate --install "$label"
     local rc=$?
     rm -f "$marker"
     [ "$rc" -eq 0 ] || return 1

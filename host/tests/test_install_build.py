@@ -447,6 +447,17 @@ def test_install_sh_verifies_the_python_package_before_it_runs_it_as_root():
     assert CODE.count("refusing it") >= 2
 
 
+def test_install_sh_asks_for_the_password_in_the_foreground_not_inside_run_long():
+    """`run_long` backgrounds what it runs, and a background process reading
+    the terminal is stopped by SIGTTIN rather than answered — a `sudo` that
+    prompts in there hangs instead of asking."""
+    assert "sudo_authorize" in CODE
+    # Inside the progress wrapper, every sudo is non-interactive.
+    for line in CODE.splitlines():
+        if "run_long" in line and "sudo" in line:
+            assert "sudo -n" in line, f"an interactive sudo inside run_long: {line.strip()}"
+
+
 def test_install_sh_does_not_dress_homebrews_tmux_up_as_a_pinned_signature():
     """The other two carry a Developer ID and Apple's notarization. tmux
     publishes source, so it carries neither, and the difference is said."""
