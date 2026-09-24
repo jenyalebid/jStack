@@ -693,11 +693,37 @@ if [ -d "$CHECKOUT/.git" ]; then
             || die "could not fast-forward $CHECKOUT to origin/$REF — it has diverged; move it aside and re-run"
         ok "on $REF at $(git -C "$CHECKOUT" log --oneline -1)"
     fi
+elif [ -f "$CHECKOUT/host/release-identity.json" ]; then
+    # A Mac installed before builds replaced releases has no checkout here at
+    # all: the old installer untarred a publisher snapshot into this path. It
+    # carries a release identity and no .git, and that pair is the whole
+    # signature — a working tree of somebody's has no release identity, and a
+    # real checkout has a .git. Anything else still falls through to the
+    # refusal below.
+    #
+    # It is moved aside, never deleted. It is the only copy of whatever the
+    # last release shipped, and an installer that deletes what it did not
+    # write is exactly issue #130.
+    PRIOR="$(sed -nE 's/.*"release": *"([^"]+)".*/\1/p' "$CHECKOUT/host/release-identity.json" | head -1)"
+    ASIDE="$CHECKOUT.snapshot-${PRIOR:-unknown}"
+    SUFFIX=2
+    while [ -e "$ASIDE" ]; do ASIDE="$CHECKOUT.snapshot-${PRIOR:-unknown}-$SUFFIX"; SUFFIX=$((SUFFIX + 1)); done
+    if [ "$DRY_RUN" = "1" ]; then
+        would "move the $PRIOR release snapshot to $ASIDE and clone $REF over it"
+    else
+        warn "$CHECKOUT holds the $PRIOR release snapshot, not a checkout — this Mac was installed before builds replaced releases"
+        mv "$CHECKOUT" "$ASIDE" || die "could not move the old snapshot to $ASIDE"
+        ok "old snapshot kept at $ASIDE"
+        run_long "cloning $REPO_URL ($REF)" \
+            git clone --quiet --single-branch --branch "$REF" "$REPO_URL" "$CHECKOUT" \
+            || die "clone of $REF failed, and the old snapshot is still at $ASIDE — see $LAST_LOG"
+        ok "on $REF at $(git -C "$CHECKOUT" log --oneline -1)"
+    fi
 elif [ -e "$CHECKOUT" ]; then
     die "$CHECKOUT exists and is not a git checkout — move it aside or pass --checkout DIR"
 else
     run_long "cloning $REPO_URL ($REF)" \
-        git clone --quiet --branch "$REF" "$REPO_URL" "$CHECKOUT" \
+        git clone --quiet --single-branch --branch "$REF" "$REPO_URL" "$CHECKOUT" \
         || die "clone of $REF failed — see $LAST_LOG"
     [ "$DRY_RUN" = "1" ] || ok "cloned in ${LAST_ELAPSED}s at $(git -C "$CHECKOUT" log --oneline -1)"
 fi
