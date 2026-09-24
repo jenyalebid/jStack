@@ -55,6 +55,14 @@ GUEST_TOOLS = {GUEST_TOOL: Path(__file__).resolve().parent / "managed_update_vm.
 NUDGE_AFTER = 30
 API_BOOT = 180
 SETTLE = 8
+#: How long a freshly adopted leaf is given to take the hub's key on its
+#: heartbeat before it is judged unable to.
+KEY_PATIENCE = 30
+#: The key a host's updater verifies every job against, or nothing where no
+#: host is installed. Asked the same way of a hub and of a leaf.
+TRUST_KEY = shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
+    "import json,pathlib; p=pathlib.Path.home()/'.local/state/jremote/updates/config.json'; "
+    "print(json.loads(p.read_text()).get('public_key','') if p.is_file() else '')")
 
 
 class AcceptanceFailure(RuntimeError):
@@ -401,9 +409,16 @@ class Fleet:
         them. The key the hub signs with reaches each leaf on its heartbeat
         (#144); nothing here re-adopts a leaf, because a real fleet is not
         re-adopted after every build either.
+
+        A hub still running code from before a9fe663 refuses to build while
+        it has adopted machines, since its key would strand them. That code
+        carries its own hatch, the variable below; a hub past the fix ignores
+        it, and this is exactly how a hub on a published release is driven
+        through its first build.
         """
         self.hub.sh(host_cli(f"updates channel {shlex.quote(build.ref)}"), timeout=120)
-        output = self.hub.sh(host_cli(f"updates build --ref {shlex.quote(build.ref)}"),
+        output = self.hub.sh("JSTACK_BUILD_DESPITE_LEAVES=1 "
+                             + host_cli(f"updates build --ref {shlex.quote(build.ref)}"),
                              timeout=3600)
         try:
             built = json.loads(output[output.index("{"):])
@@ -485,6 +500,7 @@ def fresh_install(journey, fleet: Fleet, build: Build) -> None:
 def upgrade(journey, fleet: Fleet, build: Build) -> None:
     guest = fleet.leaves[0]
     expect(fleet.prior is not None, "this run names no earlier ref to upgrade from")
+    stage_prior(fleet, guest, journey=journey)
     before = guest.installed()
     expect(before["sha"] != build.sha,
            "this Mac already runs the commit under test; an upgrade needs the earlier one")
@@ -546,7 +562,7 @@ def fleet_journey(journey, fleet: Fleet, build: Build) -> None:
 def offline_catchup(journey, fleet: Fleet, build: Build) -> None:
     guest = fleet.leaves[-1]
     machine = fleet.machine(guest)
-    stage_prior(fleet, guest)
+    stage_prior(fleet, guest, journey=journey)
     guest.stop()
     journey.note(f"{guest.name} stopped; waiting for its report to go stale")
     time.sleep(100)
@@ -569,7 +585,7 @@ def offline_catchup(journey, fleet: Fleet, build: Build) -> None:
 def session_survival(journey, fleet: Fleet, build: Build) -> None:
     guest = fleet.leaves[0]
     machine = fleet.machine(guest)
-    stage_prior(fleet, guest)
+    stage_prior(fleet, guest, journey=journey)
     session = new_session(guest, prior=True)
     journey.observe("session_pid", {"session": session["session"], "pid": session["pid"],
                                     "bypass_prompt_nudged": session["nudged"],
@@ -727,7 +743,7 @@ def reboot_mid_apply(journey, fleet: Fleet, guest: Guest, machine: str, build: B
 def interruption(journey, fleet: Fleet, build: Build) -> None:
     guest = fleet.leaves[0]
     machine = fleet.machine(guest)
-    stage_prior(fleet, guest)
+    stage_prior(fleet, guest, journey=journey)
     ensure_true_updater(journey, guest)
     fault = arm_fault(guest, "interruption")
     job = fleet.hub.queue(machine, request_id("interrupt"))["jobs"][0]
@@ -748,7 +764,7 @@ def interruption(journey, fleet: Fleet, build: Build) -> None:
 def revocation(journey, fleet: Fleet, build: Build) -> None:
     guest = fleet.leaves[-1]
     machine = fleet.machine(guest)
-    stage_prior(fleet, guest)
+    stage_prior(fleet, guest, journey=journey)
     guest.sh("'/Applications/jStack Hub.app/Contents/MacOS/JStackHub' unregister updater")
     try:
         job = fleet.hub.queue(machine, request_id("revoked"))["jobs"][0]
@@ -902,7 +918,9 @@ def install_build(guest: Guest, build: Build, *, fresh: bool = False) -> None:
         expect(not existing, f"{guest.name} is not pristine: {existing}")
     remote = f"{GUEST_HOME}/accept-install-{uuid.uuid4().hex}"
     guest.sh(f"/bin/mkdir {remote}")
-    if build.client:
+    # Over an existing install the client stays: it is closed source, built
+    # elsewhere, and the same bundle whichever commit the host moves to.
+    if build.client and (fresh or guest.absent(["/Applications/jRemote.app"])):
         work = Path(tempfile.mkdtemp(prefix="accept-client-"))
         try:
             archive = work / "jRemote.zip"
@@ -947,12 +965,41 @@ def lab_guest(guest: Guest) -> bool:
     return state != "3"
 
 
-def stage_prior(fleet: Fleet, guest: Guest) -> dict:
+def trust_key(guest: Guest) -> str:
+    return guest.sh(TRUST_KEY).strip()
+
+
+def follows(fleet: Fleet, guest: Guest) -> bool:
+    """Whether this guest's updater accepts what the hub signs.
+
+    A leaf takes the hub's key on its heartbeat, so a leaf that has only just
+    attached gets a kicked updater and a few ticks before the answer is no.
+    The answer is no for every Mac on a release from before a9fe663: it
+    trusts the key of the bundle that installed it and learns no other (#144).
+    """
+    hub = trust_key(fleet.hub)
+    if trust_key(guest) == hub:
+        return True
+    guest.sh("/bin/launchctl kickstart -k gui/$(id -u)/live.jstack.hub.updater")
+    deadline = time.monotonic() + KEY_PATIENCE
+    while time.monotonic() < deadline:
+        time.sleep(SETTLE)
+        if trust_key(guest) == hub:
+            return True
+    return False
+
+
+def stage_prior(fleet: Fleet, guest: Guest, *, journey=None) -> dict:
     """Put a guest back on the earlier commit so a journey starts where it must.
 
     The hub builds the prior ref and serves it; the leaf takes it the way it
-    takes any update. The hub is left holding the ref under test again, or
-    the journey that follows would measure the wrong commit.
+    takes any update. A leaf whose updater does not trust this hub — every
+    Mac installed from a published release is one (#144) — cannot be served
+    anything, so it is moved the way such a Mac is moved: the prior's own
+    one-file install, then adoption. What that leaves behind must follow the
+    hub, or there is no journey to start from it. The hub is left holding
+    the ref under test again, or the journey that follows would measure the
+    wrong commit.
     """
     expect(fleet.prior is not None, "the plan names no earlier ref to stage from")
     state = guest.installed()
@@ -960,7 +1007,7 @@ def stage_prior(fleet: Fleet, guest: Guest) -> dict:
         return state
     if fleet.plan.get("stage_prior_command"):
         guest.sh(fleet.plan["stage_prior_command"], timeout=2400)
-    else:
+    elif follows(fleet, guest):
         target = fleet.build
         expect(target is not None, "build the ref under test before staging an earlier one")
         machine = fleet.machine(guest)
@@ -970,6 +1017,17 @@ def stage_prior(fleet: Fleet, guest: Guest) -> dict:
             fleet.hub.wait_for("current", machine)
         finally:
             fleet.offer(target)
+    else:
+        if journey is not None:
+            journey.note(f"{guest.name} runs {state['sha']}, whose updater does not trust "
+                         f"this hub (#144): moving it onto {fleet.prior.slug} by the "
+                         "one-file install and adopting it, as a published Mac is moved")
+        install_build(guest, fleet.prior)
+        adopt(fleet, guest)
+        expect(follows(fleet, guest),
+               f"{guest.name} on {fleet.prior.slug} never took the hub's key: a ref from "
+               "before a9fe663 trusts only the bundle that installed it (#144), and "
+               "nothing this hub serves can reach it")
     time.sleep(SETTLE)
     state = guest.installed()
     expect(state["sha"] == fleet.prior.sha,

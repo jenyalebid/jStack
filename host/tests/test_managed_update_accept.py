@@ -520,6 +520,107 @@ def test_staging_prior_puts_the_ref_under_test_back_on_update_failure(
     assert offered == [PRIOR_SHA, HEAD_SHA]
 
 
+class KeyedFleet(ScriptedFleet):
+    """A hub that signs with its own key, over leaves that may or may not hold it.
+
+    `keys` is what each guest's updater trusts. An install lands the prior and
+    mints that machine its own key, as building from a checkout does; adoption
+    hands the leaf the hub's key when `learns` — which is what a leaf on code
+    from a9fe663 on does on its next heartbeat, and what no earlier leaf can.
+    """
+
+    def __init__(self, *, keys, learns=True, **kwargs):
+        super().__init__(**kwargs)
+        self.keys, self.learns = dict(keys), learns
+        self.installed: list[str] = []
+        self.adopted: list[str] = []
+
+    def __call__(self, argv, **kwargs):
+        _, action, name, *rest = argv
+        command = rest[0] if rest else ""
+        if action == "ssh" and "public_key" in command:
+            self.calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, self.keys.get(name, "") + "\n", "")
+        if action == "ssh" and "install.sh --yes" in command:
+            self.installed.append(name)
+            self.keys[name] = "own-" + name
+            self.release, self.sha = PRIOR, PRIOR_SHA
+        if action == "ssh" and "adopt-to-hub" in command:
+            self.adopted.append(name)
+            if self.learns:
+                self.keys[name] = self.keys["hub"]
+        done = super().__call__(argv, **kwargs)
+        if action == "ssh" and "queue" in command and "--path" not in command:
+            self.release, self.sha = PRIOR, PRIOR_SHA  # a staging job lands the prior
+        return done
+
+
+def _keyed(runner, monkeypatch, tmp_path, earlier, subject, **kwargs):
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    monkeypatch.setattr(runner, "KEY_PATIENCE", 0)
+    scripted = KeyedFleet(release=CANDIDATE, sha=HEAD_SHA, **kwargs)
+    fleet = build(runner, scripted, prior=earlier,
+                  adopt_command="/bin/bash ~/adopt-to-hub.sh hub.local")
+    fleet.build = subject
+    offered = []
+    monkeypatch.setattr(fleet, "offer", lambda b: offered.append(b.sha))
+    return scripted, fleet, offered
+
+
+def test_a_leaf_that_trusts_the_hub_is_staged_by_the_hub(runner, subject, earlier, tmp_path, monkeypatch):
+    scripted, fleet, offered = _keyed(runner, monkeypatch, tmp_path, earlier, subject,
+                                      keys={"hub": "hub-key", "leaf-a": "hub-key"})
+    runner.stage_prior(fleet, fleet.leaves[0])
+    assert offered == [PRIOR_SHA, HEAD_SHA]
+    assert scripted.installed == [] and scripted.adopted == []
+
+
+def test_a_leaf_that_cannot_follow_the_hub_takes_the_prior_by_the_one_file_install(
+        runner, subject, earlier, tmp_path, monkeypatch):
+    """A Mac installed from a published release trusts that release's key and
+    nothing the hub signs (#144): the hub can serve it nothing, so it is
+    moved as such a Mac is moved — installed onto the prior, then adopted."""
+    scripted, fleet, offered = _keyed(runner, monkeypatch, tmp_path, earlier, subject,
+                                      keys={"hub": "hub-key", "leaf-a": "published-key"})
+    notes = SimpleNamespace(lines=[], note=lambda text: notes.lines.append(text))
+    state = runner.stage_prior(fleet, fleet.leaves[0], journey=notes)
+    assert state["sha"] == PRIOR_SHA
+    assert offered == [], "nothing the hub serves can reach an untrusting leaf"
+    assert scripted.installed == ["leaf-a"] and scripted.adopted == ["leaf-a"]
+    install = next(c[3] for c in scripted.calls if "install.sh --yes" in (c[3] if len(c) > 3 else ""))
+    assert "--ref main" in install
+    assert any("#144" in line and HEAD_SHA in line for line in notes.lines)
+    assert scripted.keys["leaf-a"] == "hub-key"
+
+
+def test_a_leaf_that_never_takes_the_hubs_key_fails_by_name(runner, subject, earlier, tmp_path, monkeypatch):
+    scripted, fleet, offered = _keyed(runner, monkeypatch, tmp_path, earlier, subject,
+                                      keys={"hub": "hub-key", "leaf-a": "published-key"},
+                                      learns=False)
+    with pytest.raises(runner.AcceptanceFailure, match="never took the hub's key.*#144"):
+        runner.stage_prior(fleet, fleet.leaves[0])
+    assert scripted.installed == ["leaf-a"] and scripted.adopted == ["leaf-a"]
+    assert offered == []
+
+
+def test_the_hub_is_driven_through_the_refusal_older_code_raises(runner, subject):
+    """A hub on code before a9fe663 refuses to build over adopted machines;
+    its own hatch is the variable, which a hub past the fix ignores."""
+    class Building(ScriptedFleet):
+        def __call__(self, argv, **kwargs):
+            command = argv[3] if len(argv) > 3 else ""
+            if "updates build" in command:
+                self.calls.append(list(argv))
+                return subprocess.CompletedProcess(argv, 0, json.dumps({"release": CANDIDATE}), "")
+            return super().__call__(argv, **kwargs)
+
+    scripted = Building()
+    fleet = build(runner, scripted)
+    assert fleet.offer(subject) == CANDIDATE
+    built = next(c[3] for c in scripted.calls if "updates build" in c[3])
+    assert built.startswith("JSTACK_BUILD_DESPITE_LEAVES=1 ") and "updates build --ref dev" in built
+
+
 def test_artifact_fault_is_restored_when_refusal_probe_fails(runner):
     from types import SimpleNamespace
     calls = []
@@ -555,7 +656,7 @@ def test_revocation_failure_restores_the_fixture_supervisor(runner, monkeypatch)
     from types import SimpleNamespace
     commands = []
     guest = SimpleNamespace(sh=lambda command: commands.append(command))
-    monkeypatch.setattr(runner, "stage_prior", lambda *args: {})
+    monkeypatch.setattr(runner, "stage_prior", lambda *args, **kwargs: {})
 
     def fail(*args):
         raise runner.AcceptanceFailure("credential revocation failed")
@@ -813,7 +914,7 @@ def _fault_fleet(runner, monkeypatch, *, fault_result, prior_release=PRIOR):
                                 TRUE_UPDATER if command == runner.UPDATER_BUNDLE else ""),
                             stop=lambda: None, start=lambda: None)
     fleet = SimpleNamespace(leaves=[guest], hub=hub, machine=lambda _: "leaf-id", plan={})
-    monkeypatch.setattr(runner, "stage_prior", lambda fleet, guest: guest.installed())
+    monkeypatch.setattr(runner, "stage_prior", lambda fleet, guest, **kwargs: guest.installed())
     monkeypatch.setattr(runner, "arm_fault", lambda guest, fault: fault)
     monkeypatch.setattr(runner, "read_fault", lambda process: fault_result)
     return fleet, guest, queued
@@ -867,6 +968,7 @@ def _reboot_fleet(runner, monkeypatch, tmp_path, *, settled_detail, leftovers=""
     monkeypatch.setattr(runner, "read_freeze", lambda process: {
         "injected": "freeze", "job": "job-reboot", "pid": 41, "copies": ["/Applications/x.incoming-j"]})
     hub = SimpleNamespace(
+        sh=lambda command, **kwargs: "",  # the key it signs with: none, like the leaf's
         queue=lambda machine, request: queued.append(request) or {"jobs": [{"id": "job-" + request.split("-")[1]}]},
         wait_for=lambda state, machine: {"state": state, "job": {"id": "job-reboot", "detail": settled_detail}})
     installed = iter([{"build": CANDIDATE, "sha": HEAD_SHA},
