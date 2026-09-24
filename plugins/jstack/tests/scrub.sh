@@ -81,6 +81,12 @@ ALLOW = {
         "fixtures proving routing and tie-breaks against the shipped default board",
     ("plugins/jstack/tests/file-issue.sh", "auto-work"):
         "fixture board title matching the shipped default place-issue routes to",
+    ("plugins/jstack/hooks/attention.py", "jremote"):
+        "the hook reads the marker that app's host writes, and a reader cannot "
+        "name a file without naming it — same ground as the host/ prefix below",
+    ("verify/scenarios/hub/agent-tools.sh", "jremote"):
+        "the journey reads the same marker the hook does, to ask whether the "
+        "hook wrote where the Hub declared rather than where this Mac keeps it",
     ("install.sh", "jarvis"):
         "the shipped default name for the first agent workspace — a product "
         "default the owner chose, printed in --help and used when the prompt "
