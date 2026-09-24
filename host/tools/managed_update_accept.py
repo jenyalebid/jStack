@@ -270,6 +270,14 @@ class Guest:
         raise AcceptanceFailure(f"{machine} never reached {state}; last was {last.get('state')}")
 
 
+#: The subnet the lab's guests share. `vm.sh` puts a guest there only when it
+#: boots it with softnet, so a guest that was already running when the runner
+#: arrived can be on the host's default NAT instead — reachable from this Mac,
+#: invisible to every other guest, and the hub's own address is what the adopt
+#: script looks for. Overridden per plan with `lab_network`.
+LAB_NETWORK = "192.168.2."
+
+
 class Fleet:
     """The disposable machines this run may touch, and nothing else."""
 
@@ -283,6 +291,7 @@ class Fleet:
         self.slots = int(plan.get("vm_slots") or 0)
         self.fixtures = list(plan.get("fixtures") or [])
         self.provision = plan.get("provision")
+        self.network = plan.get("lab_network") or LAB_NETWORK
         self._run = run
         self._ids: dict[str, str] = {}
         self.build: Build | None = None
@@ -352,6 +361,26 @@ class Fleet:
                 raise HarnessFault(f"{guest.name}: could not stage fixtures: {exc}") from exc
             if missing:
                 raise HarnessFault(f"fixture missing: {guest.name}:{missing[0]}")
+            self.on_lab_network(guest)
+
+    def on_lab_network(self, guest: Guest) -> None:
+        """Every guest on one subnet, asked before anything leans on it.
+
+        A guest booted outside the lab keeps the default NAT, where no other
+        guest can reach it. What that costs is not an error: the adopt script
+        resolves the hub, connects to an address nothing answers on, and sits
+        there — this run spent seven minutes in a silent ssh before anyone
+        asked the one question that names it.
+        """
+        try:
+            addresses = guest.sh("/sbin/ifconfig | awk '/inet /{print $2}'").split()
+        except AcceptanceFailure as exc:
+            raise HarnessFault(f"{guest.name}: could not read its addresses: {exc}") from exc
+        if not any(address.startswith(self.network) for address in addresses):
+            raise HarnessFault(
+                f"{guest.name} is not on the lab network {self.network}0/24 — it holds "
+                + (", ".join(a for a in addresses if a != "127.0.0.1") or "no address")
+                + ". It was booted outside the lab: stop it and let this runner boot it.")
 
     def machine(self, guest: Guest) -> str:
         if guest.name not in self._ids:

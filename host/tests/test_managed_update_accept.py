@@ -118,8 +118,10 @@ class ScriptedFleet:
     """One disposable fleet's answers, in the shape vm.sh and the tools give them."""
 
     def __init__(self, *, release=PRIOR, sha=PRIOR_SHA, state="current", client="70",
-                 menubar=None, plugin="0.69.3", denied_status=403):
+                 menubar=None, plugin="0.69.3", denied_status=403, address="192.168.2.10"):
         self.release, self.sha, self.state = release, sha, state
+        #: What `ifconfig` answers on every guest of this fleet.
+        self.address = address
         self.client, self.menubar, self.plugin = client, menubar, plugin
         self.denied_status = denied_status
         self.calls: list[list[str]] = []
@@ -144,6 +146,8 @@ class ScriptedFleet:
         answer: dict = {}
         if action in {"gui", "stop", "cp"}:
             answer = {"ok": True}
+        elif "ifconfig" in command:
+            return subprocess.CompletedProcess(argv, 0, f"127.0.0.1\n{self.address}\n", "")
         elif "probe" in command:
             answer = self.probe(name)
         elif "--path /updates/queue" in command:
@@ -936,6 +940,8 @@ class ResetGuestFleet(ScriptedFleet):
         _, action, name, *rest = argv
         if action == "cp":
             self.present.setdefault(name, set()).add(rest[1])
+        if action == "ssh" and "ifconfig" in rest[0]:
+            return ScriptedFleet.__call__(self, argv, **kwargs)
         if action == "ssh" and rest[0].startswith("for p in"):
             self.calls.append(list(argv))
             wanted = [part.strip("'") for part in rest[0].split(";")[0].split()[3:]]
@@ -977,3 +983,23 @@ def test_a_fixture_still_missing_is_a_harness_receipt_not_a_failed_journey(
     assert state["state"] == "harness"
     with pytest.raises(releases.ReleaseError, match="fresh_install: harness"):
         acceptance.gate(tmp_path / "receipts", IDENTITY)
+
+
+def test_a_guest_off_the_lab_network_is_a_harness_fault_not_a_hung_journey(runner):
+    """A guest booted outside the lab keeps the default NAT and no other guest
+    can reach it. The runner says so instead of waiting on an ssh that will
+    never connect."""
+    scripted = ResetGuestFleet(address="192.168.64.120")
+    fleet = build(runner, scripted, fresh="fresh")
+    with pytest.raises(runner.HarnessFault) as caught:
+        fleet.cast(fleet.hub, fleet.fresh)
+    assert "not on the lab network" in str(caught.value)
+    assert "192.168.64.120" in str(caught.value)
+
+
+def test_a_plan_may_name_the_lab_network_it_expects(runner):
+    scripted = ResetGuestFleet(address="10.9.9.4")
+    fleet = build(runner, scripted, fresh="fresh")
+    fleet.network = "10.9.9."
+    fleet.cast(fleet.hub, fleet.fresh)
+    assert scripted.present["fresh"]
