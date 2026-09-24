@@ -603,6 +603,37 @@ def test_a_leaf_that_never_takes_the_hubs_key_fails_by_name(runner, subject, ear
     assert offered == []
 
 
+def test_a_cast_leaf_the_hub_cannot_reach_is_moved_before_its_journey(
+        runner, subject, earlier, tmp_path, monkeypatch):
+    scripted, fleet, offered = _keyed(runner, monkeypatch, tmp_path, earlier, subject,
+                                      keys={"hub": "hub-key", "leaf-a": "published-key",
+                                            "leaf-b": "hub-key", "fresh": ""})
+    fleet.fresh = runner.Guest("fresh", Path("/bin/vm.sh"), run=scripted)
+    fleet.cast(fleet.hub, fleet.leaves[0])
+    assert scripted.installed == ["leaf-a"] and scripted.adopted == ["leaf-a"]
+    assert scripted.keys["leaf-a"] == "hub-key" and offered == []
+    # A leaf that already follows, and a Mac with no host at all, are left alone.
+    fleet.cast(fleet.hub, fleet.leaves[1])
+    fleet.cast(fleet.hub, fleet.fresh)
+    assert scripted.installed == ["leaf-a"] and scripted.adopted == ["leaf-a"]
+
+
+def test_the_hub_runs_what_it_built_before_any_journey(runner, subject, tmp_path, monkeypatch):
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"disposable": True, "vm_tool": "/bin/vm.sh", "hub": "hub",
+                                "leaves": ["leaf-a", "leaf-b"]}))
+    monkeypatch.setattr(runner, "Build", lambda *args, **kwargs: subject)
+    scripted = ScriptedFleet()
+    fleet = build(runner, scripted)
+    monkeypatch.setattr(fleet, "offer", lambda _: CANDIDATE)
+    monkeypatch.setattr(runner, "Fleet", lambda *args, **kwargs: fleet)
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    monkeypatch.setattr("sys.argv", ["accept", "--ref", "dev", "--receipts", str(tmp_path / "r"),
+                                     "--plan", str(plan), "--only", "fresh_install"])
+    runner.main()
+    assert scripted.queued[0] == "machine-hub", "the hub takes its own build before any leaf is cast"
+
+
 def test_the_hub_is_driven_through_the_refusal_older_code_raises(runner, subject):
     """A hub on code before a9fe663 refuses to build over adopted machines;
     its own hatch is the variable, which a hub past the fix ignores."""

@@ -60,9 +60,10 @@ SETTLE = 8
 KEY_PATIENCE = 30
 #: The key a host's updater verifies every job against, or nothing where no
 #: host is installed. Asked the same way of a hub and of a leaf.
-TRUST_KEY = shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
-    "import json,pathlib; p=pathlib.Path.home()/'.local/state/jremote/updates/config.json'; "
-    "print(json.loads(p.read_text()).get('public_key','') if p.is_file() else '')")
+TRUST_KEY = ("f=$HOME/.local/state/jremote/updates/config.json; [ ! -f \"$f\" ] || "
+             + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
+                 "import json,sys; print(json.load(open(sys.argv[1])).get('public_key',''))")
+             + " \"$f\"")
 
 
 class AcceptanceFailure(RuntimeError):
@@ -346,6 +347,8 @@ class Fleet:
                 guest.reset()
             guest.start()
         self.prepare(*cast)
+        for guest in cast:
+            reach(self, guest)
 
     def prepare(self, *guests: Guest) -> None:
         """Put back what `vm.sh reset` takes away before a journey leans on it.
@@ -989,6 +992,43 @@ def follows(fleet: Fleet, guest: Guest) -> bool:
     return False
 
 
+def reach(fleet: Fleet, guest: Guest) -> None:
+    """A cast guest the hub can serve, or one moved to where it can be.
+
+    Every leaf this lab provisions was installed from a published release
+    and trusts that release's key; so was every Mac adopted before its hub
+    first built. The hub can serve such a Mac nothing (#144), and a journey
+    that queued it an update would fail on trust before it measured
+    anything. It is moved onto the run's earlier ref, or the ref under test
+    when the run names none, by the one-file install and adopted — as such a
+    Mac is moved for real — before the journey starts. A guest with no host
+    (the pristine one) is left as it is.
+    """
+    if guest is fleet.hub or not trust_key(guest) or follows(fleet, guest):
+        return
+    target = fleet.prior or fleet.build
+    expect(target is not None, "build the ref under test before casting a leaf")
+    move(fleet, guest, target, guest.installed()["sha"], None)
+
+
+def move(fleet: Fleet, guest: Guest, target: Build, running: str, journey) -> None:
+    """The one-file install of `target` over a Mac the hub cannot reach, then
+    adoption; what that leaves must take the hub's key on its heartbeat."""
+    said = (f"{guest.name} runs {running}, whose updater does not trust this hub "
+            f"(#144): moving it onto {target.slug} by the one-file install and "
+            "adopting it, as a published Mac is moved")
+    if journey is not None:
+        journey.note(said)
+    else:
+        print(said, flush=True)
+    install_build(guest, target)
+    adopt(fleet, guest)
+    expect(follows(fleet, guest),
+           f"{guest.name} on {target.slug} never took the hub's key: a ref from "
+           "before a9fe663 trusts only the bundle that installed it (#144), and "
+           "nothing this hub serves can reach it")
+
+
 def stage_prior(fleet: Fleet, guest: Guest, *, journey=None) -> dict:
     """Put a guest back on the earlier commit so a journey starts where it must.
 
@@ -1018,16 +1058,7 @@ def stage_prior(fleet: Fleet, guest: Guest, *, journey=None) -> dict:
         finally:
             fleet.offer(target)
     else:
-        if journey is not None:
-            journey.note(f"{guest.name} runs {state['sha']}, whose updater does not trust "
-                         f"this hub (#144): moving it onto {fleet.prior.slug} by the "
-                         "one-file install and adopting it, as a published Mac is moved")
-        install_build(guest, fleet.prior)
-        adopt(fleet, guest)
-        expect(follows(fleet, guest),
-               f"{guest.name} on {fleet.prior.slug} never took the hub's key: a ref from "
-               "before a9fe663 trusts only the bundle that installed it (#144), and "
-               "nothing this hub serves can reach it")
+        move(fleet, guest, fleet.prior, state["sha"], journey)
     time.sleep(SETTLE)
     state = guest.installed()
     expect(state["sha"] == fleet.prior.sha,
@@ -1312,6 +1343,11 @@ def main() -> int:
     # comes out with is what the fleet is offered, and a run that cannot even
     # build has nothing to write receipts about.
     identity = {"build": fleet.offer(build), "sha": build.sha}
+    # The hub runs what it built before it serves it. What a leaf takes on
+    # its heartbeat — the key the hub signs with — is this commit's route
+    # answering, not the route of whatever the hub ran when it built.
+    moved = update_to_build(fleet, fleet.hub, fleet.machine(fleet.hub), build)
+    print(f"{fleet.hub.name} runs {moved['build']} ({moved['job']})", flush=True)
     run = acceptance.Run(args.receipts, identity)
     for name in JOURNEYS:
         if args.only and name not in args.only:
