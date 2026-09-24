@@ -139,62 +139,44 @@ def test_read_block_returns_exactly_the_managed_lines(tmp_path):
     assert shell_access.read_authorized_block(tmp_path / "absent") == []
 
 
-# ── the sudoers drop-in ─────────────────────────────────────────────────────
-
-def test_sudoers_grants_the_enrolled_account_passwordless_sudo():
-    content = shell_access.sudoers_content("jarvis")
-    assert "jarvis ALL=(ALL) NOPASSWD: ALL" in content
-    assert content.endswith("\n"), "sudoers refuses a file with no final newline"
-
-
-@pytest.mark.skipif(not os.path.exists("/usr/sbin/visudo"),
-                    reason="no visudo on this machine")
-def test_sudoers_content_passes_visudo(tmp_path):
-    import subprocess
-    f = tmp_path / "jremote-managed"
-    f.write_text(shell_access.sudoers_content("jarvis"))
-    f.chmod(0o440)
-    proc = subprocess.run(["/usr/sbin/visudo", "-c", "-f", str(f)],
-                          capture_output=True, text=True)
-    assert proc.returncode == 0, proc.stderr
-
-
-# ── enable: the joiner's root steps ─────────────────────────────────────────
+# ── enable: the joiner's root step ──────────────────────────────────────────
 
 def _step(steps, name):
     return next((s for s in steps if s["step"] == name), None)
 
 
-def test_enable_turns_remote_login_on_and_records_that_it_did(tmp_path):
+def test_enable_turns_remote_login_on_and_records_that_it_did():
     runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
-    steps = shell_access.enable("jarvis", runner=runner, sudo=False,
-                                root=tmp_path)
+    steps = shell_access.enable(runner=runner, sudo=False)
 
     assert any("-setremotelogin" in c and "on" in c for c in runner.calls)
     assert _step(steps, "remote-login")["ok"] is True
-
-    sudoers = tmp_path / shell_access.SUDOERS_PATH
-    assert sudoers.read_text() == shell_access.sudoers_content("jarvis")
-    assert _mode(sudoers) == 0o440
-    assert _step(steps, "sudoers")["ok"] is True
 
     # Recorded, so disable knows whether Off is the state to restore.
     assert shell_access.enabled_remote_login() is True
 
 
-def test_enable_leaves_remote_login_alone_when_it_was_already_on(tmp_path):
+def test_a_grant_lays_no_sudoers_drop_in(tmp_path):
+    """A grant carries no standing sudo: shell is the enrolled account's own
+    authority, root on a granted machine is asked for per use."""
+    runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
+    steps = shell_access.enable(runner=runner, sudo=False)
+    assert _step(steps, "sudoers") is None
+    assert not (tmp_path / shell_access.SUDOERS_PATH).exists()
+    assert not any("sudoers" in " ".join(map(str, c)) for c in runner.calls)
+
+
+def test_enable_leaves_remote_login_alone_when_it_was_already_on():
     runner = _Runner(answers={"-getremotelogin": "Remote Login: On\n"})
-    shell_access.enable("jarvis", runner=runner, sudo=False, root=tmp_path)
+    shell_access.enable(runner=runner, sudo=False)
 
     assert not any("-setremotelogin" in c for c in runner.calls)
     assert shell_access.enabled_remote_login() is False
 
 
-def test_enable_asks_for_sudo_on_a_real_root(tmp_path):
-    """On a real machine both root steps need root; under the test root the
-    sudoers write is direct, but systemsetup always goes through the prefix."""
+def test_enable_runs_systemsetup_under_sudo():
     runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
-    shell_access.enable("jarvis", runner=runner, sudo=True, root=tmp_path)
+    shell_access.enable(runner=runner, sudo=True)
     settings = [c for c in runner.calls if "-setremotelogin" in c]
     assert settings and settings[0][0] == "sudo"
 
@@ -203,7 +185,7 @@ def test_enable_asks_for_sudo_on_a_real_root(tmp_path):
 
 def test_disable_restores_remote_login_only_if_enable_turned_it_on(tmp_path):
     runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
-    shell_access.enable("jarvis", runner=runner, sudo=False, root=tmp_path)
+    shell_access.enable(runner=runner, sudo=False)
 
     off = _Runner()
     steps = shell_access.disable(runner=off, sudo=False,
@@ -215,7 +197,7 @@ def test_disable_restores_remote_login_only_if_enable_turned_it_on(tmp_path):
 
 def test_disable_leaves_remote_login_up_when_it_predates_the_grant(tmp_path):
     runner = _Runner(answers={"-getremotelogin": "Remote Login: On\n"})
-    shell_access.enable("jarvis", runner=runner, sudo=False, root=tmp_path)
+    shell_access.enable(runner=runner, sudo=False)
 
     off = _Runner()
     steps = shell_access.disable(runner=off, sudo=False,
@@ -230,13 +212,18 @@ def test_disable_removes_the_sudoers_drop_in_the_block_and_the_identity(tmp_path
     ak = tmp_path / "authorized_keys"
     ak.write_text("ssh-rsa USEROWNKEY someone@laptop\n")
     shell_access.write_authorized_block(ak, [LINE_A])
+    # Laid by hand: no build grants sudo any more, but disable keeps sweeping
+    # the drop-in an earlier build left behind.
+    dropin = tmp_path / shell_access.SUDOERS_PATH
+    dropin.parent.mkdir(parents=True, exist_ok=True)
+    dropin.write_text("jarvis ALL=(ALL) NOPASSWD: ALL\n")
     runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
-    shell_access.enable("jarvis", runner=runner, sudo=False, root=tmp_path)
+    shell_access.enable(runner=runner, sudo=False)
 
     steps = shell_access.disable(runner=_Runner(), sudo=False,
                                  root=tmp_path, authorized_keys=ak)
 
-    assert not (tmp_path / shell_access.SUDOERS_PATH).exists()
+    assert not dropin.exists()
     assert _step(steps, "sudoers")["ok"] is True
     assert shell_access.MARK_BEGIN not in ak.read_text()
     assert "USEROWNKEY" in ak.read_text()
@@ -646,7 +633,7 @@ def test_attach_applies_the_shell_the_parent_answered(tmp_path):
     home = tmp_path / "home"
     assert shell_access.read_authorized_block(
         home / ".ssh" / "authorized_keys") == [LINE_A]
-    assert (tmp_path / "root" / shell_access.SUDOERS_PATH).is_file()
+    assert not (tmp_path / "root" / shell_access.SUDOERS_PATH).exists()
     assert any("-setremotelogin" in c for c in runner.calls)
     assert "Host work-temp" in (home / ".ssh" / "config").read_text()
     assert all(s["ok"] for s in result["shell_steps"])
@@ -670,7 +657,10 @@ def test_detach_reverses_shell_access(tmp_path):
     ak = home / ".ssh" / "authorized_keys"
     shell_access.write_authorized_block(ak, [LINE_A])
     runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
-    shell_access.enable("jenya", runner=runner, sudo=False, root=tmp_path)
+    shell_access.enable(runner=runner, sudo=False)
+    dropin = tmp_path / shell_access.SUDOERS_PATH
+    dropin.parent.mkdir(parents=True, exist_ok=True)
+    dropin.write_text("jenya ALL=(ALL) NOPASSWD: ALL\n")
 
     result = detach_parent.detach(root=tmp_path, state=state, home=home,
                                   runner=_Runner(), poster=lambda u, t: (200, {}),

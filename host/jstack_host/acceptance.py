@@ -46,7 +46,7 @@ REQUIRED: dict[str, tuple[str, ...]] = {
     "revocation": ("revoked_device", "cancelled_job", "rejected_request", "unchanged_release"),
     "off_network": ("device", "transport", "release_notice", "session_journey"),
     "shell_adopt": ("granted_at_adoption", "capability_reported", "hub_shell_answers",
-                    "root_capable", "joiner_rerun_idempotent"),
+                    "no_standing_root", "joiner_rerun_idempotent"),
     "shell_flip": ("granted_pair", "peer_shell_answers", "revoked_pair",
                    "refused_immediately", "no_readoption"),
     "shell_detach": ("shell_before_detach", "detach_steps", "material_gone",

@@ -778,15 +778,14 @@ def shell_adopt(journey, fleet: Fleet, candidate: Candidate) -> None:
     expect("Darwin" in uname and "REFUSED" not in uname,
            f"the hub could not shell into {alias}: {uname.strip()[-300:]}")
     journey.observe("hub_shell_answers", {"alias": alias, "uname": uname.strip()[:200]})
-    sudo = ssh_over(fleet.hub, alias, "sudo -n true && echo SUDO-OK")
-    expect("SUDO-OK" in sudo, f"passwordless sudo failed over ssh: {sudo.strip()[-300:]}")
-    # The lab image already gives admin passwordless sudo, so SUDO-OK alone
-    # proves nothing about the grant: the drop-in must exist and name the
-    # granted account for root_capable to be the candidate's doing.
-    dropin = ssh_over(fleet.hub, alias, f"sudo -n /bin/cat {SUDOERS_DROPIN}")
-    expect("NOPASSWD" in dropin and row["shell_user"] in dropin,
-           f"the sudoers drop-in does not carry the grant: {dropin.strip()[-300:]}")
-    journey.observe("root_capable", {"sudo": "SUDO-OK", "dropin": dropin.strip()[:300]})
+    # A grant carries no standing sudo. The lab image gives admin its own
+    # passwordless sudo, so `sudo -n` proves nothing here either way — the
+    # assertable fact is that adoption laid no drop-in.
+    dropin = ssh_over(fleet.hub, alias,
+                      f"sudo -n /bin/ls {SUDOERS_DROPIN} 2>&1 || echo ABSENT")
+    expect("ABSENT" in dropin,
+           f"adoption laid a sudoers drop-in: {dropin.strip()[-300:]}")
+    journey.observe("no_standing_root", {"dropin": "absent"})
     expect(fleet.plan.get("adopt_command"), "a joiner re-run needs 'adopt_command' in the plan")
     before = authorized_block(guest)
     pubkey_before = guest.sh(f"/bin/cat {SHELL_KEY}.pub").strip()

@@ -450,7 +450,6 @@ def attach(code: str, parent_url: str, *, host_key: str,
 
     shell_steps = _apply_shell(result.get("shell") or {},
                                home=Path(home) if home else Path.home(),
-                               root=Path(env.get("LEAF_DEST") or "/"),
                                runner=runner, sudo=sudo)
 
     return {
@@ -486,7 +485,7 @@ def attach(code: str, parent_url: str, *, host_key: str,
     }
 
 
-def _apply_shell(shell: dict, *, home: Path, root: Path,
+def _apply_shell(shell: dict, *, home: Path,
                  runner, sudo: bool) -> list[dict]:
     """Lay what the parent's `shell` answer grants, graded like detach's steps.
 
@@ -496,9 +495,7 @@ def _apply_shell(shell: dict, *, home: Path, root: Path,
     """
     if not shell.get("authorized"):
         return []
-    import getpass
     from . import shell_access
     steps = shell_access.apply_material(shell, home)
-    steps += shell_access.enable(getpass.getuser(), runner=runner, sudo=sudo,
-                                 root=root)
+    steps += shell_access.enable(runner=runner, sudo=sudo)
     return steps

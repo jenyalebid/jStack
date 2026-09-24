@@ -4,9 +4,10 @@ The leaf-side primitives behind hub-held shell grants (#131): a per-machine
 SSH identity whose private key never leaves the machine that minted it, a
 marked block in `authorized_keys` this module owns outright — rewritten in
 place on every grant change, gone when the list empties, the user's own keys
-untouched — the two root steps a grant needs (Remote Login, a sudoers
-drop-in) graded like detach's step lists, and a marked `~/.ssh/config` block
-so a granted peer is `ssh <name>` with nothing to set up.
+untouched — the one root step a grant needs (Remote Login) graded like
+detach's step lists, and a marked `~/.ssh/config` block so a granted peer is
+`ssh <name>` with nothing to set up. A grant carries no standing sudo: shell
+is the enrolled account's own authority, root is asked for per use.
 
 Every external edge is injectable (`runner`, `root`, `state`) the same way
 attach_parent's and detach_parent's are, so all of it runs in tests against a
@@ -20,7 +21,6 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 from . import hostenv
@@ -30,8 +30,9 @@ MARK_END = "# <<< jremote managed keys <<<"
 CONFIG_BEGIN = "# >>> jremote managed hosts >>>"
 CONFIG_END = "# <<< jremote managed hosts <<<"
 
-#: Relative to the machine root, so tests run it under `root=tmp_path` and a
-#: real machine resolves it to /etc/sudoers.d — the same seam detach uses.
+#: Only ever removed. No grant writes it — shell access carries no standing
+#: sudo — but disable keeps sweeping the drop-in earlier builds laid.
+#: Relative to the machine root, so tests sweep under `root=tmp_path`.
 SUDOERS_PATH = "etc/sudoers.d/jremote-managed"
 
 KEY_FILE = "ssh/id_jremote"
@@ -185,8 +186,8 @@ def write_ssh_config(path: Path, peers: list[dict],
 
 def apply_material(shell: dict, home: Path) -> list[dict]:
     """The user-writable half of a grant, graded: the authorized block and
-    the peer config. The root half (Remote Login, the sudoers drop-in) was
-    spent at adoption — which is what lets a live refresh run without it."""
+    the peer config. The root half (Remote Login) was spent at adoption —
+    which is what lets a live refresh run without it."""
     steps: list[dict] = []
     ssh_dir = Path(home) / ".ssh"
     authorized = list(shell.get("authorized") or [])
@@ -210,11 +211,7 @@ def apply_material(shell: dict, home: Path) -> list[dict]:
     return steps
 
 
-# ── the root steps ──────────────────────────────────────────────────────────
-
-def sudoers_content(user: str) -> str:
-    return f"{_word(user, 'a sudoers account')} ALL=(ALL) NOPASSWD: ALL\n"
-
+# ── the root step ───────────────────────────────────────────────────────────
 
 def _defaults(runner, root, state):
     return (runner or subprocess.run,
@@ -243,15 +240,15 @@ def _remote_login_record(state: Path) -> bool | None:
         return None
 
 
-def enable(user: str, *, runner=None, sudo: bool = True,
-           root: Path | None = None, state: Path | None = None) -> list[dict]:
-    """The joiner's root moment: Remote Login on, passwordless sudo in.
+def enable(*, runner=None, sudo: bool = True,
+           state: Path | None = None) -> list[dict]:
+    """The joiner's root moment: Remote Login on — and nothing else.
 
     Remote Login's prior state is probed first and recorded, because turning
     it on is only this grant's to undo if it was off before — a Mac whose
     owner already ran SSH keeps it on a later detach.
     """
-    runner, root, state = _defaults(runner, root, state)
+    runner, _, state = _defaults(runner, None, state)
     prefix = ["sudo"] if sudo else []
     steps: list[dict] = []
 
@@ -273,27 +270,6 @@ def enable(user: str, *, runner=None, sudo: bool = True,
     state.mkdir(parents=True, exist_ok=True)
     _record_path(state).write_text(
         json.dumps({"remote_login_enabled": turned_on}))
-
-    target = root / SUDOERS_PATH
-    content = sudoers_content(user)
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content)
-        os.chmod(target, 0o440)
-        wrote, err = True, ""
-    except OSError:
-        # Root-owned on a real machine; staged as the user, installed as root.
-        with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
-            tmp.write(content)
-        proc = runner(prefix + ["/usr/bin/install", "-m", "0440", "-o", "root",
-                                "-g", "wheel", tmp.name, str(target)],
-                      capture_output=True, text=True)
-        os.unlink(tmp.name)
-        wrote, err = proc.returncode == 0, (proc.stderr or "").strip()
-    steps.append({
-        "step": "sudoers", "ok": wrote,
-        "note": (f"passwordless sudo for {user} installed" if wrote else
-                 f"could not install the sudoers drop-in: {err or 'no detail'}")})
     return steps
 
 
