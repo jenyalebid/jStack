@@ -21,7 +21,12 @@ PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK="$PLUGIN_ROOT/hooks/memory-ceiling.sh"
 
 [[ -x "$HOOK" ]] || { echo "FAIL: $HOOK not executable" >&2; exit 1; }
-command -v jq >/dev/null 2>&1 || { echo "FAIL: jq not on PATH" >&2; exit 1; }
+
+# Deliberately NOT a jq check. jq is absent from a stock macOS and nothing in this
+# product installs it, and the hook that needed it fell through its own path filter
+# and allowed everything on every fresh machine. A test that required jq to run was
+# the reason nobody found that: it only ever ran where the bug could not happen.
+command -v python3 >/dev/null 2>&1 || { echo "FAIL: python3 not on PATH" >&2; exit 1; }
 
 TMP=$(mktemp -d /tmp/jstack-memceiling-test.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
@@ -44,13 +49,13 @@ def check(name, cond):
 mem = TMP / "projects/-some-seat/memory/MEMORY.md"
 mem.parent.mkdir(parents=True)
 
-def run(tool, path, content=None):
+def run(tool, path, content=None, env=None):
     payload = {"hook_event_name": "PreToolUse", "tool_name": tool,
                "tool_input": {"file_path": str(path)}}
     if content is not None:
         payload["tool_input"]["content"] = content
     r = subprocess.run([HOOK], input=json.dumps(payload),
-                       capture_output=True, text=True, timeout=20)
+                       capture_output=True, text=True, timeout=20, env=env)
     out = r.stdout.strip()
     decided = json.loads(out)["hookSpecificOutput"] if out else {}
     return r.returncode, decided
@@ -108,6 +113,16 @@ r = subprocess.run([HOOK], input="{}", capture_output=True, text=True, timeout=2
 check("an empty payload passes", r.returncode == 0 and r.stdout.strip() == "")
 r = subprocess.run([HOOK], input="not json", capture_output=True, text=True, timeout=20)
 check("garbage stdin exits 0", r.returncode == 0)
+
+# --- the fresh machine ----------------------------------------------------
+# The ceiling has to hold on a Mac nobody has set up. Run the hook with a PATH
+# carrying only the system directories, which is what a hook inherits from a
+# session started by the app rather than from a shell that sourced a profile.
+import os
+bare = dict(os.environ, PATH="/usr/bin:/bin:/usr/sbin:/sbin")
+code, d = run("Write", TMP / "memory/MEMORY.md", index(CEILING + 50), env=bare)
+check("the ceiling still denies with nothing but the system PATH",
+      code == 0 and d.get("permissionDecision") == "deny")
 
 print()
 if fails:
