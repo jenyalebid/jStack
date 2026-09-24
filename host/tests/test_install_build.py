@@ -341,6 +341,41 @@ def test_install_sh_replaces_a_published_hub_rather_than_naming_a_verb_it_lacks(
     assert 'rm -rf "/Applications/jStack Hub.app"' in guard
 
 
+def test_the_runtime_gate_does_not_demand_a_team_a_self_built_hub_cannot_have():
+    """The Hub's C runtime validates the seal before importing any module, and
+    it asked for the publisher's Developer ID team unconditionally. A Hub
+    compiled on the Mac that runs it is signed ad-hoc — that Mac holds no such
+    identity — so every source build built cleanly and then failed its own
+    sealed installer at the last step.
+
+    The requirement is chosen at compile time, not read from Resources at
+    launch: the seal covers this binary, so a bundle cannot relax its own rule
+    without invalidating the signature that carries it. A marker read at launch
+    could be written by whoever assembled the bundle, which is the one party
+    the check answers for.
+    """
+    runtime = (REPO / "host/macos/Runtime.c").read_text()
+    assert "#ifdef JSTACK_SOURCE_BUILD" in runtime
+    assert "CFSTR(JSTACK_REQUIREMENT)" in runtime
+    # The team pin is still what a published Hub demands.
+    strict = runtime[runtime.index("#else"):runtime.index("#endif")]
+    assert "MZ95H77RQQ" in strict and "anchor apple generic" in strict
+    relaxed = runtime[runtime.index("#ifdef JSTACK_SOURCE_BUILD"):runtime.index("#else")]
+    assert "MZ95H77RQQ" not in relaxed
+    assert "live.jstack.hub" in relaxed
+
+
+def test_a_source_build_compiles_the_runtime_that_will_accept_it():
+    """Both the service runtime and the interpreter shim are built from the
+    same file, so both carry the requirement and both need the define."""
+    import inspect
+    source = inspect.getsource(build_hub._build)
+    assert 'origin = ["-DJSTACK_SOURCE_BUILD"] if isinstance(identity.get("origin"), dict) else []' in source
+    compiles = [line for line in source.splitlines() if "Runtime.c" in line]
+    assert len(compiles) == 2
+    assert source.count("*origin") == 2
+
+
 def test_install_sh_never_deletes_uncommitted_work_in_the_checkout():
     """Issue #130: it wrote a diff to the home root, then ran `checkout -- .`
     and `clean -fdq` over the tree, and a finished, tested fix was gone."""
@@ -348,6 +383,17 @@ def test_install_sh_never_deletes_uncommitted_work_in_the_checkout():
                         "-source-$(date"):
         assert destructive not in CODE, f"install.sh still discards work: {destructive}"
     assert "has uncommitted work (above)" in CODE
+
+
+def test_install_sh_puts_this_checkouts_adapters_on_path_not_merely_some():
+    """It asked whether `log_event` resolved at all. On a Mac moved off a
+    release install the answer was yes and wrong: the profile pointed into a
+    release stage under the state dir, which the host step moves aside minutes
+    later. The install finished green with no adapter reachable at all."""
+    assert 'command -v log_event 2>/dev/null)" = "$BIN/log_event"' in CODE
+    # And the stale line is taken out, or the dead stage keeps winning.
+    assert "'  # jstack$'" in CODE
+    assert "dropped $stale stale jstack PATH line(s)" in CODE
 
 
 def test_install_sh_names_a_remedy_for_every_build_input_it_requires():

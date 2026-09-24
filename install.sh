@@ -864,13 +864,37 @@ step "Adapters on PATH"
 PROFILE="$(profile_path)"
 LINE="export PATH=\"$BIN:\$PATH\"  # jstack"
 
-if command -v log_event >/dev/null 2>&1; then
-    ok "already reachable — $(command -v log_event)"
-elif [ -f "$PROFILE" ] && grep -qF "$BIN" "$PROFILE" 2>/dev/null; then
-    ok "$PROFILE already has it — open a new shell to pick it up"
+# "An adapter is reachable" and "the adapter is this checkout's" are different
+# questions, and only the second one matters — the same distinction the root
+# declaration below is careful about. Asking the first one is why a Mac moved
+# off a release install ended with no adapters at all: its profile pointed at a
+# copy inside a release stage under the state dir, `command -v` found it and
+# this step declared victory, and the host step then moved that state dir aside
+# — leaving a PATH entry to nothing on a machine the installer called done.
+if [ "$(command -v log_event 2>/dev/null)" = "$BIN/log_event" ]; then
+    ok "already reachable — $BIN/log_event"
 elif [ "$DRY_RUN" = "1" ]; then
-    would "append to $PROFILE: $LINE"
+    would "point $PROFILE at $BIN"
 else
+    # Any earlier jstack line goes, or a dead stage keeps winning the lookup by
+    # sitting in front of ours. Removed by counting rather than by trusting
+    # grep: a profile is the user's file, and truncating one because a pipe
+    # failed is not a trade this script makes.
+    if [ -f "$PROFILE" ]; then
+        stale="$(grep -c '  # jstack$' "$PROFILE" 2>/dev/null || true)"
+        if [ "${stale:-0}" -gt 0 ]; then
+            before="$(wc -l < "$PROFILE")"
+            pruned="$(mktemp)"
+            grep -v '  # jstack$' "$PROFILE" > "$pruned" 2>/dev/null || true
+            if [ "$((before - $(wc -l < "$pruned")))" -eq "$stale" ]; then
+                cat "$pruned" > "$PROFILE"
+                warn "dropped $stale stale jstack PATH line(s) from $PROFILE"
+            else
+                warn "left $PROFILE alone — its jstack lines did not come out cleanly"
+            fi
+            rm -f "$pruned"
+        fi
+    fi
     # Appended, not asked. Every skill, hook and agent in the stack calls these
     # 18 tools by bare name, so declining left an install that was complete and
     # unusable — and said so in one yellow line above a green verdict. The line
