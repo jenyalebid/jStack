@@ -54,10 +54,10 @@ def build(stack: Path, source: Path, output: Path, version: str, config: dict | 
                 addresses.write_text(command(["git", "-C", str(stack), "show", f"{source_sha}:host/macos/NetworkAddress.swift"]))
                 sources.append(str(addresses))
             if filename == "Network.swift":
-                for extra in ("NetworkCommand.swift", "HubRecovery.swift"):
-                    companion = Path(temporary) / extra
-                    companion.write_text(command(["git", "-C", str(stack), "show", f"{source_sha}:host/macos/{extra}"]))
-                    sources.append(str(companion))
+                companion = Path(temporary) / "NetworkCommand.swift"
+                companion.write_text(command(["git", "-C", str(stack), "show",
+                                              f"{source_sha}:host/macos/NetworkCommand.swift"]))
+                sources.append(str(companion))
             command(["xcrun", "swiftc", *flags, "-O", "-o", str(macos / name), *sources], timeout=180)
     # Distribute the exact corresponding GPL source, not an external URL
     # that can disappear. Build only files emitted by git archive.

@@ -26,7 +26,7 @@ Two rules, because the file belongs to the user as much as to us:
 Managed updates keep the written path current without anything here running
 again: `~/.claude/settings.json` is the Claude provider's `config` in
 `update_plugins.discover()`, and `replace_references` rewrites paths into the
-new stack root on apply and back on rollback.
+new stack root on apply.
 """
 
 from __future__ import annotations

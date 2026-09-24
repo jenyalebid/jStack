@@ -103,10 +103,10 @@ def test_required_observations_cover_every_receipt_the_contract_names():
 
 def test_a_journey_cannot_record_a_fact_its_contract_never_asked_for(tmp_path, candidate):
     run = acceptance.Run(tmp_path / "receipts", candidate["manifest"])
-    with run.journey("rollback") as journey:
+    with run.journey("interruption") as journey:
         with pytest.raises(releases.ReleaseError):
             journey.observe("cellular_transport", "LTE")
-    assert run.results["rollback"] == "incomplete"
+    assert run.results["interruption"] == "incomplete"
 
 
 @pytest.mark.parametrize("empty", [None, False, "", [], {}])
@@ -208,12 +208,12 @@ def test_a_receipt_from_another_build_does_not_qualify_these_bytes(tmp_path, can
 
 def test_a_hand_written_pass_without_evidence_is_refused(tmp_path, candidate):
     receipts = tmp_path / "receipts"
-    pass_everything(acceptance.Run(receipts, candidate["manifest"]), skip={"rollback"})
-    (receipts / "rollback.json").write_text(json.dumps(
-        {"journey": "rollback", "result": "passed", "skipped": 0,
+    pass_everything(acceptance.Run(receipts, candidate["manifest"]), skip={"interruption"})
+    (receipts / "interruption.json").write_text(json.dumps(
+        {"journey": "interruption", "result": "passed", "skipped": 0,
          "artifacts": acceptance.artifact_set(candidate["manifest"]),
-         "evidence_sha256": "d" * 64, "observed": list(acceptance.REQUIRED["rollback"])}))
-    with pytest.raises(releases.ReleaseError, match="rollback: evidence_missing"):
+         "evidence_sha256": "d" * 64, "observed": list(acceptance.REQUIRED["interruption"])}))
+    with pytest.raises(releases.ReleaseError, match="interruption: evidence_missing"):
         acceptance.gate(receipts, candidate["manifest"])
 
 

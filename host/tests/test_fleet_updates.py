@@ -88,13 +88,13 @@ def test_signature_rejects_payload_and_trust_key_substitution(release):
         releases.verify(releases.sign(envelope["manifest"], wrong.private_bytes_raw()), public)
 
 
-@pytest.mark.parametrize("mutation", ["missing", "skipped", "stale", "wrong_digest", "failed"])
-def test_promotion_requires_exact_artifact_receipts(release, mutation):
+@pytest.mark.parametrize("mutation", ["none", "skipped", "stale", "wrong_digest", "failed"])
+def test_every_receipt_a_release_carries_is_a_pass_for_these_exact_bytes(release, mutation):
     _, _, envelope = release
     manifest = envelope["manifest"]
     receipt = manifest["receipts"]["off_network"]
-    if mutation == "missing":
-        del manifest["receipts"]["off_network"]
+    if mutation == "none":
+        manifest["receipts"] = {}
     elif mutation == "skipped":
         receipt["skipped"] = 1
     elif mutation == "stale":
@@ -103,8 +103,19 @@ def test_promotion_requires_exact_artifact_receipts(release, mutation):
         receipt["evidence_sha256"] = ""
     else:
         receipt["result"] = "failed"
-    with pytest.raises(releases.ReleaseError, match="receipt"):
+    with pytest.raises(releases.ReleaseError, match="receipt|acceptance evidence"):
         releases.validate(manifest)
+
+
+def test_a_release_that_retired_a_journey_still_installs_on_an_older_updater(release):
+    """An updater cannot be taught a journey invented after it shipped. One
+    that insisted on the exact set of names it knew refused every release that
+    renamed or retired one, forever (#123); promotion is where the set lives."""
+    manifest = release[2]["manifest"]
+    del manifest["receipts"]["off_network"]
+    manifest["receipts"]["a_journey_this_build_never_heard_of"] = dict(
+        manifest["receipts"]["interruption"])
+    assert releases.validate(manifest) is manifest
 
 
 @pytest.mark.parametrize("filename", ["../escape", "/absolute", "a/b", "", ".", "..", "a\\b"])
@@ -254,8 +265,12 @@ class Backend:
         assert job["state"] == "applying" and job["transaction"]["previous"] == "old"
         self.events.append("apply")
 
-    def rollback(self, job):
-        self.events.append("rollback")
+    def applied(self, job):
+        return bool(job.get("transaction", {}).get("swapped"))
+
+    def settle(self, job):
+        self.events.append("settle")
+        return {"error": ""}
 
     def finalize(self, job):
         self.events.append("finalize")
@@ -302,19 +317,20 @@ def test_supervisor_stages_before_apply_then_requires_hub_confirmation(tmp_path,
     assert daemon.backend.events.count("finalize") == 1
 
 
-def test_crash_mid_apply_recovers_from_disk_before_accepting_work(tmp_path, release):
+def test_crash_mid_apply_fails_the_job_and_restores_nothing(tmp_path, release):
     daemon, job = supervisor(tmp_path, release)
     daemon.current = {**job, "state": "applying", "transaction": {"previous": "old"}}
     daemon.save()
     restarted = Supervisor(daemon.root, daemon.config, Backend(), daemon.client)
     restarted.tick()
-    assert restarted.backend.events == ["rollback"]
-    assert restarted.current["state"] == "rolled_back"
+    assert restarted.backend.events == ["settle"]
+    assert restarted.current["state"] == "failed"
+    assert restarted.current["applied"] is False
+    assert "untouched and still running" in restarted.current["detail"]
 
 
-@pytest.mark.parametrize("status,expected", [
-    ("pending", "applying"), ("applied", "verifying"), ("rolled_back", "rolled_back")])
-def test_independent_owner_recovery_controls_restart_outcome(tmp_path, release, status, expected):
+@pytest.mark.parametrize("status,expected", [("applied", "verifying"), ("unknown", "failed")])
+def test_an_interrupted_application_is_judged_by_what_it_finished(tmp_path, release, status, expected):
     backend = Backend()
     backend.healthy = False
     backend.recovery_status = lambda job: status
@@ -323,58 +339,29 @@ def test_independent_owner_recovery_controls_restart_outcome(tmp_path, release, 
     daemon.save()
     daemon.tick()
     assert daemon.current["state"] == expected
-    assert ("rollback" in backend.events) is False
+    assert ("settle" in backend.events) is (expected == "failed")
 
 
-def test_root_watchdog_marker_settles_a_stalled_apply_without_a_second_swap(tmp_path, release):
-    backend = Backend()
-    backend.recovery_status = lambda job: "applied"
-    daemon, job = supervisor(tmp_path, release, backend)
-    daemon.current = {**job, "state": "applying", "transaction": {"native": True}}
-    daemon.save()
-    (daemon.root / "recovery.json").write_text(json.dumps(
-        {"schema": 1, "restored": "Hub.app.previous-stage"}))
-    daemon.tick()
-    assert daemon.current["state"] == "rolled_back"
-    assert daemon.current["detail"] == "root watchdog restored the retained hub backup"
-    assert backend.events == ["rollback"]
-
-
-def test_a_past_recovery_marker_never_settles_a_new_stall(tmp_path, release):
-    import os
+def test_a_failure_after_the_swap_says_the_machine_runs_the_release_that_failed(tmp_path, release):
     backend = Backend()
     backend.healthy = False
-    backend.recovery_status = lambda job: "applied"
+    backend.recovery_status = lambda job: "unknown"
     daemon, job = supervisor(tmp_path, release, backend)
-    marker = daemon.root / "recovery.json"
-    marker.write_text("{}")
-    os.utime(marker, (time.time() - 3600,) * 2)
-    daemon.current = {**job, "state": "applying", "transaction": {"native": True}}
+    daemon.current = {**job, "state": "applying", "transaction": {"swapped": True}}
     daemon.save()
     daemon.tick()
-    assert daemon.current["state"] == "verifying"
-    assert "rollback" not in backend.events
+    assert daemon.current["state"] == "failed" and daemon.current["applied"] is True
+    assert "running test-1" in daemon.current["detail"]
 
 
-def test_verification_waits_while_independent_owner_rolls_back(tmp_path, release):
-    backend = Backend()
-    backend.recovery_status = lambda job: "rolling_back"
-    daemon, job = supervisor(tmp_path, release, backend)
-    daemon.current = {**job, "state": "verifying", "verify_started": time.time() - 500,
-                      "transaction": {"native": True}}
-    daemon.save()
-    daemon.tick()
-    assert daemon.current["state"] == "verifying"
-    assert "rollback" not in backend.events
-
-
-def test_failed_verification_rolls_back(tmp_path, release):
+def test_failed_verification_fails_the_job(tmp_path, release):
     daemon, job = supervisor(tmp_path, release)
     daemon.tick()
     daemon.backend.healthy = False
     daemon.save(verify_started=time.time() - 150)
     daemon.tick()
-    assert daemon.current["state"] == "rolled_back"
+    assert daemon.current["state"] == "failed"
+    assert daemon.current["detail"].startswith("updated components failed verification")
 
 
 def test_tampered_download_never_reaches_apply(tmp_path, release):
@@ -404,7 +391,7 @@ def test_stack_archive_rejects_links_and_devices(tmp_path, kind):
         safe_tar(archive, tmp_path / "unpacked")
 
 
-def test_verification_timeout_recovers_without_network(tmp_path, release):
+def test_verification_timeout_settles_without_network(tmp_path, release):
     daemon, job = supervisor(tmp_path, release)
     daemon.tick()
     daemon.save(verify_started=time.time() - 181)
@@ -413,8 +400,8 @@ def test_verification_timeout_recovers_without_network(tmp_path, release):
     daemon.client = httpx.Client(transport=httpx.MockTransport(offline))
     with pytest.raises(httpx.ConnectError):
         daemon.tick()
-    assert daemon.backend.events[-1] == "rollback"
-    assert daemon.current["state"] == "rolled_back"
+    assert daemon.backend.events[-1] == "settle"
+    assert daemon.current["state"] == "failed"
 
 
 def test_restart_adopts_hub_confirmation_before_local_commit(tmp_path, release):
@@ -442,6 +429,74 @@ def test_confirmed_transaction_removes_temporary_app_backups(tmp_path):
     assert target.is_dir()
     assert not backup.exists()
     backend.finalize(job)
+
+
+def test_finalize_leaves_nothing_of_this_updaters_beside_the_app(tmp_path):
+    """Three full Hub copies were found in /Applications after one acceptance
+    run, each visible in Finder and Launchpad (#118)."""
+    from jstack_host.update_macos import MacBackend
+    target = tmp_path / "Hub.app"
+    target.mkdir()
+    for leftover in ("Hub.app.previous-release-stage-1", "Hub.app.failed-old-job",
+                     "Hub.app.incoming-old-job"):
+        (tmp_path / leftover).mkdir()
+    keep = tmp_path / "Hub.app.notes"
+    keep.mkdir()
+    job = {"transaction": {"apps": {"menubar": {
+        "target": str(target), "backup": str(tmp_path / "Hub.app.previous-release-stage-1")}}}}
+    MacBackend(tmp_path, {}).finalize(job)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["Hub.app", "Hub.app.notes"]
+
+
+def test_staging_prunes_the_release_trees_nothing_is_running_from(tmp_path, monkeypatch):
+    """Every generation staged a full source tree plus its dependencies and
+    none was ever removed, so the host's import path grew one per update
+    (#129). The tree the loaded runtime imports from is the exception."""
+    from jstack_host import update_plugins
+    from jstack_host.update_macos import MacBackend
+    root = tmp_path / "updates"
+    releases_dir = root / "releases"
+    live, superseded, incoming = (releases_dir / name for name in ("live", "old", "new"))
+    for directory in (live / "stage-a/stack/host", superseded / "stage-b", incoming):
+        directory.mkdir(parents=True)
+    backend = MacBackend(root, {"runtime_imports": [str(live / "stage-a/stack/host")]})
+    monkeypatch.setattr(update_plugins, "discover", lambda: [])
+    backend._prune_releases(incoming)
+    assert sorted(path.name for path in releases_dir.iterdir()) == ["live", "new"]
+
+
+def test_staging_keeps_the_tree_the_installed_host_service_runs_from(tmp_path, monkeypatch):
+    """`runtime_imports` only advances on a confirmed job, so after a failed
+    one the host runs out of a tree no configuration names. Its plist does."""
+    import plistlib
+    from jstack_host import update_plugins
+    from jstack_host.update_macos import MacBackend
+    root = tmp_path / "updates"
+    failed, incoming = (root / "releases" / name for name in ("failed", "new"))
+    (failed / "stage-a/stack/host").mkdir(parents=True)
+    incoming.mkdir(parents=True)
+    plist = tmp_path / "host.plist"
+    plist.write_bytes(plistlib.dumps({"Label": "live.jstack.host", "EnvironmentVariables": {
+        "PYTHONPATH": str(failed / "stage-a/stack/host") + ":" + str(failed / "stage-a/dependencies")}}))
+    monkeypatch.setattr(update_plugins, "discover", lambda: [])
+    MacBackend(root, {"host_plist": str(plist)})._prune_releases(incoming)
+    assert sorted(path.name for path in (root / "releases").iterdir()) == ["failed", "new"]
+
+
+def test_staging_keeps_the_tree_the_agent_marketplace_is_registered_against(tmp_path, monkeypatch):
+    """The marketplace is a directory registration inside a stage that the
+    agent CLIs re-read on every run; a superseded release tree costs less than
+    a registration pointing at nothing."""
+    from jstack_host import update_plugins
+    from jstack_host.update_macos import MacBackend
+    root = tmp_path / "updates"
+    registered, incoming = (root / "releases" / name for name in ("prior", "new"))
+    (registered / "stage-a/stack/plugins/jstack").mkdir(parents=True)
+    incoming.mkdir(parents=True)
+    monkeypatch.setattr(update_plugins, "discover",
+                        lambda: [{"kind": "claude", "root": str(registered / "stage-a/stack")}])
+    MacBackend(root, {})._prune_releases(incoming)
+    assert sorted(path.name for path in (root / "releases").iterdir()) == ["new", "prior"]
 
 
 def test_finalize_refuses_a_path_outside_the_updaters_backup_shape(tmp_path):
@@ -495,40 +550,6 @@ def test_atomic_replacement_preserves_executable_mode_and_symlink_target(tmp_pat
     assert launcher.read_bytes() == b"new"
     assert original.read_bytes() == b"old"
     assert launcher.stat().st_mode & 0o777 == 0o755
-
-
-def test_plugin_recovery_failure_does_not_strand_host_and_apps(tmp_path, monkeypatch):
-    from jstack_host import update_macos, update_plugins
-    events = []
-    backend = update_macos.MacBackend(tmp_path, {})
-    monkeypatch.setattr(backend, "_unload", lambda kind: events.append("stop-" + kind))
-    monkeypatch.setattr(backend, "_load", lambda kind: events.append("start-" + kind))
-    monkeypatch.setattr(update_macos, "stop_app", lambda path: None)
-    def broken(*args):
-        raise releases.ReleaseError("provider unavailable")
-    monkeypatch.setattr(update_plugins, "rollback", broken)
-    target, backup = tmp_path / "Client.app", tmp_path / "Client.previous"
-    target.mkdir()
-    (target / "version").write_text("new")
-    backup.mkdir()
-    (backup / "version").write_text("old")
-    original, plist = tmp_path / "original.plist", tmp_path / "host.plist"
-    original.write_bytes(b"old service")
-    plist.write_bytes(b"new service")
-    job = {"id": "test", "transaction": {"providers": [], "stack": str(tmp_path),
-           "apps": {"client": {"target": str(target), "backup": str(backup),
-                               "existed": True, "was_running": False}},
-           "plists": {"host": {"target": str(plist), "original": str(original)}}}}
-    with pytest.raises(releases.ReleaseError, match="host/apps restored"):
-        backend.rollback(job)
-    assert (target / "version").read_text() == "old"
-    assert plist.read_bytes() == b"old service"
-    assert events[-2:] == ["start-host", "start-menubar"]
-    # Recovery retries after the provider becomes available without moving
-    # the already-restored app into a failed bundle a second time.
-    monkeypatch.setattr(update_plugins, "rollback", lambda *args: None)
-    backend.rollback(job)
-    assert (target / "version").read_text() == "old"
 
 
 def test_promote_checks_evidence_bytes_and_preserves_prior_feed(tmp_path, release):

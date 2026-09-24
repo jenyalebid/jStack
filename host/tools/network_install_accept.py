@@ -72,8 +72,6 @@ def main():
                               "address": "10.199.76.1/24", "subnet": "10.199.76.0/24",
                               "nameFile": "/var/run/wireguard/jstack-installer-lab.name",
                               "forwarding": False, "active": True},
-                   "recovery": {"bundle": "/Applications/jStack Hub.app",
-                                "state": str(Path.home() / "Library/Application Support/jstack-installer-lab")},
                    "legacy": []}
         if args.phase == "prepare-legacy":
             assert not original.exists(), "legacy fixture already installed"
@@ -162,12 +160,12 @@ def main():
             assert digest(installed / "Contents/_CodeSignature/CodeResources") == request["candidateSeal"]
             assert digest(installed / "Contents/MacOS/JStackHub") == request["candidateBinary"]
             assert not request["legacy"] or not original.exists(), "legacy persistence remains installed"
-            hub_policy_path = "/Library/Preferences/live.jstack.hub.recovery.json"
-            hub_policy = json.loads(run("sudo", "/bin/cat", hub_policy_path))
-            assert hub_policy == {"bundle": request["recovery"]["bundle"], "owner": request["policy"]["owner"],
-                                  "state": request["recovery"]["state"]}, hub_policy
-            assert run("sudo", "/usr/bin/stat", "-f", "%u:%Lp", hub_policy_path) == "0:600"
-            result = {"active": True, "signature_identity": True, "hub_recovery_policy": True,
+            # Cutover clears the watchdog policy an older installer armed, and
+            # nothing writes one. Finding a file here is the deleted mechanism
+            # still running.
+            assert not Path("/Library/Preferences/live.jstack.hub.recovery.json").exists(), \
+                "cutover left a hub recovery policy armed"
+            result = {"active": True, "signature_identity": True, "hub_recovery_policy": False,
                       "transaction": request["transaction"]}
         else:
             assert request["legacy"]

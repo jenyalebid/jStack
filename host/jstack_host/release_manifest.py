@@ -13,8 +13,11 @@ from pathlib import Path
 
 SCHEMA = 1
 COMPONENTS = {"stack", "menubar", "client"}
+#: The journeys promotion requires, checked by `acceptance.gate`. The set moves
+#: as journeys are added, renamed and retired, which is why an updater never
+#: insists on it: see `validate`.
 RECEIPTS = {"fresh_install", "upgrade", "fleet", "offline_catchup", "session_survival",
-            "interruption", "rollback", "revocation", "off_network"}
+            "interruption", "revocation", "off_network"}
 #: The line a hub follows when nobody chose one. Named rather than empty so a
 #: manifest built before channels existed can be read as belonging to it: the
 #: releases already published came off main, which is what this names.
@@ -82,11 +85,21 @@ def validate(manifest: dict, *, promoted: bool = True) -> dict:
     if built and manifest.get("receipts"):
         raise ReleaseError("a source build cannot carry acceptance receipts")
     if promoted and not built:
+        # Every receipt the release carries, against these exact artifacts —
+        # and not a demand for one particular set of journey NAMES. This code
+        # also runs on the machine taking the update, where it is years older
+        # than the release it is judging: an updater that insisted on the names
+        # it shipped with refused every release that renamed or retired a
+        # journey, and the machine stayed joined, online and un-updatable
+        # forever (#123). Which journeys a candidate must survive is decided
+        # where the names are current — `acceptance.gate`, at promotion.
         receipts = manifest.get("receipts", {})
         artifact_set = hashlib.sha256(canonical(components)).hexdigest()
-        for name in RECEIPTS:
-            receipt = receipts.get(name, {})
-            if (receipt.get("result") != "passed" or receipt.get("skipped") != 0
+        if not isinstance(receipts, dict) or not receipts:
+            raise ReleaseError("a promoted release carries no acceptance evidence")
+        for name, receipt in sorted(receipts.items()):
+            if (not isinstance(receipt, dict) or receipt.get("result") != "passed"
+                    or receipt.get("skipped") != 0
                     or receipt.get("artifacts") != artifact_set
                     or not HEX.fullmatch(str(receipt.get("evidence_sha256", "")))):
                 raise ReleaseError(f"missing or mismatched acceptance receipt: {name}")

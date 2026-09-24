@@ -268,7 +268,7 @@ def test_a_source_build_verifies_without_receipts_but_never_while_carrying_them(
     it — and a manifest may not claim both a local build and a publication."""
     manifest = {**_minimal(), "origin": {"kind": releases.SOURCE_BUILD, "machine": "this-mac"}}
     assert releases.validate(manifest)["release"] == "local-1"
-    with pytest.raises(releases.ReleaseError, match="acceptance receipt"):
+    with pytest.raises(releases.ReleaseError, match="acceptance evidence"):
         releases.validate(_minimal())
     artifacts = hashlib.sha256(releases.canonical(manifest["components"])).hexdigest()
     with pytest.raises(releases.ReleaseError, match="cannot carry acceptance receipts"):

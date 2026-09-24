@@ -1,23 +1,22 @@
 """App-owned service updates, executed by the Hub's own updater service.
 
 State and pairing never move. No interpreter installation, legacy plist writes
-or ad-hoc signing are part of application or rollback. The updater replaces
-the bundle it runs from: its module closure is preloaded at startup, the
-replaced bundle is retained until the hub confirms the release, and the
-supervisor process exits after finalization so launchd relaunches it from
-the new bundle.
+or ad-hoc signing are part of an application. The updater replaces the bundle
+it runs from: its module closure is preloaded at startup, the replaced bundle
+survives only until the transaction closes, and the supervisor process exits
+so launchd relaunches it from whichever bundle is installed when the job ends.
 """
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import tempfile
 
 from . import release_manifest as releases
-from .update_macos import MacBackend, client_distribution, command, safe_tar, stop_app, unpack_app
+from .update_macos import (MacBackend, client_distribution, command, safe_tar, stop_app,
+                           sweep, unpack_app)
 
 OBSERVABLE = {"enabled", "requires_approval", "not_registered", "not_found"}
 
@@ -97,12 +96,20 @@ class AppBackend(MacBackend):
         return False
 
     def restart_required(self, job: dict) -> bool:
-        """Exit the confirmed, finalized supervisor whose bundle was replaced.
+        """Exit a supervisor whose own bundle was replaced under it.
 
-        launchd KeepAlive relaunches it from the new bundle; the relaunched
-        process sees its own sha equal to the release and keeps running.
+        launchd KeepAlive relaunches it from the bundle now at the target; the
+        relaunched process sees its own sha equal to the installed release and
+        keeps running, which is what ends the loop.
+
+        A settled failure counts, not only a confirmed success: the swap can
+        already have happened when the job failed, and the old rollback left
+        the machine executing the release it had just rejected until someone
+        rebooted it (#119).
         """
-        if job.get("state") != "current" or not job.get("finalized"):
+        settled = (job.get("state") == "current" and job.get("finalized")) or (
+            job.get("state") == "failed" and job.get("applied"))
+        if not settled:
             return False
         if "menubar" not in job.get("transaction", {}).get("apps", {}):
             return False
@@ -228,7 +235,7 @@ class AppBackend(MacBackend):
                 raise releases.ReleaseError("app destination is not writable")
             backup = target.with_name(target.name + ".previous-" + stage.name)
             if backup.exists():
-                raise releases.ReleaseError("recovery destination already exists")
+                raise releases.ReleaseError("a bundle already stands where this swap displaces the running one")
             from .update_macos import running
             apps[kind] = {"source": str(candidate), "target": str(target), "backup": str(backup),
                           "existed": target.exists(), "was_running": bool(target.exists() and running(target))}
@@ -280,9 +287,11 @@ class AppBackend(MacBackend):
             target, backup = Path(record["target"]), Path(record["backup"])
             if kind == "client":
                 stop_app(target)
+            # A copy an earlier job left behind is never resumed, and refusing
+            # the release over it stranded the machine until someone deleted it
+            # by hand (#117). Clear the ground on entry.
+            sweep(target)
             incoming = target.with_name(target.name + ".incoming-" + job["id"])
-            if incoming.exists():
-                raise releases.ReleaseError("unfinished incoming app requires recovery")
             command(["/usr/bin/ditto", record["source"], str(incoming)])
             self._check_app(incoming, transaction["manifest"]["components"][kind], kind,
                             source_build=built_here)
@@ -294,38 +303,33 @@ class AppBackend(MacBackend):
         if client and client["was_running"]:
             command(["/usr/bin/open", "-a", client["target"]])
 
-    def rollback(self, job: dict):
-        from . import update_plugins
-        transaction = job["transaction"]
+    def settle(self, job: dict) -> dict:
+        """Close a failed transaction: nothing restored, nothing retained.
+
+        The bundle that is at the target when a job fails is the one this
+        machine runs — this updater does not put another one there. What is
+        owed is the services this transaction stopped, started again against
+        that bundle, and an /Applications with none of its copies left in it.
+        """
+        transaction = job.get("transaction", {})
         app = Path(self.config["menubar_path"])
-        # If interrupted between renames there may be no Hub at all; nothing
-        # is observable or stoppable until its bundle is back in place.
-        if app.exists():
-            self._stop_services(app, self._statuses(app))
-        for kind, record in transaction["apps"].items():
-            target, backup = Path(record["target"]), Path(record["backup"])
-            incoming = target.with_name(target.name + ".incoming-" + job["id"])
-            if incoming.is_dir():
-                shutil.rmtree(incoming)
-            elif incoming.exists():
-                incoming.unlink()
-            if not backup.exists():
-                continue
-            if kind == "client":
-                stop_app(target)
-            if target.exists():
-                failed = target.with_name(target.name + ".failed-" + job["id"])
-                if failed.exists():
-                    raise releases.ReleaseError("failed candidate archive already exists")
-                os.replace(target, failed)
-            os.replace(backup, target)
-        current = self._statuses(app)
-        desired = dict(transaction["services"])
-        for role, status in current.items():
-            if status == "requires_approval":
-                desired[role] = status
-        self._restore_services(app, desired)
-        client = transaction["apps"].get("client")
-        if client and client["was_running"]:
-            command(["/usr/bin/open", "-a", client["target"]])
-        update_plugins.rollback(transaction["providers"], Path(transaction["stack"]))
+        problems = []
+        for record in transaction.get("apps", {}).values():
+            sweep(Path(record["target"]))
+        try:
+            current = self._statuses(app)
+            desired = dict(transaction.get("services", current))
+            for role, status in current.items():
+                # A denial recorded after the snapshot wins over the snapshot.
+                if status == "requires_approval":
+                    desired[role] = status
+            self._restore_services(app, desired)
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+            problems.append(f"app services did not start: {exc}")
+        client = transaction.get("apps", {}).get("client")
+        if client and client["was_running"] and Path(client["target"]).exists():
+            try:
+                command(["/usr/bin/open", "-a", client["target"]])
+            except (releases.ReleaseError, OSError, subprocess.SubprocessError) as exc:
+                problems.append(f"the client did not reopen: {exc}")
+        return {"error": "; ".join(problems)}

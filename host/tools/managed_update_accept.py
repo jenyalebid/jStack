@@ -430,15 +430,20 @@ def session_survival(journey, fleet: Fleet, candidate: Candidate) -> None:
                                               "bypass_prompt_nudged": fresh["nudged"]})
 
 
-RECOVERED = {"updated components failed verification", "recovered interrupted application"}
-RECOVERED_BY_REBOOT = "recovered interrupted application"
+#: What an abandoned job's detail leads with. `update_supervisor.abandon`
+#: appends which release is running to it, so these are prefixes.
+RECOVERED = ("updated components failed verification",
+             "an interrupted application could not be resumed")
+RECOVERED_BY_REBOOT = "an interrupted application could not be resumed"
 
 
-RESIDUE_LISTING = "/usr/bin/find /Applications -maxdepth 1 -name '*.incoming-*' -print"
+RESIDUE_LISTING = ("/usr/bin/find /Applications -maxdepth 1 "
+                   r"\( -name '*.incoming-*' -o -name '*.previous-*' -o -name '*.failed-*' \) -print")
 
 
 def residue(guest: Guest) -> list[str]:
-    """Half-written app copies left next to the installed bundles.
+    """Bundles the updater left next to the installed ones — a half-written
+    copy, a swapped-out one, or a candidate an updater before #118 parked.
 
     find, not a shell glob: the guest's login shell is zsh, which aborts a
     command line whose glob matches nothing, so the same pattern reads as
@@ -455,21 +460,20 @@ UPDATER_BUNDLE = (
 
 
 def updater_bundle(guest: Guest) -> str:
-    """The executable the guest's live updater is running from — the bundle
-    at /Applications, or the one a rollback moved aside (#119)."""
+    """The executable the guest's live updater is running from — the bundle at
+    /Applications, or one that was moved out from under the process (#119)."""
     return guest.sh(UPDATER_BUNDLE).strip()
 
 
 def ensure_true_updater(journey, guest: Guest) -> str:
     """A journey that queues a job on a leaf must know whose code will run it.
 
-    The supervisor exits for relaunch only when a job reaches `current`
-    (update_app.restart_required). After a rollback that swapped the Hub in,
-    launchd's relaunched process keeps executing the rejected release from
-    `jStack Hub.app.failed-<job>` while /Applications holds the previous one
-    (#119). Then the next job is applied by the wrong updater and the receipt
-    would measure it. Record the occurrence and reboot so the installed
-    release's own code runs."""
+    `update_app.restart_required` exits the supervisor whenever a settled job
+    replaced its own bundle, so the relaunched process runs the code that is
+    installed. A leaf carried here from an older release predates that: its
+    process can still be executing a bundle that is no longer at
+    /Applications, and the next job would be applied by that code while the
+    receipt claimed to measure this one (#119). Record it and reboot."""
     running = updater_bundle(guest)
     expect(bool(running), f"{guest.name} has no updater process to read")
     if not running.startswith(INSTALLED_BUNDLE):
@@ -484,13 +488,14 @@ def ensure_true_updater(journey, guest: Guest) -> str:
 
 
 def sweep_prior_residue(journey, guest: Guest) -> list[str]:
-    """The published prior names its incoming copy per RELEASE and its rollback
-    never removes it (#117): an updater killed during the client copy leaves
+    """The published prior names its incoming copy per RELEASE and never
+    removes it (#117): an updater killed during the client copy leaves
     `jRemote.app.incoming-<release>` behind, and every later attempt at that
     release on that machine dies on "unfinished incoming app requires
-    recovery". The candidate names copies per job and removes them (71a018f,
-    ae87a9a). The rest of this journey measures the candidate, so the prior's
-    leftover is removed here and the receipt says what was found."""
+    recovery". The candidate names copies per job, clears the ground on entry
+    and keeps nothing when a job fails. The rest of this journey measures the
+    candidate, so the prior's leavings are removed here and the receipt says
+    what was found."""
     found = residue(guest)
     if found:
         quoted = " ".join(shlex.quote(path) for path in found)
@@ -511,9 +516,9 @@ def reboot_mid_apply(journey, fleet: Fleet, guest: Guest, machine: str, candidat
     an app copy, boot it, and read what the journal did.
 
     The design under test (update_supervisor.tick): an apply interrupted by
-    reboot never resumes over a half-replaced installation — it is rolled back
-    as "recovered interrupted application", the release that was running stays
-    intact, the copy is removed, and the next request lands. The job installs
+    reboot never resumes over a half-replaced installation — the job ends
+    failed, naming which release the machine is left running, the half-written
+    copy is removed, and the next request lands. The job installs
     the PRIOR, because that is the only other signed release in the plan; what
     is measured is the candidate's updater, which is what every machine runs
     after this release ships.
@@ -521,9 +526,8 @@ def reboot_mid_apply(journey, fleet: Fleet, guest: Guest, machine: str, candidat
     state = guest.installed()
     expect(state["release"] == candidate.release,
            f"the reboot leg needs the candidate's updater; {guest.name} runs {state['release']}")
-    # After the kill leg's rollback the relaunched supervisor keeps running the
-    # candidate's code from `.failed-<job>` (#119); the reboot leg must read the
-    # installed bundle's own updater, so a stale one is rebooted and recorded.
+    # The reboot leg must be applied by the installed bundle's own updater, so
+    # a process left running out of a bundle that moved is rebooted (#119).
     ensure_true_updater(journey, guest)
     previous = Candidate(fleet.prior, candidate.public_key)
     try:
@@ -535,10 +539,10 @@ def reboot_mid_apply(journey, fleet: Fleet, guest: Guest, machine: str, candidat
                f"the freeze landed on job {injected.get('job')}, not {frozen['id']}")
         guest.stop()
         guest.start()
-        settled = fleet.hub.wait_for("rolled_back", machine)
+        settled = fleet.hub.wait_for("failed", machine)
         job = settled.get("job") or {}
         expect(job.get("id") == frozen["id"], "the reboot settled a different job")
-        expect(job.get("detail") == RECOVERED_BY_REBOOT,
+        expect(str(job.get("detail") or "").startswith(RECOVERED_BY_REBOOT),
                f"the reboot settled the job as {job.get('detail')!r}")
         kept = guest.installed()
         expect(kept["release"] == candidate.release,
@@ -565,10 +569,10 @@ def interruption(journey, fleet: Fleet, candidate: Candidate) -> None:
     fault = arm_fault(guest, "interruption")
     job = fleet.hub.queue(machine, request_id("interrupt"))["jobs"][0]
     result = read_fault(fault)
-    expect(result.get("state") == "rolled_back",
+    expect(result.get("state") == "failed",
            f"killing the updater mid-apply left {result.get('state')}")
-    expect(result.get("detail") in RECOVERED,
-           f"the killed job rolled back for {result.get('detail')!r}, not from recovery")
+    expect(str(result.get("detail") or "").startswith(RECOVERED),
+           f"the killed job failed for {result.get('detail')!r}, not from an interrupted apply")
     journey.observe("interrupted_job", {"job": job["id"], "injected": result.get("job")})
     journey.observe("recovered_state", {"state": result["state"], "detail": result.get("detail")})
     sweep_prior_residue(journey, guest)
@@ -576,32 +580,6 @@ def interruption(journey, fleet: Fleet, candidate: Candidate) -> None:
     fleet.hub.wait_for("current", machine)
     journey.observe("retry_current", {"job": retry["id"], "release": guest.installed()["release"]})
     journey.observe("reboot_resume", reboot_mid_apply(journey, fleet, guest, machine, candidate))
-
-
-def rollback(journey, fleet: Fleet, candidate: Candidate) -> None:
-    guest = fleet.leaves[0]
-    machine = fleet.machine(guest)
-    before = stage_prior(fleet, guest)
-    ensure_true_updater(journey, guest)
-    fault = arm_fault(guest, "rollback")
-    job = fleet.hub.queue(machine, request_id("rollback"))["jobs"][0]
-    result = read_fault(fault)
-    expect(result.get("state") == "rolled_back",
-           f"a failed apply left {result.get('state')} instead of rolling back")
-    detail = str(result.get("detail") or "")
-    expect(detail.startswith("ditto failed") and "client/jRemote.app" in detail,
-           f"the job rolled back for {detail!r}, not for the withheld client bundle")
-    journey.observe("failed_job", {"job": job["id"], "detail": result.get("detail")})
-    journey.observe("rolled_back_state", result["state"])
-    after = guest.installed()
-    expect(after["client"] == before["client"] and after["menubar"] == before["menubar"],
-           f"rollback left {after['client']}/{after['menubar']}, not {before['client']}/{before['menubar']}")
-    journey.observe("restored_components", {"client": after["client"], "menubar": after["menubar"]})
-    journey.observe("refused_release", refused_release(fleet, guest, machine))
-    row = fleet.hub.row(machine)
-    expect(row["supervisor"] and row["state"] not in {"unknown", "unknown/offline"},
-           "the machine lost its pairing or its supervisor through the failure")
-    journey.observe("pairing_intact", {"state": row["state"], "supervisor": row["supervisor"]})
 
 
 def revocation(journey, fleet: Fleet, candidate: Candidate) -> None:
@@ -721,7 +699,7 @@ def lan_address(guest: Guest) -> str:
 
 JOURNEYS = {"fresh_install": fresh_install, "upgrade": upgrade, "fleet": fleet_journey,
             "offline_catchup": offline_catchup, "session_survival": session_survival,
-            "interruption": interruption, "rollback": rollback, "off_network": off_network,
+            "interruption": interruption, "off_network": off_network,
             "revocation": revocation}
 
 # The guests each journey drives; everyone else may be parked on a
@@ -732,7 +710,6 @@ CAST = {"fresh_install": lambda f: (f.hub, f.fresh),
         "offline_catchup": lambda f: (f.hub, f.leaves[-1] if f.leaves else None),
         "session_survival": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
         "interruption": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
-        "rollback": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
         "revocation": lambda f: (f.hub, f.leaves[-1] if f.leaves else None),
         "off_network": lambda f: (f.hub, f.leaves[-1] if f.leaves else None)}
 
@@ -1064,8 +1041,8 @@ def read_fault(process: subprocess.Popen, *, timeout: int = 1800) -> dict:
     if (not injected or not injected.get("job")
             or terminal.get("job") != injected["job"]
             or terminal.get("fault") != injected["injected"]
-            or terminal.get("state") != "rolled_back"):
-        raise AcceptanceFailure(f"the fault injector did not prove injection and recovery: {output[-600:]}")
+            or terminal.get("state") != "failed"):
+        raise AcceptanceFailure(f"the fault injector did not prove injection and a failed job: {output[-600:]}")
     return terminal
 
 

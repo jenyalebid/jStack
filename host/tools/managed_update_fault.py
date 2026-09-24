@@ -2,8 +2,8 @@
 
 Run before queueing a NEW job. Observes the real durable journal and launchd
 process; never rewrites update state or installs a fake backend. An interruption
-kills only this VM's updater after a bundle moves. A rollback fault temporarily
-withholds the staged client bundle while apply is paused. A freeze stops the
+kills only this VM's updater after a bundle moves. A withheld fault removes the
+staged client bundle while apply is paused, so the application fails. A freeze stops the
 updater with an app copy half written and leaves it stopped, for the host to
 cut the VM under it. Production is refused.
 """
@@ -46,7 +46,7 @@ def updater_process(config, root):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("fault", choices=["interruption", "rollback", "freeze"])
+    parser.add_argument("fault", choices=["interruption", "withheld", "freeze"])
     parser.add_argument("--timeout", type=int, default=600)
     args = parser.parse_args()
     root = Path.home() / ".local/state/jremote/updates"
@@ -69,11 +69,11 @@ def main():
                 time.sleep(.05)
                 continue
             if injected:
-                if job.get("state") in {"rolled_back", "current", "failed", "cancelled"}:
+                if job.get("state") in {"current", "failed", "cancelled"}:
                     print(json.dumps({"fault": args.fault, "job": job["id"],
                                       "state": job["state"], "detail": job.get("detail")}), flush=True)
-                    if job["state"] != "rolled_back":
-                        raise RuntimeError("fault did not produce rollback")
+                    if job["state"] != "failed":
+                        raise RuntimeError("fault did not fail the job")
                     return
             elif job.get("state") == "applying":
                 app = job["transaction"]["apps"]["menubar"]

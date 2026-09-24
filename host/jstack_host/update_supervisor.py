@@ -1,8 +1,10 @@
 """A restart-independent, journaled updater. No shell commands arrive by HTTP.
 
 Launchd runs this from a stable bootstrap copy, not from the host being
-replaced. A job is re-authorized before applying. Interrupted application is
-rolled back from the saved transaction before accepting another job.
+replaced. A job is re-authorized before applying. A job that cannot finish
+ends failed and restores nothing: going back to a release is switching the ref
+and building it, so the failure path reports which release is running rather
+than putting a different one there.
 """
 from __future__ import annotations
 
@@ -82,6 +84,30 @@ class Supervisor:
             finish(self.current)
         self.save(finalized=True)
 
+    def abandon(self, reason: str) -> None:
+        """End a job that cannot finish, without touching what runs.
+
+        Two things can be true when a job fails, and the machine's owner has
+        to be told which: either nothing was replaced and the release that was
+        running still is, or the swap had already happened and the machine is
+        now on the release that failed. Neither is reversed here — the backend
+        only starts what it stopped and clears its own copies.
+        """
+        outcome = {}
+        settle = getattr(self.backend, "settle", None)
+        read = getattr(self.backend, "applied", None)
+        # Read before settling: the swapped-out bundle is what says the swap
+        # happened, and settling is what removes it.
+        applied = bool(read(self.current)) if read else False
+        self.save(state="failed", applied=applied, detail=f"{reason}; " + (
+            f"this machine is running {self.current.get('release', 'the release that failed')}, "
+            "which did not pass" if applied else
+            "the release it was running is untouched and still running"))
+        if settle:
+            outcome = settle(self.current) or {}
+        if outcome.get("error"):
+            self.save(detail=self.current["detail"] + "; " + outcome["error"])
+
     def connection(self) -> tuple[str, str, str]:
         # Reread the adoption on EVERY request. Detach/re-attach invalidates an
         # outstanding job; an old token cached in a long-running daemon must
@@ -158,55 +184,22 @@ class Supervisor:
             os.replace(partial, target)
         return directory
 
-    def _root_recovered(self) -> bool:
-        """The Network watchdog's report that it already swapped the Hub back.
-
-        Its marker is written only after this journal went stale mid-apply, so
-        newer-than-journal means the restore addressed this exact stall. The
-        comparison mirrors the watchdog's own re-fire guard.
-        """
-        marker = self.root / "recovery.json"
-        try:
-            return marker.stat().st_mtime >= self.journal.stat().st_mtime
-        except OSError:
-            return False
-
     def tick(self) -> None:
         self.refresh_settings()
-        # An apply interrupted by reboot/crash never starts from scratch over
-        # a half-replaced installation. Recover its exact prior transaction.
-        if self.current.get("state") in {"applying", "verifying"} and self._root_recovered():
-            # The bundle swap already happened under root; rollback finishes
-            # the rest of the transaction (services, client, plugins) and
-            # skips the app whose backup the watchdog consumed.
-            self.backend.rollback(self.current)
-            self.save(state="rolled_back", detail="root watchdog restored the retained hub backup")
+        # An apply interrupted by reboot/crash never resumes over a
+        # half-replaced installation. What it did get done decides the state.
         if self.current.get("state") == "applying":
             recover = getattr(self.backend, "recovery_status", None)
             status = recover(self.current) if recover else "unknown"
             if status == "applied":
                 self.save(state="verifying", verify_started=time.time())
-            elif status in {"pending", "rolling_back"}:
-                return
-            elif status == "rolled_back":
-                self.save(state="rolled_back", detail="independent owner rollback completed")
             else:
-                self.backend.rollback(self.current)
-                self.save(state="rolled_back", detail="recovered interrupted application")
-        if self.current.get("state") == "verifying":
-            recover = getattr(self.backend, "recovery_status", None)
-            status = recover(self.current) if recover else "unknown"
-            if status == "rolling_back":
-                return
-            if status == "rolled_back":
-                self.backend.rollback(self.current)
-                self.save(state="rolled_back", detail="independent owner rollback completed")
+                self.abandon("an interrupted application could not be resumed")
         if (self.current.get("state") == "verifying" and
                 time.time() - self.current.get("verify_started", 0) > 180):
             # This runs before the network request: losing the parent (or
             # revocation) must not strand an unconfirmed candidate forever.
-            self.backend.rollback(self.current)
-            self.save(state="rolled_back", detail="verification deadline expired")
+            self.abandon("verification deadline expired")
         if self.current.get("state") == "current":
             self.finalize()
         # One small answer from GitHub, and only that: nothing here downloads
@@ -248,13 +241,11 @@ class Supervisor:
                     self.save(state="current")
                     self.finalize()
                 elif time.time() - self.current["verify_started"] > 180:
-                    self.backend.rollback(self.current)
-                    self.save(state="rolled_back", detail="hub did not confirm the updated host")
+                    self.abandon("hub did not confirm the updated host")
                 return
             if time.time() - self.current["verify_started"] < 120:
                 return
-            self.backend.rollback(self.current)
-            self.save(state="rolled_back", detail="updated components failed verification")
+            self.abandon("updated components failed verification")
             self.heartbeat()
             return
         try:
@@ -275,18 +266,15 @@ class Supervisor:
             self.save(state="verifying", verify_started=time.time())
             self.heartbeat()
         except httpx.HTTPError:
-            # Preserve downloadable progress across ordinary network loss.
-            # If the host disappeared during apply, restore before retrying.
+            # Preserve downloadable progress across ordinary network loss. An
+            # application that lost its authority mid-way is over, not retried.
             if self.current.get("state") == "applying":
-                self.backend.rollback(self.current)
-                self.save(state="rolled_back", detail="authority lost during application")
+                self.abandon("authority lost during application")
             raise
         except Exception as exc:
             if self.current.get("state") in {"applying", "verifying"}:
-                self.save(detail=str(exc))
                 print(f"update application failed: {exc}", flush=True)
-                self.backend.rollback(self.current)
-                self.save(state="rolled_back", detail=str(exc))
+                self.abandon(str(exc))
             else:
                 self.save(state="failed", detail=str(exc))
             raise

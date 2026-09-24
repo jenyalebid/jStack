@@ -606,6 +606,8 @@ struct UpdateMachine: Decodable {
         case "pending/offline": return "Update queued · offline"
         case "current": return "Up to date"
         case "available": return "Update available"
+        // No updater on this release produces this state — it restores nothing.
+        // A leaf still on an older one can, and the hub renders what it reports.
         case "rolled_back": return "Previous version restored"
         default: return state.replacingOccurrences(of: "_", with: " ").capitalized
         }

@@ -2,7 +2,9 @@
 
 Targets and service labels are pinned during local bootstrap. A release can
 supply signed artifacts, not paths, launchd labels, or commands to execute.
-The recovery journal records each original before anything is switched.
+A failed update restores nothing: it leaves what is running alone, says which
+release that is, and keeps no bundle against a later restore — going back is
+switching the ref and building it.
 """
 from __future__ import annotations
 
@@ -130,6 +132,31 @@ def running(path: Path) -> list[int]:
     return result
 
 
+#: What the updater itself parks beside a target bundle. `.incoming-` is the
+#: copy being written, `.previous-` the bundle the swap displaced, `.failed-`
+#: a rejected candidate an updater before #118 kept for diagnosis.
+LEAVINGS = (".incoming-", ".previous-", ".failed-")
+
+
+def sweep(target: Path, *, keep: Path | None = None) -> None:
+    """Remove the updater's own leavings beside `target`.
+
+    None of them is ever restored from, and each one costs something where it
+    lies: a `.incoming-` survives a kill mid-copy and then refuses that
+    release for good (#117), a `.previous-`/`.failed-` is a second copy of the
+    app in Finder and Launchpad (#118), and while launchd's relaunched
+    supervisor runs out of a parked bundle the machine keeps executing the
+    release it rejected (#119).
+    """
+    for entry in target.parent.glob(target.name + ".*"):
+        if entry == keep or not any(entry.name.startswith(target.name + mark) for mark in LEAVINGS):
+            continue
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            entry.unlink(missing_ok=True)
+
+
 def stop_app(path: Path) -> None:
     if not path.exists():
         return
@@ -141,9 +168,9 @@ def stop_app(path: Path) -> None:
             pass
     _, alive = psutil.wait_procs(processes, timeout=10)
     if alive:
-        # Do not kill through an app refusing to quit: keep its existing
-        # bundle and report the failed transaction for recovery.
-        raise releases.ReleaseError("client did not quit; installation left recoverable")
+        # Do not kill through an app refusing to quit: its bundle is not
+        # replaced, and the job fails with the release it had still running.
+        raise releases.ReleaseError("client did not quit; nothing was replaced")
 
 
 class MacBackend:
@@ -242,10 +269,49 @@ class MacBackend:
         if str(bundle_info(path)["CFBundleVersion"]) != component["version"]:
             raise releases.ReleaseError(f"{kind} bundle version differs from release")
 
+    def _prune_releases(self, keep: Path) -> None:
+        """A machine holds one release tree: the one its code is loaded from.
+
+        Every generation staged its own `releases/<id>/stage-*` — a full source
+        copy plus its pip dependencies — and nothing removed any of them, so
+        the trees accumulated and every one of them stayed on the host's import
+        path (#129). By the time a new job stages, the only tree that can still
+        be in use is the one the loaded runtime imports from.
+        """
+        root = self.root / "releases"
+        if not root.is_dir():
+            return
+        live = [Path(path).resolve() for path in self.config.get("runtime_imports") or []]
+        # `runtime_imports` advances only once the hub confirms a job, so after
+        # a failed one the installed host service is still running out of a
+        # tree nothing here names. Its own plist is what says which.
+        for kind in ("host", "menubar"):
+            plist = self.config.get(kind + "_plist")
+            try:
+                job = plistlib.loads(Path(plist).read_bytes()) if plist else {}
+            except (OSError, ValueError, plistlib.InvalidFileException):
+                continue
+            entries = job.get("EnvironmentVariables", {}).get("PYTHONPATH", "")
+            live += [Path(path).resolve() for path in entries.split(os.pathsep) if path]
+        # The marketplace is registered as a directory inside a stage, and the
+        # agent CLIs re-read it on every run. Deleting the tree under a live
+        # registration is a worse outcome than keeping one superseded release.
+        try:
+            from . import update_plugins
+            live += [Path(provider["root"]).resolve() for provider in update_plugins.discover()]
+        except (OSError, ValueError, releases.ReleaseError):
+            return
+        for entry in root.iterdir():
+            resolved = entry.resolve()
+            if resolved == keep.resolve() or any(path.is_relative_to(resolved) for path in live):
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+
     def stage(self, manifest: dict, directory: Path) -> dict:
         # Unique staging attempts preserve a failed attempt for diagnostics;
         # they never unpack over the running release or an earlier stage.
         import tempfile
+        self._prune_releases(directory)
         stage = Path(tempfile.mkdtemp(prefix="stage-", dir=directory))
         stack = stage / "stack"
         stack.mkdir()
@@ -290,7 +356,7 @@ class MacBackend:
                           "was_running": bool(target.exists() and running(target)),
                           "existed": target.exists()}
             if Path(apps[kind]["backup"]).exists():
-                raise releases.ReleaseError("prior recovery bundle must be retained; choose a new release ID")
+                raise releases.ReleaseError("a bundle already stands where this swap displaces the running one")
         plists = {}
         for kind in ("host", "menubar"):
             target = Path(self.config[kind + "_plist"])
@@ -302,8 +368,11 @@ class MacBackend:
             if kind == "host":
                 from .install_host import upgraded_environment
                 environment = upgraded_environment(job.get("EnvironmentVariables", {}))
-                environment["PYTHONPATH"] = pythonpath + (
-                    os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else "")
+                # This release's own import roots, not this release's roots in
+                # front of the last one's. Extending the inherited value chained
+                # every superseded generation behind the current one, and every
+                # process the host spawned inherited the whole chain (#129).
+                environment["PYTHONPATH"] = pythonpath
                 updated["EnvironmentVariables"] = environment
                 # Standalone starts in its package directory; an embedding
                 # application's own working directory must stay unchanged.
@@ -364,14 +433,18 @@ class MacBackend:
             print(f"update: replacing {kind}", flush=True)
             target, backup = Path(app["target"]), Path(app["backup"])
             stop_app(target)
-            if target.exists():
-                os.replace(target, backup)
+            # A copy an earlier job left behind is never resumed, and named per
+            # release it made that release permanently un-installable here
+            # (#117). Clear the ground on entry, then name this one per job.
+            sweep(target)
             # ditto stages on the destination volume, so the final rename is
             # atomic even when /Applications and state live on different disks.
-            incoming = target.with_name(target.name + ".incoming-" + transaction["release"])
+            incoming = target.with_name(target.name + ".incoming-" + job["id"])
             command(["/usr/bin/ditto", app["source"], str(incoming)])
             self._check_app(incoming, transaction["manifest"]["components"][kind], kind,
                             source_build=built_here)
+            if target.exists():
+                os.replace(target, backup)
             os.replace(incoming, target)
         self._unload("host")
         for plist in transaction["plists"].values():
@@ -385,62 +458,61 @@ class MacBackend:
         if client and client["was_running"]:
             command(["/usr/bin/open", "-a", client["target"]])
 
-    def rollback(self, job: dict):
-        transaction = job["transaction"]
-        from . import update_plugins
-        plugin_error = None
-        try:
-            update_plugins.rollback(transaction["providers"], Path(transaction["stack"]))
-        except Exception as exc:
-            # Recover the host/apps even if a provider CLI is unavailable.
-            # Keep the transaction non-terminal until all recovery succeeds.
-            plugin_error = exc
-        self._unload("menubar")
-        self._unload("host")
-        for kind, app in transaction["apps"].items():
+    def applied(self, job: dict) -> bool:
+        """Did the swap already happen when this job failed?
+
+        Read from the transaction's own files, for the reason
+        `AppBackend.recovery_status` reads them: a backup exists only because
+        `apply` renamed the running bundle out of the way, and the rename that
+        puts the new one in place follows it immediately. A first install has
+        no backup to find and answers with the bundle itself.
+        """
+        answer = False
+        for app in job.get("transaction", {}).get("apps", {}).values():
             target, backup = Path(app["target"]), Path(app["backup"])
-            if backup.exists():
-                stop_app(target)
-                if target.exists():
-                    failed = target.with_name(target.name + ".failed-" + job["id"])
-                    if failed.exists():
-                        raise releases.ReleaseError("recovery destination already exists")
-                    os.replace(target, failed)
-                os.replace(backup, target)
-            elif not app["existed"] and target.exists():
-                stop_app(target)
-                os.replace(target, target.with_name(target.name + ".failed-" + job["id"]))
-        for plist in transaction["plists"].values():
-            atomic_bytes(Path(plist["target"]), Path(plist["original"]).read_bytes())
-        launcher = transaction.get("launcher")
-        if launcher:
-            target = Path(launcher["target"])
-            if launcher["symlink"]:
-                import uuid
-                temporary = target.with_name(target.name + ".restore-" + uuid.uuid4().hex)
-                temporary.symlink_to(launcher["symlink"])
-                os.replace(temporary, target)
-            else:
-                atomic_bytes(target, Path(launcher["original"]).read_bytes(), mode=launcher["mode"])
-        self._load("host")
-        self._load("menubar")
-        client = transaction["apps"].get("client")
-        if client and client["was_running"]:
-            command(["/usr/bin/open", "-a", client["target"]])
-        if plugin_error:
-            raise releases.ReleaseError(f"host/apps restored; plugin recovery pending: {plugin_error}") from plugin_error
+            answer = answer or backup.exists() or (not app.get("existed", True) and target.exists())
+        return answer
+
+    def settle(self, job: dict) -> dict:
+        """Close a failed transaction: nothing restored, nothing retained.
+
+        There is no rollback to run — a release is taken back by switching the
+        ref and building it — so what is owed here is a machine that runs and
+        an /Applications with no bundle of this updater's in it. The services
+        this transaction stopped are started again from whatever is installed
+        now, which `applied` has already read off disk.
+        """
+        from .install_host import is_loaded
+        transaction = job.get("transaction", {})
+        problems = []
+        for kind in ("host", "menubar"):
+            label = self.config.get(kind + "_label")
+            try:
+                if label and not is_loaded(label):
+                    self._load(kind)
+            except (releases.ReleaseError, OSError, subprocess.SubprocessError) as exc:
+                problems.append(f"{kind} service did not start: {exc}")
+        for app in transaction.get("apps", {}).values():
+            sweep(Path(app["target"]))
+        client = transaction.get("apps", {}).get("client")
+        if client and client["was_running"] and Path(client["target"]).exists():
+            try:
+                command(["/usr/bin/open", "-a", client["target"]])
+            except (releases.ReleaseError, OSError, subprocess.SubprocessError) as exc:
+                problems.append(f"the client did not reopen: {exc}")
+        return {"error": "; ".join(problems)}
 
     def finalize(self, job: dict):
         """Discard temporary app copies after the hub confirms success."""
         for app in job["transaction"]["apps"].values():
             backup = Path(app["backup"])
-            if not backup.exists():
-                continue
             target = Path(app["target"])
-            if (backup.parent != target.parent or
-                    not backup.name.startswith(target.name + ".previous-")):
-                raise releases.ReleaseError("refusing to remove an unexpected recovery bundle")
-            shutil.rmtree(backup)
+            if backup.exists():
+                if (backup.parent != target.parent or
+                        not backup.name.startswith(target.name + ".previous-")):
+                    raise releases.ReleaseError("refusing to remove an unexpected recovery bundle")
+                shutil.rmtree(backup)
+            sweep(target)
 
     def _host_required(self, job: dict) -> bool:
         return True

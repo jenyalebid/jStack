@@ -3,7 +3,7 @@
 After the Hub swaps its own bundle, the updater process's sys.path strings
 resolve into the NEW bundle. Any first-time import after the swap would mix
 new modules into the old process mid-transaction. Everything the supervisor
-can touch during verify, observe, rollback and finalize must therefore be in
+can touch during verify, observe, settle and finalize must therefore be in
 sys.modules before any byte of the bundle is replaced. The import-freeze test
 holds this list honest: it runs those paths under a hook that fails on any
 module not already loaded.
