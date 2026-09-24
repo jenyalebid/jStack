@@ -12,19 +12,45 @@ from jstack_host.update_macos import MacBackend
 def manifest():
     components = {name: {"file": name + ".zip", "version": "18", "bytes": 1,
                          "sha256": "a" * 64} for name in releases.COMPONENTS}
-    artifacts = hashlib.sha256(releases.canonical(components)).hexdigest()
     return {"schema": releases.SCHEMA, "release": "18-source", "components": components,
             "sources": {"stack": "a" * 40, "client": "b" * 40},
             "compatibility": {"protocol": 1, "rollback": True, "platform": "macos",
                               "architecture": "arm64", "minimum_os": "26.0"},
-            "receipts": {name: {"result": "passed", "skipped": 0, "artifacts": artifacts,
+            "receipts": {name: {"result": "passed", "skipped": 0, "source": "a" * 40,
                                 "evidence_sha256": "b" * 64} for name in releases.RECEIPTS}}
 
 
-def test_receipts_bind_the_exact_artifact_set():
+def test_receipts_bind_the_exact_commit():
+    """Not the artifact bytes: every Mac builds the Hub itself, so two honest
+    installs of one commit never share a digest and binding on bytes would
+    refuse a fleet its own receipts. The commit still has to match."""
     value = manifest()
     releases.validate(value)
     value["components"]["menubar"]["sha256"] = "c" * 64
+    releases.validate(value)
+    value["sources"]["stack"] = "f" * 40
+    with pytest.raises(ValueError, match="receipt"):
+        releases.validate(value)
+
+
+def test_receipts_written_against_artifact_bytes_still_read():
+    """Every release published before the build model bound its receipts to
+    the artifact digest, not the commit. The hub's first build inherits its
+    client from one of those (build_source.inherited), and a Mac behind by
+    months is judged by this code: the older binding is read on its own terms,
+    and a receipt of either shape that names the wrong thing is refused."""
+    import hashlib
+    value = manifest()
+    digest = hashlib.sha256(releases.canonical(value["components"])).hexdigest()
+    for receipt in value["receipts"].values():
+        del receipt["source"]
+        receipt["artifacts"] = digest
+    releases.validate(value)
+    value["components"]["menubar"]["sha256"] = "c" * 64
+    with pytest.raises(ValueError, match="receipt"):
+        releases.validate(value)
+    value["components"]["menubar"]["sha256"] = "a" * 64
+    value["receipts"]["fleet"]["source"] = "f" * 40
     with pytest.raises(ValueError, match="receipt"):
         releases.validate(value)
 

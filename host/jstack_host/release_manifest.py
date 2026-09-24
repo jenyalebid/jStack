@@ -86,8 +86,8 @@ def validate(manifest: dict, *, promoted: bool = True) -> dict:
     if built and manifest.get("receipts"):
         raise ReleaseError("a source build cannot carry acceptance receipts")
     if promoted and not built:
-        # Every receipt the release carries, against these exact artifacts —
-        # and not a demand for one particular set of journey NAMES. This code
+        # Every receipt the release carries, against this exact commit — and
+        # not a demand for one particular set of journey NAMES. This code
         # also runs on the machine taking the update, where it is years older
         # than the release it is judging: an updater that insisted on the names
         # it shipped with refused every release that renamed or retired a
@@ -95,13 +95,22 @@ def validate(manifest: dict, *, promoted: bool = True) -> dict:
         # forever (#123). Which journeys a candidate must survive is decided
         # where the names are current — `acceptance.gate`, at promotion.
         receipts = manifest.get("receipts", {})
+        source = manifest["sources"]["stack"]
+        # A receipt written before the build model bound the artifact bytes,
+        # not the commit, and every release published under the publisher's
+        # key carries that shape. A hub's first build carries its client
+        # forward from exactly one of those, and a Mac years behind is judged
+        # by this code too — so the older binding is still read, on its own
+        # terms: the digest of the components the receipt was written against.
         artifact_set = hashlib.sha256(canonical(components)).hexdigest()
         if not isinstance(receipts, dict) or not receipts:
             raise ReleaseError("a promoted release carries no acceptance evidence")
         for name, receipt in sorted(receipts.items()):
-            if (not isinstance(receipt, dict) or receipt.get("result") != "passed"
-                    or receipt.get("skipped") != 0
-                    or receipt.get("artifacts") != artifact_set
+            if not isinstance(receipt, dict):
+                raise ReleaseError(f"missing or mismatched acceptance receipt: {name}")
+            bound = (receipt.get("source") == source if "source" in receipt
+                     else receipt.get("artifacts") == artifact_set)
+            if (receipt.get("result") != "passed" or receipt.get("skipped") != 0 or not bound
                     or not HEX.fullmatch(str(receipt.get("evidence_sha256", "")))):
                 raise ReleaseError(f"missing or mismatched acceptance receipt: {name}")
     return manifest

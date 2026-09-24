@@ -178,20 +178,14 @@ def test_a_managed_mac_is_refused_cleanly_rather_than_raising_inside_the_build(r
     assert not (root / "build.json").exists()
 
 
-def test_a_hub_with_leaves_shows_why_there_is_no_button_instead_of_offering_one(rig, monkeypatch):
-    """The refusal comes from `build_source`, so the window and the terminal
-    read one rule. See #144 for why it exists."""
+def test_a_hub_with_leaves_is_offered_the_button_like_any_other(rig):
+    """#144: the leaves learn this hub's key on their heartbeat, so adopting
+    machines no longer holds the build, in the window or at the terminal."""
     root, console, _, grid = rig
     grid.upsert_host("leaf-one", "Office Mac", "10.66.0.9")
     grid.bind_host_device("leaf-one", "device-1")
     body = console.get(SOURCE).json()
-    assert body["can_build"] is False and "Office Mac" in body["blocked"]
-    assert "#144" in body["blocked"]
-    refused = console.post(BUILD)
-    assert refused.status_code == 409 and "#144" in refused.json()["detail"]
-    # The ref is still the hub's to choose; only the build is held.
-    assert console.post(REF, json={"ref": "dev"}).status_code == 200
-    assert not (root / "build.json").exists()
+    assert body["can_build"] is True and body["blocked"] == ""
 
 
 def test_a_host_with_no_updater_configured_offers_nothing_and_refuses_both(rig, monkeypatch):

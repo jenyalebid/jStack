@@ -9,6 +9,8 @@ than putting a different one there.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import fcntl
 import json
 import os
@@ -147,7 +149,40 @@ class Supervisor:
                                     json=body, headers={"Authorization": "Bearer " + token})
         response.raise_for_status()
         answer = response.json()
+        if prefix.startswith("/managed"):
+            self.pin_parent_key(answer.get("public_key"))
         return answer
+
+    def pin_parent_key(self, key: object) -> None:
+        """A managed machine's trust root is its parent, not a publisher (#144).
+
+        The key this machine verifies jobs against came from the bundle that
+        installed it. The parent that adopted it signs with its own key, so
+        the first build on the parent made every job unverifiable here — and
+        the key that would fix it only arrived inside the update this machine
+        refused. It arrives here instead, on the connection the parent
+        authenticates and the job itself comes down: whatever can hand this
+        machine a job can already hand it the key that job is signed with.
+        Only a parent's answer reaches this; the local heartbeat never does.
+        """
+        if not isinstance(key, str) or not key or key == self.config.get("public_key"):
+            return
+        try:
+            if len(base64.b64decode(key, validate=True)) != 32:
+                return
+        except (ValueError, binascii.Error):
+            return
+        path = self.root / "config.json"
+        try:
+            stored = json.loads(path.read_text())
+            if not isinstance(stored, dict):
+                stored = dict(self.config)
+        except (OSError, ValueError):
+            stored = dict(self.config)
+        stored["public_key"] = key
+        atomic_json(path, stored)
+        self.config["public_key"] = key
+        print("the parent hub signs with a new key; this machine now trusts it", flush=True)
 
     def authorize(self) -> None:
         response = self.heartbeat()

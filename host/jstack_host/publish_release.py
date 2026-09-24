@@ -232,7 +232,7 @@ def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -
     argv = [*runner, "--candidate", str(candidate), "--receipts", str(receipts)]
     print("Running acceptance: " + " ".join(argv), flush=True)
     finished = subprocess.run(argv, timeout=config.get("acceptance_timeout", 6 * 3600))
-    state = acceptance.inspect(receipts, manifest)
+    state = acceptance.inspect(receipts, build_of(manifest))
     for name, entry in state.items():
         print(f"  {name}: {entry['state']}" + (f" — {entry['detail']}" if entry["detail"] else ""),
               flush=True)
@@ -241,12 +241,17 @@ def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -
     return state
 
 
+def build_of(manifest: dict) -> dict:
+    """The commit a receipt binds to, named the way `acceptance` names it."""
+    return {"build": manifest["release"], "sha": manifest["sources"]["stack"]}
+
+
 def promote(candidate: Path, receipts_dir: Path, feed: Path, private_key: bytes,
             *, local_components: str | None = None) -> dict:
     manifest = candidate_manifest(candidate, private_key)
     # One door. Every journey is a genuine pass over these exact artifacts, or
     # this raises and names the ones that are not.
-    manifest["receipts"] = acceptance.gate(receipts_dir, manifest)
+    manifest["receipts"] = acceptance.gate(receipts_dir, build_of(manifest))
     envelope = releases.sign(manifest, private_key)
     for item in manifest["components"].values():
         releases.check_artifact(candidate / item["file"], item)
@@ -451,7 +456,8 @@ def main():
         state = qualify(config, args.candidate, args.receipts, private)
         print(json.dumps({name: entry["state"] for name, entry in state.items()}, indent=2))
     elif args.action == "acceptance":
-        state = acceptance.inspect(args.receipts, candidate_manifest(args.candidate, private))
+        state = acceptance.inspect(
+            args.receipts, build_of(candidate_manifest(args.candidate, private)))
         print(json.dumps({name: {"state": entry["state"], "detail": entry["detail"]}
                           for name, entry in state.items()}, indent=2))
     elif args.action == "deploy":

@@ -513,3 +513,20 @@ def test_a_final_release_is_still_cuttable():
     fleet is running, or that fleet can never inherit this change."""
     from jstack_host import release_channel
     assert callable(release_channel.publish)
+
+
+def test_homebrew_is_found_where_it_lives_not_only_on_path():
+    """A non-login shell has PATH=/usr/bin:/bin:/usr/sbin:/sbin.
+
+    `command -v brew` there answers no on a Mac that has Homebrew, and the
+    installer told its owner to go install what was already sitting in
+    /opt/homebrew. The same stripped PATH hides everything Homebrew installed,
+    so resolving brew has to put its bin back on PATH as well.
+    """
+    assert "/opt/homebrew/bin/brew" in CODE and "/usr/local/bin/brew" in CODE
+    assert '[ -n "$BREW" ] && PATH="$("$BREW" --prefix)/bin:$PATH"' in CODE
+    # Nothing may run brew by bare name any more: the name is what was missing.
+    assert "command -v brew" not in CODE.split("BREW=\"$(command -v brew", 1)[1]
+    brew = CODE.index('BREW=""')
+    for caller in ('"$BREW" install wireguard-go wireguard-tools', '"$BREW" install tmux'):
+        assert CODE.index(caller) > brew, f"{caller} runs before Homebrew is resolved"

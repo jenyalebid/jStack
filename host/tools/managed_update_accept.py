@@ -1,9 +1,14 @@
 """One unattended acceptance run over disposable Macs, one receipt per journey.
 
-Every journey here drives the shipped code: the real installer, the real
-supervisor under launchd, the real authenticated routes, real bundle
-replacement and the real fault injector. Nothing is simulated, and nothing is
-asserted about a machine this run did not ask.
+The subject is a commit, not a package. Every Mac here fetches the ref under
+test from the public repo and builds the Hub itself, which is what install and
+update now mean — so the runner hands a guest nothing but the closed-source
+Mac app, and then checks that what the machine ends up running is that commit.
+
+Every journey drives the shipped code: the real installer, the real supervisor
+under launchd, the real authenticated routes, real bundle replacement and the
+real fault injector. Nothing is simulated, and nothing is asserted about a
+machine this run did not ask.
 
 The runner cannot mark a journey passed. It checks an expectation and then
 records what it observed; `jstack_host.acceptance` writes the receipt from
@@ -19,23 +24,29 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import http.server
 import json
 import re
 import shlex
 import shutil
 import subprocess
 import sys
-import threading
+import tempfile
 import time
 import uuid
 from pathlib import Path
+
+from jstack_host.acceptance import HarnessFault
 
 GUEST_HOME = "/Users/admin"
 GUEST_TOOL = GUEST_HOME + "/update-vm.py"
 GUEST_FAULT = GUEST_HOME + "/update-fault.py"
 GUEST_PYTHON = "/Applications/jStack Hub.app/Contents/MacOS/JStackPython"
+GUEST_HOST_CLI = GUEST_HOME + "/.local/bin/jstack-host"
 GUEST_TMUX = "/Applications/jStack Hub.app/Contents/MacOS/tmux"
+# The guest-side halves of this runner, shipped beside it. A reset guest has
+# neither, so the runner lays them down itself before any journey uses one.
+GUEST_TOOLS = {GUEST_TOOL: Path(__file__).resolve().parent / "managed_update_vm.py",
+               GUEST_FAULT: Path(__file__).resolve().parent / "managed_update_fault.py"}
 #: How long a spawned session gets to answer on its own before the runner looks
 #: at its pane. Releases before ca7cf89 left the bypass warning on screen (the
 #: watcher ran an unquoted tmux path), so a session on such a PRIOR never
@@ -44,10 +55,35 @@ GUEST_TMUX = "/Applications/jStack Hub.app/Contents/MacOS/tmux"
 NUDGE_AFTER = 30
 API_BOOT = 180
 SETTLE = 8
+#: How long a freshly adopted leaf is given to take the hub's key on its
+#: heartbeat before it is judged unable to.
+KEY_PATIENCE = 30
+#: The key a host's updater verifies every job against, or nothing where no
+#: host is installed. Asked the same way of a hub and of a leaf.
+TRUST_KEY = ("f=$HOME/.local/state/jremote/updates/config.json; [ ! -f \"$f\" ] || "
+             + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
+                 "import json,sys; print(json.load(open(sys.argv[1])).get('public_key',''))")
+             + " \"$f\"")
+#: The credential a managed Mac presents to its hub, as `attach` recorded it.
+#: Empty on a Mac that has no parent.
+DEVICE_ID = ("f=$HOME/.local/state/jremote/parent.json; [ ! -f \"$f\" ] || "
+             + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
+                 "import json,sys; print(json.load(open(sys.argv[1])).get('device_id',''))")
+             + " \"$f\"")
+#: The build a hub last offered its fleet, as the hub's own feed states it:
+#: which build, and which client it carries. Read after `updates build`, whose
+#: answer names the build but not its parts.
+SERVED = ("f=$HOME/.local/state/jremote/updates/config.json; "
+          + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
+              "import json,sys; c=json.load(open(sys.argv[1])); "
+              "m=json.load(open(c['feed_dir'] + '/latest.json'))['manifest']; "
+              "print(json.dumps({'build': m['release'], "
+              "'client': str(m['components']['client']['version'])}))")
+          + " \"$f\"")
 
 
 class AcceptanceFailure(RuntimeError):
-    """An expectation the candidate did not meet. It ends one journey, not the run."""
+    """An expectation the commit did not meet. It ends one journey, not the run."""
 
 
 def expect(condition, message: str) -> None:
@@ -55,29 +91,69 @@ def expect(condition, message: str) -> None:
         raise AcceptanceFailure(message)
 
 
-class Candidate:
-    """The exact bytes under test, read from the signed candidate only."""
+def git(checkout: Path, *argv: str, timeout: int = 300) -> str:
+    done = subprocess.run(["git", "-C", str(checkout), *argv],
+                          capture_output=True, text=True, timeout=timeout)
+    if done.returncode:
+        raise AcceptanceFailure("git " + " ".join(argv) + ": " + done.stderr.strip()[-400:])
+    return done.stdout
 
-    def __init__(self, directory: Path, public_key: str):
-        from jstack_host import acceptance, release_manifest
-        self.dir = Path(directory)
-        self.public_key = public_key
-        envelope = json.loads((self.dir / "candidate.json").read_text())
-        self.manifest = release_manifest.verify(envelope, public_key, promoted=False)
-        for item in self.manifest["components"].values():
-            release_manifest.check_artifact(self.dir / item["file"], item)
-        self.release = self.manifest["release"]
-        self.artifacts = acceptance.artifact_set(self.manifest)
 
-    def version(self, component: str) -> str:
-        return str(self.manifest["components"][component]["version"])
+class Build:
+    """The commit under test: a ref, the sha it resolves to, and what that
+    commit declares it ships.
 
-    def file(self, component: str) -> Path:
-        return self.dir / self.manifest["components"][component]["file"]
+    Nothing here is signed and nothing but the Mac app is carried to a guest.
+    Each machine clones this ref and builds the Hub with its own key, so two
+    honest installs of one commit differ byte for byte and the only thing they
+    can be held to is the commit itself.
+    """
+
+    def __init__(self, repo_url: str, ref: str, *, checkout: Path, client: Path | None = None):
+        self.repo_url = repo_url.rstrip("/")
+        self.ref = ref
+        self.checkout = Path(checkout).expanduser()
+        self.client = Path(client).expanduser() if client else None
+        listing = subprocess.run(["git", "ls-remote", self.repo_url, "refs/heads/" + ref],
+                                 capture_output=True, text=True, timeout=120)
+        head = listing.stdout.split("\t", 1)[0].strip()
+        if listing.returncode or not re.fullmatch(r"[0-9a-f]{40}", head):
+            raise AcceptanceFailure(
+                f"{self.repo_url} has no branch {ref}: {(listing.stderr or listing.stdout)[-300:]}")
+        self.sha = head
+        # The version the guests will install is the one inside the commit,
+        # never the one in this checkout's working tree.
+        git(self.checkout, "fetch", "--quiet", self.repo_url, ref)
+        declared = git(self.checkout, "show",
+                       self.sha + ":plugins/jstack/.claude-plugin/plugin.json")
+        self.stack_version = str(json.loads(declared)["version"])
+        self.client_version = bundle_build(self.client) if self.client else ""
 
     @property
-    def stack_sha(self) -> str:
-        return self.manifest["sources"]["stack"]
+    def slug(self) -> str:
+        return f"{self.ref}@{self.sha[:8]}"
+
+    @property
+    def raw_url(self) -> str:
+        """Where the README tells a Mac to fetch the installer from."""
+        owner = self.repo_url.removesuffix(".git").split("github.com/", 1)[-1]
+        return f"https://raw.githubusercontent.com/{owner}/{self.sha}/install.sh"
+
+    def version(self, component: str) -> str:
+        if component == "stack":
+            return self.stack_version
+        if component == "client":
+            return self.client_version
+        raise AcceptanceFailure(f"a build does not declare a {component} version up front")
+
+
+def bundle_build(app: Path) -> str:
+    """CFBundleVersion of an app bundle or of the zip holding one."""
+    if app.is_dir():
+        plist = app / "Contents/Info.plist"
+        return subprocess.run(["/usr/bin/defaults", "read", str(plist), "CFBundleVersion"],
+                              capture_output=True, text=True, timeout=60).stdout.strip()
+    raise AcceptanceFailure(f"--client must name an app bundle: {app}")
 
 
 class Guest:
@@ -98,6 +174,14 @@ class Guest:
 
     def copy(self, source: Path, destination: str) -> None:
         self.vm("cp", self.name, str(source), destination)
+
+    def absent(self, paths: list[str]) -> list[str]:
+        """Which of these guest paths do not exist, asked in one round trip."""
+        if not paths:
+            return []
+        listed = " ".join(shlex.quote(path) for path in paths)
+        answer = self.sh(f"for p in {listed}; do [ -e \"$p\" ] || printf '%s\\n' \"$p\"; done")
+        return [line for line in answer.splitlines() if line in paths]
 
     def start(self) -> str:
         """GUI, because the menu bar and the client app are part of the proof."""
@@ -129,6 +213,11 @@ class Guest:
 
     def stop(self) -> None:
         self.vm("stop", self.name, timeout=300)
+
+    def reset(self) -> None:
+        """Back to the base image: deleted and re-cloned, nothing of the last
+        run left on it. `vm.sh reset` refuses the base image itself."""
+        self.vm("reset", self.name, timeout=600)
 
     def tool_call(self, *argv: str, timeout: int = 600) -> dict:
         command = " ".join(shlex.quote(part) for part in [GUEST_PYTHON, GUEST_TOOL, *argv])
@@ -171,7 +260,7 @@ class Guest:
     def installed(self) -> dict:
         """What is actually running here, as the product's own observer sees it."""
         observed = self.probe()["observed"]
-        return {"release": observed.get("release"),
+        return {"build": observed.get("release"),
                 "sha": observed.get("host_source", {}).get("sha"),
                 "dirty": observed.get("host_source", {}).get("dirty"),
                 "client": observed["components"]["client"]["installed"],
@@ -211,6 +300,14 @@ class Guest:
         raise AcceptanceFailure(f"{machine} never reached {state}; last was {last.get('state')}")
 
 
+#: The subnet the lab's guests share. `vm.sh` puts a guest there only when it
+#: boots it with softnet, so a guest that was already running when the runner
+#: arrived can be on the host's default NAT instead — reachable from this Mac,
+#: invisible to every other guest, and the hub's own address is what the adopt
+#: script looks for. Overridden per plan with `lab_network`.
+LAB_NETWORK = "192.168.2."
+
+
 class Fleet:
     """The disposable machines this run may touch, and nothing else."""
 
@@ -220,11 +317,31 @@ class Fleet:
         self.hub = Guest(plan["hub"], tool, run=run)
         self.leaves = [Guest(name, tool, run=run) for name in plan.get("leaves", [])]
         self.fresh = Guest(plan["fresh"], tool, run=run) if plan.get("fresh") else None
-        self.prior = Path(plan["prior_candidate"]).expanduser() if plan.get("prior_candidate") else None
         self.off_lan = plan.get("off_lan")
         self.slots = int(plan.get("vm_slots") or 0)
+        self.fixtures = list(plan.get("fixtures") or [])
+        self.provision = plan.get("provision")
+        self.network = plan.get("lab_network") or LAB_NETWORK
+        self._run = run
         self._ids: dict[str, str] = {}
-        self.candidate: Candidate | None = None
+        self.build: Build | None = None
+        self.prior: Build | None = None
+        #: What the hub's own build of a ref came out as. A build id folds in
+        #: the client and the dependency set the *building* machine holds, so
+        #: the hub's id for a commit and a fresh Mac's id for the same commit
+        #: are not required to match; the commit is what both are held to.
+        self.offered: dict[str, str] = {}
+        #: The client each offered build carries, by ref. jRemote is closed
+        #: source and built elsewhere, so a hub's build carries forward the
+        #: client its feed already holds (`build_source.inherited`): a Mac the
+        #: hub serves lands on the hub's client, whatever this run carried in
+        #: for the Macs it installs by hand.
+        self.served: dict[str, str] = {}
+        #: Guests this run installed a host on by hand, by name. The fresh
+        #: guest is reset before its first cast of a run and kept afterwards:
+        #: the Mac fresh_install adopted is a fleet member for the rest of the
+        #: run, and Update All is expected to reach it.
+        self.installed: set[str] = set()
 
     def guests(self) -> list[Guest]:
         return [self.hub, *self.leaves, *([self.fresh] if self.fresh else [])]
@@ -249,66 +366,179 @@ class Fleet:
                 if guest.name not in names:
                     guest.stop()
         for guest in cast:
+            # The fresh guest is pristine by definition, not by discipline: a
+            # run that died after installing on it would otherwise hand the
+            # next one a Mac that already has a Hub, and the pristine check in
+            # install_build would fail a journey the product never reached.
+            # Once this run has installed on it, it stays: a reset here would
+            # turn the Mac the hub adopted into a row no Mac ever answers for.
+            if guest is self.fresh and guest.name not in self.installed:
+                guest.reset()
             guest.start()
+        self.prepare(*cast)
+        for guest in cast:
+            reach(self, guest)
+
+    def prepare(self, *guests: Guest) -> None:
+        """Put back what `vm.sh reset` takes away before a journey leans on it.
+
+        A reset clones a pristine Mac, which carries none of the lab's
+        fixtures. The runner's own guest tools it copies every time. The
+        plan's `fixtures` (absolute guest paths — the adopt script, the lab's
+        env agent) are re-laid by its `provision` host command, `{guest}`
+        standing for the guest's name, when any is absent. One still absent
+        after that is a harness fault: the journey never reached the product.
+        """
+        for guest in guests:
+            try:
+                for remote, local in GUEST_TOOLS.items():
+                    guest.copy(local, remote)
+                missing = guest.absent(self.fixtures)
+                if missing and self.provision:
+                    command = [part.replace("{guest}", guest.name)
+                               for part in shlex.split(self.provision)]
+                    done = self._run(command, capture_output=True, text=True, timeout=1800)
+                    if done.returncode:
+                        raise HarnessFault(f"{guest.name}: provisioning failed: "
+                                           + (done.stderr or done.stdout).strip()[-800:])
+                    missing = guest.absent(self.fixtures)
+            except AcceptanceFailure as exc:
+                raise HarnessFault(f"{guest.name}: could not stage fixtures: {exc}") from exc
+            if missing:
+                raise HarnessFault(f"fixture missing: {guest.name}:{missing[0]}")
+            self.on_lab_network(guest)
+            lab_guest(guest)
+
+    def on_lab_network(self, guest: Guest) -> None:
+        """Every guest on one subnet, asked before anything leans on it.
+
+        A guest booted outside the lab keeps the default NAT, where no other
+        guest can reach it. What that costs is not an error: the adopt script
+        resolves the hub, connects to an address nothing answers on, and sits
+        there — this run spent seven minutes in a silent ssh before anyone
+        asked the one question that names it.
+        """
+        try:
+            addresses = guest.sh("/sbin/ifconfig | awk '/inet /{print $2}'").split()
+        except AcceptanceFailure as exc:
+            raise HarnessFault(f"{guest.name}: could not read its addresses: {exc}") from exc
+        if not any(address.startswith(self.network) for address in addresses):
+            raise HarnessFault(
+                f"{guest.name} is not on the lab network {self.network}0/24 — it holds "
+                + (", ".join(a for a in addresses if a != "127.0.0.1") or "no address")
+                + ". It was booted outside the lab: stop it and let this runner boot it.")
 
     def machine(self, guest: Guest) -> str:
         if guest.name not in self._ids:
             self._ids[guest.name] = guest.host_id()
         return self._ids[guest.name]
 
-    def offer(self, candidate: Candidate) -> None:
-        """Point the fixture hub at the exact candidate under test."""
-        remote = f"{GUEST_HOME}/accept-candidate/{candidate.release}"
-        self.hub.sh("mkdir -p " + shlex.quote(remote))
-        for name in ("stack", "menubar", "client"):
-            self.hub.copy(candidate.file(name), f"{remote}/{candidate.file(name).name}")
-        self.hub.copy(candidate.dir / "candidate.json", remote + "/candidate.json")
-        self.hub.tool_call("offer", "--candidate", remote)
-        self.candidate = candidate
+    def offer(self, build: Build) -> str:
+        """Make the fixture hub build a ref and offer the result to its fleet.
+
+        This is the product's own door — `updates build` is the only call that
+        builds — so what the leaves install is what a real hub would serve
+        them. The key the hub signs with reaches each leaf on its heartbeat
+        (#144); nothing here re-adopts a leaf, because a real fleet is not
+        re-adopted after every build either.
+
+        A hub still running code from before a9fe663 refuses to build while
+        it has adopted machines, since its key would strand them. That code
+        carries its own hatch, the variable below; a hub past the fix ignores
+        it, and this is exactly how a hub on a published release is driven
+        through its first build.
+        """
+        self.hub.sh(host_cli(f"updates channel {shlex.quote(build.ref)}"), timeout=120)
+        output = self.hub.sh("JSTACK_BUILD_DESPITE_LEAVES=1 "
+                             + host_cli(f"updates build --ref {shlex.quote(build.ref)}"),
+                             timeout=3600)
+        try:
+            built = json.loads(output[output.index("{"):])
+        except ValueError as exc:
+            raise AcceptanceFailure(
+                f"the hub did not report a build of {build.slug}: {output[-500:]}") from exc
+        self.offered[build.ref] = built["release"]
+        served = self.served_now()
+        expect(served["build"] == built["release"],
+               f"the hub reports {built['release']} built but serves {served['build']}")
+        self.served[build.ref] = served["client"]
+        self.build = build
+        return built["release"]
+
+    def served_now(self) -> dict:
+        """What the hub's feed offers this moment: the build and its client."""
+        answer = self.hub.sh(SERVED, timeout=120).strip()
+        try:
+            served = json.loads(answer[answer.index("{"):])
+        except ValueError as exc:
+            raise AcceptanceFailure(f"the hub's feed names no build: {answer[-300:]}") from exc
+        return served
 
 
 def request_id(prefix: str) -> str:
     return f"accept-{prefix}-{uuid.uuid4().hex[:12]}"
 
 
-def component_check(journey, check: str, state: dict, candidate: Candidate) -> None:
-    """Installed *and* running, for both apps and every installed plugin."""
-    expect(str(state["client"]) == candidate.version("client"),
-           f"client is {state['client']}, candidate is {candidate.version('client')}")
-    expect(str(state["menubar"]) == candidate.version("menubar"),
-           f"menu bar is {state['menubar']}, candidate is {candidate.version('menubar')}")
+def host_cli(arguments: str) -> str:
+    return shlex.quote(GUEST_HOST_CLI) + " " + arguments
+
+
+def component_check(journey, check: str, state: dict, build: Build, *, client: str) -> None:
+    """Installed *and* running, for both apps and every installed plugin.
+
+    `client` is the jRemote this Mac is held to: the one this run carried in
+    where the Mac built for itself, the one the hub's build carries where the
+    hub served it. Empty means no client was declared for this path.
+    """
+    if client:
+        expect(str(state["client"]) == client,
+               f"client is {state['client']}, the build this Mac took carries {client}")
+    # The menu bar's CFBundleVersion is the build's own date, digits only —
+    # the one thing `build_hub.bundle_version` says may not be derived twice.
+    # It is not knowable before a machine builds, so it is read back against
+    # the build id that machine is running.
+    day = str(state["build"] or "").split("-")[:3]
+    expect(len(day) == 3 and str(state["menubar"]) == "".join(day),
+           f"menu bar is {state['menubar']}, which is not the date in {state['build']}")
     expect(state["menubar_pids"], "the menu bar is installed but not running")
     expect(state["plugins"], "no installed plugin versions were observed")
     for name, version in state["plugins"].items():
-        expect(version == candidate.version("stack"),
-               f"plugin {name} is {version}, candidate is {candidate.version('stack')}")
+        expect(version == build.version("stack"),
+               f"plugin {name} is {version}, the commit declares {build.version('stack')}")
     journey.observe(check, {"client": state["client"], "menubar": state["menubar"],
                             "plugins": state["plugins"]})
 
 
-def identity_check(journey, check: str, state: dict, candidate: Candidate) -> None:
-    expect(state["release"] == candidate.release,
-           f"running host reports release {state['release']}, not {candidate.release}")
-    expect(state["sha"] == candidate.stack_sha,
-           f"running host reports source {state['sha']}, not {candidate.stack_sha}")
+def identity_check(journey, check: str, state: dict, build: Build) -> None:
+    """The machine runs the commit under test.
+
+    The commit, not the build id: a build id folds in the client and the
+    dependency set of whichever machine did the building, so a hub's id for a
+    commit and a freshly installed Mac's id for the same commit legitimately
+    differ. The sha is what every honest install of this ref shares.
+    """
+    expect(state["sha"] == build.sha,
+           f"running host built {state['sha']}, not {build.sha} ({build.slug})")
     expect(not state["dirty"], "the running host reports modified source")
-    journey.observe(check, {"release": state["release"], "sha": state["sha"],
-                            "updater": state["updater"]})
+    journey.observe(check, {"build": state["build"], "sha": state["sha"],
+                            "ref": build.ref, "updater": state["updater"]})
 
 
 # ── The journeys
 
 
-def fresh_install(journey, fleet: Fleet, candidate: Candidate) -> None:
+def fresh_install(journey, fleet: Fleet, build: Build) -> None:
     guest = fleet.fresh
     expect(guest is not None, "the plan names no pristine guest for a fresh install")
-    journey.note(f"installing the candidate on pristine guest {guest.name}")
+    journey.note(f"installing {build.slug} on pristine guest {guest.name}")
     guest.start()
-    install_candidate(guest, candidate, fresh=True)
+    install_build(guest, build, fresh=True)
+    fleet.installed.add(guest.name)
     state = guest.installed()
-    identity_check(journey, "installed_release", state, candidate)
+    identity_check(journey, "installed_build", state, build)
     journey.observe("host_identity", {"host_id": guest.host_id(), "updater": state["updater"]})
-    component_check(journey, "app_versions", state, candidate)
+    # Built on the Mac itself, out of the client this run laid down first.
+    component_check(journey, "app_versions", state, build, client=build.version("client"))
     journey.observe("plugin_versions", state["plugins"])
     machine = adopt(fleet, guest)
     row = fleet.hub.row(machine)
@@ -319,40 +549,47 @@ def fresh_install(journey, fleet: Fleet, candidate: Candidate) -> None:
     journey.observe("new_session", new_session(guest))
 
 
-def upgrade(journey, fleet: Fleet, candidate: Candidate) -> None:
+def upgrade(journey, fleet: Fleet, build: Build) -> None:
     guest = fleet.leaves[0]
-    expect(fleet.prior is not None, "the plan names no previous release to upgrade from")
+    expect(fleet.prior is not None, "this run names no earlier ref to upgrade from")
+    stage_prior(fleet, guest, journey=journey)
     before = guest.installed()
-    expect(before["release"] != candidate.release,
-           "this Mac already runs the candidate; an upgrade needs the previous release")
-    journey.observe("previous_release", {"release": before["release"], "client": before["client"],
-                                         "menubar": before["menubar"]})
+    expect(before["sha"] != build.sha,
+           "this Mac already runs the commit under test; an upgrade needs the earlier one")
+    journey.observe("previous_build", {"build": before["build"], "sha": before["sha"],
+                                       "client": before["client"], "menubar": before["menubar"]})
     machine = fleet.machine(guest)
     job = fleet.hub.queue(machine, request_id("upgrade"))
     journey.note(f"hub queued {job['jobs'][0]['id']} for {machine}")
     fleet.hub.wait_for("current", machine)
     state = guest.installed()
-    identity_check(journey, "installed_release", state, candidate)
+    identity_check(journey, "installed_build", state, build)
     journey.observe("host_identity", {"host_id": machine, "verified": state["verified"]})
-    component_check(journey, "app_versions", state, candidate)
+    # Served by the hub, so held to the client the hub's build carries.
+    component_check(journey, "app_versions", state, build, client=fleet.served[build.ref])
     journey.observe("plugin_versions", state["plugins"])
 
 
-def fleet_journey(journey, fleet: Fleet, candidate: Candidate) -> None:
+def fleet_journey(journey, fleet: Fleet, build: Build) -> None:
     expect(len(fleet.leaves) >= 2, "the contract's fleet case needs a hub and two managed Macs")
     hub_machine = fleet.machine(fleet.hub)
     first, second = fleet.leaves[0], fleet.leaves[1]
-    journey.observe("hub_self_update", update_to_candidate(fleet, fleet.hub, hub_machine, candidate))
+    journey.observe("hub_self_update", update_to_build(fleet, fleet.hub, hub_machine, build))
     # The leaf's own Update action: queued on the leaf, owned by the hub.
     leaf_machine = fleet.machine(first)
     local = first.queue("self", request_id("leaf-local"))
     journey.note(f"leaf-initiated job {local['jobs'][0]['id']}")
     fleet.hub.wait_for("current", leaf_machine)
-    expect(first.installed()["release"] == candidate.release, "the leaf did not reach the candidate")
+    expect(first.installed()["sha"] == build.sha, "the leaf did not reach the commit under test")
     journey.observe("leaf_local_update", {"machine": leaf_machine, "job": local["jobs"][0]["id"]})
     fleet.cast(fleet.hub, second)
     other = fleet.machine(second)
-    journey.observe("leaf_remote_update", update_to_candidate(fleet, second, other, candidate))
+    journey.observe("leaf_remote_update", update_to_build(fleet, second, other, build))
+    # The Mac fresh_install adopted is in this fleet only when this run made
+    # it: a fresh guest no journey installed on is a pristine Mac, not a row.
+    enrolled = fleet.fresh if fleet.fresh and fleet.fresh.name in fleet.installed else None
+    fixture = {hub_machine, leaf_machine, other, *([fleet.machine(enrolled)] if enrolled else [])}
+    forget_strangers(journey, fleet, fixture)
     request = request_id("update-all")
     everything = fleet.hub.queue("all", request)
     machines = {job["machine"]: job["id"] for job in everything["jobs"]}
@@ -363,7 +600,7 @@ def fleet_journey(journey, fleet: Fleet, candidate: Candidate) -> None:
     # The parked leaf comes back to find the same queued job and catches up —
     # never a second job minted for the same request.
     completed = {hub_machine, other}
-    for guest in [first, *([fleet.fresh] if fleet.fresh else [])]:
+    for guest in [first, *([enrolled] if enrolled else [])]:
         fleet.cast(fleet.hub, guest)
         machine = fleet.machine(guest)
         if machine in machines:
@@ -380,10 +617,30 @@ def fleet_journey(journey, fleet: Fleet, candidate: Candidate) -> None:
     journey.observe("denied_authority", denied(fleet, first))
 
 
-def offline_catchup(journey, fleet: Fleet, candidate: Candidate) -> None:
+def forget_strangers(journey, fleet: Fleet, fixture: set[str]) -> list[str]:
+    """Withdraw the hub's rows for Macs that no longer exist.
+
+    A reset guest comes back as a new machine, so a hub kept across runs
+    holds one row per past run for the fresh Mac, each a job Update All
+    would queue and no Mac would ever finish. They leave by the product's
+    own door — the same forget a real hub needs for a Mac that was wiped
+    under it — and the receipt names them.
+    """
+    strangers = sorted(row["machine"] for row in fleet.hub.inventory()["machines"]
+                       if row["machine"] not in fixture)
+    for machine in strangers:
+        answer = fleet.hub.call(f"/hosts/{machine}/forget", {})
+        expect(answer["status"] == 200, f"the hub would not forget {machine}: {answer}")
+    if strangers:
+        journey.note(f"forgot {len(strangers)} machine(s) no guest answers for: "
+                     + ", ".join(strangers))
+    return strangers
+
+
+def offline_catchup(journey, fleet: Fleet, build: Build) -> None:
     guest = fleet.leaves[-1]
     machine = fleet.machine(guest)
-    stage_prior(fleet, guest)
+    stage_prior(fleet, guest, journey=journey)
     guest.stop()
     journey.note(f"{guest.name} stopped; waiting for its report to go stale")
     time.sleep(100)
@@ -397,21 +654,21 @@ def offline_catchup(journey, fleet: Fleet, candidate: Candidate) -> None:
     expect((settled.get("job") or {}).get("id") == job["id"],
            "catching up created a second job instead of finishing the queued one")
     journey.observe("same_job_current", {"job": job["id"], "state": settled["state"]})
-    expect(settled["observed"].get("release") == candidate.release,
-           "the returning Mac did not report the candidate")
+    expect(settled["observed"].get("release") == fleet.offered[build.ref],
+           "the returning Mac did not report the build the hub offers")
     journey.observe("fresh_observation", {"last_contact": settled["last_contact"],
-                                          "release": settled["observed"].get("release")})
+                                          "build": settled["observed"].get("release")})
 
 
-def session_survival(journey, fleet: Fleet, candidate: Candidate) -> None:
+def session_survival(journey, fleet: Fleet, build: Build) -> None:
     guest = fleet.leaves[0]
     machine = fleet.machine(guest)
-    stage_prior(fleet, guest)
+    stage_prior(fleet, guest, journey=journey)
     session = new_session(guest, prior=True)
     journey.observe("session_pid", {"session": session["session"], "pid": session["pid"],
                                     "bypass_prompt_nudged": session["nudged"],
                                     "request_redelivered": session["reprompted"]})
-    update_to_candidate(fleet, guest, machine, candidate)
+    update_to_build(fleet, guest, machine, build)
     after = guest.tool_call("session-proof", "--session", session["session"])
     expect(after.get("session") == session["session"] and
            after.get("holders") == session["holders"],
@@ -422,11 +679,11 @@ def session_survival(journey, fleet: Fleet, candidate: Candidate) -> None:
     state = guest.installed()
     expect(state["menubar_pids"], "the menu bar did not relaunch after the update")
     journey.observe("app_relaunch", {"menubar": state["menubar_pids"], "client": state["client_pids"]})
-    # The candidate's own start path: a brand-new session on the updated Mac
-    # answers with nobody touching its pane, or the release still wedges a
+    # This commit's own start path: a brand-new session on the updated Mac
+    # answers with nobody touching its pane, or the build still wedges a
     # remote start on the bypass warning.
     fresh = new_session(guest)
-    journey.observe("candidate_new_session", {"session": fresh["session"], "pid": fresh["pid"],
+    journey.observe("built_new_session", {"session": fresh["session"], "pid": fresh["pid"],
                                               "bypass_prompt_nudged": fresh["nudged"]})
 
 
@@ -511,25 +768,25 @@ def sweep_prior_residue(journey, guest: Guest) -> list[str]:
     return found
 
 
-def reboot_mid_apply(journey, fleet: Fleet, guest: Guest, machine: str, candidate: Candidate) -> dict:
+def reboot_mid_apply(journey, fleet: Fleet, guest: Guest, machine: str, build: Build) -> dict:
     """Cut the guest with the candidate's own updater frozen half-way through
     an app copy, boot it, and read what the journal did.
 
     The design under test (update_supervisor.tick): an apply interrupted by
     reboot never resumes over a half-replaced installation — the job ends
-    failed, naming which release the machine is left running, the half-written
-    copy is removed, and the next request lands. The job installs
-    the PRIOR, because that is the only other signed release in the plan; what
-    is measured is the candidate's updater, which is what every machine runs
-    after this release ships.
+    failed, naming which build the machine is left running, the half-written
+    copy is removed, and the next request lands. The job installs the earlier
+    ref, because that is the only other commit this run builds; what is
+    measured is this commit's updater, which is what every machine runs once
+    the fleet is moved onto it.
     """
     state = guest.installed()
-    expect(state["release"] == candidate.release,
-           f"the reboot leg needs the candidate's updater; {guest.name} runs {state['release']}")
+    expect(state["sha"] == build.sha,
+           f"the reboot leg needs this commit's updater; {guest.name} built {state['sha']}")
     # The reboot leg must be applied by the installed bundle's own updater, so
     # a process left running out of a bundle that moved is rebooted (#119).
     ensure_true_updater(journey, guest)
-    previous = Candidate(fleet.prior, candidate.public_key)
+    previous = fleet.prior
     try:
         fleet.offer(previous)
         fault = arm_fault(guest, "freeze")
@@ -545,26 +802,26 @@ def reboot_mid_apply(journey, fleet: Fleet, guest: Guest, machine: str, candidat
         expect(str(job.get("detail") or "").startswith(RECOVERED_BY_REBOOT),
                f"the reboot settled the job as {job.get('detail')!r}")
         kept = guest.installed()
-        expect(kept["release"] == candidate.release,
-               f"the reboot left {kept['release']} in place of the candidate")
+        expect(kept["sha"] == build.sha,
+               f"the reboot left {kept['sha']} in place of the commit under test")
         left = residue(guest)
         expect(not left, f"the recovered updater left {left}")
         retry = fleet.hub.queue(machine, request_id("reboot-retry"))["jobs"][0]
         fleet.hub.wait_for("current", machine)
         after = guest.installed()
-        expect(after["release"] == previous.release,
-               f"the request after the reboot left {after['release']}, not {previous.release}")
+        expect(after["sha"] == previous.sha,
+               f"the request after the reboot left {after['sha']}, not {previous.sha}")
     finally:
-        fleet.offer(candidate)
+        fleet.offer(build)
     return {"job": frozen["id"], "state": settled["state"], "detail": job["detail"],
-            "frozen_copies": injected.get("copies"), "release_kept": kept["release"],
-            "retry_job": retry["id"], "retry_release": after["release"]}
+            "frozen_copies": injected.get("copies"), "build_kept": kept["build"],
+            "retry_job": retry["id"], "retry_sha": after["sha"]}
 
 
-def interruption(journey, fleet: Fleet, candidate: Candidate) -> None:
+def interruption(journey, fleet: Fleet, build: Build) -> None:
     guest = fleet.leaves[0]
     machine = fleet.machine(guest)
-    stage_prior(fleet, guest)
+    stage_prior(fleet, guest, journey=journey)
     ensure_true_updater(journey, guest)
     fault = arm_fault(guest, "interruption")
     job = fleet.hub.queue(machine, request_id("interrupt"))["jobs"][0]
@@ -578,14 +835,14 @@ def interruption(journey, fleet: Fleet, candidate: Candidate) -> None:
     sweep_prior_residue(journey, guest)
     retry = fleet.hub.queue(machine, request_id("interrupt-retry"))["jobs"][0]
     fleet.hub.wait_for("current", machine)
-    journey.observe("retry_current", {"job": retry["id"], "release": guest.installed()["release"]})
-    journey.observe("reboot_resume", reboot_mid_apply(journey, fleet, guest, machine, candidate))
+    journey.observe("retry_current", {"job": retry["id"], "sha": guest.installed()["sha"]})
+    journey.observe("reboot_resume", reboot_mid_apply(journey, fleet, guest, machine, build))
 
 
-def revocation(journey, fleet: Fleet, candidate: Candidate) -> None:
+def revocation(journey, fleet: Fleet, build: Build) -> None:
     guest = fleet.leaves[-1]
     machine = fleet.machine(guest)
-    stage_prior(fleet, guest)
+    stage_prior(fleet, guest, journey=journey)
     guest.sh("'/Applications/jStack Hub.app/Contents/MacOS/JStackHub' unregister updater")
     try:
         job = fleet.hub.queue(machine, request_id("revoked"))["jobs"][0]
@@ -601,12 +858,13 @@ def revocation(journey, fleet: Fleet, candidate: Candidate) -> None:
            "the restarted updater did not record a rejected request")
     journey.observe("rejected_request", log.strip().splitlines()[-3:])
     state = guest.installed()
-    expect(state["release"] != candidate.release,
-           "a revoked machine installed the release it was no longer authorized for")
-    journey.observe("unchanged_release", {"release": state["release"], "client": state["client"]})
+    expect(state["sha"] != build.sha,
+           "a revoked machine built the commit it was no longer authorized for")
+    journey.observe("unchanged_build", {"build": state["build"], "sha": state["sha"],
+                                        "client": state["client"]})
 
 
-def off_network(journey, fleet: Fleet, candidate: Candidate) -> None:
+def off_network(journey, fleet: Fleet, build: Build) -> None:
     """Cut direct Hub HTTP access while retaining WireGuard's UDP underlay.
 
     A host-route blackhole also cuts the tunnel when both use the same IP.
@@ -650,17 +908,15 @@ def off_network(journey, fleet: Fleet, candidate: Candidate) -> None:
                                       "mesh_target": hub_mesh, "mesh_http": mesh_probe,
                                       "filter": guest.sh(f"sudo /sbin/pfctl -a {anchor} -sr").strip()})
 
-        # The release has to be visible from out here, not just installable.
+        # The build has to be visible from out here, not just installable.
+        offered = fleet.offered[build.ref]
         row = fleet.hub.row(machine)
-        expect(row["desired"] == candidate.release,
-               f"the hub offers {row['desired']}, not {candidate.release}")
+        expect(row["desired"] == offered, f"the hub offers {row['desired']}, not {offered}")
         inventory = guest.inventory()
-        expect(inventory.get("release") == candidate.release,
-               f"off the LAN the Mac sees release {inventory.get('release')}, "
-               f"not {candidate.release}")
-        journey.observe("release_notice", {"release": inventory.get("release"),
-                                           "hub_state": row["state"],
-                                           "seen_over": hub_mesh})
+        expect(inventory.get("release") == offered,
+               f"off the LAN the Mac sees {inventory.get('release')}, not {offered}")
+        journey.observe("build_notice", {"build": inventory.get("release"),
+                                         "hub_state": row["state"], "seen_over": hub_mesh})
 
         journey.observe("session_journey", new_session(guest))
     finally:
@@ -1000,54 +1256,16 @@ CAST = {"fresh_install": lambda f: (f.hub, f.fresh),
 # ── Operations the journeys are written in terms of
 
 
-@contextlib.contextmanager
-def candidate_repo(candidate: Candidate):
-    """Serve one candidate's release assets the way the repo URL would.
+def install_build(guest: Guest, build: Build, *, fresh: bool = False) -> None:
+    """Install the commit under test the way the README tells a Mac to.
 
-    install.sh resolves the current tag over the repo URL (git's dumb HTTP
-    reads info/refs as plain "sha<TAB>ref" lines) and downloads assets from
-    releases/download/<tag>/<file>. Answering both from the candidate
-    directory makes the shipped installer install the candidate's own sealed
-    Hub — the public URL would hand it the latest published release instead.
+    The installer is fetched from the ref and clones that ref itself, so what
+    lands on the guest is a checkout the machine then builds the Hub out of —
+    the runner carries in no stack bytes at all. The Mac app is the exception:
+    it is closed source and built elsewhere, so it is copied in *before* the
+    installer runs, because `install.sh` names an already-installed
+    /Applications/jRemote.app as the client of the build it is about to make.
     """
-    refs = f"{candidate.stack_sha}\trefs/tags/stack-release-{candidate.release}\n".encode()
-    directory = candidate.dir
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            path = self.path.split("?", 1)[0]
-            if path.endswith("/info/refs"):
-                self.send_response(200)
-                self.send_header("Content-Type", "text/plain")
-                self.send_header("Content-Length", str(len(refs)))
-                self.end_headers()
-                self.wfile.write(refs)
-                return
-            asset = directory / path.rsplit("/", 1)[-1]
-            if "/releases/download/" not in path or not asset.is_file():
-                self.send_error(404)
-                return
-            self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(asset.stat().st_size))
-            self.end_headers()
-            with asset.open("rb") as handle:
-                shutil.copyfileobj(handle, self.wfile)
-
-        def log_message(self, *args):
-            pass
-
-    server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield server.server_address[1]
-    finally:
-        server.shutdown()
-
-
-def install_candidate(guest: Guest, candidate: Candidate, *, fresh: bool = False) -> None:
-    """Install exact candidate bytes through the shipped installer, not a copy of it."""
     if fresh:
         existing = guest.sh("for p in ~/.local/state/jremote ~/jStack "
                             "'/Applications/jStack Hub.app' "
@@ -1061,72 +1279,210 @@ def install_candidate(guest: Guest, candidate: Candidate, *, fresh: bool = False
         expect(not existing, f"{guest.name} is not pristine: {existing}")
     remote = f"{GUEST_HOME}/accept-install-{uuid.uuid4().hex}"
     guest.sh(f"/bin/mkdir {remote}")
-    for name in ("stack", "menubar", "client"):
-        guest.copy(candidate.file(name), f"{remote}/{candidate.file(name).name}")
-    # An untarred snapshot with a release identity and no .git is what the
-    # installer treats as a publisher snapshot: exact local bytes, no fetch.
-    guest.sh(f"/bin/mkdir ~/jStack && "
-             f"/usr/bin/tar -xzf {remote}/{candidate.file('stack').name} -C ~/jStack", timeout=900)
-    gateway = guest.sh("/sbin/route -n get default | /usr/bin/awk '/gateway/{print $2}'").strip()
-    expect(gateway, f"{guest.name}: no default gateway — cannot reach the host's candidate server")
-    with candidate_repo(candidate) as port:
-        guest.sh(f"cd ~/jStack && JSTACK_CHECKOUT=$HOME/jStack "
-                 f"JSTACK_REPO_URL=http://{gateway}:{port}/jstack.git "
-                 "/bin/bash install.sh --yes --no-claude --no-app", timeout=2400)
-    guest.sh(f"/usr/bin/ditto -x -k {remote}/{candidate.file('client').name} /Applications",
-             timeout=600)
-    guest.sh("/usr/bin/open -a /Applications/jRemote.app")
-    # The sealed provisioner writes candidate_test false unconditionally and
-    # its repair path refuses to change it — that guard is for production
-    # machines. A disposable lab guest gets the flag flipped in state, then
-    # the updater restarted so its next cycle verifies unpromoted envelopes.
-    flip = ("import json,pathlib; "
-            "p=pathlib.Path.home()/'.local/state/jremote/updates/config.json'; "
-            "c=json.loads(p.read_text()); c['candidate_test']=True; "
-            "p.write_text(json.dumps(c, indent=2))")
-    guest.sh(f"{shlex.quote(GUEST_PYTHON)} -c {shlex.quote(flip)}")
-    guest.sh("/bin/launchctl kickstart -k gui/$(id -u)/live.jstack.hub.updater")
+    # Over an existing install the client stays: it is closed source, built
+    # elsewhere, and the same bundle whichever commit the host moves to.
+    if build.client and (fresh or guest.absent(["/Applications/jRemote.app"])):
+        work = Path(tempfile.mkdtemp(prefix="accept-client-"))
+        try:
+            archive = work / "jRemote.zip"
+            subprocess.run(["/usr/bin/ditto", "-c", "-k", "--keepParent",
+                            str(build.client), str(archive)], check=True, timeout=600)
+            guest.copy(archive, f"{remote}/jRemote.zip")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        guest.sh(f"/usr/bin/ditto -x -k {remote}/jRemote.zip /Applications", timeout=600)
+    guest.sh(f"/usr/bin/curl -fsSL {shlex.quote(build.raw_url)} -o {remote}/install.sh",
+             timeout=300)
+    guest.sh(f"JSTACK_REPO_URL={shlex.quote(build.repo_url)} "
+             f"/bin/bash {remote}/install.sh --yes --no-claude --no-app "
+             f"--ref {shlex.quote(build.ref)}", timeout=3600)
+    if build.client:
+        guest.sh("/usr/bin/open -a /Applications/jRemote.app")
+    lab_guest(guest)
     time.sleep(SETTLE)
 
 
-def stage_prior(fleet: Fleet, guest: Guest) -> dict:
-    """Put a guest back on the previous release so a journey starts where it must."""
+def lab_guest(guest: Guest) -> bool:
+    """Mark an installed host as the disposable lab fixture it is.
+
+    The sealed installer writes `candidate_test` false unconditionally and
+    its repair path refuses to change it — that guard is for production
+    machines, and every install here rewrites the flag off: a leaf taking the
+    build under test, the hub installing the build it just made. The guest
+    tool refuses every call while it is off, so the runner restores it after
+    each install and before each cast, then restarts the updater so its next
+    cycle verifies unpromoted envelopes. Returns whether a host was there.
+    """
+    flip = ("import json,pathlib,sys; "
+            "p=pathlib.Path.home()/'.local/state/jremote/updates/config.json'; "
+            "p.is_file() or sys.exit(3); "
+            "c=json.loads(p.read_text()); "
+            "c.get('candidate_test') is True and sys.exit(0); "
+            "c['candidate_test']=True; p.write_text(json.dumps(c, indent=2)); sys.exit(4)")
+    answer = guest.sh(f"{shlex.quote(GUEST_PYTHON)} -c {shlex.quote(flip)}; echo lab=$?").strip()
+    state = answer.rsplit("lab=", 1)[-1]
+    if state == "4":
+        guest.sh("/bin/launchctl kickstart -k gui/$(id -u)/live.jstack.hub.updater")
+    return state != "3"
+
+
+def trust_key(guest: Guest) -> str:
+    return guest.sh(TRUST_KEY).strip()
+
+
+def follows(fleet: Fleet, guest: Guest) -> bool:
+    """Whether this guest's updater accepts what the hub signs.
+
+    A leaf takes the hub's key on its heartbeat, so a leaf that has only just
+    attached gets a kicked updater and a few ticks before the answer is no.
+    The answer is no for every Mac on a release from before a9fe663: it
+    trusts the key of the bundle that installed it and learns no other (#144).
+    """
+    hub = trust_key(fleet.hub)
+    if trust_key(guest) == hub:
+        return True
+    guest.sh("/bin/launchctl kickstart -k gui/$(id -u)/live.jstack.hub.updater")
+    deadline = time.monotonic() + KEY_PATIENCE
+    while time.monotonic() < deadline:
+        time.sleep(SETTLE)
+        if trust_key(guest) == hub:
+            return True
+    return False
+
+
+def reach(fleet: Fleet, guest: Guest) -> None:
+    """A cast guest the hub can serve, or one moved to where it can be.
+
+    Every leaf this lab provisions was installed from a published release
+    and trusts that release's key; so was every Mac adopted before its hub
+    first built. The hub can serve such a Mac nothing (#144), and a journey
+    that queued it an update would fail on trust before it measured
+    anything. It is moved onto the run's earlier ref, or the ref under test
+    when the run names none, by the one-file install and adopted — as such a
+    Mac is moved for real — before the journey starts. A guest with no host
+    (the pristine one) is left as it is.
+
+    A leaf that follows the hub but runs neither the earlier ref nor the ref
+    under test is what an earlier run left behind: under the build model the
+    same Macs carry from run to run, and a journey that took such a leaf as
+    it stood would measure a move from a commit this run never named. It is
+    staged onto the earlier ref, as every leaf of a real fleet starts from
+    the build it last took.
+    """
+    if guest is fleet.hub or not trust_key(guest):
+        return
+    if revoked(fleet, guest):
+        readopt(fleet, guest)
+    if follows(fleet, guest):
+        running = guest.installed()["sha"]
+        named = {ref.sha for ref in (fleet.prior, fleet.build) if ref is not None}
+        if fleet.prior and running not in named:
+            print(f"{guest.name} runs {running[:8]}, which this run never named: staging it "
+                  f"onto {fleet.prior.slug} first", flush=True)
+            stage_prior(fleet, guest)
+        return
+    target = fleet.prior or fleet.build
+    expect(target is not None, "build the ref under test before casting a leaf")
+    move(fleet, guest, target, guest.installed()["sha"], None)
+
+
+def revoked(fleet: Fleet, guest: Guest) -> bool:
+    """Whether the hub has revoked the credential this guest presents.
+
+    A revoked Mac heartbeats into refusals and the hub queues it nothing
+    (`machine credential is revoked; update not authorized`). The revocation
+    journey leaves its leaf exactly so, and the next journey to cast that
+    leaf would fail on the hub's refusal before it measured anything. Read
+    from both sides: the credential the Mac recorded at attach, and the hub's
+    own device list, which names every device it holds, revoked ones included.
+    """
+    device = guest.sh(DEVICE_ID).strip()
+    if not device:
+        return False
+    answer = fleet.hub.call("/devices")
+    expect(answer["status"] == 200, f"the hub would not list its devices: {answer}")
+    rows = json.loads(answer["body"])["devices"]
+    return any(row["id"] == device and row.get("revoked") for row in rows)
+
+
+def readopt(fleet: Fleet, guest: Guest) -> None:
+    """A revoked Mac is brought back the way a Mac joins: adopted again. The
+    hub never resurrects a revoked credential; adoption mints a new one and
+    binds the Mac's row to it. Nothing is reinstalled — the Mac runs fine."""
+    print(f"{guest.name}: the hub has revoked its credential; adopting it again, "
+          "as a revoked Mac is brought back", flush=True)
+    adopt(fleet, guest)
+    expect(not revoked(fleet, guest),
+           f"{guest.name} is still revoked on the hub after adoption")
+
+
+def move(fleet: Fleet, guest: Guest, target: Build, running: str, journey) -> None:
+    """The one-file install of `target` over a Mac the hub cannot reach, then
+    adoption; what that leaves must take the hub's key on its heartbeat."""
+    said = (f"{guest.name} runs {running}, whose updater does not trust this hub "
+            f"(#144): moving it onto {target.slug} by the one-file install and "
+            "adopting it, as a published Mac is moved")
+    if journey is not None:
+        journey.note(said)
+    else:
+        print(said, flush=True)
+    install_build(guest, target)
+    adopt(fleet, guest)
+    expect(follows(fleet, guest),
+           f"{guest.name} on {target.slug} never took the hub's key: a ref from "
+           "before a9fe663 trusts only the bundle that installed it (#144), and "
+           "nothing this hub serves can reach it")
+
+
+def stage_prior(fleet: Fleet, guest: Guest, *, journey=None) -> dict:
+    """Put a guest back on the earlier commit so a journey starts where it must.
+
+    The hub builds the prior ref and serves it; the leaf takes it the way it
+    takes any update. A leaf whose updater does not trust this hub — every
+    Mac installed from a published release is one (#144) — cannot be served
+    anything, so it is moved the way such a Mac is moved: the prior's own
+    one-file install, then adoption. What that leaves behind must follow the
+    hub, or there is no journey to start from it. The hub is left holding
+    the ref under test again, or the journey that follows would measure the
+    wrong commit.
+    """
+    expect(fleet.prior is not None, "the plan names no earlier ref to stage from")
     state = guest.installed()
-    if fleet.prior is None:
-        raise AcceptanceFailure("the plan names no previous release to stage from")
-    prior = json.loads((fleet.prior / "candidate.json").read_text())["manifest"]["release"]
-    if state["release"] == prior:
+    if state["sha"] == fleet.prior.sha:
         return state
     if fleet.plan.get("stage_prior_command"):
         guest.sh(fleet.plan["stage_prior_command"], timeout=2400)
-    else:
-        target = fleet.candidate
-        expect(target is not None, "offer the candidate before staging a previous release")
-        previous = Candidate(fleet.prior, target.public_key)
+    elif follows(fleet, guest):
+        target = fleet.build
+        expect(target is not None, "build the ref under test before staging an earlier one")
         machine = fleet.machine(guest)
         try:
-            fleet.offer(previous)
+            fleet.offer(fleet.prior)
             fleet.hub.queue(machine, request_id("stage-prior"))
             fleet.hub.wait_for("current", machine)
         finally:
             fleet.offer(target)
+    else:
+        move(fleet, guest, fleet.prior, state["sha"], journey)
     time.sleep(SETTLE)
     state = guest.installed()
-    expect(state["release"] == prior,
-           f"{guest.name} is on {state['release']} after staging, not {prior}")
+    expect(state["sha"] == fleet.prior.sha,
+           f"{guest.name} built {state['sha']} after staging, not {fleet.prior.sha}")
     return state
 
 
-def update_to_candidate(fleet: Fleet, guest: Guest, machine: str, candidate: Candidate) -> dict:
+def update_to_build(fleet: Fleet, guest: Guest, machine: str, build: Build) -> dict:
     state = guest.installed()
-    if state["release"] != candidate.release:
-        job = fleet.hub.queue(machine, request_id("to-candidate"))["jobs"][0]
+    if state["sha"] != build.sha:
+        job = fleet.hub.queue(machine, request_id("to-build"))["jobs"][0]
         fleet.hub.wait_for("current", machine)
         state = guest.installed()
-        expect(state["release"] == candidate.release,
-               f"{machine} reported current on {state['release']}")
-        return {"machine": machine, "job": job["id"], "release": state["release"]}
-    return {"machine": machine, "release": state["release"], "job": "already current"}
+        expect(state["sha"] == build.sha,
+               f"{machine} reported current on {state['sha']}, not {build.slug}")
+        return {"machine": machine, "job": job["id"], "build": state["build"],
+                "sha": state["sha"]}
+    return {"machine": machine, "build": state["build"], "sha": state["sha"],
+            "job": "already current"}
 
 
 def adopt(fleet: Fleet, guest: Guest) -> str:
@@ -1262,7 +1618,7 @@ def denied(fleet: Fleet, leaf: Guest) -> dict:
     return answer
 
 
-def refused_release(fleet: Fleet, guest: Guest, machine: str) -> dict:
+def refused_build(fleet: Fleet, guest: Guest, machine: str) -> dict:
     """Bad bytes are refused before anything running is replaced."""
     before = guest.installed()
     if fleet.plan.get("tamper_command"):
@@ -1278,10 +1634,10 @@ def refused_release(fleet: Fleet, guest: Guest, machine: str) -> dict:
             expect(any(word in detail.lower() for word in ("signature", "artifact", "mismatch")),
                    f"the hub refused for an unrelated reason: {detail}")
             after = guest.installed()
-            expect(all(after[key] == before[key] for key in ("release", "sha", "client", "menubar")),
+            expect(all(after[key] == before[key] for key in ("build", "sha", "client", "menubar")),
                    "the rejected artifact changed the running installation")
             return {"refused_by": "hub", "status": 503, "detail": detail,
-                    "unchanged_release": after["release"]}
+                    "unchanged_build": after["build"]}
         expect(response["status"] == 200, f"unexpected queue response: {response}")
         job = json.loads(response["body"])["jobs"][0]
         row = fleet.hub.wait_for("failed", machine, timeout=900, poll=5)
@@ -1332,8 +1688,16 @@ def read_fault(process: subprocess.Popen, *, timeout: int = 1800) -> dict:
 # ── The run
 
 
+#: Journeys that start on an earlier commit and move forward from it. Without
+#: `--prior-ref` there is nothing to move from, and that is a skip with a
+#: reason, never a journey quietly reduced to a no-op.
+NEEDS_PRIOR = {"upgrade", "offline_catchup", "session_survival", "interruption", "revocation"}
+
+
 def unsupported(fleet: Fleet, name: str) -> str | None:
     """Why this plan cannot run a journey — never a reason to pass it quietly."""
+    if name in NEEDS_PRIOR and fleet.prior is None:
+        return "this run names no earlier ref to start from (--prior-ref)"
     if name == "off_network" and not fleet.leaves:
         return "the plan names no managed Mac to take off the LAN"
     if name == "fresh_install" and fleet.fresh is None:
@@ -1347,29 +1711,51 @@ def unsupported(fleet: Fleet, name: str) -> str | None:
     return None
 
 
+DEFAULT_REPO = "https://github.com/jenyalebid/jStack.git"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--candidate", type=Path, required=True)
+    parser.add_argument("--ref", required=True, help="the branch under test")
+    parser.add_argument("--prior-ref", help="an earlier branch the upgrade legs start from")
+    parser.add_argument("--repo", default=DEFAULT_REPO,
+                        help="where the guests fetch the installer and the source from")
+    parser.add_argument("--client", type=Path,
+                        help="the jRemote.app bundle to install; it is not built from this repo")
+    parser.add_argument("--checkout", type=Path,
+                        default=Path(__file__).resolve().parents[2],
+                        help="a checkout used only to read what the commit declares")
     parser.add_argument("--receipts", type=Path, required=True)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--only", nargs="+", choices=sorted(JOURNEYS),
                         help="run these journeys, retaining previous receipts for the others")
     args = parser.parse_args()
     from jstack_host import acceptance
-    trust = Path(__file__).resolve().parents[1] / "jstack_host/release-trust.json"
     plan = json.loads(args.plan.read_text())
     if plan.get("production") or not plan.get("disposable"):
         parser.error("acceptance runs only against a plan marked disposable")
-    candidate = Candidate(args.candidate, json.loads(trust.read_text())["public_key"])
+    build = Build(args.repo, args.ref, checkout=args.checkout, client=args.client)
     fleet = Fleet(plan, run=subprocess.run)
-    run = acceptance.Run(args.receipts, candidate.manifest)
-    print(f"Acceptance for {candidate.release} over {plan['hub']} "
+    if args.prior_ref:
+        fleet.prior = Build(args.repo, args.prior_ref, checkout=args.checkout,
+                            client=args.client)
+    print(f"Acceptance for {build.slug} over {plan['hub']} "
           f"and {len(fleet.leaves)} managed Macs", flush=True)
     fleet.hub.start()
     if not fleet.slots:
         for leaf in fleet.leaves:
             leaf.start()
-    fleet.offer(candidate)
+    fleet.prepare(fleet.hub)
+    # The hub builds the commit before any receipt is written: the build id it
+    # comes out with is what the fleet is offered, and a run that cannot even
+    # build has nothing to write receipts about.
+    identity = {"build": fleet.offer(build), "sha": build.sha}
+    # The hub runs what it built before it serves it. What a leaf takes on
+    # its heartbeat — the key the hub signs with — is this commit's route
+    # answering, not the route of whatever the hub ran when it built.
+    moved = update_to_build(fleet, fleet.hub, fleet.machine(fleet.hub), build)
+    print(f"{fleet.hub.name} runs {moved['build']} ({moved['job']})", flush=True)
+    run = acceptance.Run(args.receipts, identity)
     for name in JOURNEYS:
         if args.only and name not in args.only:
             continue
@@ -1379,9 +1765,9 @@ def main() -> int:
             continue
         with run.journey(name) as journey:
             fleet.cast(*CAST[name](fleet))
-            JOURNEYS[name](journey, fleet, candidate)
-    state = acceptance.inspect(args.receipts, candidate.manifest)
-    summary = {"release": candidate.release,
+            JOURNEYS[name](journey, fleet, build)
+    state = acceptance.inspect(args.receipts, identity)
+    summary = {"build": identity["build"], "ref": build.ref, "sha": build.sha,
                "results": {name: row["state"] for name, row in state.items()}}
     print(json.dumps(summary, indent=2), flush=True)
     return 0 if all(row["state"] == "passed" for row in state.values()) else 1

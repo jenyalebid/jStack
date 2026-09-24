@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from typing import NamedTuple
 
 from .update_macos import command
 
@@ -168,6 +169,97 @@ def _is_date(value) -> bool:
 #: package, because that is where the readers already look.
 MESH_TOOLS = "scripts"
 
+#: Where the installer puts the audited CPython 3.12 this Hub is built around.
+FRAMEWORK_PYTHON = "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"
+RUNTIME = "3.12"
+
+#: One question, asked of a candidate in its own process: which framework it
+#: belongs to, what it calls itself, and whether it carries pip.
+PROBE = ("import importlib.util, json, sys;"
+         "print(json.dumps({'prefix': sys.base_prefix, 'version': sys.version.split()[0],"
+         " 'pip': importlib.util.find_spec('pip') is not None}))")
+
+
+class Interpreter(NamedTuple):
+    """The CPython a Hub is built *around*: its binary, its framework, its version."""
+
+    executable: str
+    framework: Path
+    version: str
+
+
+def build_interpreter() -> Interpreter:
+    """Locate that CPython. Never assume the running process is it.
+
+    Two assumptions lived here as one, and neither holds. `jstack-host` runs
+    from the checkout venv, which the installer builds on whatever python3 the
+    Mac already had — 3.14 from Homebrew on a stock machine; the sealed Hub
+    runs JStackPython, which is 3.12 but ships the host package and its
+    dependencies and never pip. So `updates build` died on the version guard
+    from the CLI and on "No module named pip" from the service, install worked
+    because the installer builds under a venv it made on the framework, and no
+    machine could move itself forward — which also left rollback, switch the
+    branch and rebuild, with nothing to rebuild with.
+
+    Everything the build takes from an interpreter comes from this one answer:
+    the `Python` binary and `lib` copied into the bundle, the ABI its wheels
+    must match, and the version stamped on the nested framework. The framework
+    interpreter is the installer's own hard requirement, so a Mac that could
+    install can always build.
+    """
+    refused: list[tuple[str, str]] = []
+    for candidate in (os.environ.get("JSTACK_BUILD_PYTHON"), FRAMEWORK_PYTHON, sys.executable):
+        if not candidate or any(candidate == name for name, _ in refused):
+            continue
+        found = subprocess.run([candidate, "-c", PROBE], capture_output=True,
+                               text=True, timeout=120)
+        if found.returncode != 0:
+            refused.append((candidate, "did not run"))
+            continue
+        try:
+            answer = json.loads(found.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            refused.append((candidate, "answered nothing"))
+            continue
+        framework = Path(answer["prefix"])
+        if not str(answer["version"]).startswith(RUNTIME + "."):
+            refused.append((candidate, "is " + str(answer["version"])))
+        elif not (framework / "Python").is_file():
+            refused.append((candidate, "is not a framework build"))
+        elif not answer["pip"]:
+            refused.append((candidate, "has no pip"))
+        else:
+            return Interpreter(candidate, framework, str(answer["version"]))
+    raise RuntimeError(
+        f"this Hub is built around the audited CPython {RUNTIME} framework and nothing here "
+        "is one — " + "; ".join(f"{name} {why}" for name, why in refused)
+        + f". Install python.org's macOS {RUNTIME} package, or point JSTACK_BUILD_PYTHON at "
+          "a framework interpreter that has pip.")
+
+
+#: Where the installer's Homebrew puts what it was told to install. A build
+#: runs from launchd or over ssh, and neither hands the process a login
+#: shell's PATH — on a stock Mac that is /usr/bin:/bin:/usr/sbin:/sbin, which
+#: contains none of it.
+TOOL_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin")
+
+
+def build_tool(name: str, override: str = "") -> Path:
+    """A build input, found where it lives rather than where PATH points.
+
+    `shutil.which("tmux")` answered no on a Mac whose tmux the installer had
+    itself put at /opt/homebrew/bin/tmux, and the build died calling it a
+    missing requirement. Absence and invisibility are not the same fact, and
+    only one of them is the operator's to fix.
+    """
+    searched = [os.environ.get(override) if override else None, shutil.which(name),
+                *(directory + "/" + name for directory in TOOL_DIRS)]
+    for candidate in searched:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return Path(candidate)
+    raise ValueError(f"{name} is required as a build input — it is not on PATH and not in "
+                     + ", ".join(TOOL_DIRS))
+
 
 def stage_mesh_tools(stack: Path, packages: Path) -> Path:
     """Put the mesh scripts where `hostenv.peer_script()` reads them.
@@ -216,11 +308,8 @@ def build(stack: Path, output: Path, version: str, config: dict | None = None, *
 
 def _build(stack: Path, output: Path, version: str, config: dict | None, *, catalog,
            identity: dict, trust_key=None) -> Path:
-    if sys.version_info[:2] != (3, 12):
-        raise ValueError("this runtime build requires the audited CPython 3.12 framework")
-    source = Path(sys.base_prefix)
-    if not (source / "Python").is_file():
-        raise ValueError("a framework Python build is required")
+    interpreter = build_interpreter()
+    source = interpreter.framework
     info = hub_info(version, identity)
     app_name = info["CFBundleName"]
     bundle_id = info["CFBundleIdentifier"]
@@ -242,7 +331,7 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
     (runtime / "Resources/Info.plist").write_bytes(plistlib.dumps({
         "CFBundleIdentifier": "live.jstack.python", "CFBundleExecutable": "Python",
         "CFBundleName": "jStack Python", "CFBundlePackageType": "FMWK",
-        "CFBundleVersion": sys.version.split()[0]}))
+        "CFBundleVersion": interpreter.version}))
     (framework / "Versions/Current").symlink_to("3.12")
     (framework / "Python").symlink_to("Versions/Current/Python")
     (framework / "Resources").symlink_to("Versions/Current/Resources")
@@ -251,7 +340,7 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
         package_source = Path(temporary) / "host"
         shutil.copytree(stack / "host", package_source,
                         ignore=shutil.ignore_patterns(".venv", "build", "*.egg-info", "__pycache__"))
-        command([sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--no-compile",
+        command([interpreter.executable, "-m", "pip", "install", "--disable-pip-version-check", "--no-compile",
                  "--target", str(packages), "--report", str(resources / "dependency-resolution.json"),
                  str(package_source)], timeout=900)
     report_path = resources / "dependency-resolution.json"
@@ -294,10 +383,8 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
                            ("JStackHostBar", "host/menubar/JStackHostBar.swift")):
         command(["xcrun", "swiftc", "-O", "-o", str(macos / name), str(stack / relative)], timeout=180)
     from .bundle_tools import bundle
-    tmux = shutil.which("tmux")
-    if not tmux:
-        raise ValueError("tmux is required as a build input")
-    bundle(Path(tmux), macos / "tmux", contents / "Frameworks/Tools", resources / "Licenses")
+    bundle(build_tool("tmux", "JSTACK_BUILD_TMUX"), macos / "tmux",
+           contents / "Frameworks/Tools", resources / "Licenses")
     python_license = source / "Resources/English.lproj/Documentation/license.html"
     if not python_license.is_file():
         raise ValueError("Python distribution license notice is required")
@@ -339,13 +426,23 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
 
 def sign(app: Path, config: dict | None):
     binaries = [path for path in app.rglob("*") if macho(path)]
-    signing = ["/usr/bin/codesign", "--force", "--options", "runtime"]
+    signing = ["/usr/bin/codesign", "--force"]
     if config:
+        # The hardened runtime is what notarization demands, and only a
+        # Developer ID build is ever notarized. It also turns on library
+        # validation: a process may map only libraries signed by Apple or by
+        # its own Team ID. An ad-hoc signature has no Team ID, so a hardened
+        # ad-hoc JStackRuntime cannot load the ad-hoc Python framework beside
+        # it — dyld refuses with "different Team IDs" (macOS 26.7), and every
+        # Hub built on a Mac without a Developer ID died at its first launch.
+        # The runtime gate and the updater's check ask a source build only
+        # for its identifier, never for the hardening flag.
         if config.get("sign_keychain_password_file"):
             command(["/usr/bin/security", "unlock-keychain", "-p",
                      Path(config["sign_keychain_password_file"]).read_text().strip(), config["sign_keychain"]])
             command(["/usr/bin/security", "set-keychain-settings", config["sign_keychain"]])
-        signing += ["--timestamp", "--keychain", config["sign_keychain"], "--sign", config["sign_identity"]]
+        signing += ["--options", "runtime", "--timestamp", "--keychain", config["sign_keychain"],
+                    "--sign", config["sign_identity"]]
     else:
         signing += ["--sign", "-"]
     for path in sorted(binaries, key=lambda p: len(p.parts), reverse=True):

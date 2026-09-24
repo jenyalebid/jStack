@@ -17,8 +17,23 @@ curl -fsSL https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh \
     | bash -s -- --agent Jarvis
 
 echo "== verdict =="
-rel="$(sed -n 's/.*"release": "\([^"]*\)".*/\1/p' ~/jStack/host/release-identity.json 2>/dev/null)"
+# The identity moved with the install shape. A release snapshot carried it in
+# the checkout; a checkout is a git clone and carries no such file. What this
+# Mac runs is the bundle it compiled, and the bundle is where the identity is
+# — sealed under Contents/Resources, so it cannot be edited after signing.
+HUB_ID="/Applications/jStack Hub.app/Contents/Resources/packages/release-identity.json"
+rel="$(sed -n 's/.*"release": "\([^"]*\)".*/\1/p' "$HUB_ID" 2>/dev/null)"
 [ -n "$rel" ] && echo "OK installed release: $rel" || echo "FAIL no release identity"
+# `origin` is written only by a machine that compiled the bundle for itself,
+# and a publisher's release carries none — so this is the one honest answer to
+# "did this Mac build what it is running".
+grep -q '"kind"[[:space:]]*:[[:space:]]*"source-build"' "$HUB_ID" 2>/dev/null \
+    && echo "OK built on this Mac (origin: source-build)" \
+    || echo "FAIL the Hub does not record this Mac as its builder"
+[ -d ~/jStack/.git ] && echo "OK the install is a checkout, not a snapshot" \
+    || echo "FAIL ~/jStack is not a git checkout"
+curl -fsS -m 10 http://127.0.0.1:9090/api/health >/dev/null 2>&1 \
+    && echo "OK host answering on 9090" || echo "FAIL host not answering"
 sleep 5
 if ~/jStack/plugins/jstack/bin/jstack-scheduler status >/dev/null 2>&1; then
     echo "OK scheduler service healthy (status exit 0)"
@@ -30,8 +45,10 @@ grep -q "Library/Logs/jstack-scheduler" ~/Library/LaunchAgents/com.jstack.schedu
 pgrep -f JStackHostBar >/dev/null && echo "OK menu bar running" || echo "FAIL menu bar not running"
 launchctl list | grep -i jstack | sed 's/^/  launchd: /'
 ~/jStack/plugins/jstack/bin/jstack-doctor 2>&1 | grep -i 'versions' | sed 's/^/  doctor: /'
-~/jStack/plugins/jstack/bin/jstack-doctor 2>&1 | grep -qi 'shipped copy' \
-    && echo "OK doctor grades the shipped copy" || echo "FAIL doctor mis-grades the install"
+# "shipped copy" was the old answer: a release snapshot served the plugin.
+# A checkout serves it now, and the doctor says so in those words.
+~/jStack/plugins/jstack/bin/jstack-doctor 2>&1 | grep -qi 'serves from the checkout' \
+    && echo "OK doctor grades the install as a checkout" || echo "FAIL doctor mis-grades the install"
 echo DONE-HUB-INSTALL
 EOF
 

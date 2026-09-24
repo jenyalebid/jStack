@@ -81,6 +81,7 @@ def candidate(tmp_path):
     (directory / "candidate.json").write_text(
         json.dumps(releases.sign(manifest, private, promoted=False)))
     return {"dir": directory, "manifest": manifest, "private": private,
+            "build": publish_release.build_of(manifest),
             "public": base64.b64encode(key.public_key().public_bytes_raw()).decode()}
 
 
@@ -102,7 +103,7 @@ def test_required_observations_cover_every_receipt_the_contract_names():
 
 
 def test_a_journey_cannot_record_a_fact_its_contract_never_asked_for(tmp_path, candidate):
-    run = acceptance.Run(tmp_path / "receipts", candidate["manifest"])
+    run = acceptance.Run(tmp_path / "receipts", candidate["build"])
     with run.journey("interruption") as journey:
         with pytest.raises(releases.ReleaseError):
             journey.observe("cellular_transport", "LTE")
@@ -111,22 +112,22 @@ def test_a_journey_cannot_record_a_fact_its_contract_never_asked_for(tmp_path, c
 
 @pytest.mark.parametrize("empty", [None, False, "", [], {}])
 def test_an_empty_probe_answer_is_not_an_observation(tmp_path, candidate, empty):
-    run = acceptance.Run(tmp_path / "receipts", candidate["manifest"])
+    run = acceptance.Run(tmp_path / "receipts", candidate["build"])
     with run.journey("revocation") as journey:
         with pytest.raises(releases.ReleaseError):
             journey.observe("revoked_device", empty)
 
 
-def test_a_passing_journey_binds_its_receipt_to_the_exact_artifacts(tmp_path, candidate):
+def test_a_passing_journey_binds_its_receipt_to_the_exact_commit(tmp_path, candidate):
     receipts = tmp_path / "receipts"
-    run = acceptance.Run(receipts, candidate["manifest"])
+    run = acceptance.Run(receipts, candidate["build"])
     with run.journey("upgrade") as journey:
         journey.note("installed the previous release first")
         for check in acceptance.REQUIRED["upgrade"]:
             journey.observe(check, check + "-value")
     receipt = json.loads((receipts / "upgrade.json").read_text())
     assert receipt["result"] == "passed" and receipt["skipped"] == 0
-    assert receipt["artifacts"] == acceptance.artifact_set(candidate["manifest"])
+    assert receipt["source"] == candidate["build"]["sha"]
     assert receipt["evidence_sha256"] == releases.digest(receipts / "upgrade.log")
     # The values live in the evidence, the names in the signed receipt.
     log = (receipts / "upgrade.log").read_text()
@@ -136,7 +137,7 @@ def test_a_passing_journey_binds_its_receipt_to_the_exact_artifacts(tmp_path, ca
 
 def test_one_journey_failing_still_records_the_rest(tmp_path, candidate):
     receipts = tmp_path / "receipts"
-    run = acceptance.Run(receipts, candidate["manifest"])
+    run = acceptance.Run(receipts, candidate["build"])
     with run.journey("interruption") as journey:
         journey.observe("interrupted_job", "job-1")
         raise TimeoutError("updater never restarted")
@@ -153,8 +154,8 @@ def test_one_journey_failing_still_records_the_rest(tmp_path, candidate):
 
 def test_a_complete_run_opens_the_gate_and_signs(tmp_path, candidate):
     receipts = tmp_path / "receipts"
-    pass_everything(acceptance.Run(receipts, candidate["manifest"]))
-    accepted = acceptance.gate(receipts, candidate["manifest"])
+    pass_everything(acceptance.Run(receipts, candidate["build"]))
+    accepted = acceptance.gate(receipts, candidate["build"])
     assert set(accepted) == releases.RECEIPTS
     manifest = {**candidate["manifest"], "receipts": accepted}
     assert releases.validate(manifest)["release"] == candidate["manifest"]["release"]
@@ -162,69 +163,75 @@ def test_a_complete_run_opens_the_gate_and_signs(tmp_path, candidate):
 
 def test_a_journey_that_never_ran_is_named_not_assumed(tmp_path, candidate):
     receipts = tmp_path / "receipts"
-    pass_everything(acceptance.Run(receipts, candidate["manifest"]), skip={"off_network"})
+    pass_everything(acceptance.Run(receipts, candidate["build"]), skip={"off_network"})
     with pytest.raises(releases.ReleaseError, match="off_network: missing"):
-        acceptance.gate(receipts, candidate["manifest"])
+        acceptance.gate(receipts, candidate["build"])
 
 
 def test_a_recorded_skip_is_refused_exactly_like_an_absence(tmp_path, candidate):
     receipts = tmp_path / "receipts"
-    run = acceptance.Run(receipts, candidate["manifest"])
+    run = acceptance.Run(receipts, candidate["build"])
     pass_everything(run, skip={"off_network"})
     run.skip("off_network", "no leaf can be taken off the LAN")
     assert json.loads((receipts / "off_network.json").read_text())["skipped"] == 1
     with pytest.raises(releases.ReleaseError, match="no leaf can be taken off the LAN"):
-        acceptance.gate(receipts, candidate["manifest"])
+        acceptance.gate(receipts, candidate["build"])
 
 
 def test_an_incomplete_journey_cannot_pass_by_recording_most_of_it(tmp_path, candidate):
     receipts = tmp_path / "receipts"
-    run = acceptance.Run(receipts, candidate["manifest"])
+    run = acceptance.Run(receipts, candidate["build"])
     pass_everything(run, skip={"fleet"})
     with run.journey("fleet") as journey:
         for check in acceptance.REQUIRED["fleet"][:-1]:
             journey.observe(check, check)
     assert run.results["fleet"] == "incomplete"
     with pytest.raises(releases.ReleaseError, match="denied_authority"):
-        acceptance.gate(receipts, candidate["manifest"])
+        acceptance.gate(receipts, candidate["build"])
 
 
 def test_evidence_edited_after_the_run_stops_promotion(tmp_path, candidate):
     receipts = tmp_path / "receipts"
-    pass_everything(acceptance.Run(receipts, candidate["manifest"]))
+    pass_everything(acceptance.Run(receipts, candidate["build"]))
     (receipts / "fleet.log").write_text("result: passed\n")
     with pytest.raises(releases.ReleaseError, match="fleet: evidence_changed"):
-        acceptance.gate(receipts, candidate["manifest"])
+        acceptance.gate(receipts, candidate["build"])
 
 
-def test_a_receipt_from_another_build_does_not_qualify_these_bytes(tmp_path, candidate):
+def test_a_receipt_from_another_commit_does_not_qualify_this_one(tmp_path, candidate):
+    """Rebuilt bytes off the same commit are fine; a different commit is not.
+
+    Every Mac builds the Hub itself now, so two honest installs of one commit
+    never share an artifact digest and binding on bytes would refuse the fleet
+    its own receipts. The commit is the binding, and it still has to hold.
+    """
     receipts = tmp_path / "receipts"
-    pass_everything(acceptance.Run(receipts, candidate["manifest"]))
-    rebuilt = json.loads(json.dumps(candidate["manifest"]))
-    rebuilt["components"]["client"]["sha256"] = "f" * 64
-    with pytest.raises(releases.ReleaseError, match="other_artifacts"):
-        acceptance.gate(receipts, rebuilt)
+    pass_everything(acceptance.Run(receipts, candidate["build"]))
+    assert acceptance.gate(receipts, candidate["build"])
+    moved = {**candidate["build"], "sha": "f" * 40}
+    with pytest.raises(releases.ReleaseError, match="other_source"):
+        acceptance.gate(receipts, moved)
 
 
 def test_a_hand_written_pass_without_evidence_is_refused(tmp_path, candidate):
     receipts = tmp_path / "receipts"
-    pass_everything(acceptance.Run(receipts, candidate["manifest"]), skip={"interruption"})
+    pass_everything(acceptance.Run(receipts, candidate["build"]), skip={"interruption"})
     (receipts / "interruption.json").write_text(json.dumps(
         {"journey": "interruption", "result": "passed", "skipped": 0,
-         "artifacts": acceptance.artifact_set(candidate["manifest"]),
+         "source": candidate["build"]["sha"],
          "evidence_sha256": "d" * 64, "observed": list(acceptance.REQUIRED["interruption"])}))
     with pytest.raises(releases.ReleaseError, match="interruption: evidence_missing"):
-        acceptance.gate(receipts, candidate["manifest"])
+        acceptance.gate(receipts, candidate["build"])
 
 
 def test_a_passed_receipt_that_names_no_observations_is_refused(tmp_path, candidate):
     receipts = tmp_path / "receipts"
-    pass_everything(acceptance.Run(receipts, candidate["manifest"]))
+    pass_everything(acceptance.Run(receipts, candidate["build"]))
     receipt = json.loads((receipts / "revocation.json").read_text())
     receipt["observed"] = ["revoked_device"]
     (receipts / "revocation.json").write_text(json.dumps(receipt))
     with pytest.raises(releases.ReleaseError, match="revocation: incomplete"):
-        acceptance.gate(receipts, candidate["manifest"])
+        acceptance.gate(receipts, candidate["build"])
 
 
 # ── The release action
@@ -242,7 +249,7 @@ def test_promotion_refuses_an_empty_receipt_directory_by_name(tmp_path, candidat
 
 def test_promotion_publishes_the_candidate_with_its_evidence(tmp_path, candidate):
     receipts = tmp_path / "receipts"
-    pass_everything(acceptance.Run(receipts, candidate["manifest"]))
+    pass_everything(acceptance.Run(receipts, candidate["build"]))
     feed = tmp_path / "feed"
     envelope = publish_release.promote(candidate["dir"], receipts, feed, candidate["private"])
     release = envelope["manifest"]["release"]
@@ -256,7 +263,7 @@ def test_qualify_reports_what_a_runner_that_died_left_behind(tmp_path, candidate
     receipts = tmp_path / "receipts"
 
     def half_a_run(argv, **kwargs):
-        run = acceptance.Run(receipts, candidate["manifest"])
+        run = acceptance.Run(receipts, candidate["build"])
         pass_everything(run, skip={"off_network", "fleet"})
         return __import__("subprocess").CompletedProcess(argv, 1)
 
@@ -286,7 +293,7 @@ def test_one_payload_pasted_under_every_check_is_not_a_run(tmp_path, candidate):
     the shape of a value and nothing about where it came from.
     """
     receipts = tmp_path / "receipts"
-    run = acceptance.Run(receipts, candidate["manifest"])
+    run = acceptance.Run(receipts, candidate["build"])
     pass_everything(run, skip={"fresh_install"})
     pasted = {"disposition": "owner_directed_release_exception",
               "new_full_journey_performed": False}
@@ -297,22 +304,22 @@ def test_one_payload_pasted_under_every_check_is_not_a_run(tmp_path, candidate):
     receipt = json.loads((receipts / "fresh_install.json").read_text())
     assert receipt["result"] == "passed" and not receipt["missing"]
     assert receipt["evidence_sha256"] == releases.digest(receipts / "fresh_install.log")
-    state = acceptance.inspect(receipts, candidate["manifest"])
+    state = acceptance.inspect(receipts, candidate["build"])
     assert state["fresh_install"]["state"] == "not_observed"
     assert "all 6 checks" in state["fresh_install"]["detail"]
     with pytest.raises(releases.ReleaseError, match="fresh_install"):
-        acceptance.gate(receipts, candidate["manifest"])
+        acceptance.gate(receipts, candidate["build"])
 
 
 def test_checks_that_honestly_agree_are_not_mistaken_for_a_paste(tmp_path, candidate):
     """Two checks may legitimately read the same value; the trap needs more
     than agreement, or the next honest run gets refused and the gate widened."""
     receipts = tmp_path / "receipts"
-    run = acceptance.Run(receipts, candidate["manifest"])
+    run = acceptance.Run(receipts, candidate["build"])
     pass_everything(run, skip={"fresh_install"})
     with run.journey("fresh_install") as journey:
         for index, check in enumerate(acceptance.REQUIRED["fresh_install"]):
-            journey.observe(check, {"release": "2026-09-22-9f6c8c02"} if index < 2
+            journey.observe(check, {"build": "2026-09-22-9f6c8c02"} if index < 2
                             else {"check": check})
-    assert acceptance.inspect(receipts, candidate["manifest"])["fresh_install"]["state"] == "passed"
-    assert acceptance.gate(receipts, candidate["manifest"])
+    assert acceptance.inspect(receipts, candidate["build"])["fresh_install"]["state"] == "passed"
+    assert acceptance.gate(receipts, candidate["build"])

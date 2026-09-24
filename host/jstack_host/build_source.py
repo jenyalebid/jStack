@@ -300,29 +300,6 @@ def land(feed: Path, output: Path, envelope: dict) -> Path:
     return feed / release_id
 
 
-#: The one way past the adopted-machine refusal below, and it is typed, never
-#: defaulted: `JSTACK_BUILD_DESPITE_LEAVES=1 jstack-host updates build`. The
-#: machine that publishes for a fleet has to build eventually, and re-keying
-#: its leaves by hand afterwards is a decision somebody makes on purpose.
-DESPITE_LEAVES = "JSTACK_BUILD_DESPITE_LEAVES"
-
-
-def adopted() -> list[str]:
-    """The machines that take their updates from this one.
-
-    Exactly the rows `updates/queue` will send a job to: a forgotten row takes
-    nothing, and a row with no bound credential has no updater to strand.
-    """
-    try:
-        from .store import get_store
-        rows = get_store().list_hosts()
-    except Exception as exc:  # a store that cannot be read is not "no leaves"
-        raise releases.ReleaseError(
-            "could not read this hub's adopted machines: " + str(exc)) from exc
-    return [row["name"] or row["key"] for row in rows
-            if not row["deleted"] and row["device_id"]]
-
-
 def build_refusal(root: Path, config: dict) -> str:
     """Why this machine must not build, or `""` if it may.
 
@@ -335,17 +312,10 @@ def build_refusal(root: Path, config: dict) -> str:
     if not config.get("github_repo"):
         return "this host has no source repository to build from"
     # A build mints this hub's own key and rotates `public_key` to it
-    # (`_offer`). A leaf verifies its parent's jobs against the key it pinned
-    # when it installed, so the first build under it makes every future job
-    # unverifiable there — and the key that would fix it only arrives inside an
-    # update the leaf now refuses. #144 holds the fix; this refusal holds the
-    # fleet.
-    names = adopted()
-    if names and os.environ.get(DESPITE_LEAVES) != "1":
-        return ("this hub has adopted machines (" + ", ".join(names) + ") and a build "
-                "would rotate the release key they trust, leaving them unable to verify "
-                "any update from this hub — see #144. Forget them, or build with "
-                f"{DESPITE_LEAVES}=1 and re-adopt them afterwards.")
+    # (`_offer`). The machines this hub adopted learn that key on their next
+    # heartbeat (`update_supervisor.pin_parent_key`, #144), so a hub with
+    # leaves builds like any other; it used to refuse, because the key only
+    # travelled inside the update the leaves could no longer verify.
     return ""
 
 
@@ -375,6 +345,73 @@ def build(root: Path, config: dict, *, ref: str | None = None, now=None) -> dict
         raise
 
 
+def archive_hub(app: Path, output: Path, signing: dict | None) -> Path:
+    """The built bundle as the zip a stage unpacks, notarized when this hub can.
+
+    Without `signing` the bundle is ad-hoc signed and nothing is notarized;
+    the archive has the same shape either way, and it is `stage()`'s codesign
+    check that decides whether it installs.
+    """
+    from . import build_hub
+    from .update_macos import command
+    menu = output / "menubar-notarized.zip"
+    if signing:
+        build_hub.notarize(app, output, signing)
+        shutil.move(output / "hub-notarized.zip", menu)
+    else:
+        command(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(app), str(menu)],
+                timeout=900)
+    return menu
+
+
+def catalog_variant(config: dict, stack: Path, work: Path, release_id: str, *,
+                    version: str, repo: str, date: str, public: str, ref: str,
+                    built_by: dict) -> Path | None:
+    """The equal-identity Hub carrying this machine's private capabilities.
+
+    A Hub that runs catalogued capabilities refuses the catalog-free bundle a
+    feed offers: `stage()` takes the menubar from
+    `local_components/<release>/hub-catalog.zip` instead, and reads the same
+    release, sha and package fingerprint out of it. The publisher's path
+    (`publish_release.sign_hub`) built that variant beside every release; a
+    hub building its own ref had nothing to put there, so its every build
+    staged as "private capability build ... is missing" on the one Mac that
+    built it. Same stack, same identity, same signing — one more catalog,
+    stored machine-locally and never landed in the feed.
+    """
+    catalog_path = config.get("local_catalog")
+    if not catalog_path:
+        return None
+    if not config.get("local_components"):
+        raise releases.ReleaseError(
+            "this hub carries private capabilities (local_catalog); configure local_components")
+    from . import build_hub
+    catalog = json.loads(Path(catalog_path).read_text())
+    destination = work / "hub-catalog-build"
+    destination.mkdir()
+    app = build_hub.build(stack, destination, version, config.get("signing"), catalog=catalog,
+                          release_id=release_id, github_repo=repo, date=date,
+                          trust_key=public, channel=ref, origin=built_by)
+    archive = archive_hub(app, destination, config.get("signing"))
+    shutil.rmtree(app, ignore_errors=True)
+    store = Path(config["local_components"]) / release_id
+    store.mkdir(parents=True, exist_ok=True)
+    target = store / "hub-catalog.zip"
+    shutil.copy2(archive, target)
+    return target
+
+
+def variant_present(config: dict, release_id: str) -> None:
+    """A re-offer of a build whose private variant is gone would stage as
+    missing on this very machine; say so at the build instead."""
+    if not config.get("local_catalog"):
+        return
+    target = Path(config.get("local_components") or "") / release_id / "hub-catalog.zip"
+    if not (config.get("local_components") and target.is_file()):
+        raise releases.ReleaseError(
+            f"private capability build for {release_id} is missing: {target}")
+
+
 def _build(root: Path, config: dict, ref: str) -> dict:
     from . import build_hub
     from .update_macos import command
@@ -397,6 +434,7 @@ def _build(root: Path, config: dict, ref: str) -> dict:
         manifest = releases.verify(envelope, public)
         for item in manifest["components"].values():
             releases.check_artifact(feed / release_id / item["file"], item)
+        variant_present(config, release_id)
         return _offer(root, config, feed, envelope, public)
     work = Path(tempfile.mkdtemp(prefix="build-", suffix=".noindex", dir=root))
     stack, output = work / "stack", work / release_id
@@ -427,17 +465,13 @@ def _build(root: Path, config: dict, ref: str) -> dict:
         app = build_hub.build(stack, output, version, config.get("signing"),
                               release_id=release_id, github_repo=repo, date=date,
                               trust_key=public, channel=ref, origin=built_by)
-        menu = output / "menubar-notarized.zip"
-        if config.get("signing"):
-            build_hub.notarize(app, output, config["signing"])
-            shutil.move(output / "hub-notarized.zip", menu)
-        else:
-            # Nothing to notarize: without `signing` the bundle is ad-hoc
-            # signed. The archive has the same shape either way, and it is
-            # `stage()`'s codesign check that decides whether it installs.
-            command(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(app), str(menu)],
-                    timeout=600)
+        menu = archive_hub(app, output, config.get("signing"))
         shutil.rmtree(app, ignore_errors=True)
+        # Before the identity files below: both bundles archive HEAD of the
+        # same clean tree, and the variant is the same identity plus the
+        # catalog. Stored beside the feed, not in it.
+        catalog_variant(config, stack, work, release_id, version=version, repo=repo,
+                        date=date, public=public, ref=ref, built_by=built_by)
         # After the Hub is built, because `build_hub` archives HEAD and
         # refuses a dirty `host/`: these two files exist only in the tarball
         # the installing machine unpacks, and `stage()` reads the identity
@@ -599,13 +633,7 @@ def bootstrap(checkout: Path, output: Path, key_dir: Path, *, repo: str, ref: st
         app = build_hub.build(stack, output, version, signing, release_id=release_id,
                               github_repo=repo, date=date, trust_key=public,
                               channel=ref, origin=built_by)
-        menu = output / "menubar-notarized.zip"
-        if signing:
-            build_hub.notarize(app, output, signing)
-            shutil.move(output / "hub-notarized.zip", menu)
-        else:
-            command(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(app), str(menu)],
-                    timeout=900)
+        menu = archive_hub(app, output, signing)
         installable(app)
         compatibility = compatibility_of(app, client) if item else None
         shutil.rmtree(app, ignore_errors=True)

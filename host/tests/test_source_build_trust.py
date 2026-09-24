@@ -189,13 +189,12 @@ def envelope(key: Ed25519PrivateKey, *, origin: dict | None) -> dict:
     components = {name: {"file": name + ".zip", "version": "20260923", "bytes": 4,
                          "sha256": hashlib.sha256(name.encode()).hexdigest()}
                   for name in releases.COMPONENTS}
-    artifacts = hashlib.sha256(releases.canonical(components)).hexdigest()
     manifest = {"schema": 1, "release": "2026-09-23-aaaaaaaa", "components": components,
                 "sources": {"stack": "a" * 40, "client": "b" * 40},
                 "compatibility": {"protocol": 1, "rollback": True, "platform": "macos",
                                   "architecture": "arm64", "minimum_os": "13.0"}}
     if origin is None:
-        manifest["receipts"] = {name: {"result": "passed", "skipped": 0, "artifacts": artifacts,
+        manifest["receipts"] = {name: {"result": "passed", "skipped": 0, "source": "a" * 40,
                                        "evidence_sha256": "c" * 64} for name in releases.RECEIPTS}
     else:
         manifest["origin"] = origin
