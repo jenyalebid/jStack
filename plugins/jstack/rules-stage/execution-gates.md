@@ -20,8 +20,8 @@ Verify: command · ./verify/build-from-ref.sh
 
 - The heading is `## Stage <N> — <deliverable>`. Write the em dash; the parser
   also takes `–`, `-` and `Stage N:`.
-- `Verify:` is one line, `<kind>` or `<kind> · <spec>`. Write `·`; `|` and `--`
-  are also read.
+- `Verify:` is one line, `<kind>` or `<kind> · <spec>`. Write `·`; `|`, `--`,
+  `—`, `–`, `-` and `:` are also read, and never end up inside the spec.
 - Numbering is advisory. Document order is the stage's identity; a number that
   disagrees is reported and ignored.
 - `# Part one — …` H1s are structure. A stage never lives at H1.

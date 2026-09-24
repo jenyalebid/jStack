@@ -54,7 +54,17 @@ _VERIFY = re.compile(r"^[ \t>]*(?:[-*+][ \t]+)?(?:\*\*|__|\*|_|`)*[ \t]*verify[ 
 # `<kind>` then an optional separator then the rest. The kind is taken as the
 # first word rather than by splitting on the separator first, so a spec that
 # contains `--` cannot be mistaken for the separator that introduces it.
-_VERIFY_BODY = re.compile(r"^([A-Za-z][\w-]*)[ \t]*(?:(?:·|\||--)[ \t]*)?(.*)$")
+#
+# Every dash the heading accepts is accepted here too. An author whose stage
+# headings all read `Stage 4 — …` reaches for the same em dash on the Verify
+# line, and a separator that leaked into the spec would be *shelled*: the stage
+# runs `— ./verify/build.sh`, comes back nonzero, and the author is told their
+# verification failed rather than that their line is malformed. A bare `-` is
+# only a separator when whitespace follows it, so a spec opening on a flag
+# survives.
+_VERIFY_BODY = re.compile(
+    r"^([A-Za-z][\w]*)[ \t]*(?:(?:·|\||--|—|–|:)[ \t]*|-[ \t]+)?(.*)$"
+)
 
 # A code span at the head of the spec is the spec; the em-dashed sentence these
 # plans trail it with is commentary. `command` means something gets executed,

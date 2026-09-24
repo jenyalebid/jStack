@@ -168,10 +168,18 @@ def test_every_accepted_heading_form(heading):
     assert parsed.problems == []
 
 
-@pytest.mark.parametrize("sep", ["·", "|", "--"])
+@pytest.mark.parametrize("sep", ["·", "|", "--", "—", "–", "-", ":", ""])
 def test_every_accepted_verify_separator(sep):
+    """Every form yields the identical pair. A separator that leaked into the
+    spec would be shelled by `run_verify`, and the author would be told their
+    verification failed rather than that their `Verify:` line is malformed —
+    the em dash being the likeliest to be typed, since every stage heading in
+    the plan that defined this format uses one."""
     parsed = parse(f"# P\n## Stage 1 — a\nVerify: command {sep} ./verify/x.sh\n")
-    assert parsed.stages[0].verify_spec == "./verify/x.sh"
+    assert (parsed.stages[0].verify_kind, parsed.stages[0].verify_spec) == (
+        "command",
+        "./verify/x.sh",
+    )
     assert parsed.problems == []
 
 
