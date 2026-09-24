@@ -16,7 +16,7 @@ def test_interrupted_copy_does_not_block_a_new_job_for_the_same_release(monkeypa
     monkeypatch.setattr(backend, "_statuses", lambda _: {})
     monkeypatch.setattr(backend, "_stop_services", lambda *args: None)
     monkeypatch.setattr(backend, "_restore_services", lambda *args: None)
-    monkeypatch.setattr(backend, "_check_app", lambda *args: None)
+    monkeypatch.setattr(backend, "_check_app", lambda *args, **kwargs: None)
     monkeypatch.setattr(update_plugins, "install", lambda *args: None)
     monkeypatch.setattr(update_plugins, "rollback", lambda *args: None)
     transaction = {"release": "same-release", "services": {}, "providers": [],
@@ -76,7 +76,7 @@ def test_recovery_state_is_judged_by_the_transaction_files(monkeypatch, tmp_path
             path.mkdir()
     backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
     checked = []
-    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind: checked.append((path, kind)))
+    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind, **_: checked.append((path, kind)))
     transaction = {"apps": {"menubar": {"target": str(app), "backup": str(backup), "existed": True}},
                    "manifest": {"components": {"menubar": {"version": "20260923"}}}}
     assert backend.recovery_status({"id": "job-1", "transaction": transaction}) == expected
@@ -90,7 +90,7 @@ def test_recovery_ignores_a_same_version_prior_that_was_never_swapped(monkeypatc
     app.mkdir()
     (tmp_path / "Hub.app.incoming-job-2").mkdir()
     backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
-    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind: None)  # version matches
+    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind, **_: None)  # version matches
     transaction = {"apps": {"menubar": {"target": str(app), "existed": True,
                                         "backup": str(tmp_path / "Hub.app.previous-x")}},
                    "manifest": {"components": {"menubar": {"version": "20260923"}}}}
@@ -102,7 +102,7 @@ def test_recovery_judges_every_app_in_the_transaction(monkeypatch, tmp_path):
     hub.mkdir(); client.mkdir()
     (tmp_path / "Hub.app.previous-x").mkdir()
     backend = update_app.AppBackend(tmp_path, {"menubar_path": str(hub)})
-    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind: None)
+    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind, **_: None)
     transaction = {"apps": {
         "menubar": {"target": str(hub), "backup": str(tmp_path / "Hub.app.previous-x"), "existed": True},
         "client": {"target": str(client), "backup": str(tmp_path / "jRemote.app.previous-x"), "existed": True}},
@@ -115,7 +115,7 @@ def test_recovery_judges_every_app_in_the_transaction(monkeypatch, tmp_path):
 def test_recovery_of_a_first_install_needs_no_backup(monkeypatch, tmp_path):
     app = tmp_path / "Hub.app"
     backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
-    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind: None)
+    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind, **_: None)
     transaction = {"apps": {"menubar": {"target": str(app), "existed": False,
                                         "backup": str(tmp_path / "Hub.app.previous-x")}},
                    "manifest": {"components": {"menubar": {"version": "1"}}}}

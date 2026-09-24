@@ -25,8 +25,18 @@ def journal_path() -> Path:
 
 
 def identity(app: Path, identifier: str) -> dict:
+    """The sealed identity of a bundle this machine is willing to adopt.
+
+    `verify` has already refused anything whose seal does not hold, and has
+    already decided which signing identity that seal had to carry. What is
+    left here is Gatekeeper, and Gatekeeper is a question about a notarised
+    bundle from a Developer ID: a Hub compiled on this Mac has neither, and
+    asking anyway is the exact refusal that shut every non-publisher machine
+    out of its own build. The fingerprint below is asked of both paths.
+    """
     app_services.verify(app, identifier)
-    command(["/usr/sbin/spctl", "--assess", "--type", "execute", str(app)])
+    if not app_services.source_built(app):
+        command(["/usr/sbin/spctl", "--assess", "--type", "execute", str(app)])
     from .sourcestamp import fingerprint
     packages = app / "Contents/Resources/packages"
     value = json.loads((packages / "release-identity.json").read_text())
@@ -150,10 +160,12 @@ def provision() -> None:
                      "feed_dir": str(releases.RELEASE_DIR.parent / "fleet")}
     if source.get("github_repo"):
         configuration["github_repo"] = build_source.repository(source["github_repo"])
-    # The ref this bundle was built from, carried the way `install_updater`
-    # carries it. Dropping it walked a hub that had been moved onto a branch
-    # back to stable the moment it was reinstalled — from the branch build it
-    # had just installed, whose own identity says which line it came off.
+    # The ref this bundle was built from, read out of the bundle's own sealed
+    # release identity. Nothing else here knows it: not the caller, not the
+    # state dir a fresh install refuses to find anything in. While the bundle
+    # did not record it this line was a constant — every branch install, and
+    # every reinstall of a hub already moved onto a branch, was provisioned to
+    # follow stable and rebuilt itself off main from its next update onward.
     configuration["channel"] = build_source.channel_ref(source)
     atomic_json(config_path, configuration)
 

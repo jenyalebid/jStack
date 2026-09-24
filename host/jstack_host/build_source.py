@@ -64,6 +64,18 @@ def channel_ref(config: dict) -> str:
     return name
 
 
+def source_origin(machine: str) -> dict:
+    """The marker saying these bytes were built by the machine that will run
+    them, in the one spelling both readers of it know.
+
+    It goes in two places and has to mean the same thing in both: inside the
+    signed manifest, where it excuses a release from the acceptance receipts
+    a publication carries, and inside the built bundle, where it tells the
+    sealed installer to ask the pinned key rather than a signing team.
+    """
+    return {"kind": releases.SOURCE_BUILD, "machine": machine}
+
+
 def branch(ref: str) -> str:
     """The git branch a ref name selects. `stable` is this repo's main."""
     return "main" if ref == releases.STABLE_CHANNEL else ref
@@ -260,7 +272,7 @@ def assemble(*, release_id: str, notes: str, sequence: int, repo: str, ref: str,
         "channel": {"github_repo": repo, "name": ref},
         # Inside the signed bytes, because it is what excuses this manifest
         # from the acceptance receipts a publication carries.
-        "origin": {"kind": releases.SOURCE_BUILD, "machine": machine},
+        "origin": source_origin(machine),
         "sources": {"stack": sha, "client": client_sha},
         "client_packages": dependencies,
         "components": components,
@@ -358,11 +370,13 @@ def _build(root: Path, config: dict, ref: str) -> dict:
         if (previous.get("channel", {}).get("name") or releases.STABLE_CHANNEL) == ref and (
                 isinstance(previous.get("sequence"), int) and sequence < previous["sequence"]):
             raise releases.ReleaseError(f"{ref} is behind the build this hub already holds")
+        built_by = source_origin(config.get("machine", ""))
         identity = {"release": release_id, "sha": sha, "version": version, "date": date,
-                    "github_repo": repo, "sequence": sequence, "channel": ref}
+                    "github_repo": repo, "sequence": sequence, "channel": ref,
+                    "origin": built_by}
         app = build_hub.build(stack, output, version, config.get("signing"),
                               release_id=release_id, github_repo=repo, date=date,
-                              trust_key=public)
+                              trust_key=public, channel=ref, origin=built_by)
         menu = output / "menubar-notarized.zip"
         if config.get("signing"):
             build_hub.notarize(app, output, config["signing"])
@@ -474,22 +488,19 @@ def client_component(client: Path, output: Path) -> tuple[dict, str]:
 def installable(app: Path) -> None:
     """Refuse a bundle the sealed installer would reject, before it is moved.
 
-    `install_signed.identity` pins the publisher's signing team and asks
-    Gatekeeper; an ad-hoc signature satisfies neither. Reaching that check
-    with the bundle already in /Applications turns a missing credential into
-    a codesign requirement failure nine frames down.
+    The same question `install_signed.identity` asks, asked here because there
+    it is asked with the bundle already in /Applications — a failure nine
+    frames down, after the whole build. What it can still catch is a build
+    whose seal did not take: an ad-hoc signature is enough for a bundle this
+    machine built, an absent or broken one is not, on any path.
     """
     from . import app_services
-    from .update_macos import command
     try:
         app_services.verify(app, "live.jstack.hub")
-        command(["/usr/sbin/spctl", "--assess", "--type", "execute", str(app)])
     except Exception as exc:
         raise releases.ReleaseError(
-            "this Mac built a Hub the sealed installer will not adopt: it is signed "
-            "ad-hoc, and installation requires a notarized bundle from the publisher's "
-            "signing team. Point JSTACK_SIGNING_CONFIG at a release configuration "
-            f"carrying sign_identity and notary_credentials. ({exc})") from exc
+            "this Mac built a Hub its own sealed installer will not adopt — the "
+            f"bundle's signature does not hold over what was built: {exc}") from exc
 
 
 def bootstrap(checkout: Path, output: Path, key_dir: Path, *, repo: str, ref: str,
@@ -531,10 +542,13 @@ def bootstrap(checkout: Path, output: Path, key_dir: Path, *, repo: str, ref: st
             (stack / "plugins/jstack/.claude-plugin/plugin.json").read_text())["version"]
         item, client_sha = client_component(client, output) if client else (None, "")
         release_id = source_identity(date, sha, client_sha, {})
+        built_by = source_origin(machine)
         identity = {"release": release_id, "sha": sha, "version": version, "date": date,
-                    "github_repo": repo, "sequence": sequence, "channel": ref}
+                    "github_repo": repo, "sequence": sequence, "channel": ref,
+                    "origin": built_by}
         app = build_hub.build(stack, output, version, signing, release_id=release_id,
-                              github_repo=repo, date=date, trust_key=public)
+                              github_repo=repo, date=date, trust_key=public,
+                              channel=ref, origin=built_by)
         menu = output / "menubar-notarized.zip"
         if signing:
             build_hub.notarize(app, output, signing)
@@ -580,7 +594,7 @@ def bootstrap(checkout: Path, output: Path, key_dir: Path, *, repo: str, ref: st
         shutil.rmtree(work, ignore_errors=True)
 
 
-def seed(root: Path, output: Path, *, ref: str) -> dict:
+def seed(root: Path, output: Path) -> dict:
     """Make what the installer built this hub's first offer.
 
     `inherited()` refuses on an empty feed, so a hub that never lands its own
@@ -601,10 +615,6 @@ def seed(root: Path, output: Path, *, ref: str) -> dict:
     feed = Path(config["feed_dir"])
     land(feed, output, envelope)
     atomic_json(feed / "latest.json", envelope)
-    # The ref this Mac was installed from. `install_signed.provision` reads it
-    # out of the bundle's release identity, which `build_hub` does not write.
-    if config.get("channel") != ref:
-        atomic_json(config_path, {**json.loads(config_path.read_text()), "channel": ref})
     return {"release": manifest["release"], "feed": str(feed)}
 
 
@@ -625,14 +635,13 @@ def main():
     seed_args = actions.add_parser("seed")
     seed_args.add_argument("--root", type=Path, required=True)
     seed_args.add_argument("--output", type=Path, required=True)
-    seed_args.add_argument("--ref", required=True)
     args = parser.parse_args()
     if args.action == "bootstrap":
         signing = json.loads(args.signing.read_text()).get("signing") if args.signing else None
         result = bootstrap(args.checkout, args.output, args.key_dir, repo=args.repo, ref=args.ref,
                            client=args.client, signing=signing, machine=args.machine)
     else:
-        result = seed(args.root, args.output, ref=args.ref)
+        result = seed(args.root, args.output)
     print(json.dumps(result))
 
 

@@ -1150,18 +1150,18 @@ if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ] \
     command -v tmux >/dev/null 2>&1 \
         || die "no tmux on PATH — the Hub bundles it, so it is a build input.
      Install it: brew install tmux"
-    # `install_signed.identity` pins the publisher's signing team and asks
-    # Gatekeeper before it adopts a bundle, and `build_hub` signs ad-hoc when it
-    # is handed no signing configuration — which satisfies neither. The build
-    # asks codesign the same question at the end; this asks it before the ten
-    # minutes, where the answer is still cheap.
+    # Signing is optional, and on all but the publisher's Mac it is absent.
+    # A Hub built here is then signed ad-hoc, which the sealed installer now
+    # adopts: the bundle records that this machine built it, and the pinned
+    # key that signed the manifest naming it is what vouches for it. Point
+    # JSTACK_SIGNING_CONFIG at a release configuration carrying sign_identity
+    # and notary_credentials to get a notarized bundle instead.
     SIGNING_CONFIG="${JSTACK_SIGNING_CONFIG:-${JSTACK_RELEASE_CONFIG:-}}"
-    { [ -n "$SIGNING_CONFIG" ] && [ -f "$SIGNING_CONFIG" ]; } || die \
-        "a Hub built on this Mac is signed ad-hoc, and the sealed installer only
-     adopts a notarized bundle from the publisher's signing team. Point
-     JSTACK_SIGNING_CONFIG at a release configuration carrying sign_identity
-     and notary_credentials."
-    ok "build inputs — CPython 3.12 framework, clang, swiftc, tmux, signing identity"
+    if [ -n "$SIGNING_CONFIG" ] && [ ! -f "$SIGNING_CONFIG" ]; then
+        die "JSTACK_SIGNING_CONFIG points at no file: $SIGNING_CONFIG
+     Unset it to build a Hub signed with this machine's own key."
+    fi
+    ok "build inputs — CPython 3.12 framework, clang, swiftc, tmux"
 
     if [ "$DRY_RUN" = "1" ]; then
         would "build the Hub from $REF and install it into /Applications"
@@ -1198,7 +1198,9 @@ if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ] \
         if [ -d "/Applications/jRemote.app" ]; then
             build_args+=(--client /Applications/jRemote.app)
         fi
-        build_args+=(--signing "$SIGNING_CONFIG")
+        if [ -n "$SIGNING_CONFIG" ]; then
+            build_args+=(--signing "$SIGNING_CONFIG")
+        fi
         run_long "building the Hub from $REF" \
             "$BUILD_VENV/bin/python3" -m jstack_host.build_source bootstrap "${build_args[@]}" \
             || die "the Hub build failed — $(tail -4 "$LAST_LOG" 2>/dev/null | tr '\n' ' ')"
@@ -1252,7 +1254,7 @@ if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ] \
                 # that never lands its first release can never build a second,
                 # and a hub with no feed serves no leaf.
                 if "$BUILD_VENV/bin/python3" -m jstack_host.build_source seed \
-                        --root "$HUB_STATE/updates" --output "$BUILD_OUT" --ref "$REF" >/dev/null; then
+                        --root "$HUB_STATE/updates" --output "$BUILD_OUT" >/dev/null; then
                     ok "feed seeded — this hub offers $HUB_RELEASE and can build the next one"
                 else
                     warn "the Hub is installed but its feed is empty — it can serve no leaf, and

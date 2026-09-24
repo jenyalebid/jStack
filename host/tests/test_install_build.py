@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from jstack_host import build_source, release_manifest as releases
+from jstack_host import build_hub, build_source, release_manifest as releases
 
 REPO = Path(__file__).resolve().parents[2]
 INSTALL = (REPO / "install.sh").read_text()
@@ -37,7 +37,17 @@ def bundle(path: Path, info: dict) -> Path:
 
 
 @pytest.fixture
-def installing(tmp_path, monkeypatch):
+def sealed():
+    """The identity `build_hub` sealed into the bundle it was asked to build.
+
+    The bundle is archived and deleted before `bootstrap` returns, so this is
+    the only place a test can read what the compiler was handed.
+    """
+    return {}
+
+
+@pytest.fixture
+def installing(tmp_path, monkeypatch, sealed):
     """A Mac part way through an install: a checkout on a ref, a client in
     /Applications, and no hub yet. Git, the Hub compiler and ditto are stubbed;
     the identity, the manifest, the signature and the tarball are the real code.
@@ -77,6 +87,17 @@ def installing(tmp_path, monkeypatch):
             "CFBundleIdentifier": "live.jstack.hub", "CFBundleVersion": "20260923",
             "LSMinimumSystemVersion": "13.0"})
         (app / "built").write_text(kwargs["trust_key"])
+        # The real `release_identity`, on whatever `bootstrap` handed it: this
+        # file is the only thing `install_signed.provision` has to read a ref
+        # or an origin out of, so a stub that wrote its own would be asserting
+        # the fixture. The compiler itself is what is out of reach here.
+        packages = app / "Contents/Resources/packages"
+        packages.mkdir(parents=True)
+        sealed.update(build_hub.release_identity(
+            HEAD, version, release_id=kwargs["release_id"],
+            github_repo=kwargs["github_repo"], date=kwargs["date"],
+            channel=kwargs.get("channel"), origin=kwargs.get("origin")))
+        (packages / "release-identity.json").write_text(json.dumps(sealed))
         return app
 
     monkeypatch.setattr(update_macos, "command", command)
@@ -153,19 +174,47 @@ def test_the_tarball_carries_the_identity_and_the_key_stage_reads_back(installin
     assert trust["public_key"] == build_source.build_key(keys)[1]
 
 
-def test_a_bundle_the_sealed_installer_will_not_adopt_stops_before_applications(installing,
-                                                                                monkeypatch):
-    """`install_signed.identity` pins the publisher's signing team and asks
-    Gatekeeper; an ad-hoc signature satisfies neither. Reaching that check with
-    the bundle already in /Applications turns a missing credential into a
-    codesign requirement failure nine frames down."""
+def test_the_built_hub_records_the_ref_it_was_built_from(installing, sealed):
+    """#148. `install_signed.provision` reads the hub's channel out of this
+    file and nothing else knows it — a fresh install refuses to find anything
+    in the state dir, and the caller is not asked. While the bundle recorded
+    no ref, every branch install was provisioned to follow stable."""
+    built(installing, ref="feature/x")
+    assert sealed["channel"] == "feature/x"
+    assert build_source.channel_ref(sealed) == "feature/x"
+
+
+def test_a_no_app_install_records_its_ref_too(installing, sealed):
+    """The half the workaround in `seed()` could never reach: without a client
+    there is no manifest and no first offer, so nothing ran after the install
+    to correct the channel it had been provisioned with."""
+    assert built(installing, client=None, ref="feature/x")["offer"] is False
+    assert sealed["channel"] == "feature/x"
+
+
+def test_the_built_hub_records_that_this_machine_built_it(installing, sealed):
+    """#146. The marker the sealed installer's bundle gate reads, in the same
+    spelling the signed manifest carries — one answer to what a source build
+    is, sealed into the bundle by the signature over it."""
+    _, output, _, _, _ = installing
+    built(installing)
+    manifest = json.loads((output / "manifest.json").read_text())["manifest"]
+    assert sealed["origin"] == manifest["origin"] == {
+        "kind": releases.SOURCE_BUILD, "machine": "this-mac"}
+
+
+def test_a_build_whose_seal_does_not_hold_stops_before_applications(installing, monkeypatch):
+    """`install_signed.identity` asks the same question with the bundle
+    already in /Applications, nine frames down. An ad-hoc signature is enough
+    for a Hub this machine built; an absent or broken one is enough for
+    nobody, and that is what is still worth catching here."""
     from jstack_host import app_services
 
     def refuse(*args, **kwargs):
-        raise releases.ReleaseError("code failed to satisfy specified code requirement(s)")
+        raise releases.ReleaseError("code object is not signed at all")
 
     monkeypatch.setattr(app_services, "verify", refuse)
-    with pytest.raises(releases.ReleaseError, match="JSTACK_SIGNING_CONFIG"):
+    with pytest.raises(releases.ReleaseError, match="signature does not hold"):
         built(installing)
 
 
@@ -199,7 +248,7 @@ def test_the_install_lands_what_it_built_as_the_hubs_first_offer(installing, tmp
     first release can never build a second one — and a hub with no feed serves
     no leaf."""
     root, feed, output = seeded(installing, tmp_path)
-    answer = build_source.seed(root, output, ref="dev")
+    answer = build_source.seed(root, output)
     public = build_source.build_key(root)[1]
     manifest = releases.verify(json.loads((feed / "latest.json").read_text()), public)
     assert manifest["release"] == answer["release"]
@@ -211,19 +260,22 @@ def test_the_install_lands_what_it_built_as_the_hubs_first_offer(installing, tmp
     assert build_source.inherited({"feed_dir": str(feed), "public_key": public})
 
 
-def test_the_seed_records_the_ref_this_mac_was_installed_from(installing, tmp_path):
-    """`install_signed.provision` reads the channel out of the bundle's release
-    identity, which `build_hub.release_identity` does not write — so a hub
-    installed from a branch would check main."""
+def test_the_seed_leaves_the_channel_the_bundle_already_answered_for(installing, tmp_path):
+    """The Phase-1b workaround, gone. It wrote the ref into the hub's config
+    after provisioning, which covered the installer's own path and nothing
+    else: a `--no-app` install never reached it, and neither did a bundle
+    reinstalled outside the installer. The bundle carries the ref now."""
+    import inspect
     root, _, output = seeded(installing, tmp_path)
-    build_source.seed(root, output, ref="dev")
-    assert json.loads((root / "config.json").read_text())["channel"] == "dev"
+    build_source.seed(root, output)
+    assert "channel" not in json.loads((root / "config.json").read_text())
+    assert "channel" not in inspect.getsource(build_source.seed)
 
 
 def test_a_hub_that_does_not_trust_the_installers_key_refuses_the_offer(installing, tmp_path):
     root, feed, output = seeded(installing, tmp_path, config={"public_key": "not-this-key"})
     with pytest.raises(releases.ReleaseError, match="does not trust the key"):
-        build_source.seed(root, output, ref="dev")
+        build_source.seed(root, output)
     assert not (feed / "latest.json").exists()
 
 
@@ -258,17 +310,20 @@ def test_install_sh_never_deletes_uncommitted_work_in_the_checkout():
 def test_install_sh_names_a_remedy_for_every_build_input_it_requires():
     """A Mac without these cannot install, which is intended — but a traceback
     ten minutes into a build is not the way to say so."""
-    for remedy in ("python.org", "xcode-select --install", "brew install tmux",
-                   "JSTACK_SIGNING_CONFIG"):
+    for remedy in ("python.org", "xcode-select --install", "brew install tmux"):
         assert remedy in CODE, f"no remedy offered for a missing build input: {remedy}"
     assert "Python.framework/Versions/3.12" in CODE
 
 
-def test_the_signing_gate_is_named_the_same_way_in_both_places():
-    """install.sh refuses before the build and `installable()` refuses after
-    it; two spellings of that requirement would leave one of them to rot."""
-    import inspect
-    assert "JSTACK_SIGNING_CONFIG" in inspect.getsource(build_source.installable)
+def test_install_sh_does_not_require_a_publisher_signing_identity():
+    """#146: it did, and that made the publisher's Mac the only machine the
+    one install path there is could reach. A configuration that is set but
+    names no file is still a mistake worth refusing over."""
+    assert "JSTACK_SIGNING_CONFIG" in CODE, "the door to a notarized build is gone"
+    assert "points at no file" in CODE
+    for refusal in ("adopts a notarized bundle from the publisher",
+                    "and notary_credentials.\"\n"):
+        assert refusal not in CODE, f"install.sh still refuses an unsigned build: {refusal}"
 
 
 def test_install_sh_lands_its_build_in_the_feed_through_the_one_writer():

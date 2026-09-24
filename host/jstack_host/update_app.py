@@ -133,7 +133,8 @@ class AppBackend(MacBackend):
             if not target.exists():
                 return "unknown"  # cut between the two renames
             try:
-                self._check_app(target, transaction["manifest"]["components"][kind], kind)
+                self._check_app(target, transaction["manifest"]["components"][kind], kind,
+                                source_build=self._built_here(job))
             except (OSError, ValueError, KeyError, subprocess.SubprocessError):
                 return "unknown"
         # Every replacement finished before the journal advanced; verification
@@ -188,6 +189,7 @@ class AppBackend(MacBackend):
         installed_catalog = self._automation_catalog(app)
         installed_roles = set(self._definitions(app))
         apps = {}
+        built_here = self.built_here(manifest)
         for kind in ("menubar", "client"):
             if kind == "client" and client_distribution(Path(self.config["client_path"]), self.config) != "hub":
                 continue
@@ -208,7 +210,7 @@ class AppBackend(MacBackend):
                     raise releases.ReleaseError(
                         f"private capability build for {manifest['release']} is missing: {archive}")
             candidate = unpack_app(archive, folder)
-            self._check_app(candidate, component, kind)
+            self._check_app(candidate, component, kind, source_build=built_here)
             if kind == "menubar":
                 from .sourcestamp import fingerprint
                 packages = candidate / "Contents/Resources/packages"
@@ -273,6 +275,7 @@ class AppBackend(MacBackend):
             raise releases.ReleaseError("service approvals changed since staging")
         update_plugins.install(transaction["providers"], Path(transaction["stack"]))
         self._stop_services(app, transaction["services"])
+        built_here = self._built_here(job)
         for kind, record in transaction["apps"].items():
             target, backup = Path(record["target"]), Path(record["backup"])
             if kind == "client":
@@ -281,7 +284,8 @@ class AppBackend(MacBackend):
             if incoming.exists():
                 raise releases.ReleaseError("unfinished incoming app requires recovery")
             command(["/usr/bin/ditto", record["source"], str(incoming)])
-            self._check_app(incoming, transaction["manifest"]["components"][kind], kind)
+            self._check_app(incoming, transaction["manifest"]["components"][kind], kind,
+                            source_build=built_here)
             if target.exists():
                 os.replace(target, backup)
             os.replace(incoming, target)

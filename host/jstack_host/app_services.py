@@ -19,8 +19,42 @@ def bundled() -> bool:
     return False
 
 
+def source_built(app: Path) -> bool:
+    """Whether this bundle records that the machine reading it built it.
+
+    The marker is `origin` in `release-identity.json`, which sits under
+    `Contents/Resources` and is therefore sealed: a bundle that acquires the
+    claim after signing breaks the signature, and the requirement `verify`
+    then picks is checked against a seal that no longer holds. A publisher's
+    release carries no `origin` at all, so it never reaches this path.
+    """
+    from . import release_manifest as releases
+    try:
+        identity = json.loads(
+            (app / "Contents/Resources/packages/release-identity.json").read_text())
+    except (OSError, ValueError):
+        return False
+    origin = identity.get("origin") if isinstance(identity, dict) else None
+    return isinstance(origin, dict) and origin.get("kind") == releases.SOURCE_BUILD
+
+
 def verify(app: Path, identifier="live.jstack.hub"):
-    requirement = f'=anchor apple generic and certificate leaf[subject.OU] = "MZ95H77RQQ" and identifier "{identifier}"'
+    """Refuse a bundle that is not intact, or not one this machine trusts.
+
+    Two questions, and only the second has ever had more than one answer. The
+    seal has to hold over every byte, on every path, and `--verify --deep
+    --strict` below is that check whichever requirement it carries — which is
+    also why reading the marker off an unverified bundle is safe: a forged one
+    fails the very call it selected. Then: who applied the seal. A published
+    Hub answers with the publisher's Developer ID team. A Hub this Mac
+    compiled for itself cannot — there is no such identity on it — and answers
+    the way its manifest already does: the key this machine minted and pinned
+    signed the release naming these bytes. The bundle identifier is demanded
+    either way; only the signing identity moves.
+    """
+    requirement = f'=identifier "{identifier}"' if source_built(app) else (
+        f'=anchor apple generic and certificate leaf[subject.OU] = "MZ95H77RQQ" '
+        f'and identifier "{identifier}"')
     command(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R", requirement, str(app)])
 
 

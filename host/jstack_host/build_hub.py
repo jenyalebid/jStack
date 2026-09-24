@@ -100,7 +100,8 @@ def relocate(path: Path, source: Path, target: Path):
         command(["/usr/bin/install_name_tool", *changes, str(path)])
 
 
-def release_identity(source_sha: str, version: str, *, release_id=None, github_repo=None, date=None) -> dict:
+def release_identity(source_sha: str, version: str, *, release_id=None, github_repo=None,
+                     date=None, channel=None, origin=None) -> dict:
     """A Hub release is its source hash and the day it was cut — never a counter.
 
     The Hub is not App Store distributed, so nothing requires a monotonically
@@ -109,14 +110,38 @@ def release_identity(source_sha: str, version: str, *, release_id=None, github_r
     entirely. Ordering is not the identity's job either — whichever hash is
     promoted is current, by definition, so rollback is promoting another hash
     rather than out-numbering the last one.
+
+    Two things the bundle has to answer for itself, because the things that
+    read them have nothing else to ask. `channel` is the ref these bytes were
+    built from: `install_signed.provision` writes the hub's config out of this
+    file, and with no ref in it every branch install was provisioned to follow
+    stable. `origin` is the marker that says a machine built this for itself,
+    which is what lets the installer's bundle gate ask the pinned key instead
+    of a signing team no such machine holds. Both are sealed by the signature
+    over the bundle, which is the only reason either can be believed.
     """
-    from .release_manifest import identifier
-    from .build_source import repository
+    from .release_manifest import SOURCE_BUILD, identifier
+    from .build_source import channel_ref, repository
     if any(value is not None for value in (release_id, github_repo, date)):
         if not release_id or not github_repo or not _is_date(date):
             raise ValueError("release builds require release ID, GitHub origin and an ISO date together")
-        return {"sha": source_sha, "release": identifier(release_id), "version": version,
-                "date": date, "github_repo": repository(github_repo)}
+        identity = {"sha": source_sha, "release": identifier(release_id), "version": version,
+                    "date": date, "github_repo": repository(github_repo)}
+        if channel is not None:
+            # `channel_ref` reads an empty ref as `stable`, which is right for a
+            # config written before refs existed and wrong for a caller naming
+            # one: silently following main is the defect this field exists to
+            # close, not an acceptable default for a build that asked.
+            if not channel:
+                raise ValueError("a build that records a release line must name one")
+            identity["channel"] = channel_ref({"channel": channel})
+        if origin is not None:
+            if not isinstance(origin, dict) or origin.get("kind") != SOURCE_BUILD:
+                raise ValueError("a bundle records no origin but the one its manifest records")
+            identity["origin"] = origin
+        return identity
+    if channel is not None or origin is not None:
+        raise ValueError("a dev build follows no release line and has no release origin")
     return {"sha": source_sha, "release": f"hub-{version}-{source_sha[:8]}", "version": version}
 
 
@@ -169,13 +194,15 @@ def stage_mesh_tools(stack: Path, packages: Path) -> Path:
 
 
 def build(stack: Path, output: Path, version: str, config: dict | None = None, *, catalog=None,
-          release_id=None, github_repo=None, date=None, trust_key=None) -> Path:
+          release_id=None, github_repo=None, date=None, trust_key=None,
+          channel=None, origin=None) -> Path:
     # Build one immutable git snapshot. A clean-tree check alone does not
     # exclude untracked package files or concurrent changes during pip/build.
     command(["git", "-C", str(stack), "diff", "--quiet", "HEAD", "--", "host"])
     source_sha = command(["git", "-C", str(stack), "rev-parse", "HEAD"]).strip()
     identity = release_identity(source_sha, version, release_id=release_id,
-                                github_repo=github_repo, date=date)
+                                github_repo=github_repo, date=date,
+                                channel=channel, origin=origin)
     with tempfile.TemporaryDirectory(prefix="jstack-source-") as temporary:
         root = Path(temporary)
         archive = root / "source.tar"
@@ -346,6 +373,7 @@ def main():
     parser.add_argument("--release-id")
     parser.add_argument("--github-repo")
     parser.add_argument("--date", help="ISO day this release is cut, e.g. 2026-09-21")
+    parser.add_argument("--channel", help="the ref these bytes are built from; absent means stable")
     parser.add_argument("--trust-key", help="base64 Ed25519 public key this Hub will verify its updates against")
     parser.add_argument("--signing-config", type=Path)
     parser.add_argument("--notarize", action="store_true")
@@ -357,7 +385,7 @@ def main():
     catalog = json.loads(args.catalog.read_text()) if args.catalog else None
     app = build(args.stack.resolve(), args.output.resolve(), args.version, config, catalog=catalog,
                 release_id=args.release_id, github_repo=args.github_repo, date=args.date,
-                trust_key=args.trust_key)
+                trust_key=args.trust_key, channel=args.channel)
     if args.notarize:
         notarize(app, args.output.resolve(), config)
     print(app)

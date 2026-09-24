@@ -184,17 +184,61 @@ class MacBackend:
         if version(platform.mac_ver()[0]) < version(compatibility["minimum_os"]):
             raise releases.ReleaseError("release requires a newer macOS")
 
-    def _check_app(self, path: Path, component: dict, kind: str):
+    @staticmethod
+    def built_here(manifest: dict) -> bool:
+        """Whether this release is one a machine built for itself.
+
+        `origin` lives inside the bytes the pinned key signed, which is the
+        only reason it can be trusted to excuse anything — so callers hand
+        over a manifest that came back from `release_manifest.verify`, never
+        one read off disk.
+        """
+        origin = manifest.get("origin")
+        return isinstance(origin, dict) and origin.get("kind") == releases.SOURCE_BUILD
+
+    def _built_here(self, job: dict) -> bool:
+        """The same answer, for the paths that run from the journal.
+
+        `transaction.manifest` beside it is an unsigned copy; a marker read
+        from there would be a trust root sitting outside the signature. The
+        envelope is re-verified against this machine's pinned key instead, and
+        an envelope that does not verify grants nothing — the answer is the
+        stricter path, never an exception, so a journal this machine can no
+        longer read fails the publisher's check rather than skipping it.
+        """
+        try:
+            manifest = releases.verify(job["envelope"], self.config["public_key"],
+                                       promoted=not self.config.get("candidate_test", False))
+        except (KeyError, TypeError, releases.ReleaseError):
+            return False
+        return self.built_here(manifest)
+
+    def _check_app(self, path: Path, component: dict, kind: str, *, source_build: bool = False):
+        """Intact, the bundle this release names, signed by someone trusted here.
+
+        The seal is checked on every path and is never relaxed. Who had to
+        apply it is the part that moves: a Hub this machine compiled carries
+        no Developer ID and no notarisation, and what vouches for it instead
+        is the pinned key that signed the manifest naming these bytes — a
+        manifest already verified, whose artifact fingerprint the downloader
+        already matched. jRemote is not built here on any path: its bytes are
+        the publisher's whichever release carries them, so the client keeps
+        the team requirement and Gatekeeper.
+        """
         team = self.config["team_id"]
         identifier = self.config[kind + "_bundle_id"]
         if kind == "client" and not identifier:
             # A host bootstrapped without a client can later discover a signed
             # direct-distribution app. Pin to that installed bundle identity.
             identifier = bundle_info(Path(self.config["client_path"]))["CFBundleIdentifier"]
-        command(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R",
-                 f'=anchor apple generic and certificate leaf[subject.OU] = "{team}" and identifier "{identifier}"',
-                 str(path)])
-        command(["/usr/sbin/spctl", "--assess", "--type", "execute", str(path)])
+        if source_build and kind == "menubar":
+            command(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R",
+                     f'=identifier "{identifier}"', str(path)])
+        else:
+            command(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R",
+                     f'=anchor apple generic and certificate leaf[subject.OU] = "{team}" and identifier "{identifier}"',
+                     str(path)])
+            command(["/usr/sbin/spctl", "--assess", "--type", "execute", str(path)])
         if str(bundle_info(path)["CFBundleVersion"]) != component["version"]:
             raise releases.ReleaseError(f"{kind} bundle version differs from release")
 
@@ -226,6 +270,7 @@ class MacBackend:
         command([python, "-c", "import jstack_host.server; import jstack_host.update_routes"],
                 env={**os.environ, "PYTHONPATH": pythonpath})
         apps = {}
+        built_here = self.built_here(manifest)
         for kind in ("menubar", "client"):
             if kind == "client" and client_distribution(Path(self.config["client_path"]), self.config) != "hub":
                 continue
@@ -233,7 +278,7 @@ class MacBackend:
             folder.mkdir()
             component = manifest["components"][kind]
             app = unpack_app(directory / component["file"], folder)
-            self._check_app(app, component, kind)
+            self._check_app(app, component, kind, source_build=built_here)
             target = Path(self.config[kind + "_path"])
             # Check permission before stopping a single process. A Mac whose
             # application directory is not user-writable needs provisioning,
@@ -314,6 +359,7 @@ class MacBackend:
         from . import update_plugins
         update_plugins.install(transaction["providers"], Path(transaction["stack"]))
         self._unload("menubar")
+        built_here = self._built_here(job)
         for kind, app in transaction["apps"].items():
             print(f"update: replacing {kind}", flush=True)
             target, backup = Path(app["target"]), Path(app["backup"])
@@ -324,7 +370,8 @@ class MacBackend:
             # atomic even when /Applications and state live on different disks.
             incoming = target.with_name(target.name + ".incoming-" + transaction["release"])
             command(["/usr/bin/ditto", app["source"], str(incoming)])
-            self._check_app(incoming, transaction["manifest"]["components"][kind], kind)
+            self._check_app(incoming, transaction["manifest"]["components"][kind], kind,
+                            source_build=built_here)
             os.replace(incoming, target)
         self._unload("host")
         for plist in transaction["plists"].values():
@@ -424,9 +471,11 @@ class MacBackend:
                 return False
             if self._host_required(job) and not self._verify_host(job):
                 return False
+            built_here = self._built_here(job)
             for kind, app in job["transaction"]["apps"].items():
                 target = Path(app["target"])
-                self._check_app(target, job["envelope"]["manifest"]["components"][kind], kind)
+                self._check_app(target, job["envelope"]["manifest"]["components"][kind], kind,
+                                source_build=built_here)
                 if self._running_required(kind, app, job["transaction"]) and not self._app_running(kind, target):
                     return False
             return True
