@@ -143,11 +143,9 @@ def resolve(args) -> SimpleNamespace:
     # The one import `-m scheduler` needs is the plugin dir itself. The
     # installing shell's own PYTHONPATH is that shell's business — freezing it
     # in would bake transient sys.path junk into a service that outlives it.
-    # A vendor dir beside the plugin carries pure-python dependencies for an
-    # interpreter that has no site-packages of its own — the signed Hub's
-    # bundled python. Absent on a dev checkout, present on signed installs.
-    vendor = PLUGIN_ROOT / "vendor"
-    env["PYTHONPATH"] = str(PLUGIN_ROOT) + (os.pathsep + str(vendor) if vendor.is_dir() else "")
+    # vendor/ ships tracked beside the plugin: pure-python dependencies for an
+    # interpreter with no site-packages of its own — the Hub's bundled python.
+    env["PYTHONPATH"] = os.pathsep.join([str(PLUGIN_ROOT), str(PLUGIN_ROOT / "vendor")])
     env["JSTACK_ROOT"] = str(rootp)
     for var in PASS_THROUGH:
         val = os.environ.get(var)

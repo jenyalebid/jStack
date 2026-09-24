@@ -47,7 +47,7 @@ BANDS = [("extreme", compaction.EXTREME), ("heavy", compaction.HEAVY)]
 
 #: The newest readings are at the end, so the tail is read rather than the file — but a
 #: session whose tool results are enormous can hold only one assistant turn in a fixed
-#: window (the 64MB brian/chat transcript holds exactly one in 512KB), and one reading
+#: window (a 64MB transcript has been measured holding exactly one in 512KB), and one reading
 #: cannot show a crossing. So the window doubles until it has two, or gives up.
 TAIL_BYTES = 512 * 1024
 MAX_SCAN = 8 * 1024 * 1024

@@ -5,7 +5,6 @@ import argparse
 import base64
 import copy
 import fcntl
-import hashlib
 import json
 import os
 import shutil
@@ -17,6 +16,9 @@ import time
 from pathlib import Path
 
 from . import acceptance, release_manifest as releases
+#: Defined where a hub builds from source, so a build cut here and a build
+#: cut there can never name the same sources differently.
+from .build_source import release_date, source_identity
 from .update_macos import command
 from .update_supervisor import atomic_json
 
@@ -51,19 +53,6 @@ def allocate_client_build(candidates: Path, minimum: int) -> int:
         number = max(previous, minimum) + 1
         atomic_json(state, {"build": number})
         return number
-
-
-def release_date() -> str:
-    """Calendar date for the release, independent of the client build counter."""
-    from datetime import date
-    return date.today().isoformat()
-
-
-def source_identity(date: str, stack: str, client: str, dependencies: dict) -> str:
-    # Fleet jobs key by release: a client-only fix must not look already installed.
-    sources = {"stack": stack, "client": client, "dependencies": dependencies}
-    fingerprint = hashlib.sha256(releases.canonical(sources)).hexdigest()[:16]
-    return f"{date}-{stack[:8]}-{fingerprint}"
 
 
 def sign_hub(stack: Path, output: Path, version: str, config: dict) -> None:
@@ -112,7 +101,7 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
     output = work / release_id
     output.mkdir()
     version = json.loads((stack / "plugins/jstack/.claude-plugin/plugin.json").read_text())["version"]
-    from .release_channel import repository
+    from .build_source import repository
     github_repo = repository(config.get("github_repo") or command(
         ["git", "-C", str(stack), "remote", "get-url", "origin"]).strip())
     # Ordering, now that nothing counts releases. The identity is a hash and a

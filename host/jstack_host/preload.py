@@ -3,7 +3,7 @@
 After the Hub swaps its own bundle, the updater process's sys.path strings
 resolve into the NEW bundle. Any first-time import after the swap would mix
 new modules into the old process mid-transaction. Everything the supervisor
-can touch during verify, observe, rollback and finalize must therefore be in
+can touch during verify, observe, settle and finalize must therefore be in
 sys.modules before any byte of the bundle is replaced. The import-freeze test
 holds this list honest: it runs those paths under a hook that fails on any
 module not already loaded.
@@ -21,7 +21,9 @@ MODULES = (
     "cryptography.hazmat.primitives.asymmetric.ed25519",
     # jstack_host closure of the supervisor's tick
     "jstack_host.release_manifest",
-    "jstack_host.release_channel",
+    "jstack_host.build_source",
+    "jstack_host.build_hub",
+    "jstack_host.bundle_tools",
     "jstack_host.fleet_updates",
     "jstack_host.hostenv",
     "jstack_host.update_supervisor",

@@ -20,6 +20,10 @@ set -u -o pipefail   # a scenario's exit code must survive the tee into its log
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCEN="$HERE/scenarios"
 RECEIPTS_ROOT="${JSTACK_VERIFY_RECEIPTS:-$HOME/.local/state/jstack-verify}"
+# The same driver every scenario uses, resolved the same way — this file
+# only ever stops a guest with it. Missing is not fatal here: a run that
+# needs it fails in common.sh with the remedy named.
+VM="${VM_SH:-$(command -v vm.sh 2>/dev/null || true)}"
 
 usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -61,7 +65,7 @@ for f in $files; do
         # A green guest has said everything it has to say — its screen is in
         # the receipts. A red one stays booted for inspection.
         [ "${JSTACK_VERIFY_KEEP:-0}" = "1" ] \
-            || "${VM_SH:-$HOME/Operations/Infrastructure/scripts/vm.sh}" stop "vfy-${id//\//-}" >/dev/null 2>&1 || true
+            || "$VM" stop "vfy-${id//\//-}" >/dev/null 2>&1 || true
     else
         v=FAIL; fail=1
         # A red guest stays booted for inspection — but only the LAST one.
@@ -71,7 +75,7 @@ for f in $files; do
         # the evidence either way.
         [ "$n" -lt "$total" ] && {
             echo "   (guest vfy-${id//\//-} stopped to free its VM slot — receipts keep the evidence)"
-            "${VM_SH:-$HOME/Operations/Infrastructure/scripts/vm.sh}" stop "vfy-${id//\//-}" >/dev/null 2>&1 || true
+            "$VM" stop "vfy-${id//\//-}" >/dev/null 2>&1 || true
         }
     fi
     echo "$v" > "$run_dir/verdict.txt"

@@ -8,7 +8,12 @@
 # marker is a failure, not a silence.
 set -u
 
-VM="${VM_SH:-$HOME/Operations/Infrastructure/scripts/vm.sh}"
+# The driver that boots and talks to a guest. Whatever boots VMs here:
+# named by $VM_SH, or `vm.sh` on PATH. There is no default path — a
+# guessed one belongs to whoever wrote the guess, not to whoever is
+# running the suite.
+VM="${VM_SH:-$(command -v vm.sh 2>/dev/null || true)}"
+: "${VM:?set VM_SH to the script that boots your test VMs}"
 TART="${TART:-/opt/homebrew/bin/tart}"
 : "${RECEIPTS:?run through verify/run.sh}"
 GUEST=""

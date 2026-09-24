@@ -198,3 +198,33 @@ def test_provisioning_keeps_existing_credentials_and_unknown_client_identity(fre
     assert config["client_bundle_id"] == "" and config["client_managed"] is False
     assert config["service_model"] == "app" and "services_app" not in config
     assert config["menubar_bundle_id"] == "live.jstack.hub"
+
+
+@pytest.mark.parametrize("built_from,expected", [("feature/x", "feature/x"), (None, "stable")])
+def test_provisioning_carries_the_ref_the_bundle_was_built_from(fresh, monkeypatch,
+                                                                built_from, expected):
+    """A hub moved onto a branch installs a branch build. Dropping the ref
+    here walked it back to stable on the reinstall that delivered it."""
+    from jstack_host import devices, hostenv, releases, update_macos
+    app, state, _, _, _ = fresh
+    identity = {"sha": "a" * 40, "release": "77-source", "github_repo": "owner/repo"}
+    if built_from:
+        identity["channel"] = built_from
+    monkeypatch.setattr(install_signed, "identity", lambda *args: identity)
+    install_signed.install(app, state)
+    trust = app / "Contents/Resources/packages/jstack_host/release-trust.json"
+    trust.parent.mkdir(parents=True)
+    trust.write_text(json.dumps({"public_key": "fixture-public-key"}))
+    monkeypatch.setattr(hostenv, "state_dir", lambda: state)
+    monkeypatch.setattr(hostenv, "token_path", lambda: state / "token")
+    monkeypatch.setattr(hostenv, "host_id", lambda: "existing-identity")
+    monkeypatch.setattr(install_signed.install_host, "mint_token", lambda _: ("fixture", False))
+    monkeypatch.setattr(devices, "internal_token", lambda: "fixture")
+    monkeypatch.setattr(devices, "_credential_dir", lambda: state)
+    monkeypatch.setattr(releases, "RELEASE_DIR", state / "releases/mac")
+    monkeypatch.setattr(update_macos, "bundle_info", lambda _: {})
+    monkeypatch.setattr(update_macos, "client_distribution", lambda *_: "external")
+    install_signed.provision()
+    config = json.loads((state / "updates/config.json").read_text())
+    assert config["channel"] == expected
+    assert config["github_repo"] == "owner/repo"

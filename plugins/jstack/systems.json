@@ -8,7 +8,7 @@
     "description": "one-line summary",
     "code": "array of code paths (relative to plugin root)",
     "config": "array of config paths (relative to plugin root unless ~/-prefixed)",
-    "docs": "array of doc paths inside the plugin (typically docs/systems/{id}.md)",
+    "docs": "array of doc paths inside the plugin",
     "test": {
       "type": "script | endpoint — 'script' = CLI executable, runs in-place, exit 0 = pass. 'endpoint' = HTTP POST handled by a host process (reserved for host-side wrappers).",
       "path": "string — for type=script, path relative to plugin root. for type=endpoint, URL path.",
@@ -29,9 +29,7 @@
         "hooks/hooks.json"
       ],
       "config": [],
-      "docs": [
-        "docs/systems/path-rule-injection.md"
-      ],
+      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/path-rule-injection.sh",
@@ -53,9 +51,7 @@
         "session_runtime.py"
       ],
       "config": [],
-      "docs": [
-        "docs/systems/transcript-dialogue.md"
-      ],
+      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/read-transcript.sh",
@@ -73,9 +69,7 @@
         "hooks/hooks.json"
       ],
       "config": [],
-      "docs": [
-        "docs/systems/session-end-engine.md"
-      ],
+      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/timeline-injection.sh",
@@ -197,9 +191,7 @@
         "bin/log_event"
       ],
       "config": [],
-      "docs": [
-        "docs/systems/timeline-log.md"
-      ],
+      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/tag-command.sh",
@@ -327,9 +319,7 @@
         "rules-stage/timeline.md"
       ],
       "config": [],
-      "docs": [
-        "docs/systems/timeline-log.md"
-      ],
+      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/log-event.sh",
@@ -373,9 +363,7 @@
       "config": [
         "~/.claude/jstack/review.json"
       ],
-      "docs": [
-        "docs/systems/session-end-engine.md"
-      ],
+      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/session-review.sh",
@@ -628,9 +616,7 @@
         "bin/seat"
       ],
       "config": [],
-      "docs": [
-        "docs/systems/root-derivation.md"
-      ],
+      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/root.sh",
@@ -691,9 +677,7 @@
         "{install}/config/scheduler.json",
         "{install}/config/schedule.json"
       ],
-      "docs": [
-        "docs/systems/scheduler.md"
-      ],
+      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/scheduler.sh",
@@ -711,9 +695,7 @@
             "scheduler/registry.py"
           ],
           "config": [],
-          "docs": [
-            "docs/systems/scheduler.md"
-          ],
+          "docs": [],
           "test": {
             "type": "script",
             "path": "tests/scheduler-bare.sh",
@@ -733,9 +715,7 @@
             "root.py"
           ],
           "config": [],
-          "docs": [
-            "docs/systems/scheduler.md"
-          ],
+          "docs": [],
           "test": {
             "type": "script",
             "path": "tests/schedule-self.sh",
@@ -754,9 +734,7 @@
             "bin/jstack-scheduler"
           ],
           "config": [],
-          "docs": [
-            "docs/systems/scheduler.md"
-          ],
+          "docs": [],
           "test": {
             "type": "script",
             "path": "tests/scheduler-install.sh",
@@ -780,9 +758,7 @@
         "hooks/session-start-inject.py"
       ],
       "config": [],
-      "docs": [
-        "docs/systems/agent-inbox.md"
-      ],
+      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/msg.sh",
@@ -828,9 +804,7 @@
       "config": [
         "~/.claude/jstack/review.json"
       ],
-      "docs": [
-        "docs/systems/repo-seats.md"
-      ],
+      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/repo-seat.sh",

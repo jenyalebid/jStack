@@ -23,21 +23,23 @@ def process(records, status=0):
 @pytest.mark.parametrize("records,status", [
     ([{"armed": "interruption"}], 0),
     ([{"armed": "interruption"}], 1),
-    ([{"fault": "interruption", "job": "one", "state": "rolled_back"}], 0),
+    ([{"fault": "interruption", "job": "one", "state": "failed"}], 0),
     ([{"injected": "interruption", "job": "one"},
-      {"fault": "interruption", "job": "other", "state": "rolled_back"}], 0),
+      {"fault": "interruption", "job": "other", "state": "failed"}], 0),
     ([{"injected": "interruption", "job": "one"},
-      {"fault": "rollback", "job": "one", "state": "rolled_back"}], 0),
+      {"fault": "withheld", "job": "one", "state": "failed"}], 0),
     ([{"injected": "interruption", "job": "one"},
-      {"fault": "interruption", "job": "one", "state": "rolled_back"}], 1),
+      {"fault": "interruption", "job": "one", "state": "rolled_back"}], 0),
+    ([{"injected": "interruption", "job": "one"},
+      {"fault": "interruption", "job": "one", "state": "failed"}], 1),
 ])
-def test_incomplete_or_failed_injection_is_not_recovery(runner, records, status):
+def test_incomplete_or_unsettled_injection_is_not_a_result(runner, records, status):
     with pytest.raises(runner.AcceptanceFailure):
         runner.read_fault(process(records, status))
 
 
-def test_completed_fault_returns_matching_recovery(runner):
-    terminal = {"fault": "rollback", "job": "one", "state": "rolled_back"}
+def test_completed_fault_returns_the_job_it_settled(runner):
+    terminal = {"fault": "withheld", "job": "one", "state": "failed"}
     assert runner.read_fault(process([
-        {"armed": "rollback"}, {"injected": "rollback", "job": "one"}, terminal,
+        {"armed": "withheld"}, {"injected": "withheld", "job": "one"}, terminal,
     ])) == terminal

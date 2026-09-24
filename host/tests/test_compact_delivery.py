@@ -941,7 +941,7 @@ def test_the_in_place_nudge_never_claims_a_compaction_that_did_not_happen(
     assert cod.CONTINUE_IN_PLACE != cod.CONTINUE
 
 
-def test_boss_speaking_first_outranks_an_in_place_continue(near_ceiling, typed, monkeypatch):
+def test_the_user_speaking_first_outranks_an_in_place_continue(near_ceiling, typed, monkeypatch):
     """Same rule as the boundary path, and the same reason: a real turn after the Stop
     offset means they are driving."""
     monkeypatch.setattr(cod, "pane", lambda name: screen())
@@ -1246,7 +1246,7 @@ def test_the_continue_claims_only_what_every_caller_knows():
     assert "inventing work" in cod.CONTINUE
 
 
-def test_never_nudges_over_a_message_boss_is_writing(near_ceiling, nudged, monkeypatch):
+def test_never_nudges_over_a_message_the_user_is_writing(near_ceiling, nudged, monkeypatch):
     """Same money test as the compaction's, one phase later — and a likelier collision,
     because the boundary lands minutes after the turn ended rather than seconds."""
     offset = append(near_ceiling, BOUNDARY, *ARTIFACTS)
@@ -1255,7 +1255,7 @@ def test_never_nudges_over_a_message_boss_is_writing(near_ceiling, nudged, monke
     assert nudged == []
 
 
-def test_boss_getting_there_first_ends_it(near_ceiling, nudged, monkeypatch):
+def test_the_user_getting_there_first_ends_it(near_ceiling, nudged, monkeypatch):
     offset = append(near_ceiling, BOUNDARY, *ARTIFACTS, PROMPT)
     monkeypatch.setattr(cod, "pane", lambda name: screen())
     assert cod.wait_and_continue("jr-x", near_ceiling, offset, True) == "taken"
@@ -1376,7 +1376,7 @@ def test_the_restart_cannot_keep_a_child_alive_forever(near_ceiling, nudged, mon
     assert nudged == []
 
 
-def test_the_nudge_cannot_be_mistaken_for_boss(near_ceiling):
+def test_the_nudge_cannot_be_mistaken_for_the_user(near_ceiling):
     """It arrives as a user turn. A bare "continue" would leave a transcript claiming the user
     asked for something nobody asked for — worse than a misplaced `/compact`, because
     that one has no voice."""
@@ -1460,7 +1460,7 @@ def test_a_failed_send_is_reported_as_not_sent(near_ceiling, keys, monkeypatch):
     assert cod.wait_and_send("jr-x", near_ceiling, 1000, size, "claude") == "not-taken"
 
 
-def test_it_never_wipes_what_boss_typed_into_the_gap(keys):
+def test_it_never_wipes_what_the_user_typed_into_the_gap(keys):
     """The box is only cleared when it is holding OUR text. A person starting a message in the
     second after the Enter keeps those keystrokes — the whole point of this hook's caution."""
     typed, box = keys

@@ -6,23 +6,34 @@ import shutil
 from jstack_host import install_host, update_app, update_plugins
 
 
-def test_interrupted_copy_does_not_block_a_new_job_for_the_same_release(monkeypatch, tmp_path):
+def transaction_for(app, source, tmp_path, backup=None):
+    return {"release": "same-release", "services": {}, "providers": [],
+            "stack": str(tmp_path), "manifest": {"components": {"menubar": {}}},
+            "apps": {"menubar": {"source": str(source), "target": str(app), "existed": True,
+                                 "was_running": False,
+                                 "backup": str(backup or tmp_path / "Hub.app.previous-stage-x")}}}
+
+
+def prepared(monkeypatch, tmp_path, app):
+    backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
+    monkeypatch.setattr(backend, "_statuses", lambda _: {})
+    monkeypatch.setattr(backend, "_stop_services", lambda *args: None)
+    monkeypatch.setattr(backend, "_restore_services", lambda *args: None)
+    monkeypatch.setattr(backend, "_check_app", lambda *args, **kwargs: None)
+    monkeypatch.setattr(update_plugins, "install", lambda *args: None)
+    return backend
+
+
+def test_a_copy_a_kill_left_behind_does_not_poison_the_release(monkeypatch, tmp_path):
+    """A kill mid-copy used to leave `<app>.incoming-*`, and every later job
+    for that release died on it until someone deleted it by hand (#117)."""
     app, source = tmp_path / "Hub.app", tmp_path / "staged.app"
     app.mkdir()
     (app / "version").write_text("old")
     source.mkdir()
     (source / "version").write_text("new")
-    backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
-    monkeypatch.setattr(backend, "_statuses", lambda _: {})
-    monkeypatch.setattr(backend, "_stop_services", lambda *args: None)
-    monkeypatch.setattr(backend, "_restore_services", lambda *args: None)
-    monkeypatch.setattr(backend, "_check_app", lambda *args: None)
-    monkeypatch.setattr(update_plugins, "install", lambda *args: None)
-    monkeypatch.setattr(update_plugins, "rollback", lambda *args: None)
-    transaction = {"release": "same-release", "services": {}, "providers": [],
-                   "stack": str(tmp_path), "manifest": {"components": {"menubar": {}}},
-                   "apps": {"menubar": {"source": str(source), "target": str(app),
-                                         "backup": str(tmp_path / "backup")}}}
+    backend = prepared(monkeypatch, tmp_path, app)
+    transaction = transaction_for(app, source, tmp_path)
 
     def interrupted_copy(argv):
         destination = Path(argv[-1])
@@ -33,12 +44,38 @@ def test_interrupted_copy_does_not_block_a_new_job_for_the_same_release(monkeypa
     monkeypatch.setattr(update_app, "command", interrupted_copy)
     with pytest.raises(KeyboardInterrupt):
         backend.apply({"id": "interrupted-job", "transaction": transaction})
-    backend.rollback({"id": "interrupted-job", "transaction": transaction})
+    # Nothing was replaced, and the half-written copy is still lying there.
     assert (app / "version").read_text() == "old"
+    assert (tmp_path / "Hub.app.incoming-interrupted-job").is_dir()
     monkeypatch.setattr(update_app, "command", lambda argv: shutil.copytree(argv[-2], argv[-1]))
     backend.apply({"id": "retry-job", "transaction": transaction})
     assert (app / "version").read_text() == "new"
     assert not (tmp_path / "Hub.app.incoming-interrupted-job").exists()
+    assert not (tmp_path / "Hub.app.incoming-retry-job").exists()
+
+
+def test_a_failed_update_leaves_the_bundle_that_is_installed_running(monkeypatch, tmp_path):
+    """No rollback: settling starts the services again against whatever is at
+    the target, and keeps no bundle of its own anywhere near it."""
+    app, source = tmp_path / "Hub.app", tmp_path / "staged.app"
+    app.mkdir()
+    (app / "version").write_text("old")
+    source.mkdir()
+    backend = prepared(monkeypatch, tmp_path, app)
+    restored = []
+    monkeypatch.setattr(backend, "_restore_services", lambda *args: restored.append(args))
+    monkeypatch.setattr(backend, "_statuses", lambda _: {"host": "enabled", "menu": "enabled"})
+    for leftover in ("Hub.app.incoming-failed-job", "Hub.app.previous-stage-x",
+                     "Hub.app.failed-older-job"):
+        (tmp_path / leftover).mkdir()
+    transaction = transaction_for(app, source, tmp_path)
+    transaction["services"] = {"host": "enabled", "menu": "enabled"}
+    job = {"id": "failed-job", "transaction": transaction}
+    assert backend.applied(job) is True  # the backup exists: the swap happened
+    assert backend.settle(job) == {"error": ""}
+    assert (app / "version").read_text() == "old"
+    assert restored == [(app, {"host": "enabled", "menu": "enabled"})]
+    assert sorted(path.name for path in tmp_path.glob("Hub.app*")) == ["Hub.app"]
 
 
 def test_disabled_services_are_never_registered_or_unregistered(monkeypatch, tmp_path):
@@ -76,7 +113,7 @@ def test_recovery_state_is_judged_by_the_transaction_files(monkeypatch, tmp_path
             path.mkdir()
     backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
     checked = []
-    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind: checked.append((path, kind)))
+    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind, **_: checked.append((path, kind)))
     transaction = {"apps": {"menubar": {"target": str(app), "backup": str(backup), "existed": True}},
                    "manifest": {"components": {"menubar": {"version": "20260923"}}}}
     assert backend.recovery_status({"id": "job-1", "transaction": transaction}) == expected
@@ -90,7 +127,7 @@ def test_recovery_ignores_a_same_version_prior_that_was_never_swapped(monkeypatc
     app.mkdir()
     (tmp_path / "Hub.app.incoming-job-2").mkdir()
     backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
-    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind: None)  # version matches
+    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind, **_: None)  # version matches
     transaction = {"apps": {"menubar": {"target": str(app), "existed": True,
                                         "backup": str(tmp_path / "Hub.app.previous-x")}},
                    "manifest": {"components": {"menubar": {"version": "20260923"}}}}
@@ -102,7 +139,7 @@ def test_recovery_judges_every_app_in_the_transaction(monkeypatch, tmp_path):
     hub.mkdir(); client.mkdir()
     (tmp_path / "Hub.app.previous-x").mkdir()
     backend = update_app.AppBackend(tmp_path, {"menubar_path": str(hub)})
-    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind: None)
+    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind, **_: None)
     transaction = {"apps": {
         "menubar": {"target": str(hub), "backup": str(tmp_path / "Hub.app.previous-x"), "existed": True},
         "client": {"target": str(client), "backup": str(tmp_path / "jRemote.app.previous-x"), "existed": True}},
@@ -115,7 +152,7 @@ def test_recovery_judges_every_app_in_the_transaction(monkeypatch, tmp_path):
 def test_recovery_of_a_first_install_needs_no_backup(monkeypatch, tmp_path):
     app = tmp_path / "Hub.app"
     backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
-    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind: None)
+    monkeypatch.setattr(backend, "_check_app", lambda path, component, kind, **_: None)
     transaction = {"apps": {"menubar": {"target": str(app), "existed": False,
                                         "backup": str(tmp_path / "Hub.app.previous-x")}},
                    "manifest": {"components": {"menubar": {"version": "1"}}}}
@@ -205,23 +242,27 @@ def test_stop_waits_for_the_real_job_to_disappear(monkeypatch, tmp_path):
     assert calls == [(tmp_path, "unregister", "menu")]
 
 
-def test_recovery_restores_an_app_missing_between_renames(monkeypatch, tmp_path):
+def test_a_failure_before_the_swap_says_so_and_keeps_the_copy_out_of_the_way(monkeypatch, tmp_path):
     app = tmp_path / "Hub.app"
-    backup = tmp_path / "Hub.app.previous"
-    backup.mkdir()
-    (backup / "old-version").write_text("original")
+    app.mkdir()
+    (app / "version").write_text("old")
+    (tmp_path / "Hub.app.incoming-test").mkdir()
     backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
     monkeypatch.setattr(backend, "_statuses", lambda _: {"host": "enabled", "menu": "not_registered"})
     restored = []
     monkeypatch.setattr(backend, "_restore_services", lambda *args: restored.append(args))
-    monkeypatch.setattr(update_plugins, "rollback", lambda *args: None)
     transaction = {"services": {"host": "enabled", "menu": "not_registered"}, "providers": [],
                    "stack": str(tmp_path), "apps": {
-                       "menubar": {"target": str(app), "backup": str(backup)},
-                       "client": {"target": str(tmp_path / "client"), "backup": str(tmp_path / "absent"),
+                       "menubar": {"target": str(app), "existed": True,
+                                   "backup": str(tmp_path / "Hub.app.previous-stage-x")},
+                       "client": {"target": str(tmp_path / "client"), "existed": True,
+                                  "backup": str(tmp_path / "client.previous-stage-x"),
                                   "was_running": False}}}
-    backend.rollback({"id": "test", "transaction": transaction})
-    assert (app / "old-version").read_text() == "original"
+    job = {"id": "test", "transaction": transaction}
+    assert backend.applied(job) is False  # no backup was ever made
+    backend.settle(job)
+    assert (app / "version").read_text() == "old"
+    assert not (tmp_path / "Hub.app.incoming-test").exists()
     assert restored == [(app, transaction["services"])]
 
 
@@ -276,31 +317,22 @@ def test_enabled_host_still_requires_authenticated_api(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("status", ["enabled", "requires_approval"])
-def test_missing_main_app_recovery_reobserves_after_restoring_the_bundle(monkeypatch, tmp_path, status):
-    app, backup = tmp_path / "Hub.app", tmp_path / "Hub.app.previous"
-    backup.mkdir()
-    (backup / "old-version").write_text("original")
+def test_settling_reads_approvals_now_rather_than_trusting_the_snapshot(monkeypatch, tmp_path, status):
+    app = tmp_path / "Hub.app"
+    app.mkdir()
     backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app), "host_capability": "dashboard"})
-    observed = []
-
-    def statuses(target):
-        observed.append(Path(target).exists())
-        return {"host": "not_registered", "menu": "not_registered", "dashboard": status}
-
-    monkeypatch.setattr(backend, "_statuses", statuses)
+    monkeypatch.setattr(backend, "_statuses", lambda _: {
+        "host": "not_registered", "menu": "not_registered", "dashboard": status})
     restored = []
     monkeypatch.setattr(backend, "_restore_services", lambda *args: restored.append(args))
-    monkeypatch.setattr(update_plugins, "rollback", lambda *args: None)
     transaction = {"services": {"host": "not_registered", "menu": "not_registered",
                                 "dashboard": "enabled"},
                    "providers": [], "stack": str(tmp_path),
-                   "apps": {"menubar": {"target": str(app), "backup": str(backup)}}}
-    backend.rollback({"id": "test", "transaction": transaction})
-    # Nothing is observable or stoppable until the bundle is back in place.
-    assert observed == [True]
+                   "apps": {"menubar": {"target": str(app), "existed": True,
+                                        "backup": str(tmp_path / "Hub.app.previous-x")}}}
+    backend.settle({"id": "test", "transaction": transaction})
     # A denial recorded after the snapshot wins over the snapshot.
     assert restored[0][1]["dashboard"] == status
-    assert (app / "old-version").read_text() == "original"
 
 
 def test_disabled_host_observation_reports_installed_completion_not_running_source(monkeypatch, tmp_path):

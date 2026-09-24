@@ -88,63 +88,13 @@ def test_signature_rejects_payload_and_trust_key_substitution(release):
         releases.verify(releases.sign(envelope["manifest"], wrong.private_bytes_raw()), public)
 
 
-@pytest.mark.parametrize("invalid_artifact", [False, True])
-def test_public_channel_advances_only_after_complete_verified_download(tmp_path, release, invalid_artifact):
-    from jstack_host import release_channel
-    root = tmp_path / "updates"
-    feed = tmp_path / "feed"
-    previous = releases.sign({**release[2]["manifest"], "release": "previous"}, release[0].private_bytes_raw())
-    atomic_json(feed / "latest.json", previous)
-    tag = release_channel.TAG_PREFIX + "test-1"
-    calls = []
-
-    def transport(request):
-        calls.append(str(request.url))
-        if request.url.host == "api.github.com":
-            return httpx.Response(200, json=[
-                {"draft": True, "prerelease": False, "tag_name": tag + "-draft"},
-                {"draft": False, "prerelease": True, "tag_name": tag + "-preview"},
-                {"draft": False, "prerelease": False, "tag_name": "mac-71"},
-                {"draft": False, "prerelease": False, "tag_name": tag}])
-        if request.url.path.endswith("manifest.json"):
-            return httpx.Response(200, json=release[2])
-        return httpx.Response(200, content=b"tampered" if invalid_artifact else b"artifact")
-
-    config = {"github_repo": "example/stack", "feed_dir": str(feed), "public_key": release[1]}
-    with httpx.Client(transport=httpx.MockTransport(transport)) as client:
-        if invalid_artifact:
-            with pytest.raises(releases.ReleaseError):
-                release_channel.refresh(root, config, client=client, now=1000)
-            assert json.loads((feed / "latest.json").read_text()) == previous
-        else:
-            release_channel.refresh(root, config, client=client, now=1000)
-            assert json.loads((feed / "latest.json").read_text()) == release[2]
-            for component in release[2]["manifest"]["components"].values():
-                assert (feed / "test-1" / component["file"]).read_bytes() == b"artifact"
-        previous_calls = len(calls)
-        release_channel.refresh(root, config, client=client, now=1001)
-        assert len(calls) == previous_calls
-
-
-@pytest.mark.parametrize("excluded", ["managed", "candidate_test", "parent_record"])
-def test_public_channel_never_overrides_parent_or_candidate_feed(tmp_path, excluded):
-    from jstack_host import release_channel
-    config = {"github_repo": "example/stack"}
-    if excluded == "parent_record":
-        (tmp_path / "parent.json").write_text("{}")
-    else:
-        config[excluded] = True
-    release_channel.refresh(tmp_path / "updates", config)
-    assert not (tmp_path / "updates" / "channel.json").exists()
-
-
-@pytest.mark.parametrize("mutation", ["missing", "skipped", "stale", "wrong_digest", "failed"])
-def test_promotion_requires_exact_artifact_receipts(release, mutation):
+@pytest.mark.parametrize("mutation", ["none", "skipped", "stale", "wrong_digest", "failed"])
+def test_every_receipt_a_release_carries_is_a_pass_for_these_exact_bytes(release, mutation):
     _, _, envelope = release
     manifest = envelope["manifest"]
     receipt = manifest["receipts"]["off_network"]
-    if mutation == "missing":
-        del manifest["receipts"]["off_network"]
+    if mutation == "none":
+        manifest["receipts"] = {}
     elif mutation == "skipped":
         receipt["skipped"] = 1
     elif mutation == "stale":
@@ -153,8 +103,19 @@ def test_promotion_requires_exact_artifact_receipts(release, mutation):
         receipt["evidence_sha256"] = ""
     else:
         receipt["result"] = "failed"
-    with pytest.raises(releases.ReleaseError, match="receipt"):
+    with pytest.raises(releases.ReleaseError, match="receipt|acceptance evidence"):
         releases.validate(manifest)
+
+
+def test_a_release_that_retired_a_journey_still_installs_on_an_older_updater(release):
+    """An updater cannot be taught a journey invented after it shipped. One
+    that insisted on the exact set of names it knew refused every release that
+    renamed or retired one, forever (#123); promotion is where the set lives."""
+    manifest = release[2]["manifest"]
+    del manifest["receipts"]["off_network"]
+    manifest["receipts"]["a_journey_this_build_never_heard_of"] = dict(
+        manifest["receipts"]["interruption"])
+    assert releases.validate(manifest) is manifest
 
 
 @pytest.mark.parametrize("filename", ["../escape", "/absolute", "a/b", "", ".", "..", "a\\b"])
@@ -304,8 +265,12 @@ class Backend:
         assert job["state"] == "applying" and job["transaction"]["previous"] == "old"
         self.events.append("apply")
 
-    def rollback(self, job):
-        self.events.append("rollback")
+    def applied(self, job):
+        return bool(job.get("transaction", {}).get("swapped"))
+
+    def settle(self, job):
+        self.events.append("settle")
+        return {"error": ""}
 
     def finalize(self, job):
         self.events.append("finalize")
@@ -352,19 +317,20 @@ def test_supervisor_stages_before_apply_then_requires_hub_confirmation(tmp_path,
     assert daemon.backend.events.count("finalize") == 1
 
 
-def test_crash_mid_apply_recovers_from_disk_before_accepting_work(tmp_path, release):
+def test_crash_mid_apply_fails_the_job_and_restores_nothing(tmp_path, release):
     daemon, job = supervisor(tmp_path, release)
     daemon.current = {**job, "state": "applying", "transaction": {"previous": "old"}}
     daemon.save()
     restarted = Supervisor(daemon.root, daemon.config, Backend(), daemon.client)
     restarted.tick()
-    assert restarted.backend.events == ["rollback"]
-    assert restarted.current["state"] == "rolled_back"
+    assert restarted.backend.events == ["settle"]
+    assert restarted.current["state"] == "failed"
+    assert restarted.current["applied"] is False
+    assert "untouched and still running" in restarted.current["detail"]
 
 
-@pytest.mark.parametrize("status,expected", [
-    ("pending", "applying"), ("applied", "verifying"), ("rolled_back", "rolled_back")])
-def test_independent_owner_recovery_controls_restart_outcome(tmp_path, release, status, expected):
+@pytest.mark.parametrize("status,expected", [("applied", "verifying"), ("unknown", "failed")])
+def test_an_interrupted_application_is_judged_by_what_it_finished(tmp_path, release, status, expected):
     backend = Backend()
     backend.healthy = False
     backend.recovery_status = lambda job: status
@@ -373,58 +339,29 @@ def test_independent_owner_recovery_controls_restart_outcome(tmp_path, release, 
     daemon.save()
     daemon.tick()
     assert daemon.current["state"] == expected
-    assert ("rollback" in backend.events) is False
+    assert ("settle" in backend.events) is (expected == "failed")
 
 
-def test_root_watchdog_marker_settles_a_stalled_apply_without_a_second_swap(tmp_path, release):
-    backend = Backend()
-    backend.recovery_status = lambda job: "applied"
-    daemon, job = supervisor(tmp_path, release, backend)
-    daemon.current = {**job, "state": "applying", "transaction": {"native": True}}
-    daemon.save()
-    (daemon.root / "recovery.json").write_text(json.dumps(
-        {"schema": 1, "restored": "Hub.app.previous-stage"}))
-    daemon.tick()
-    assert daemon.current["state"] == "rolled_back"
-    assert daemon.current["detail"] == "root watchdog restored the retained hub backup"
-    assert backend.events == ["rollback"]
-
-
-def test_a_past_recovery_marker_never_settles_a_new_stall(tmp_path, release):
-    import os
+def test_a_failure_after_the_swap_says_the_machine_runs_the_release_that_failed(tmp_path, release):
     backend = Backend()
     backend.healthy = False
-    backend.recovery_status = lambda job: "applied"
+    backend.recovery_status = lambda job: "unknown"
     daemon, job = supervisor(tmp_path, release, backend)
-    marker = daemon.root / "recovery.json"
-    marker.write_text("{}")
-    os.utime(marker, (time.time() - 3600,) * 2)
-    daemon.current = {**job, "state": "applying", "transaction": {"native": True}}
+    daemon.current = {**job, "state": "applying", "transaction": {"swapped": True}}
     daemon.save()
     daemon.tick()
-    assert daemon.current["state"] == "verifying"
-    assert "rollback" not in backend.events
+    assert daemon.current["state"] == "failed" and daemon.current["applied"] is True
+    assert "running test-1" in daemon.current["detail"]
 
 
-def test_verification_waits_while_independent_owner_rolls_back(tmp_path, release):
-    backend = Backend()
-    backend.recovery_status = lambda job: "rolling_back"
-    daemon, job = supervisor(tmp_path, release, backend)
-    daemon.current = {**job, "state": "verifying", "verify_started": time.time() - 500,
-                      "transaction": {"native": True}}
-    daemon.save()
-    daemon.tick()
-    assert daemon.current["state"] == "verifying"
-    assert "rollback" not in backend.events
-
-
-def test_failed_verification_rolls_back(tmp_path, release):
+def test_failed_verification_fails_the_job(tmp_path, release):
     daemon, job = supervisor(tmp_path, release)
     daemon.tick()
     daemon.backend.healthy = False
     daemon.save(verify_started=time.time() - 150)
     daemon.tick()
-    assert daemon.current["state"] == "rolled_back"
+    assert daemon.current["state"] == "failed"
+    assert daemon.current["detail"].startswith("updated components failed verification")
 
 
 def test_tampered_download_never_reaches_apply(tmp_path, release):
@@ -454,7 +391,7 @@ def test_stack_archive_rejects_links_and_devices(tmp_path, kind):
         safe_tar(archive, tmp_path / "unpacked")
 
 
-def test_verification_timeout_recovers_without_network(tmp_path, release):
+def test_verification_timeout_settles_without_network(tmp_path, release):
     daemon, job = supervisor(tmp_path, release)
     daemon.tick()
     daemon.save(verify_started=time.time() - 181)
@@ -463,8 +400,8 @@ def test_verification_timeout_recovers_without_network(tmp_path, release):
     daemon.client = httpx.Client(transport=httpx.MockTransport(offline))
     with pytest.raises(httpx.ConnectError):
         daemon.tick()
-    assert daemon.backend.events[-1] == "rollback"
-    assert daemon.current["state"] == "rolled_back"
+    assert daemon.backend.events[-1] == "settle"
+    assert daemon.current["state"] == "failed"
 
 
 def test_restart_adopts_hub_confirmation_before_local_commit(tmp_path, release):
@@ -492,6 +429,74 @@ def test_confirmed_transaction_removes_temporary_app_backups(tmp_path):
     assert target.is_dir()
     assert not backup.exists()
     backend.finalize(job)
+
+
+def test_finalize_leaves_nothing_of_this_updaters_beside_the_app(tmp_path):
+    """Three full Hub copies were found in /Applications after one acceptance
+    run, each visible in Finder and Launchpad (#118)."""
+    from jstack_host.update_macos import MacBackend
+    target = tmp_path / "Hub.app"
+    target.mkdir()
+    for leftover in ("Hub.app.previous-release-stage-1", "Hub.app.failed-old-job",
+                     "Hub.app.incoming-old-job"):
+        (tmp_path / leftover).mkdir()
+    keep = tmp_path / "Hub.app.notes"
+    keep.mkdir()
+    job = {"transaction": {"apps": {"menubar": {
+        "target": str(target), "backup": str(tmp_path / "Hub.app.previous-release-stage-1")}}}}
+    MacBackend(tmp_path, {}).finalize(job)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["Hub.app", "Hub.app.notes"]
+
+
+def test_staging_prunes_the_release_trees_nothing_is_running_from(tmp_path, monkeypatch):
+    """Every generation staged a full source tree plus its dependencies and
+    none was ever removed, so the host's import path grew one per update
+    (#129). The tree the loaded runtime imports from is the exception."""
+    from jstack_host import update_plugins
+    from jstack_host.update_macos import MacBackend
+    root = tmp_path / "updates"
+    releases_dir = root / "releases"
+    live, superseded, incoming = (releases_dir / name for name in ("live", "old", "new"))
+    for directory in (live / "stage-a/stack/host", superseded / "stage-b", incoming):
+        directory.mkdir(parents=True)
+    backend = MacBackend(root, {"runtime_imports": [str(live / "stage-a/stack/host")]})
+    monkeypatch.setattr(update_plugins, "discover", lambda: [])
+    backend._prune_releases(incoming)
+    assert sorted(path.name for path in releases_dir.iterdir()) == ["live", "new"]
+
+
+def test_staging_keeps_the_tree_the_installed_host_service_runs_from(tmp_path, monkeypatch):
+    """`runtime_imports` only advances on a confirmed job, so after a failed
+    one the host runs out of a tree no configuration names. Its plist does."""
+    import plistlib
+    from jstack_host import update_plugins
+    from jstack_host.update_macos import MacBackend
+    root = tmp_path / "updates"
+    failed, incoming = (root / "releases" / name for name in ("failed", "new"))
+    (failed / "stage-a/stack/host").mkdir(parents=True)
+    incoming.mkdir(parents=True)
+    plist = tmp_path / "host.plist"
+    plist.write_bytes(plistlib.dumps({"Label": "live.jstack.host", "EnvironmentVariables": {
+        "PYTHONPATH": str(failed / "stage-a/stack/host") + ":" + str(failed / "stage-a/dependencies")}}))
+    monkeypatch.setattr(update_plugins, "discover", lambda: [])
+    MacBackend(root, {"host_plist": str(plist)})._prune_releases(incoming)
+    assert sorted(path.name for path in (root / "releases").iterdir()) == ["failed", "new"]
+
+
+def test_staging_keeps_the_tree_the_agent_marketplace_is_registered_against(tmp_path, monkeypatch):
+    """The marketplace is a directory registration inside a stage that the
+    agent CLIs re-read on every run; a superseded release tree costs less than
+    a registration pointing at nothing."""
+    from jstack_host import update_plugins
+    from jstack_host.update_macos import MacBackend
+    root = tmp_path / "updates"
+    registered, incoming = (root / "releases" / name for name in ("prior", "new"))
+    (registered / "stage-a/stack/plugins/jstack").mkdir(parents=True)
+    incoming.mkdir(parents=True)
+    monkeypatch.setattr(update_plugins, "discover",
+                        lambda: [{"kind": "claude", "root": str(registered / "stage-a/stack")}])
+    MacBackend(root, {})._prune_releases(incoming)
+    assert sorted(path.name for path in (root / "releases").iterdir()) == ["new", "prior"]
 
 
 def test_finalize_refuses_a_path_outside_the_updaters_backup_shape(tmp_path):
@@ -545,40 +550,6 @@ def test_atomic_replacement_preserves_executable_mode_and_symlink_target(tmp_pat
     assert launcher.read_bytes() == b"new"
     assert original.read_bytes() == b"old"
     assert launcher.stat().st_mode & 0o777 == 0o755
-
-
-def test_plugin_recovery_failure_does_not_strand_host_and_apps(tmp_path, monkeypatch):
-    from jstack_host import update_macos, update_plugins
-    events = []
-    backend = update_macos.MacBackend(tmp_path, {})
-    monkeypatch.setattr(backend, "_unload", lambda kind: events.append("stop-" + kind))
-    monkeypatch.setattr(backend, "_load", lambda kind: events.append("start-" + kind))
-    monkeypatch.setattr(update_macos, "stop_app", lambda path: None)
-    def broken(*args):
-        raise releases.ReleaseError("provider unavailable")
-    monkeypatch.setattr(update_plugins, "rollback", broken)
-    target, backup = tmp_path / "Client.app", tmp_path / "Client.previous"
-    target.mkdir()
-    (target / "version").write_text("new")
-    backup.mkdir()
-    (backup / "version").write_text("old")
-    original, plist = tmp_path / "original.plist", tmp_path / "host.plist"
-    original.write_bytes(b"old service")
-    plist.write_bytes(b"new service")
-    job = {"id": "test", "transaction": {"providers": [], "stack": str(tmp_path),
-           "apps": {"client": {"target": str(target), "backup": str(backup),
-                               "existed": True, "was_running": False}},
-           "plists": {"host": {"target": str(plist), "original": str(original)}}}}
-    with pytest.raises(releases.ReleaseError, match="host/apps restored"):
-        backend.rollback(job)
-    assert (target / "version").read_text() == "old"
-    assert plist.read_bytes() == b"old service"
-    assert events[-2:] == ["start-host", "start-menubar"]
-    # Recovery retries after the provider becomes available without moving
-    # the already-restored app into a failed bundle a second time.
-    monkeypatch.setattr(update_plugins, "rollback", lambda *args: None)
-    backend.rollback(job)
-    assert (target / "version").read_text() == "old"
 
 
 def test_promote_checks_evidence_bytes_and_preserves_prior_feed(tmp_path, release):
@@ -688,156 +659,6 @@ def test_running_observes_exec_after_cached_process_scan(tmp_path):
         process.terminate()
         process.wait(timeout=5)
         process.stdin.close()
-
-
-def _channel_feed(release, offers, manifests):
-    """A GitHub release list and the manifest each tag serves.
-
-    `offers` is what the API lists, `manifests` maps tag -> signed envelope.
-    A tag with no entry serves a 404, which is how a client-only release —
-    one that publishes no stack manifest at all — looks from here.
-    """
-    def transport(request):
-        if request.url.host == "api.github.com":
-            return httpx.Response(200, json=offers)
-        tag = str(request.url).split("/download/")[1].split("/")[0]
-        if request.url.path.endswith("manifest.json"):
-            envelope = manifests.get(tag)
-            return httpx.Response(200, json=envelope) if envelope else httpx.Response(404)
-        return httpx.Response(200, content=b"artifact")
-    return httpx.MockTransport(transport)
-
-
-def _signed(fixture, **fields):
-    return releases.sign({**fixture[2]["manifest"], **fields}, fixture[0].private_bytes_raw())
-
-
-def test_a_hub_on_stable_never_takes_a_branch_release(tmp_path, release):
-    """The branch line is published as a prerelease, and stable's filter drops
-    prereleases — so a side branch cannot reach a hub that did not ask for it
-    even if it is the newest thing published."""
-    from jstack_host import release_channel
-    branch_tag = release_channel.TAG_PREFIX + "branch-1"
-    stable_tag = release_channel.TAG_PREFIX + "test-1"
-    offers = [{"draft": False, "prerelease": True, "tag_name": branch_tag},
-              {"draft": False, "prerelease": False, "tag_name": stable_tag}]
-    manifests = {
-        branch_tag: _signed(release, release="branch-1", sequence=99,
-                            channel={"name": "feature/x"}),
-        stable_tag: _signed(release, release="test-1", sequence=5,
-                            channel={"name": "stable"})}
-    feed = tmp_path / "feed"
-    config = {"github_repo": "example/stack", "feed_dir": str(feed),
-              "public_key": release[1]}
-    with httpx.Client(transport=_channel_feed(release, offers, manifests)) as client:
-        release_channel.refresh(tmp_path / "updates", config, client=client, now=1000)
-    assert json.loads((feed / "latest.json").read_text())["manifest"]["release"] == "test-1"
-
-
-def test_a_hub_switched_to_a_branch_takes_that_branchs_release(tmp_path, release):
-    """The whole of the switch: a channel name in this hub's config."""
-    from jstack_host import release_channel
-    branch_tag = release_channel.TAG_PREFIX + "branch-1"
-    stable_tag = release_channel.TAG_PREFIX + "test-1"
-    offers = [{"draft": False, "prerelease": True, "tag_name": branch_tag},
-              {"draft": False, "prerelease": False, "tag_name": stable_tag}]
-    manifests = {
-        branch_tag: _signed(release, release="branch-1", sequence=99,
-                            channel={"name": "feature/x"}),
-        stable_tag: _signed(release, release="test-1", sequence=5,
-                            channel={"name": "stable"})}
-    feed = tmp_path / "feed"
-    config = {"github_repo": "example/stack", "feed_dir": str(feed),
-              "public_key": release[1], "channel": "feature/x"}
-    with httpx.Client(transport=_channel_feed(release, offers, manifests)) as client:
-        release_channel.refresh(tmp_path / "updates", config, client=client, now=1000)
-    assert json.loads((feed / "latest.json").read_text())["manifest"]["release"] == "branch-1"
-
-
-def test_the_channel_comes_from_the_signed_manifest_not_the_tag(tmp_path, release):
-    """A tag is metadata anyone with push rights can write; the line a hub
-    follows is a trust decision. A tag that says stable over a manifest that
-    says otherwise is not an offer to a stable hub."""
-    from jstack_host import release_channel
-    liar = release_channel.TAG_PREFIX + "test-1"
-    offers = [{"draft": False, "prerelease": False, "tag_name": liar}]
-    manifests = {liar: _signed(release, release="test-1", sequence=99,
-                               channel={"name": "feature/x"})}
-    feed = tmp_path / "feed"
-    config = {"github_repo": "example/stack", "feed_dir": str(feed),
-              "public_key": release[1]}
-    root = tmp_path / "updates"
-    with httpx.Client(transport=_channel_feed(release, offers, manifests)) as client:
-        release_channel.refresh(root, config, client=client, now=1000)
-    assert not (feed / "latest.json").exists()
-    assert json.loads((root / "channel.json").read_text())["status"] == "not_published"
-
-
-def test_the_channel_refuses_to_walk_a_hub_backwards(tmp_path, release):
-    """The guard the counter used to provide. It is a sequence now, because
-    the identity is a hash and a date and neither of those orders."""
-    from jstack_host import release_channel
-    tag = release_channel.TAG_PREFIX + "older"
-    offers = [{"draft": False, "prerelease": False, "tag_name": tag}]
-    manifests = {tag: _signed(release, release="older", sequence=4,
-                              channel={"name": "stable"})}
-    feed = tmp_path / "feed"
-    current = _signed(release, release="newer", sequence=9, channel={"name": "stable"})
-    atomic_json(feed / "latest.json", current)
-    config = {"github_repo": "example/stack", "feed_dir": str(feed),
-              "public_key": release[1]}
-    with httpx.Client(transport=_channel_feed(release, offers, manifests)) as client:
-        with pytest.raises(releases.ReleaseError):
-            release_channel.refresh(tmp_path / "updates", config, client=client, now=1000)
-    assert json.loads((feed / "latest.json").read_text()) == current
-
-
-def test_moving_to_a_branch_is_not_a_downgrade(tmp_path, release):
-    """Two counts only compare along one line. A hub deliberately switched is
-    changing which history it measures against, and its old count means
-    nothing on the new one — so a branch whose sequence is lower still lands."""
-    from jstack_host import release_channel
-    tag = release_channel.TAG_PREFIX + "branch-1"
-    offers = [{"draft": False, "prerelease": True, "tag_name": tag}]
-    manifests = {tag: _signed(release, release="branch-1", sequence=2,
-                              channel={"name": "feature/x"})}
-    feed = tmp_path / "feed"
-    atomic_json(feed / "latest.json",
-                _signed(release, release="newer", sequence=9, channel={"name": "stable"}))
-    config = {"github_repo": "example/stack", "feed_dir": str(feed),
-              "public_key": release[1], "channel": "feature/x"}
-    with httpx.Client(transport=_channel_feed(release, offers, manifests)) as client:
-        release_channel.refresh(tmp_path / "updates", config, client=client, now=1000)
-    assert json.loads((feed / "latest.json").read_text())["manifest"]["release"] == "branch-1"
-
-
-def test_a_manifest_from_before_channels_reads_as_stable(tmp_path, release):
-    """Every release already published came off main. If absent read as "no
-    channel" instead of stable, every hub in the field would stop updating."""
-    from jstack_host import release_channel
-    tag = release_channel.TAG_PREFIX + "test-1"
-    offers = [{"draft": False, "prerelease": False, "tag_name": tag}]
-    manifests = {tag: release[2]}          # no channel name, no sequence
-    feed = tmp_path / "feed"
-    config = {"github_repo": "example/stack", "feed_dir": str(feed),
-              "public_key": release[1]}
-    with httpx.Client(transport=_channel_feed(release, offers, manifests)) as client:
-        release_channel.refresh(tmp_path / "updates", config, client=client, now=1000)
-    assert json.loads((feed / "latest.json").read_text()) == release[2]
-
-
-@pytest.mark.parametrize("name", ["../etc", "-rf", "a b", "x" * 200])
-def test_a_channel_name_that_is_not_a_branch_is_refused(name):
-    """The name is pasted into a comparison against signed content and comes
-    from a config file — bound it here, once, rather than at each use."""
-    from jstack_host import release_channel
-    with pytest.raises(releases.ReleaseError):
-        release_channel.channel_name({"channel": name})
-
-
-def test_no_channel_configured_is_the_stable_line():
-    from jstack_host import release_channel
-    assert release_channel.channel_name({}) == releases.STABLE_CHANNEL
 
 
 def _channel_cli(state, *argv):

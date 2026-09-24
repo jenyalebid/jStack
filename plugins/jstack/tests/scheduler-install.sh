@@ -99,21 +99,31 @@ case "$(uname)" in
 Darwin)
     # plistlib parsing IS the validity assertion — grep can bless a plist
     # launchd would reject.
-    msg=$("$PY" - "$TMP/gen.def" "$TMP/root" "$REPO_ROOT" "$PLUGIN_ROOT" 2>&1 <<'EOF'
+    msg=$("$PY" - "$TMP/gen.def" "$TMP/root" "$REPO_ROOT" "$PLUGIN_ROOT" "$TMP/home" 2>&1 <<'EOF'
 import plistlib, sys
-gen, jroot, repo, plugin = sys.argv[1:5]
+gen, jroot, repo, plugin, home = sys.argv[1:6]
 with open(gen, "rb") as fh:
     d = plistlib.load(fh)
 assert d["RunAtLoad"] is True, "RunAtLoad missing/false"
 assert d["KeepAlive"] is True, "KeepAlive missing/false"
 pa = d["ProgramArguments"]
-assert pa[-2:] == ["-m", "scheduler"], f"ProgramArguments {pa!r}"
+# The sealed interpreter ignores PYTHONPATH, so the import paths are baked
+# into the command line: python -c "sys.path[:0] = [...]; run_module(...)".
+assert pa[1] == "-c", f"ProgramArguments {pa!r}"
+assert "runpy.run_module('scheduler'" in pa[2], f"ProgramArguments {pa!r}"
+for want in (plugin, plugin + "/vendor"):
+    assert repr(want) in pa[2], f"{want} missing from sys.path insertion: {pa[2]!r}"
 env = d["EnvironmentVariables"]
 assert env.get("JSTACK_ROOT") == jroot, f"JSTACK_ROOT={env.get('JSTACK_ROOT')!r} not {jroot!r}"
-assert env.get("PYTHONPATH") == plugin, f"PYTHONPATH={env.get('PYTHONPATH')!r}"
+assert env.get("PYTHONPATH") == plugin + ":" + plugin + "/vendor", f"PYTHONPATH={env.get('PYTHONPATH')!r}"
 assert env.get("PATH"), "no PATH — the service manager hands the daemon a stripped one"
+# launchd opens the log files before the process exists, so a root inside a
+# TCC-protected folder would kill the spawn with nothing to prompt: the
+# spawn-time paths live under ~/Library/Logs instead, never under the root.
+logs = home + "/Library/Logs/jstack-scheduler/"
 for key in ("StandardOutPath", "StandardErrorPath"):
-    assert d[key].startswith(jroot + "/State/"), f"{key}={d[key]} not under the root's State"
+    assert d[key].startswith(logs), f"{key}={d[key]} not under {logs}"
+assert d["WorkingDirectory"] == home, f"WorkingDirectory={d['WorkingDirectory']} is not the home launchd can always reach"
 for key in ("WorkingDirectory", "StandardOutPath", "StandardErrorPath"):
     p = d[key]
     assert not (p == repo or p.startswith(repo + "/")), f"{key}={p} resolves inside the checkout"
@@ -121,7 +131,7 @@ print("plist ok")
 EOF
 )
     if [ $? -eq 0 ]; then
-        pass "plist parses with plistlib: RunAtLoad/KeepAlive, -m scheduler, root-derived env and State logs, no path in the checkout"
+        pass "plist parses with plistlib: RunAtLoad/KeepAlive, plugin and vendor on the daemon's import path, root-derived env, logs and workdir outside TCC-protected folders, no path in the checkout"
     else
         fail "generated plist assertions: $msg"
     fi

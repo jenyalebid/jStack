@@ -63,6 +63,46 @@ def test_release_bundle_uses_the_manifest_identity():
                         "github_repo": "owner/repo", "date": "2026-09-21"}
 
 
+def test_the_bundle_answers_for_its_ref_and_for_who_built_it():
+    """#148 and #146. Nothing downstream can ask either question anywhere
+    else: `install_signed.provision` writes a fresh hub's channel from this
+    file, and `app_services.verify` takes the source-build exemption from it.
+    A publication passes neither, so it keeps the team requirement."""
+    from jstack_host.build_source import source_origin
+    identity = build_hub.release_identity(
+        "a" * 40, "0.70.0", release_id="2026-09-21-aaaaaaaa", github_repo="owner/repo",
+        date="2026-09-21", channel="feature/x", origin=source_origin("this-mac"))
+    assert identity["channel"] == "feature/x"
+    assert identity["origin"] == {"kind": "source-build", "machine": "this-mac"}
+
+
+@pytest.mark.parametrize("value", ["../escape", "-flag", "a" * 80, "feature/../main", ""])
+def test_a_ref_a_hub_will_not_follow_cannot_be_sealed_into_a_bundle(value):
+    """The bundle's channel is pasted into a git command line and compared
+    against signed content by whoever reads it back, so it is bounded where it
+    is written, not only where it is used."""
+    with pytest.raises(ValueError):
+        build_hub.release_identity("a" * 40, "0.70.0", release_id="2026-09-21-aaaaaaaa",
+                                   github_repo="owner/repo", date="2026-09-21", channel=value)
+
+
+@pytest.mark.parametrize("origin", [{"kind": "published"}, {"machine": "x"}, "source-build", {}])
+def test_only_the_marker_a_manifest_carries_can_be_sealed_as_an_origin(origin):
+    """One spelling of "a machine built this". A bundle that records anything
+    else records nothing the installer's gate will read."""
+    with pytest.raises(ValueError):
+        build_hub.release_identity("a" * 40, "0.70.0", release_id="2026-09-21-aaaaaaaa",
+                                   github_repo="owner/repo", date="2026-09-21", origin=origin)
+
+
+@pytest.mark.parametrize("extra", [{"channel": "dev"}, {"origin": {"kind": "source-build"}}])
+def test_a_dev_build_claims_no_release_line_and_no_origin(extra):
+    """The fallback identity names no release and no repo; a ref or an origin
+    on it would be a claim about a build nobody cut."""
+    with pytest.raises(ValueError):
+        build_hub.release_identity("a" * 40, "0.70.0", **extra)
+
+
 @pytest.mark.parametrize("arguments", [
     {"release_id": "2026-09-21-aaaaaaaa"},
     {"release_id": "2026-09-21-aaaaaaaa", "github_repo": "owner/repo", "date": ""},

@@ -253,9 +253,6 @@ func serve(_ policy: NetworkPolicy) throws {
                 return source
             }
             defer { signals.forEach { $0.cancel() } }
-            let recovery = Thread { hubRecoveryLoop() }
-            recovery.name = "hub-recovery"
-            recovery.start()
             while !shutdownState.requested {
                 let policy = try readPolicy()
                 if policy.active { try serve(policy) }

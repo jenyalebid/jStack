@@ -137,34 +137,12 @@ def observed(providers: list[dict]) -> dict:
     return result
 
 
-def rollback(providers: list[dict], stack: Path):
-    for provider in providers:
-        for field in ("config", "hooks", "marketplace"):
-            if provider.get(field):
-                replace_references(Path(provider[field]), str(stack), provider["root"])
-        move_shell_references(str(stack), provider["root"])
-        if provider["kind"] == "claude":
-            # Reinstalling an older version through update is not supported.
-            # Restore only our entry, merging any concurrent unrelated plugin
-            # changes. The original immutable cache was never removed.
-            path = Path(provider["ledger"])
-            data = json.loads(path.read_text())
-            data["plugins"]["jstack@jStack"] = provider["previous_entries"]
-            from .update_supervisor import atomic_json
-            atomic_json(path, data)
-        else:
-            run([provider["binary"], "plugin", "marketplace", "add", provider["root"]])
-            run([provider["binary"], "plugin", "add", "jstack@jstack", "--json"])
-
-
 def prepare() -> list[dict]:
     result = discover()
     for provider in result:
         if not Path(provider["binary"]).is_file():
             raise ReleaseError(f"{provider['kind']} CLI is missing: nothing at "
                                f"{provider['binary']} and none on {tool_path()}")
-        if provider["kind"] == "claude":
-            provider["previous_entries"] = json.loads(Path(provider["ledger"]).read_text())["plugins"]["jstack@jStack"]
     return result
 
 

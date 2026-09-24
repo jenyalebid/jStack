@@ -1,0 +1,351 @@
+"""Installing means building a commit on a ref, not downloading a release.
+
+Two halves. `build_source.bootstrap`/`seed` are the installer's build and its
+first offer — the same manifest and the same feed writer a hub's own
+`updates build` uses, fed from what an installing Mac actually has. The rest
+reads `install.sh` and `app/install.sh` as text, the way the menubar script's
+tests do: those two are the only door onto a fresh machine and nothing else
+executes them under pytest.
+"""
+import json
+import plistlib
+import re
+import tarfile
+from pathlib import Path
+
+import pytest
+
+from jstack_host import build_hub, build_source, release_manifest as releases
+
+REPO = Path(__file__).resolve().parents[2]
+INSTALL = (REPO / "install.sh").read_text()
+APP_INSTALL = (REPO / "app/install.sh").read_text()
+#: The same script with its commentary taken out. What a shell script no
+#: longer does cannot be asserted against a file that explains why it stopped
+#: doing it — every "this used to" note reads as the thing itself.
+CODE = "\n".join(line for line in INSTALL.splitlines() if not line.lstrip().startswith("#"))
+
+HEAD = "f" * 40
+CLIENT = "b" * 40
+
+
+def bundle(path: Path, info: dict) -> Path:
+    (path / "Contents").mkdir(parents=True)
+    with (path / "Contents/Info.plist").open("wb") as stream:
+        plistlib.dump(info, stream)
+    return path
+
+
+@pytest.fixture
+def sealed():
+    """The identity `build_hub` sealed into the bundle it was asked to build.
+
+    The bundle is archived and deleted before `bootstrap` returns, so this is
+    the only place a test can read what the compiler was handed.
+    """
+    return {}
+
+
+@pytest.fixture
+def installing(tmp_path, monkeypatch, sealed):
+    """A Mac part way through an install: a checkout on a ref, a client in
+    /Applications, and no hub yet. Git, the Hub compiler and ditto are stubbed;
+    the identity, the manifest, the signature and the tarball are the real code.
+    """
+    from jstack_host import app_services, build_hub, update_macos
+    checkout, output, keys = tmp_path / "jStack", tmp_path / "out", tmp_path / "keys"
+    client = bundle(tmp_path / "Applications/jRemote.app", {
+        "CFBundleIdentifier": "live.jstack.client", "CFBundleVersion": "109",
+        "LSMinimumSystemVersion": "26.0", "JStackSourceCommit": CLIENT})
+    checkout.mkdir()
+    calls = []
+
+    def stack_tree(target: Path):
+        (target / "plugins/jstack/.claude-plugin").mkdir(parents=True)
+        (target / "plugins/jstack/.claude-plugin/plugin.json").write_text('{"version": "9.9.9"}')
+        (target / "host/jstack_host").mkdir(parents=True)
+        (target / "host/jstack_host/__init__.py").write_text("# host\n")
+
+    def command(argv, **kwargs):
+        calls.append(argv)
+        if argv[:2] == ["git", "-C"] and "worktree" in argv and "add" in argv:
+            stack_tree(Path(argv[-2]))
+            return ""
+        if "rev-parse" in argv:
+            return HEAD + "\n"
+        if "rev-list" in argv:
+            return "101\n"
+        if argv[0] == "/usr/bin/ditto":
+            import zipfile
+            with zipfile.ZipFile(argv[-1], "w") as archive:
+                archive.writestr(Path(argv[-2]).name + "/Contents/Info.plist", "x")
+            return ""
+        return ""
+
+    def compile_hub(stack, output, version, signing, **kwargs):
+        app = bundle(Path(output) / "jStack Hub.app", {
+            "CFBundleIdentifier": "live.jstack.hub", "CFBundleVersion": "20260923",
+            "LSMinimumSystemVersion": "13.0"})
+        (app / "built").write_text(kwargs["trust_key"])
+        # The real `release_identity`, on whatever `bootstrap` handed it: this
+        # file is the only thing `install_signed.provision` has to read a ref
+        # or an origin out of, so a stub that wrote its own would be asserting
+        # the fixture. The compiler itself is what is out of reach here.
+        packages = app / "Contents/Resources/packages"
+        packages.mkdir(parents=True)
+        sealed.update(build_hub.release_identity(
+            HEAD, version, release_id=kwargs["release_id"],
+            github_repo=kwargs["github_repo"], date=kwargs["date"],
+            channel=kwargs.get("channel"), origin=kwargs.get("origin")))
+        (packages / "release-identity.json").write_text(json.dumps(sealed))
+        return app
+
+    monkeypatch.setattr(update_macos, "command", command)
+    monkeypatch.setattr(build_hub, "build", compile_hub)
+    monkeypatch.setattr(app_services, "verify", lambda *a, **k: None)
+    monkeypatch.setattr(build_source.subprocess, "run", lambda *a, **k: None)
+    return checkout, output, keys, client, calls
+
+
+def built(installing, **overrides):
+    checkout, output, keys, client, _ = installing
+    return build_source.bootstrap(checkout, output, keys, repo="example/stack",
+                                  ref=overrides.pop("ref", "dev"),
+                                  client=overrides.pop("client", client),
+                                  machine="this-mac", **overrides)
+
+
+# ── What the installer builds ───────────────────────────────────────────────
+
+def test_the_installer_signs_its_build_with_the_key_this_machine_minted(installing):
+    _, output, keys, _, _ = installing
+    answer = built(installing)
+    _, public = build_source.build_key(keys)
+    manifest = releases.verify(json.loads((output / "manifest.json").read_text()), public)
+    assert answer["public_key"] == public and answer["offer"] is True
+    assert manifest["origin"] == {"kind": releases.SOURCE_BUILD, "machine": "this-mac"}
+    assert manifest["channel"] == {"github_repo": "example/stack", "name": "dev"}
+    assert manifest["sources"] == {"stack": HEAD, "client": CLIENT}
+    assert manifest["sequence"] == 101 and not manifest["receipts"]
+
+
+def test_the_manifest_names_the_client_this_mac_installed_and_its_commit(installing):
+    """jRemote is not built here and its release is downloaded once, by the
+    installer that verified it — so the bytes this hub can honestly offer are
+    the ones already on the disk."""
+    _, output, _, client, _ = installing
+    built(installing)
+    manifest = json.loads((output / "manifest.json").read_text())["manifest"]
+    item = manifest["components"]["client"]
+    assert item["file"] == "jRemote.zip" and item["version"] == "109"
+    releases.check_artifact(output / item["file"], item)
+    assert manifest["sources"]["client"] == CLIENT
+    assert manifest["mobile"]["source"] == CLIENT
+
+
+def test_a_client_that_does_not_record_its_commit_is_refused(installing, tmp_path):
+    """Without it the manifest cannot name a client revision, and no later
+    build can carry one forward."""
+    anonymous = bundle(tmp_path / "Anon/jRemote.app", {
+        "CFBundleIdentifier": "x", "CFBundleVersion": "1", "LSMinimumSystemVersion": "26.0"})
+    with pytest.raises(releases.ReleaseError, match="commit it was built from"):
+        built(installing, client=anonymous)
+
+
+def test_the_release_runs_on_what_both_of_its_bundles_run_on(installing):
+    """A publication states compatibility by hand. An installer reads it back
+    off the two bundles, and the higher minimum is the release's."""
+    _, output, _, _, _ = installing
+    built(installing)
+    manifest = json.loads((output / "manifest.json").read_text())["manifest"]
+    assert manifest["compatibility"]["minimum_os"] == "26.0"
+    assert manifest["compatibility"]["protocol"] == 1
+    assert manifest["compatibility"]["rollback"] is True
+
+
+def test_the_tarball_carries_the_identity_and_the_key_stage_reads_back(installing):
+    _, output, keys, _, _ = installing
+    release = built(installing)["release"]
+    with tarfile.open(output / "stack.tar.gz") as archive:
+        identity = json.loads(archive.extractfile("host/release-identity.json").read())
+        trust = json.loads(archive.extractfile("host/jstack_host/release-trust.json").read())
+    assert identity["release"] == release and identity["sha"] == HEAD
+    assert identity["channel"] == "dev" and identity["package_sha256"]
+    assert trust["public_key"] == build_source.build_key(keys)[1]
+
+
+def test_the_built_hub_records_the_ref_it_was_built_from(installing, sealed):
+    """#148. `install_signed.provision` reads the hub's channel out of this
+    file and nothing else knows it — a fresh install refuses to find anything
+    in the state dir, and the caller is not asked. While the bundle recorded
+    no ref, every branch install was provisioned to follow stable."""
+    built(installing, ref="feature/x")
+    assert sealed["channel"] == "feature/x"
+    assert build_source.channel_ref(sealed) == "feature/x"
+
+
+def test_a_no_app_install_records_its_ref_too(installing, sealed):
+    """The half the workaround in `seed()` could never reach: without a client
+    there is no manifest and no first offer, so nothing ran after the install
+    to correct the channel it had been provisioned with."""
+    assert built(installing, client=None, ref="feature/x")["offer"] is False
+    assert sealed["channel"] == "feature/x"
+
+
+def test_the_built_hub_records_that_this_machine_built_it(installing, sealed):
+    """#146. The marker the sealed installer's bundle gate reads, in the same
+    spelling the signed manifest carries — one answer to what a source build
+    is, sealed into the bundle by the signature over it."""
+    _, output, _, _, _ = installing
+    built(installing)
+    manifest = json.loads((output / "manifest.json").read_text())["manifest"]
+    assert sealed["origin"] == manifest["origin"] == {
+        "kind": releases.SOURCE_BUILD, "machine": "this-mac"}
+
+
+def test_a_build_whose_seal_does_not_hold_stops_before_applications(installing, monkeypatch):
+    """`install_signed.identity` asks the same question with the bundle
+    already in /Applications, nine frames down. An ad-hoc signature is enough
+    for a Hub this machine built; an absent or broken one is enough for
+    nobody, and that is what is still worth catching here."""
+    from jstack_host import app_services
+
+    def refuse(*args, **kwargs):
+        raise releases.ReleaseError("code object is not signed at all")
+
+    monkeypatch.setattr(app_services, "verify", refuse)
+    with pytest.raises(releases.ReleaseError, match="signature does not hold"):
+        built(installing)
+
+
+def test_without_a_client_the_hub_is_still_built_and_the_feed_stays_empty(installing):
+    """`--no-app`. A manifest needs all three components, so a feed carrying a
+    component this Mac does not have is the one thing that must not happen."""
+    _, output, _, _, _ = installing
+    answer = built(installing, client=None)
+    assert answer["offer"] is False and answer["release"]
+    assert not (output / "manifest.json").exists()
+    assert (output / "menubar-notarized.zip").is_file()
+
+
+# ── The first offer ─────────────────────────────────────────────────────────
+
+def seeded(installing, tmp_path, **overrides):
+    _, output, keys, _, _ = installing
+    built(installing, **{k: v for k, v in overrides.items() if k == "ref"})
+    root, feed = tmp_path / "updates", tmp_path / "state/fleet"
+    root.mkdir(parents=True)
+    (root / "build-key").write_bytes((keys / "build-key").read_bytes())
+    (root / "build-key").chmod(0o600)
+    config = {"feed_dir": str(feed), "public_key": build_source.build_key(keys)[1]}
+    config.update(overrides.get("config", {}))
+    (root / "config.json").write_text(json.dumps(config))
+    return root, feed, output
+
+
+def test_the_install_lands_what_it_built_as_the_hubs_first_offer(installing, tmp_path):
+    """`inherited()` refuses on an empty feed, so a hub that never lands its
+    first release can never build a second one — and a hub with no feed serves
+    no leaf."""
+    root, feed, output = seeded(installing, tmp_path)
+    answer = build_source.seed(root, output)
+    public = build_source.build_key(root)[1]
+    manifest = releases.verify(json.loads((feed / "latest.json").read_text()), public)
+    assert manifest["release"] == answer["release"]
+    for item in manifest["components"].values():
+        releases.check_artifact(feed / manifest["release"] / item["file"], item)
+    assert releases.verify(json.loads((feed / manifest["release"] / "manifest.json").read_text()),
+                           public)["release"] == manifest["release"]
+    # `inherited()` is the next build's first act, and it now has an answer.
+    assert build_source.inherited({"feed_dir": str(feed), "public_key": public})
+
+
+def test_the_seed_leaves_the_channel_the_bundle_already_answered_for(installing, tmp_path):
+    """The Phase-1b workaround, gone. It wrote the ref into the hub's config
+    after provisioning, which covered the installer's own path and nothing
+    else: a `--no-app` install never reached it, and neither did a bundle
+    reinstalled outside the installer. The bundle carries the ref now."""
+    import inspect
+    root, _, output = seeded(installing, tmp_path)
+    build_source.seed(root, output)
+    assert "channel" not in json.loads((root / "config.json").read_text())
+    assert "channel" not in inspect.getsource(build_source.seed)
+
+
+def test_a_hub_that_does_not_trust_the_installers_key_refuses_the_offer(installing, tmp_path):
+    root, feed, output = seeded(installing, tmp_path, config={"public_key": "not-this-key"})
+    with pytest.raises(releases.ReleaseError, match="does not trust the key"):
+        build_source.seed(root, output)
+    assert not (feed / "latest.json").exists()
+
+
+def test_one_writer_lands_both_a_hubs_build_and_an_installers(installing, tmp_path):
+    """Two spellings of the feed layout would be two answers to what a locally
+    built release is, and only one of them is what `stage()` consumes."""
+    import inspect
+    source = inspect.getsource(build_source._build)
+    assert "land(feed, output, envelope)" in source
+    assert "assemble(" in source and "os.rename" not in source
+
+
+# ── The installer's own text ────────────────────────────────────────────────
+
+def test_install_sh_installs_a_ref_and_downloads_no_release():
+    assert "--ref" in CODE and "JSTACK_REF" in CODE
+    assert "git clone --quiet --branch" in CODE
+    assert "merge --ff-only" in CODE
+    for gone in ("RELEASE_TAG", "stack-release", "releases/download", "tar xzf"):
+        assert gone not in CODE, f"install.sh still downloads a release: {gone}"
+
+
+def test_install_sh_never_deletes_uncommitted_work_in_the_checkout():
+    """Issue #130: it wrote a diff to the home root, then ran `checkout -- .`
+    and `clean -fdq` over the tree, and a finished, tested fix was gone."""
+    for destructive in ("clean -fdq", "checkout -- .", "jstack-local-changes",
+                        "-source-$(date"):
+        assert destructive not in CODE, f"install.sh still discards work: {destructive}"
+    assert "has uncommitted work (above)" in CODE
+
+
+def test_install_sh_names_a_remedy_for_every_build_input_it_requires():
+    """A Mac without these cannot install, which is intended — but a traceback
+    ten minutes into a build is not the way to say so."""
+    for remedy in ("python.org", "xcode-select --install", "brew install tmux"):
+        assert remedy in CODE, f"no remedy offered for a missing build input: {remedy}"
+    assert "Python.framework/Versions/3.12" in CODE
+
+
+def test_install_sh_does_not_require_a_publisher_signing_identity():
+    """#146: it did, and that made the publisher's Mac the only machine the
+    one install path there is could reach. A configuration that is set but
+    names no file is still a mistake worth refusing over."""
+    assert "JSTACK_SIGNING_CONFIG" in CODE, "the door to a notarized build is gone"
+    assert "points at no file" in CODE
+    for refusal in ("adopts a notarized bundle from the publisher",
+                    "and notary_credentials.\"\n"):
+        assert refusal not in CODE, f"install.sh still refuses an unsigned build: {refusal}"
+
+
+def test_install_sh_lands_its_build_in_the_feed_through_the_one_writer():
+    assert "jstack_host.build_source bootstrap" in CODE
+    assert "jstack_host.build_source seed" in CODE
+    assert "build-key" in CODE, "the hub must keep the key its installer signed with"
+
+
+def test_jremotes_door_is_untouched():
+    """Moving the client to a direct-download host is blocked on a credential
+    that has not arrived; until it does, this is how a Mac gets jRemote."""
+    assert 'TAG_PREFIX="mac-app-"' in APP_INSTALL
+    assert 'TEAM_ID="MZ95H77RQQ"' in APP_INSTALL
+    for gate in ("shasum -a 256", "codesign --verify --strict",
+                 "source=Notarized Developer ID", "spctl -a -vvv -t exec"):
+        assert gate in APP_INSTALL, f"the app installer lost a gate: {gate}"
+    hosts = set(re.findall(r"https://([a-z0-9.-]+)/", APP_INSTALL))
+    assert hosts <= {"github.com", "api.github.com", "raw.githubusercontent.com"}, hosts
+
+
+def test_a_final_release_is_still_cuttable():
+    """One last release has to be publishable with the machinery the deployed
+    fleet is running, or that fleet can never inherit this change."""
+    from jstack_host import release_channel
+    assert callable(release_channel.publish)

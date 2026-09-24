@@ -25,8 +25,18 @@ def journal_path() -> Path:
 
 
 def identity(app: Path, identifier: str) -> dict:
+    """The sealed identity of a bundle this machine is willing to adopt.
+
+    `verify` has already refused anything whose seal does not hold, and has
+    already decided which signing identity that seal had to carry. What is
+    left here is Gatekeeper, and Gatekeeper is a question about a notarised
+    bundle from a Developer ID: a Hub compiled on this Mac has neither, and
+    asking anyway is the exact refusal that shut every non-publisher machine
+    out of its own build. The fingerprint below is asked of both paths.
+    """
     app_services.verify(app, identifier)
-    command(["/usr/sbin/spctl", "--assess", "--type", "execute", str(app)])
+    if not app_services.source_built(app):
+        command(["/usr/sbin/spctl", "--assess", "--type", "execute", str(app)])
     from .sourcestamp import fingerprint
     packages = app / "Contents/Resources/packages"
     value = json.loads((packages / "release-identity.json").read_text())
@@ -113,7 +123,7 @@ def observations(app: Path) -> dict:
 
 def provision() -> None:
     """Called only after runtime_entry has applied the saved environment."""
-    from . import devices, hostenv, release_channel, releases
+    from . import build_source, devices, hostenv, releases
     from .update_macos import bundle_info, client_distribution
     settings = service_settings.read()
     journal = json.loads(journal_path().read_text())
@@ -149,7 +159,14 @@ def provision() -> None:
                      "client_managed": client_distribution(client, {"client_managed": False}) == "hub",
                      "feed_dir": str(releases.RELEASE_DIR.parent / "fleet")}
     if source.get("github_repo"):
-        configuration["github_repo"] = release_channel.repository(source["github_repo"])
+        configuration["github_repo"] = build_source.repository(source["github_repo"])
+    # The ref this bundle was built from, read out of the bundle's own sealed
+    # release identity. Nothing else here knows it: not the caller, not the
+    # state dir a fresh install refuses to find anything in. While the bundle
+    # did not record it this line was a constant — every branch install, and
+    # every reinstall of a hub already moved onto a branch, was provisioned to
+    # follow stable and rebuilt itself off main from its next update onward.
+    configuration["channel"] = build_source.channel_ref(source)
     atomic_json(config_path, configuration)
 
 

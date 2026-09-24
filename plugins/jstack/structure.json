@@ -31,11 +31,9 @@
     ".gitignore": "keeps runtime state, credentials and Finder litter out of the public checkout",
     "README.md": "the repo's front page; manifest.sh audits the counts it claims",
     "app": "the jStack companion app — a product riding in the tooling repo; first candidate to split out if outside users ever install",
-    "docs": "repo-level docs and specs",
     "host": "the host-side python package (jstack_host) — machine-local pieces a portable plugin cannot ship",
     "install.sh": "the installer — directory-source marketplace, so git pull is the update",
     "plugins": "the catalog's contents; today one plugin, jstack",
-    "product.md": "what jStack is as a product",
     "release.sh": "coordinated release build and evidence-gated promotion entry point",
     "verify": "the acceptance journeys — each scenario drives a real install in a GUI guest and reads the verdict off its terminal, so what ships is asserted on a machine and not in a mock; run.sh is the runner, lib/ its shared shell"
   },
@@ -44,7 +42,6 @@
     ".codex-plugin": "codex plugin manifest — same version, bumped together (manifest.sh enforces parity)",
     "bin": "the shipped adapters — log_event, msg, seat, session-files and the rest",
     "commands-stage": "bare slash commands staged for a host's ~/.claude/commands",
-    "docs": "plugin system docs (docs/systems/<id>.md)",
     "githooks": "versioned git hooks for this checkout — .git/hooks symlinks resolve here",
     "hooks": "the Claude Code hook scripts — SessionStart, Stop, UserPromptSubmit, PreToolUse",
     "prompts": "model-bound text the hooks inject — file-sourced per the prompt-sourcing rule, loaded by hooks/_prompts.py",
@@ -56,6 +53,7 @@
     "structure.json": "this manifest",
     "systems.json": "the plugin's systems registry — federated into host registries",
     "tests": "the hermetic suite — every executable *.sh here runs on push (pre-push layer 2)",
+    "vendor": "pure-python dependencies for an interpreter with no site-packages of its own — the signed Hub's bundled python runs the scheduler daemon, and recurring jobs need dateutil; tracked because the reader in bin/jstack-scheduler ships on main",
     "session_runtime.py": "provider-neutral transcript facts and native Codex offline fork API"
   }
 }

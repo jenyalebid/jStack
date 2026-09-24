@@ -1,22 +1,9 @@
 # jStack
 
-### Client-only Mac
+jStack Hub is the Mac backend of jRemote. The jStack Plugin provides Claude
+Code and Codex commands independently.
 
-Run `./install.sh --no-host` to use jRemote with another machine's Hub.
-On that Hub choose **Pair a Device**; in jRemote choose **Add a Mac** and
-enter its address and pairing code. A local Hub is not required.
-
-> **Beta — under construction. Not ready for release.**
-
-jStack Plugin provides Claude Code and Codex commands independently.
-jStack Hub is the Mac server and menu bar; jRemote is its separately installed
-client. A parent Hub manages leaves, each running one installation of the same Hub.
-
-[Product contract](product.md#core-contract) ·
-[Build, release and update workflow](docs/managed-updates.md)
-
-Develop on branches; main holds complete, verified functionality. Publishing
-is an explicit action over tested artifacts, never a side effect of a push.
+> **In development — not ready for release.**
 
 ## Install
 
@@ -32,10 +19,10 @@ Removes the app, Hub and services; keeps your state, token and paired devices:
 curl -fsSL https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh | bash -s -- --uninstall
 ```
 
-## Full reset
+## Reset
 
-Wipes everything — state, token, credentials — then installs the latest
-published release clean. Devices re-pair afterward.
+Wipes everything — state, token, credentials — then builds the current main
+commit clean. Devices re-pair afterward.
 
 ```
 curl -fsSL https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh | bash -s -- --purge

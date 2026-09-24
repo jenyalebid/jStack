@@ -112,7 +112,8 @@ update.setAccessibilityIdentifier("updates_tap_lab")
 details.addItem(update)
 let window = HostInfoWindow()
 let form = HostInfoForm(machine: "Lab Mac", status: "Running", version: "0.70.0",
-    source: "abc123", app: InfoAppSnapshot(), updateStatus: "Update available",
+    source: "abc123", hubSource: nil, sourceBusy: false, follow: { _ in }, rebuild: {},
+    app: InfoAppSnapshot(), updateStatus: "Update available",
     error: nil, localCommand: update, machines: [], commands: [:], allCommand: nil,
     open: {}, download: {})
 window.render(form)
@@ -205,6 +206,11 @@ print("live menu actions passed")
                     {"session_id": "c", "attention": "waiting"}]},
                 "/devices": {"devices": [{"id": "phone", "name": "Test Phone"}]},
                 "/hosts": {"hosts": [{"key": "leaf", "name": "Test Leaf"}]},
+                "/updates/source": {
+                    "ref": "stable", "repository": "example/stack", "enabled": True,
+                    "managed": False, "running": {"release": "2026-09-22-abcdef12"},
+                    "check": {"status": "current"}, "build": {"state": "idle"},
+                    "can_build": True, "blocked": ""},
                 "/updates/inventory": {"release": "new", "machines": [
                     {"machine": "lab", "name": "Lab", "desired": "new",
                      "state": "pending" if queued else "available", "supervisor": True}]},

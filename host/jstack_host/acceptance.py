@@ -1,6 +1,6 @@
 """Acceptance receipts written from observations, never from a declaration.
 
-The nine journeys in `release_manifest.RECEIPTS` are what a candidate must
+The journeys in `release_manifest.RECEIPTS` are what a candidate must
 survive before it can be offered to a fleet. Each journey here names the facts
 it has to observe. A run records those facts while the journey executes against
 the exact artifact set of the candidate under test, and the receipt is written
@@ -27,7 +27,7 @@ from . import release_manifest as releases
 from .update_supervisor import atomic_json
 
 # What each journey must observe before its receipt can say passed. These are
-# the contract's own words in `docs/managed-updates.md`, not a convenient
+# the contract's own words, not a convenient
 # subset: adding a journey to the runner never adds a way to skip one of these.
 REQUIRED: dict[str, tuple[str, ...]] = {
     "fresh_install": ("installed_release", "host_identity", "plugin_versions",
@@ -41,8 +41,6 @@ REQUIRED: dict[str, tuple[str, ...]] = {
     "session_survival": ("session_pid", "surviving_pid", "new_output", "app_relaunch",
                          "candidate_new_session"),
     "interruption": ("interrupted_job", "recovered_state", "retry_current", "reboot_resume"),
-    "rollback": ("failed_job", "rolled_back_state", "restored_components",
-                 "refused_release", "pairing_intact"),
     "revocation": ("revoked_device", "cancelled_job", "rejected_request", "unchanged_release"),
     "off_network": ("device", "transport", "release_notice", "session_journey"),
 }

@@ -19,27 +19,9 @@ def test_native_service_compiles(tmp_path, filename, flags):
         sources.append(str(source.parent / "NetworkAddress.swift"))
     if filename == "Network.swift":
         sources.append(str(source.parent / "NetworkCommand.swift"))
-        sources.append(str(source.parent / "HubRecovery.swift"))
     result = subprocess.run(["swiftc", *flags, "-O", "-o", str(tmp_path / "probe"), *sources],
                             capture_output=True, text=True, timeout=180)
     assert result.returncode == 0, result.stderr
-
-
-def test_hub_recovery_watchdog_reads_the_updaters_exact_contract():
-    source = (Path(__file__).resolve().parents[1] / "macos/HubRecovery.swift").read_text()
-    # The root watchdog observes the user updater's journal, backup naming and
-    # marker path; these literals must move together with the Python side
-    # (update_supervisor.job.json states, update_app backup names).
-    assert '"/updates/job.json"' in source
-    assert '"applying"' in source and '"verifying"' in source
-    assert '".previous-"' in source
-    assert '"updates/recovery.json"' in source
-    assert 'identifier \\"live.jstack.hub\\"' in source
-    assert '"gui/\\(owner)/live.jstack.hub.updater"' in source
-    # Restoration is gated on all three conditions, in the fail-safe order:
-    # a verifying Hub or a live updater always wins over recovery.
-    tick = source[source.index("func hubRecoveryTick("):]
-    assert tick.index("hubVerifies") < tick.index("updaterRunning") < tick.index("restoreHub")
 
 
 @pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("swiftc"), reason="requires macOS Swift toolchain")

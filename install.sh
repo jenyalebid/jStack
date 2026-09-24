@@ -18,6 +18,9 @@ set -uo pipefail
 
 REPO_URL="${JSTACK_REPO_URL:-https://github.com/jenyalebid/jStack.git}"
 CHECKOUT="${JSTACK_CHECKOUT:-$HOME/jStack}"
+# The line this machine follows. Nothing is downloaded pre-built any more: the
+# Hub this Mac runs is the commit at the tip of this branch, compiled here.
+REF="${JSTACK_REF:-main}"
 AGENT_ROOT="${JSTACK_AGENT_ROOT:-$HOME/Agents}"
 MIN_PY_MAJOR=3
 MIN_PY_MINOR=9
@@ -57,6 +60,7 @@ usage: install.sh [options]
   --agent NAME        create this agent workspace (default: ask, or "Jarvis" with --yes)
   --agent-root DIR    where agent workspaces live (default: <root>/Agents)
   --checkout DIR      where to clone jStack (default: ~/jStack)
+  --ref REF           branch to build and install (default: main)
   --no-scheduler      don't install the scheduler daemon (no recurring wakes)
   --no-claude         don't install Claude Code even if it is missing
   --no-host           use the client with another Hub; no local Hub or menu
@@ -69,9 +73,13 @@ agent workspace — and then runs to the end. Every other part of the stack has
 one sensible answer, so it is installed, and the way to decline it is a flag
 above rather than a prompt.
 
-Environment: JSTACK_REPO_URL, JSTACK_CHECKOUT, JSTACK_AGENT_ROOT override the
-defaults above. JSTACK_ROOT, if you export it, is honoured by everything the
-stack does afterwards — see docs/systems/root-derivation.md.
+This installs by building: the checkout is put on --ref and the Hub is
+compiled from that commit on this Mac. It needs the audited CPython 3.12
+framework and the Command Line Tools; a Mac without them is told so.
+
+Environment: JSTACK_REPO_URL, JSTACK_CHECKOUT, JSTACK_AGENT_ROOT, JSTACK_REF
+override the defaults above. JSTACK_ROOT, if you export it, is honoured by
+everything the stack does afterwards.
 EOF
 }
 
@@ -85,6 +93,7 @@ while [ $# -gt 0 ]; do
         --agent)       AGENT_NAME="${2:-}"; shift ;;
         --agent-root)  AGENT_ROOT="${2:-}"; shift ;;
         --checkout)    CHECKOUT="${2:-}"; shift ;;
+        --ref)         REF="${2:-}"; shift ;;
         # ROOT_FROM_FLAG separates "someone asked for this root, now" from "this
         # shell happens to export one". Both arrive as $JSTACK_ROOT and they
         # need opposite handling: an exported root is already declared
@@ -101,6 +110,14 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+# A ref is pasted into a git command line and becomes a directory name inside
+# the hub's own source tree, so it is bounded here the way build_source.CHANNEL
+# bounds it on the hub.
+case "$REF" in
+    ""|-*|*" "*|*".."*|*"~"*|*"^"*|*":"*)
+        echo "--ref must name a branch, got: ${REF:-<empty>}" >&2; exit 2 ;;
+esac
 
 # The one installer. Sub-installers check this and refuse direct invocation.
 export JSTACK_INSTALLER=1
@@ -646,92 +663,43 @@ export PATH="$HOME/.local/bin:$PATH"
 
 # ── 2. the checkout ─────────────────────────────────────────────────────────
 
-step "jStack source at $CHECKOUT"
-
-# Which release is current, resolved once over the git protocol (no API rate
-# limit). Everything below installs THIS — the published, tested snapshot with
-# its release identity — never raw main.
-# Newest by publication, not by tag text: same-day releases differ only in
-# their hash suffix, and a lexicographic sort orders those randomly. The
-# releases API lists newest-first; the tag sort remains as offline fallback.
-RELEASE_TAG="$(curl -fsSL "https://api.github.com/repos/jenyalebid/jStack/releases?per_page=30" 2>/dev/null \
-    | "$PY" -c 'import json,sys; rs=[r for r in json.load(sys.stdin) if r["tag_name"].startswith("stack-release-2")]; print(max(rs, key=lambda r: r["published_at"])["tag_name"] if rs else "")' 2>/dev/null)"
-[ -n "$RELEASE_TAG" ] || RELEASE_TAG="$(git ls-remote --tags "$REPO_URL" 'refs/tags/stack-release-2*' 2>/dev/null \
-    | sed 's|.*refs/tags/||' | sort | tail -1)"
-
-if [ -d "$CHECKOUT/.git" ] && [ -n "$RELEASE_TAG" ] \
-        && [ "${JSTACK_SOURCE:-0}" != "1" ] && [ -z "${JSTACK_RELEASE_CONFIG:-}" ] \
-        && [ -z "$(git -C "$CHECKOUT" status --porcelain 2>/dev/null)" ] \
-        && [ -z "$(git -C "$CHECKOUT" log --oneline '@{u}..HEAD' 2>/dev/null)" ]; then
-    # A clean source clone is what earlier installers left behind, and it is
-    # exactly why machines reported stale versions: main is source, not the
-    # release. Convert it — old bytes move aside rather than vanish. A dirty
-    # tree or local commits mean somebody's work: leave it on the git path.
-    # JSTACK_SOURCE=1 keeps a deliberate source install; the publisher is
-    # recognized by JSTACK_RELEASE_CONFIG and never converted.
-    ASIDE="$CHECKOUT-source-$(date +%Y%m%d%H%M%S)"
-    if [ "$DRY_RUN" = "1" ]; then
-        would "move source clone to $ASIDE and install $RELEASE_TAG"
-    else
-        mv "$CHECKOUT" "$ASIDE"
-        ok "source clone moved aside to $ASIDE — installing the published release"
-    fi
-fi
+step "jStack source at $CHECKOUT ($REF)"
 
 if [ -d "$CHECKOUT/.git" ]; then
-    # An existing checkout is somebody's working tree. Fetch so the install is
-    # current, but never reset — an installer that discards local commits is a
-    # worse outcome than an installer that is one commit behind.
-    run git -C "$CHECKOUT" fetch --quiet origin
+    # An existing checkout is somebody's working tree, and on a machine that
+    # agents share it is the only copy of whatever is not committed yet. This
+    # step used to write a diff to the home root and then run `checkout -- .`
+    # and `clean -fdq` over the tree; it destroyed a finished, tested fix and
+    # left the only copy loose where nobody was told to look (issue #130).
+    # Nothing here deletes a byte the installer did not write: it
+    # fast-forwards, or it refuses and says what is in the way.
+    run git -C "$CHECKOUT" fetch --quiet origin "+refs/heads/$REF:refs/remotes/origin/$REF" \
+        || die "could not fetch $REF from origin — is it a branch in $REPO_URL?"
     if [ "$DRY_RUN" = "1" ]; then
-        would "git -C $CHECKOUT merge --ff-only (if clean)"
-    elif [ -z "$(git -C "$CHECKOUT" status --porcelain)" ] && git -C "$CHECKOUT" merge --ff-only --quiet '@{u}' 2>/dev/null; then
-        ok "updated to $(git -C "$CHECKOUT" log --oneline -1)"
-    elif [ -n "$(git -C "$CHECKOUT" log --oneline '@{u}..HEAD' 2>/dev/null)" ]; then
-        # Local commits are somebody's work: refuse loudly, never silently.
-        # An install that keeps running old code under a green summary is the
-        # failure this script exists to stop, so this is a die, not a warn.
-        die "$CHECKOUT has local commits and is $(git -C "$CHECKOUT" rev-list --count 'HEAD..@{u}') behind — rebase or move it aside, then re-run"
+        would "git -C $CHECKOUT checkout $REF && git merge --ff-only origin/$REF"
     else
-        # Uncommitted noise (build junk, an aborted edit) must not pin the
-        # whole machine to an old stack. Save the exact bytes aside, then take
-        # upstream — the machine ends current, and nothing is lost.
-        STASH="$CHECKOUT/../jstack-local-changes-$(date +%Y%m%d%H%M%S).diff"
-        git -C "$CHECKOUT" diff HEAD > "$STASH" 2>/dev/null
-        run git -C "$CHECKOUT" checkout -- . && run git -C "$CHECKOUT" clean -fdq -e .venv -e .venv312
-        if git -C "$CHECKOUT" merge --ff-only --quiet '@{u}' 2>/dev/null; then
-            ok "updated to $(git -C "$CHECKOUT" log --oneline -1) (local edits saved to $STASH)"
-        else
-            die "could not fast-forward $CHECKOUT — it has diverged from origin; move it aside and re-run"
+        DIRTY="$(git -C "$CHECKOUT" status --porcelain)"
+        if [ -n "$DIRTY" ]; then
+            printf '%s\n' "$DIRTY" | sed 's/^/       /' >&2
+            die "$CHECKOUT has uncommitted work (above) — commit it or move it aside, then re-run"
         fi
+        git -C "$CHECKOUT" checkout --quiet "$REF" -- 2>/dev/null \
+            || git -C "$CHECKOUT" checkout --quiet -b "$REF" "origin/$REF" \
+            || die "could not put $CHECKOUT on $REF"
+        if [ -n "$(git -C "$CHECKOUT" log --oneline "origin/$REF..HEAD" 2>/dev/null)" ]; then
+            die "$CHECKOUT is on $REF with local commits — rebase or move it aside, then re-run"
+        fi
+        git -C "$CHECKOUT" merge --ff-only --quiet "origin/$REF" \
+            || die "could not fast-forward $CHECKOUT to origin/$REF — it has diverged; move it aside and re-run"
+        ok "on $REF at $(git -C "$CHECKOUT" log --oneline -1)"
     fi
-elif [ -f "$CHECKOUT/host/release-identity.json" ] && [ -f "$CHECKOUT/plugins/jstack/.claude-plugin/plugin.json" ]; then
-    # A publisher snapshot intentionally has no mutable git checkout. Keep
-    # those exact local bytes; never fetch main over a selected release.
-    ok "using the local release snapshot (no source checkout update)"
 elif [ -e "$CHECKOUT" ]; then
     die "$CHECKOUT exists and is not a git checkout — move it aside or pass --checkout DIR"
 else
-    # A fresh machine gets the published release, resolved above. Only if no
-    # release exists at all does the clone remain, so a brand-new repo can
-    # still bootstrap.
-    if [ -n "$RELEASE_TAG" ]; then
-        SNAP="$(mktemp -t jstack-release).tar.gz"
-        run_long "downloading release $RELEASE_TAG" \
-            curl -fsSL -o "$SNAP" "${REPO_URL%.git}/releases/download/$RELEASE_TAG/stack.tar.gz" \
-            || die "release download failed — see $LAST_LOG"
-        if [ "$DRY_RUN" = "1" ]; then
-            would "unpack $RELEASE_TAG into $CHECKOUT"
-        else
-            mkdir -p "$CHECKOUT"
-            tar xzf "$SNAP" -C "$CHECKOUT" || die "could not unpack $RELEASE_TAG into $CHECKOUT"
-            rm -f "$SNAP"
-            ok "installed release $RELEASE_TAG ($(sed -n 's/.*"release": *"\([^"]*\)".*/\1/p' "$CHECKOUT/host/release-identity.json"))"
-        fi
-    else
-        run_long "cloning $REPO_URL" git clone --quiet "$REPO_URL" "$CHECKOUT" || die "clone failed — see $LAST_LOG"
-        [ "$DRY_RUN" = "1" ] || ok "cloned in ${LAST_ELAPSED}s at $(git -C "$CHECKOUT" log --oneline -1)"
-    fi
+    run_long "cloning $REPO_URL ($REF)" \
+        git clone --quiet --branch "$REF" "$REPO_URL" "$CHECKOUT" \
+        || die "clone of $REF failed — see $LAST_LOG"
+    [ "$DRY_RUN" = "1" ] || ok "cloned in ${LAST_ELAPSED}s at $(git -C "$CHECKOUT" log --oneline -1)"
 fi
 
 PLUGIN="$CHECKOUT/plugins/jstack"
@@ -1099,19 +1067,19 @@ step "Host and menu bar"
 
 HOST_INSTALLER="$CHECKOUT/host/install.sh"
 
-# This script is also the updater and the repairer. A machine that already has
-# a signed Hub answering is left alone (its updater delivers releases); a Hub
-# app that is present but dead is torn down and reinstalled fresh; leftover
-# legacy services or state are purged rather than silently steering the
-# install onto the legacy path — that fallback installed an unsigned stack on
-# a machine that asked for the release.
+# This script is also the repairer. A machine that already has a Hub answering
+# is left alone — moving that one forward is `jstack-host updates build`, which
+# builds the ref the hub follows; a Hub app that is present but dead is torn
+# down and reinstalled fresh; leftover legacy services or state are purged
+# rather than silently steering the install onto the legacy path.
 JSTACK_HUB_CURRENT=0
-if [ -n "$RELEASE_TAG" ] && [ "$(uname -s)" = "Darwin" ] && [ "$WANT_HOST" != "0" ]; then
+if [ "$(uname -s)" = "Darwin" ] && [ "$WANT_HOST" != "0" ]; then
     if [ -d "/Applications/jStack Hub.app" ]; then
         if curl -fsS -m 3 http://127.0.0.1:9090/api/health >/dev/null 2>&1; then
             installed_release="$(sed -nE 's/.*"release": *"([^"]+)".*/\1/p' \
                 "/Applications/jStack Hub.app/Contents/Resources/packages/release-identity.json" 2>/dev/null)"
-            ok "signed Hub already installed and answering${installed_release:+ (release $installed_release)} — its updater delivers new releases"
+            ok "Hub already installed and answering${installed_release:+ (release $installed_release)}"
+            note "moving it forward is \`jstack-host updates build\`, not a re-run of this: the sealed installer does not adopt an installation it did not make"
             JSTACK_HUB_CURRENT=1
             HOST_INSTALLED=1
             SIGNED_HUB=1
@@ -1157,23 +1125,93 @@ if [ -n "$RELEASE_TAG" ] && [ "$(uname -s)" = "Darwin" ] && [ "$WANT_HOST" != "0
         fi
     fi
 fi
-if [ -n "$RELEASE_TAG" ] && [ -f "$CHECKOUT/host/release-identity.json" ] && [ "$WANT_HOST" != "0" ] \
-        && [ "$(uname -s)" = "Darwin" ] && [ "${JSTACK_HUB_CURRENT:-0}" != "1" ]; then
-    # A release install gets the SIGNED, notarized Hub the release published —
-    # never a source-built unsigned menubar with python launch agents. The
-    # sealed app carries its own installer; codesign/spctl verification happens
-    # inside install_signed before anything is adopted.
-    HUB_ZIP="$(mktemp -t jstack-hub).zip"
-    run_long "downloading the signed jStack Hub" \
-        curl -fsSL -o "$HUB_ZIP" "${REPO_URL%.git}/releases/download/$RELEASE_TAG/menubar-notarized.zip" \
-        || die "hub download failed — see $LAST_LOG"
+if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ] \
+        && [ "${JSTACK_HUB_CURRENT:-0}" != "1" ]; then
+    # The Hub this Mac runs is the commit the checkout is on, compiled here —
+    # nothing pre-built is downloaded any more. `build_hub` copies the runtime
+    # out of the interpreter running it and accepts exactly the audited CPython
+    # 3.12 framework (release.sh makes the same demand of the publisher), and it
+    # drives clang, swiftc and tmux. A Mac missing one of those cannot install;
+    # it is told which one and what to do, rather than handed a traceback ten
+    # minutes into a build.
+    FRAMEWORK_PY="${JSTACK_BUILD_PYTHON:-/Library/Frameworks/Python.framework/Versions/3.12/bin/python3}"
+    BUILD_VENV="$CHECKOUT/host/.venv312"
+    HUB_STATE="$HOME/.local/state/jremote"
+    if [ ! -x "$BUILD_VENV/bin/python3" ] && [ ! -x "$FRAMEWORK_PY" ]; then
+        die "the Hub is compiled on this Mac and that needs the audited CPython 3.12 framework.
+     It is not at $FRAMEWORK_PY — install python.org's
+     macOS 3.12 package, or set JSTACK_BUILD_PYTHON to a 3.12 framework interpreter."
+    fi
+    for tool in clang swiftc; do
+        xcrun --find "$tool" >/dev/null 2>&1 \
+            || die "no $tool — the Hub's runtime shim and its menu bar are compiled here.
+     Install the Command Line Tools: xcode-select --install"
+    done
+    command -v tmux >/dev/null 2>&1 \
+        || die "no tmux on PATH — the Hub bundles it, so it is a build input.
+     Install it: brew install tmux"
+    # Signing is optional, and on all but the publisher's Mac it is absent.
+    # A Hub built here is then signed ad-hoc, which the sealed installer now
+    # adopts: the bundle records that this machine built it, and the pinned
+    # key that signed the manifest naming it is what vouches for it. Point
+    # JSTACK_SIGNING_CONFIG at a release configuration carrying sign_identity
+    # and notary_credentials to get a notarized bundle instead.
+    SIGNING_CONFIG="${JSTACK_SIGNING_CONFIG:-${JSTACK_RELEASE_CONFIG:-}}"
+    if [ -n "$SIGNING_CONFIG" ] && [ ! -f "$SIGNING_CONFIG" ]; then
+        die "JSTACK_SIGNING_CONFIG points at no file: $SIGNING_CONFIG
+     Unset it to build a Hub signed with this machine's own key."
+    fi
+    ok "build inputs — CPython 3.12 framework, clang, swiftc, tmux"
+
     if [ "$DRY_RUN" = "1" ]; then
-        would "install the signed Hub into /Applications and run its sealed installer"
+        would "build the Hub from $REF and install it into /Applications"
+        would "land what it built in the hub's feed as its first offer"
     else
-        run_long "installing the signed Hub" ditto -x -k "$HUB_ZIP" /Applications \
+        # A venv *on* the framework, never the framework itself: `_build` copies
+        # the runtime out of sys.base_prefix, which a venv keeps pointed at the
+        # framework, and the venv is the only one of the two that can carry the
+        # build's own dependencies. Editable, so a later install builds the
+        # checkout it just moved rather than a copy taken at venv time.
+        if [ ! -x "$BUILD_VENV/bin/python3" ]; then
+            run_long "creating the build interpreter" "$FRAMEWORK_PY" -m venv "$BUILD_VENV" \
+                || die "could not create $BUILD_VENV — see $LAST_LOG"
+        fi
+        if ! "$BUILD_VENV/bin/python3" -c 'import jstack_host, httpx, cryptography' >/dev/null 2>&1; then
+            run_long "installing the build's dependencies" \
+                "$BUILD_VENV/bin/python3" -m pip install --quiet -e "$CHECKOUT/host" \
+                || die "could not install the host package into $BUILD_VENV — see $LAST_LOG"
+        fi
+        BUILD_DIR="$(mktemp -d -t jstack-build)"
+        BUILD_OUT="$BUILD_DIR/out"
+        BUILD_KEYS="$BUILD_DIR/keys"
+        # The hub's private signing key is minted in there. Every exit takes it
+        # with it, including the ones that die before it reaches the state dir.
+        trap 'rm -rf "$BUILD_DIR"' EXIT
+        build_args=(--checkout "$CHECKOUT" --output "$BUILD_OUT" --key-dir "$BUILD_KEYS"
+                    --ref "$REF"
+                    --repo "$(printf '%s' "$REPO_URL" | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')"
+                    --machine "$(scutil --get ComputerName 2>/dev/null || hostname -s)")
+        # The client is not built here and cannot be: it is the bundle step 8
+        # installed and verified. Without it the build still produces a Hub —
+        # a release manifest needs all three components, so the feed stays
+        # empty instead of carrying a component this Mac does not have.
+        if [ -d "/Applications/jRemote.app" ]; then
+            build_args+=(--client /Applications/jRemote.app)
+        fi
+        if [ -n "$SIGNING_CONFIG" ]; then
+            build_args+=(--signing "$SIGNING_CONFIG")
+        fi
+        run_long "building the Hub from $REF" \
+            "$BUILD_VENV/bin/python3" -m jstack_host.build_source bootstrap "${build_args[@]}" \
+            || die "the Hub build failed — $(tail -4 "$LAST_LOG" 2>/dev/null | tr '\n' ' ')"
+        HUB_RELEASE="$(sed -nE 's/.*"release": *"([^"]+)".*/\1/p' "$LAST_LOG" | tail -1)"
+        HUB_ZIP="$BUILD_OUT/menubar-notarized.zip"
+        [ -f "$HUB_ZIP" ] || die "the build produced no Hub archive in $BUILD_OUT"
+        ok "built $HUB_RELEASE in ${LAST_ELAPSED}s"
+
+        run_long "installing the Hub" ditto -x -k "$HUB_ZIP" /Applications \
             || die "could not unpack the Hub into /Applications — see $LAST_LOG"
-        rm -f "$HUB_ZIP"
-        [ -d "/Applications/jStack Hub.app" ] || die "the Hub zip did not contain 'jStack Hub.app'"
+        [ -d "/Applications/jStack Hub.app" ] || die "the Hub archive did not contain 'jStack Hub.app'"
         # A service approval granted to a previous sealed Hub outlives its
         # bundle: it sits in the Background Task Management database, launchctl
         # bootout never touches it, and the sealed installer refuses over it
@@ -1192,8 +1230,8 @@ if [ -n "$RELEASE_TAG" ] && [ -f "$CHECKOUT/host/release-identity.json" ] && [ "
         done
         if run_long "running the Hub's sealed installer" \
                 "/Applications/jStack Hub.app/Contents/MacOS/JStackRuntime" install \
-                --app "/Applications/jStack Hub.app" --state-dir "$HOME/.local/state/jremote"; then
-            ok "signed Hub installed"
+                --app "/Applications/jStack Hub.app" --state-dir "$HUB_STATE"; then
+            ok "Hub installed — $HUB_RELEASE, built here from $REF"
             HOST_INSTALLED=1
             SIGNED_HUB=1
             # Pairing and every later step reach the host through
@@ -1203,6 +1241,29 @@ if [ -n "$RELEASE_TAG" ] && [ -f "$CHECKOUT/host/release-identity.json" ] && [ "
             printf '#!/bin/sh\nexec "/Applications/jStack Hub.app/Contents/MacOS/JStackCLI" "$@"\n' \
                 > "$HOME/.local/bin/jstack-host"
             chmod +x "$HOME/.local/bin/jstack-host"
+            # The key this build was signed with becomes the hub's own: it is
+            # minted outside the state dir because the sealed installer refuses
+            # to provision over a state dir that already holds anything, and it
+            # has to be the same key, or the hub's next build signs a feed its
+            # own configuration cannot verify.
+            mkdir -p "$HUB_STATE/updates"
+            cp -p "$BUILD_KEYS/build-key" "$HUB_STATE/updates/build-key" \
+                || warn "could not keep the build key — this hub will mint a new one and rotate its trust"
+            if [ -f "$BUILD_OUT/manifest.json" ]; then
+                # `build_source.inherited()` refuses on an empty feed, so a hub
+                # that never lands its first release can never build a second,
+                # and a hub with no feed serves no leaf.
+                if "$BUILD_VENV/bin/python3" -m jstack_host.build_source seed \
+                        --root "$HUB_STATE/updates" --output "$BUILD_OUT" >/dev/null; then
+                    ok "feed seeded — this hub offers $HUB_RELEASE and can build the next one"
+                else
+                    warn "the Hub is installed but its feed is empty — it can serve no leaf, and
+     \`jstack-host updates build\` has nothing to carry a client artifact forward from"
+                fi
+            else
+                warn "no jRemote on this Mac, so the hub's feed stays empty — install the app and
+     re-run, or this hub can serve no leaf and cannot build its next release"
+            fi
         else
             # A machine with a Hub app but no provisioned host service is the
             # green-looking broken install this script exists to prevent.
@@ -1244,11 +1305,16 @@ if [ "${SCHED_PENDING:-0}" = "1" ]; then
     SCHED_PY="$PY"
     if [ "${SIGNED_HUB:-0}" = "1" ] && [ -x "$HUB_PY" ]; then
         VENDOR="$CHECKOUT/plugins/jstack/vendor"
-        run_long "vendoring python-dateutil beside the plugin" \
-            "$PY" -m pip install --quiet --target "$VENDOR" python-dateutil \
-            || warn "could not vendor python-dateutil — see $LAST_LOG"
         # the sealed interpreter ignores PYTHONPATH — probe via sys.path, the
-        # same way the installed daemon definition loads it
+        # same way the installed daemon definition loads it. The repo ships the
+        # payload, so pip only runs where that probe fails; running it anyway
+        # wrote dist-info into a tracked directory, and step 2 refuses to
+        # update a checkout somebody — including this script — has dirtied.
+        if ! "$HUB_PY" -c "import sys; sys.path.insert(0, '$VENDOR'); import dateutil" 2>/dev/null; then
+            run_long "vendoring python-dateutil beside the plugin" \
+                "$PY" -m pip install --quiet --target "$VENDOR" python-dateutil \
+                || warn "could not vendor python-dateutil — see $LAST_LOG"
+        fi
         if "$HUB_PY" -c "import sys; sys.path.insert(0, '$VENDOR'); import dateutil" 2>/dev/null; then
             SCHED_PY="$HUB_PY"
         else
