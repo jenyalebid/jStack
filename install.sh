@@ -1183,6 +1183,134 @@ HOST_INSTALLER="$CHECKOUT/host/install.sh"
 # builds the ref the hub follows; a Hub app that is present but dead is torn
 # down and reinstalled fresh; leftover legacy services or state are purged
 # rather than silently steering the install onto the legacy path.
+# The Hub this Mac runs is the commit the checkout is on, compiled here —
+# nothing pre-built is downloaded any more. `build_hub` copies the runtime out
+# of the interpreter running it and accepts exactly the audited CPython 3.12
+# framework (release.sh makes the same demand of the publisher), and it drives
+# clang, swiftc and tmux.
+#
+# Asked HERE, before the block below decides to replace a published Hub, and
+# not where the build itself runs. Asked there it cost a machine its working
+# install: the published Hub was unregistered and deleted and the host's state
+# moved aside, and only then did the script discover there was no interpreter
+# to build the replacement with. It named the remedy correctly and left a Mac
+# with no Hub at all. Nothing is torn down until the replacement is known to
+# be buildable.
+#
+# Two of the three install themselves, because "go and fetch three things"
+# is not an answer a machine should give when it can fetch them. The two that
+# do are the two with a source worth trusting, and each is checked the way
+# `app/install.sh` checks the Mac app — who signed it, and whether Apple
+# notarized it — rather than taken on the strength of the URL.
+PSF_TEAM="BMM5U3QVKW"
+PY_VERSION="3.12.10"
+PY_PKG_URL="https://www.python.org/ftp/python/$PY_VERSION/python-$PY_VERSION-macos11.pkg"
+
+# python.org ships a Developer ID package signed by the Python Software
+# Foundation and notarized by Apple. Verified before it is run, and refused on
+# either count — an installer that would run an unverified root package is a
+# worse problem than the missing interpreter.
+install_framework_python() {
+    local dir pkg sig
+    dir="$(mktemp -d)"; pkg="$dir/python-$PY_VERSION.pkg"
+    run_long "downloading CPython $PY_VERSION from python.org" \
+        curl -fsSL -o "$pkg" "$PY_PKG_URL" || { rm -rf "$dir"; return 1; }
+    sig="$(pkgutil --check-signature "$pkg" 2>&1)"
+    case "$sig" in
+        *"Developer ID Installer: Python Software Foundation ($PSF_TEAM)"*) ;;
+        *) warn "the python.org package is not signed by the Python Software Foundation ($PSF_TEAM) — refusing it"
+           rm -rf "$dir"; return 1 ;;
+    esac
+    case "$sig" in
+        *"Notarization: trusted by the Apple notary service"*) ;;
+        *) warn "the python.org package is not notarized by Apple — refusing it"
+           rm -rf "$dir"; return 1 ;;
+    esac
+    ok "python.org package — Python Software Foundation ($PSF_TEAM), notarized by Apple"
+    run_long "installing CPython $PY_VERSION (admin password may be asked)" \
+        sudo -p "admin password (installing CPython $PY_VERSION): " \
+             installer -pkg "$pkg" -target / || { rm -rf "$dir"; return 1; }
+    rm -rf "$dir"
+    [ -x "$FRAMEWORK_PY" ]
+}
+
+# Apple's own, through Apple's own updater. `xcode-select --install` raises a
+# dialog nobody is standing in front of; the marker file is what makes the
+# same package appear as a labelled update this can install without one.
+install_command_line_tools() {
+    local marker label
+    marker=/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    : > "$marker" 2>/dev/null || return 1
+    label="$(softwareupdate --list 2>/dev/null \
+        | sed -n 's/^\* Label: \(Command Line Tools for Xcode.*\)$/\1/p' \
+        | sort -V | tail -1)"
+    if [ -z "$label" ]; then rm -f "$marker"; return 1; fi
+    run_long "installing $label (admin password may be asked)" \
+        sudo -p "admin password (installing the Command Line Tools): " \
+             softwareupdate --install "$label"
+    local rc=$?
+    rm -f "$marker"
+    [ "$rc" -eq 0 ] || return 1
+    xcrun --find clang >/dev/null 2>&1
+}
+
+ensure_build_inputs() {
+    FRAMEWORK_PY="${JSTACK_BUILD_PYTHON:-/Library/Frameworks/Python.framework/Versions/3.12/bin/python3}"
+    BUILD_VENV="$CHECKOUT/host/.venv312"
+    HUB_STATE="$HOME/.local/state/jremote"
+
+    if [ ! -x "$BUILD_VENV/bin/python3" ] && [ ! -x "$FRAMEWORK_PY" ]; then
+        if [ "$DRY_RUN" = "1" ]; then
+            would "install CPython $PY_VERSION from python.org"
+        else
+            warn "no CPython 3.12 framework at $FRAMEWORK_PY — the Hub is compiled here, so it is a build input"
+            install_framework_python \
+                || die "could not install the CPython 3.12 framework.
+     Install python.org's macOS $PY_VERSION package by hand, or set
+     JSTACK_BUILD_PYTHON to a 3.12 framework interpreter, then re-run."
+            ok "CPython 3.12 framework — $FRAMEWORK_PY"
+        fi
+    fi
+
+    if ! xcrun --find clang >/dev/null 2>&1 || ! xcrun --find swiftc >/dev/null 2>&1; then
+        if [ "$DRY_RUN" = "1" ]; then
+            would "install the Command Line Tools through softwareupdate"
+        else
+            warn "no clang or swiftc — the Hub's runtime shim and its menu bar are compiled here"
+            install_command_line_tools \
+                || die "could not install the Command Line Tools.
+     Install them by hand: xcode-select --install, then re-run."
+            ok "Command Line Tools — $(xcrun --find clang)"
+        fi
+    fi
+
+    # The one with nothing to pin. tmux publishes source, not a signed build,
+    # so there is no team and no notarization to check the way the other two
+    # are checked — Homebrew is the source, and that is said rather than
+    # dressed up as the same kind of trust.
+    if ! command -v tmux >/dev/null 2>&1; then
+        if [ "$DRY_RUN" = "1" ]; then
+            would "install tmux with Homebrew"
+        elif command -v brew >/dev/null 2>&1; then
+            warn "no tmux on PATH — the Hub bundles it, so it is a build input"
+            note "tmux ships as source, so unlike the other two there is no signature to pin — this is Homebrew's build"
+            run_long "installing tmux with Homebrew" brew install tmux \
+                || die "brew install tmux failed — see $LAST_LOG"
+            command -v tmux >/dev/null 2>&1 \
+                || die "tmux still is not on PATH after installing it — open a new shell and re-run."
+        else
+            die "no tmux on PATH, and no Homebrew to install it with — the Hub bundles tmux, so it is a build input.
+     Install Homebrew (https://brew.sh) then re-run, or put a tmux on PATH yourself."
+        fi
+    fi
+
+    ok "build inputs — CPython 3.12 framework, clang, swiftc, tmux"
+}
+
+if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ]; then
+    ensure_build_inputs
+fi
+
 JSTACK_HUB_CURRENT=0
 if [ "$(uname -s)" = "Darwin" ] && [ "$WANT_HOST" != "0" ]; then
     if [ -d "/Applications/jStack Hub.app" ]; then
@@ -1263,29 +1391,7 @@ if [ "$(uname -s)" = "Darwin" ] && [ "$WANT_HOST" != "0" ]; then
 fi
 if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ] \
         && [ "${JSTACK_HUB_CURRENT:-0}" != "1" ]; then
-    # The Hub this Mac runs is the commit the checkout is on, compiled here —
-    # nothing pre-built is downloaded any more. `build_hub` copies the runtime
-    # out of the interpreter running it and accepts exactly the audited CPython
-    # 3.12 framework (release.sh makes the same demand of the publisher), and it
-    # drives clang, swiftc and tmux. A Mac missing one of those cannot install;
-    # it is told which one and what to do, rather than handed a traceback ten
-    # minutes into a build.
-    FRAMEWORK_PY="${JSTACK_BUILD_PYTHON:-/Library/Frameworks/Python.framework/Versions/3.12/bin/python3}"
-    BUILD_VENV="$CHECKOUT/host/.venv312"
-    HUB_STATE="$HOME/.local/state/jremote"
-    if [ ! -x "$BUILD_VENV/bin/python3" ] && [ ! -x "$FRAMEWORK_PY" ]; then
-        die "the Hub is compiled on this Mac and that needs the audited CPython 3.12 framework.
-     It is not at $FRAMEWORK_PY — install python.org's
-     macOS 3.12 package, or set JSTACK_BUILD_PYTHON to a 3.12 framework interpreter."
-    fi
-    for tool in clang swiftc; do
-        xcrun --find "$tool" >/dev/null 2>&1 \
-            || die "no $tool — the Hub's runtime shim and its menu bar are compiled here.
-     Install the Command Line Tools: xcode-select --install"
-    done
-    command -v tmux >/dev/null 2>&1 \
-        || die "no tmux on PATH — the Hub bundles it, so it is a build input.
-     Install it: brew install tmux"
+    # Already settled, before anything on this Mac was taken apart.
     # Signing is optional, and on all but the publisher's Mac it is absent.
     # A Hub built here is then signed ad-hoc, which the sealed installer now
     # adopts: the bundle records that this machine built it, and the pinned

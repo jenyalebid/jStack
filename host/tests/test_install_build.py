@@ -422,6 +422,38 @@ def test_install_sh_drops_a_dead_link_of_ours_that_no_pass_would_revisit():
     assert 'ours "$(readlink "$target")" || continue' in CODE
 
 
+def test_install_sh_settles_build_inputs_before_it_takes_a_working_hub_apart():
+    """It asked for the interpreter where the build runs, which is after the
+    published Hub has been unregistered, deleted and its state moved aside. A
+    Mac with no CPython 3.12 framework was left with no Hub at all, under a
+    correctly worded remedy."""
+    call = CODE.index("    ensure_build_inputs")
+    # The teardown on the INSTALL path, not the one --uninstall does.
+    replace = CODE.index("cannot build itself forward")
+    teardown = CODE.index('rm -rf "/Applications/jStack Hub.app"', replace)
+    assert call < teardown, "build inputs are settled after the Hub is deleted"
+    # And after the checkout exists, since the venv it may find lives there.
+    assert CODE.index('step "jStack source at $CHECKOUT ($REF)"') < call
+
+
+def test_install_sh_verifies_the_python_package_before_it_runs_it_as_root():
+    """A root package fetched over the network and run unverified is a worse
+    problem than the missing interpreter it would fix."""
+    assert "pkgutil --check-signature" in CODE
+    assert 'Developer ID Installer: Python Software Foundation ($PSF_TEAM)' in CODE
+    assert "Notarization: trusted by the Apple notary service" in CODE
+    assert 'PSF_TEAM="BMM5U3QVKW"' in CODE
+    # Refused on either count, rather than installed with a warning.
+    assert CODE.count("refusing it") >= 2
+
+
+def test_install_sh_does_not_dress_homebrews_tmux_up_as_a_pinned_signature():
+    """The other two carry a Developer ID and Apple's notarization. tmux
+    publishes source, so it carries neither, and the difference is said."""
+    assert "no signature to pin" in INSTALL
+    assert "brew install tmux" in CODE
+
+
 def test_install_sh_names_a_remedy_for_every_build_input_it_requires():
     """A Mac without these cannot install, which is intended — but a traceback
     ten minutes into a build is not the way to say so."""
