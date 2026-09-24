@@ -65,15 +65,22 @@ def _cmd_updates_enable(args) -> int:
 
 
 def _updates_config(args):
-    """The updater config this command acts on, or None with the reason said."""
+    """The updater config this command acts on, or None with the reason said.
+
+    Through `_adopt`, like every other read command, because the config lives
+    in the host's state dir and on this operation's hub that directory is
+    named by the installed service and by nothing else. Resolving the package
+    default instead answered `~/.local/state/jremote` — a directory the live
+    host has never read — so `channel` reported "updates are not enabled" on a
+    hub whose updater was enabled and current, and `build`, the only door that
+    builds, refused the same way. That is #34 again, in the two verbs the
+    builds-not-releases migration added: `enable` adopted from the first
+    commit and these two never did.
+    """
     import json
-    import os
     from . import hostenv
 
-    state_dir = _path(args.state_dir)
-    if state_dir is not None:
-        os.environ["JREMOTE_STATE_DIR"] = str(state_dir)
-        hostenv.reset_profile()
+    _adopt(args)
     config_path = hostenv.state_dir() / "updates" / "config.json"
     if not config_path.exists():
         print("updates are not enabled on this host — run `jstack-host updates enable`",
