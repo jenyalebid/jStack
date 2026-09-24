@@ -14,7 +14,12 @@
 # allowlist is per (file, term), each entry carrying its reason; a new hit in
 # a new file never passes silently.
 #
-# Exit 0 = no org identity in any tracked file (names checked too).
+# Scope is what the working tree would ship: tracked files plus untracked ones
+# git does not ignore. A new file is untracked at exactly the moment its author
+# runs this gate before `git add` — scanning only the index would pass the one
+# file a change adds without ever reading it.
+#
+# Exit 0 = no org identity in any tracked or unignored untracked file (names checked too).
 # Exit 1 = at least one hit, named file:line: term with the offending line.
 
 set -u
@@ -131,17 +136,22 @@ def _allowed(rel: str, label: str) -> bool:
     return any(rel.startswith(pfx) and label == lbl
                for pfx, lbl in ALLOW_PREFIX)
 
-res = subprocess.run(["git", "-C", repo_root, "ls-files", "-z"],
-                     capture_output=True, text=True)
-if res.returncode != 0:
-    # A check that cannot look must raise: a raw directory walk would scan
-    # other sessions' untracked work-in-progress, which never ships.
-    print(f"FAIL — cannot list tracked files: {res.stderr.strip()}")
-    sys.exit(1)
-paths = [p for p in res.stdout.split("\0") if p and p != SELF]
+def _list(kind: str, *extra: str) -> list:
+    res = subprocess.run(["git", "-C", repo_root, "ls-files", "-z", *extra],
+                         capture_output=True, text=True)
+    if res.returncode != 0:
+        # A check that cannot look must raise, never pass on an empty list.
+        print(f"FAIL — cannot list {kind} files: {res.stderr.strip()}")
+        sys.exit(1)
+    return [(p, kind) for p in res.stdout.split("\0") if p and p != SELF]
 
-hits, allowed_used, scanned = [], set(), 0
-for rel in paths:
+# --exclude-standard keeps .gitignore'd files out: those cannot ship by
+# accident, and a raw directory walk would read build output and caches.
+paths = _list("tracked") + _list("untracked", "--others", "--exclude-standard")
+
+hits, allowed_used = [], set()
+scanned = {"tracked": 0, "untracked": 0}
+for rel, kind in paths:
     # File NAMES carry identity too (a term list can't reach a path otherwise).
     for label, rx in COMPILED:
         if rx.search(rel) and not _allowed(rel, label):
@@ -153,7 +163,7 @@ for rel in paths:
         continue  # tracked but deleted in this worktree — nothing ships from it
     if b"\0" in raw:
         continue  # binary — not a carrier of prose identity
-    scanned += 1
+    scanned[kind] += 1
     for lineno, line in enumerate(raw.decode("utf-8", "replace").splitlines(), 1):
         for literal, _reason in SHIPPED:
             line = line.replace(literal, "")
@@ -176,13 +186,15 @@ for pfx, lbl in sorted(ALLOW_PREFIX):
 for rel, label in stale:
     hits.append((rel, 0, label, "(stale allowlist entry — term no longer present; delete it)"))
 
+counted = (f"{scanned['tracked']} tracked + {scanned['untracked']} untracked "
+           f"files")
 if hits:
-    print(f"FAIL — {len(hits)} org-identity hit(s) in {scanned} tracked files:")
+    print(f"FAIL — {len(hits)} org-identity hit(s) in {counted}:")
     for rel, lineno, label, excerpt in hits:
         where = f"{rel}:{lineno}" if lineno else rel
         print(f"  {where}: term '{label}' — {excerpt}")
     sys.exit(1)
 
-print(f"PASS — {scanned} tracked files scanned, no org identity "
+print(f"PASS — {counted} scanned, no org identity "
       f"({len(allowed_used)} allowlisted carriers, each with its reason)")
 PY
