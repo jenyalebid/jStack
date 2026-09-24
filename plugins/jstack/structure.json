@@ -53,6 +53,7 @@
     "structure.json": "this manifest",
     "systems.json": "the plugin's systems registry — federated into host registries",
     "tests": "the hermetic suite — every executable *.sh here runs on push (pre-push layer 2)",
+    "vendor": "pure-python dependencies for an interpreter with no site-packages of its own — the signed Hub's bundled python runs the scheduler daemon, and recurring jobs need dateutil; tracked because the reader in bin/jstack-scheduler ships on main",
     "session_runtime.py": "provider-neutral transcript facts and native Codex offline fork API"
   }
 }
