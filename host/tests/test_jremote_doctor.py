@@ -256,7 +256,7 @@ OWNERS = [{"mechanism": "compact on delivery", "ships": "stop-compact-delivery.s
 def test_a_hand_wired_copy_of_a_shipped_hook_is_named(machine, monkeypatch):
     _plugin(machine, monkeypatch, ["stop-compact-delivery.sh"], OWNERS)
     _settings(machine, monkeypatch,
-              ["~/Operations/Infrastructure/assistant/hooks/compact_on_delivery.py"])
+              ["~/ops/assistant/hooks/compact_on_delivery.py"])
     r = doctor.check_hook_owners()
     assert r["grade"] == doctor.WARN
     assert "compact on delivery (Stop)" in r["detail"]
