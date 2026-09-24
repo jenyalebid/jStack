@@ -1,4 +1,6 @@
+import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -184,31 +186,58 @@ def test_a_present_peer_table_is_not_blamed_for_a_missing_tool(tmp_path, monkeyp
     assert tunnel.missing_for_pairing() == [tmp_path / "gone/wg_peer.py"]
 
 
-def test_a_hub_rebuilding_itself_finds_an_interpreter_that_has_pip(monkeypatch):
-    """The sealed runtime has no pip, and a hub rebuilds itself from inside it.
+def test_a_hub_rebuilding_itself_locates_the_framework_it_builds_around(monkeypatch, tmp_path):
+    """The interpreter running the build is never assumed to be the one built around.
 
-    `sys.executable -m pip` there is "No module named pip", which made install
-    work — the installer builds under the venv it created — and update fail on
-    every machine: `jstack-host updates build` runs under JStackPython.
+    `jstack-host` runs from the checkout venv, which the installer makes on
+    whatever python3 the Mac already had — 3.14 from Homebrew on a stock
+    machine — and the sealed Hub runs JStackPython, which is 3.12 with no pip.
+    Both failed: the first on the version guard, the second on "No module
+    named pip". Install worked either way, so every machine could install and
+    none could update itself.
     """
     from jstack_host import build_hub
-    asked = []
+
+    def answering(**overrides):
+        answer = {"prefix": str(framework), "version": "3.12.10", "pip": True} | overrides
+        return json.dumps(answer)
+
+    framework = tmp_path / "Library/Frameworks/Python.framework/Versions/3.12"
+    framework.mkdir(parents=True)
+    (framework / "Python").write_bytes(b"\xcf\xfa\xed\xfe")
+    asked, answers = [], {}
 
     def probe(argv, **kwargs):
         asked.append(argv[0])
-        return subprocess.CompletedProcess(argv, 0 if argv[0] == build_hub.FRAMEWORK_PYTHON else 1)
+        if argv[0] not in answers:
+            return subprocess.CompletedProcess(argv, 1, "", "no such file")
+        return subprocess.CompletedProcess(argv, 0, answers[argv[0]], "")
 
-    monkeypatch.delenv("JSTACK_BUILD_PYTHON", raising=False)
     monkeypatch.setattr(build_hub.subprocess, "run", probe)
-    assert build_hub.build_python() == build_hub.FRAMEWORK_PYTHON
+    monkeypatch.delenv("JSTACK_BUILD_PYTHON", raising=False)
+
+    # The running interpreter is a pipless 3.12 and a Homebrew 3.14 at once —
+    # neither is what the bundle embeds, and the framework is found regardless.
+    answers[build_hub.FRAMEWORK_PYTHON] = answering()
+    answers[sys.executable] = answering(version="3.14.7", pip=True, prefix=str(tmp_path / "brew"))
+    found = build_hub.build_interpreter()
+    assert found == build_hub.Interpreter(build_hub.FRAMEWORK_PYTHON, framework, "3.12.10")
     assert asked[0] == build_hub.FRAMEWORK_PYTHON
 
+    # JSTACK_BUILD_PYTHON is asked first and wins when it qualifies.
     monkeypatch.setenv("JSTACK_BUILD_PYTHON", "/opt/python3")
+    answers["/opt/python3"] = answering()
     asked.clear()
-    assert build_hub.build_python() == build_hub.FRAMEWORK_PYTHON
-    assert asked == ["/opt/python3", build_hub.FRAMEWORK_PYTHON]
+    assert build_hub.build_interpreter().executable == "/opt/python3"
+    assert asked == ["/opt/python3"]
 
-    monkeypatch.setattr(build_hub.subprocess, "run",
-                        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1))
-    with pytest.raises(RuntimeError, match="no interpreter here can run pip"):
-        build_hub.build_python()
+    # A 3.12 that is not a framework build, and one without pip, are both
+    # refused — and the refusal says which was which.
+    del answers["/opt/python3"], answers[build_hub.FRAMEWORK_PYTHON]
+    answers["/opt/python3"] = answering(prefix=str(tmp_path / "plain"))
+    answers[sys.executable] = answering(pip=False)
+    with pytest.raises(RuntimeError) as refused:
+        build_hub.build_interpreter()
+    assert "/opt/python3 is not a framework build" in str(refused.value)
+    assert "has no pip" in str(refused.value)
+    assert "3.12" in str(refused.value)

@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from typing import NamedTuple
 
 from .update_macos import command
 
@@ -168,31 +169,72 @@ def _is_date(value) -> bool:
 #: package, because that is where the readers already look.
 MESH_TOOLS = "scripts"
 
-#: Where the installer puts the audited CPython 3.12 it requires.
+#: Where the installer puts the audited CPython 3.12 this Hub is built around.
 FRAMEWORK_PYTHON = "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"
+RUNTIME = "3.12"
+
+#: One question, asked of a candidate in its own process: which framework it
+#: belongs to, what it calls itself, and whether it carries pip.
+PROBE = ("import importlib.util, json, sys;"
+         "print(json.dumps({'prefix': sys.base_prefix, 'version': sys.version.split()[0],"
+         " 'pip': importlib.util.find_spec('pip') is not None}))")
 
 
-def build_python() -> str:
-    """An interpreter that can run pip, which the Hub's own runtime cannot.
+class Interpreter(NamedTuple):
+    """The CPython a Hub is built *around*: its binary, its framework, its version."""
 
-    A hub rebuilds itself by calling `build()` from inside JStackPython, the
-    sealed runtime, and that runtime ships the `jstack_host` package and its
-    dependencies — never pip. `sys.executable -m pip` there dies with "No
-    module named pip", so install worked (the installer builds under the
-    venv it made) and update could never move a single machine forward.
+    executable: str
+    framework: Path
+    version: str
 
-    The framework interpreter is the installer's own hard requirement, so a
-    Mac that could install can always build.
+
+def build_interpreter() -> Interpreter:
+    """Locate that CPython. Never assume the running process is it.
+
+    Two assumptions lived here as one, and neither holds. `jstack-host` runs
+    from the checkout venv, which the installer builds on whatever python3 the
+    Mac already had — 3.14 from Homebrew on a stock machine; the sealed Hub
+    runs JStackPython, which is 3.12 but ships the host package and its
+    dependencies and never pip. So `updates build` died on the version guard
+    from the CLI and on "No module named pip" from the service, install worked
+    because the installer builds under a venv it made on the framework, and no
+    machine could move itself forward — which also left rollback, switch the
+    branch and rebuild, with nothing to rebuild with.
+
+    Everything the build takes from an interpreter comes from this one answer:
+    the `Python` binary and `lib` copied into the bundle, the ABI its wheels
+    must match, and the version stamped on the nested framework. The framework
+    interpreter is the installer's own hard requirement, so a Mac that could
+    install can always build.
     """
+    refused: list[tuple[str, str]] = []
     for candidate in (os.environ.get("JSTACK_BUILD_PYTHON"), FRAMEWORK_PYTHON, sys.executable):
-        if not candidate:
+        if not candidate or any(candidate == name for name, _ in refused):
             continue
-        found = subprocess.run([candidate, "-c", "import pip"], capture_output=True, timeout=120)
-        if found.returncode == 0:
-            return candidate
+        found = subprocess.run([candidate, "-c", PROBE], capture_output=True,
+                               text=True, timeout=120)
+        if found.returncode != 0:
+            refused.append((candidate, "did not run"))
+            continue
+        try:
+            answer = json.loads(found.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            refused.append((candidate, "answered nothing"))
+            continue
+        framework = Path(answer["prefix"])
+        if not str(answer["version"]).startswith(RUNTIME + "."):
+            refused.append((candidate, "is " + str(answer["version"])))
+        elif not (framework / "Python").is_file():
+            refused.append((candidate, "is not a framework build"))
+        elif not answer["pip"]:
+            refused.append((candidate, "has no pip"))
+        else:
+            return Interpreter(candidate, framework, str(answer["version"]))
     raise RuntimeError(
-        "no interpreter here can run pip — install python.org's macOS 3.12 package, "
-        "or set JSTACK_BUILD_PYTHON to a 3.12 interpreter that has it")
+        f"this Hub is built around the audited CPython {RUNTIME} framework and nothing here "
+        "is one — " + "; ".join(f"{name} {why}" for name, why in refused)
+        + f". Install python.org's macOS {RUNTIME} package, or point JSTACK_BUILD_PYTHON at "
+          "a framework interpreter that has pip.")
 
 
 def stage_mesh_tools(stack: Path, packages: Path) -> Path:
@@ -242,11 +284,8 @@ def build(stack: Path, output: Path, version: str, config: dict | None = None, *
 
 def _build(stack: Path, output: Path, version: str, config: dict | None, *, catalog,
            identity: dict, trust_key=None) -> Path:
-    if sys.version_info[:2] != (3, 12):
-        raise ValueError("this runtime build requires the audited CPython 3.12 framework")
-    source = Path(sys.base_prefix)
-    if not (source / "Python").is_file():
-        raise ValueError("a framework Python build is required")
+    interpreter = build_interpreter()
+    source = interpreter.framework
     info = hub_info(version, identity)
     app_name = info["CFBundleName"]
     bundle_id = info["CFBundleIdentifier"]
@@ -268,7 +307,7 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
     (runtime / "Resources/Info.plist").write_bytes(plistlib.dumps({
         "CFBundleIdentifier": "live.jstack.python", "CFBundleExecutable": "Python",
         "CFBundleName": "jStack Python", "CFBundlePackageType": "FMWK",
-        "CFBundleVersion": sys.version.split()[0]}))
+        "CFBundleVersion": interpreter.version}))
     (framework / "Versions/Current").symlink_to("3.12")
     (framework / "Python").symlink_to("Versions/Current/Python")
     (framework / "Resources").symlink_to("Versions/Current/Resources")
@@ -277,7 +316,7 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
         package_source = Path(temporary) / "host"
         shutil.copytree(stack / "host", package_source,
                         ignore=shutil.ignore_patterns(".venv", "build", "*.egg-info", "__pycache__"))
-        command([build_python(), "-m", "pip", "install", "--disable-pip-version-check", "--no-compile",
+        command([interpreter.executable, "-m", "pip", "install", "--disable-pip-version-check", "--no-compile",
                  "--target", str(packages), "--report", str(resources / "dependency-resolution.json"),
                  str(package_source)], timeout=900)
     report_path = resources / "dependency-resolution.json"

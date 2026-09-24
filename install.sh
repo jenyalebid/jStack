@@ -1429,11 +1429,12 @@ if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ] \
         would "build the Hub from $REF and install it into /Applications"
         would "land what it built in the hub's feed as its first offer"
     else
-        # A venv *on* the framework, never the framework itself: `_build` copies
-        # the runtime out of sys.base_prefix, which a venv keeps pointed at the
-        # framework, and the venv is the only one of the two that can carry the
-        # build's own dependencies. Editable, so a later install builds the
-        # checkout it just moved rather than a copy taken at venv time.
+        # A venv, because the framework itself must not carry this machine's
+        # packages and the build needs jstack_host and its dependencies
+        # importable to run at all. Which CPython the bundle is built *around*
+        # is `build_hub.build_interpreter()`'s answer, not this one's.
+        # Editable, so a later install builds the checkout it just moved
+        # rather than a copy taken at venv time.
         if [ ! -x "$BUILD_VENV/bin/python3" ]; then
             run_long "creating the build interpreter" "$FRAMEWORK_PY" -m venv "$BUILD_VENV" \
                 || die "could not create $BUILD_VENV — see $LAST_LOG"
