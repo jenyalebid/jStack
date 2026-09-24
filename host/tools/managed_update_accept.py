@@ -871,7 +871,9 @@ def shell_flip(journey, fleet: Fleet, candidate: Candidate) -> None:
     expect(len(fleet.leaves) >= 2, "the pair needs two managed Macs")
     leaf_a, leaf_b = fleet.leaves[0], fleet.leaves[1]
     machine_a, machine_b = fleet.machine(leaf_a), fleet.machine(leaf_b)
-    lab_root = tempfile.mkdtemp(prefix="shell-updates-lab-")
+    # The lab claims its root itself and refuses a pre-existing dir without
+    # its marker — hand it a path that does not exist yet, under our tempdir.
+    lab_root = str(Path(tempfile.mkdtemp(prefix="shell-lab-")) / "updates-lab")
     port = int(fleet.plan.get("shell_lab_port") or 19090)
     server, adopted, error = None, [], None
     try:

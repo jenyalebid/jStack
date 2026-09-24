@@ -189,6 +189,26 @@ def test_it_boots_out_both_leaf_daemons_and_deletes_what_the_installer_wrote(
     assert result["detached"] is True
 
 
+def test_an_unreadable_root_only_dir_routes_to_the_sudo_retry(tmp_path):
+    """/etc/wireguard is 700 root on a real leaf, so stat from the enrolled
+    account answers EACCES — which Path.exists() re-raises rather than
+    swallows. The first live shell_detach run crashed exactly here; an
+    unreadable path must reach the privileged removal, not the traceback."""
+    guarded = tmp_path / "etc/wireguard"
+    guarded.mkdir(parents=True)
+    (guarded / "jrleaf.conf").write_text("[Interface]\n")
+    guarded.chmod(0o000)
+    runner = _Runner()
+    try:
+        result = detach_parent.detach(root=tmp_path, state=tmp_path / "state",
+                                      runner=runner, poster=_poster(), sudo=False)
+    finally:
+        guarded.chmod(0o755)
+    assert _step(result, "tunnel-files")["ok"] is True
+    assert any("jrleaf.conf" in " ".join(map(str, argv)) and "/bin/rm" in argv
+               for argv in runner.calls)
+
+
 def test_a_daemon_that_was_already_down_is_not_a_failure(tmp_path):
     """`launchctl bootout` answers 3 for "no such process" — which is the state
     this is trying to reach, not a failure to reach it."""
