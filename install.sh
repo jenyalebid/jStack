@@ -1065,6 +1065,17 @@ fi
 # both die on a machine that installed cleanly — which surfaces as "adoption is
 # broken" long after the install reported every check passed. Install them here
 # the way dateutil is installed rather than reported. Not a hard prerequisite: a
+# A non-login shell gets PATH=/usr/bin:/bin:/usr/sbin:/sbin, so `command -v brew`
+# on a Mac that has Homebrew answers no and the installer tells its owner to go
+# install what is already there. Ask where Homebrew is instead, and put its bin
+# on PATH so everything it installed is visible to the checks below.
+BREW=""
+for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    [ -x "$candidate" ] && { BREW="$candidate"; break; }
+done
+[ -n "$BREW" ] || BREW="$(command -v brew 2>/dev/null || true)"
+[ -n "$BREW" ] && PATH="$("$BREW" --prefix)/bin:$PATH"
+
 # machine that never joins a mesh never touches them, so a missing Homebrew is a
 # warning, not a die.
 step "Mesh tooling (WireGuard)"
@@ -1073,9 +1084,9 @@ if command -v wg >/dev/null 2>&1 && command -v wireguard-go >/dev/null 2>&1; the
     ok "WireGuard present — wg and wireguard-go on PATH"
 elif [ "$DRY_RUN" = "1" ]; then
     would "brew install wireguard-go wireguard-tools"
-elif command -v brew >/dev/null 2>&1; then
+elif [ -n "$BREW" ]; then
     run_long "installing WireGuard (wireguard-go, wireguard-tools)" \
-        brew install wireguard-go wireguard-tools
+        "$BREW" install wireguard-go wireguard-tools
     if command -v wg >/dev/null 2>&1 && command -v wireguard-go >/dev/null 2>&1; then
         ok "WireGuard installed — a hub can mint a leaf, a leaf can join"
     else
@@ -1301,10 +1312,10 @@ ensure_build_inputs() {
     if ! command -v tmux >/dev/null 2>&1; then
         if [ "$DRY_RUN" = "1" ]; then
             would "install tmux with Homebrew"
-        elif command -v brew >/dev/null 2>&1; then
+        elif [ -n "$BREW" ]; then
             warn "no tmux on PATH — the Hub bundles it, so it is a build input"
             note "tmux ships as source, so unlike the other two there is no signature to pin — this is Homebrew's build"
-            run_long "installing tmux with Homebrew" brew install tmux \
+            run_long "installing tmux with Homebrew" "$BREW" install tmux \
                 || die "brew install tmux failed — see $LAST_LOG"
             command -v tmux >/dev/null 2>&1 \
                 || die "tmux still is not on PATH after installing it — open a new shell and re-run."
