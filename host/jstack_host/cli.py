@@ -7,6 +7,8 @@
     jstack-host open             guide this Mac into open mode, and prove it
     jstack-host welcome          open the app on a session that checks this Mac
     jstack-host status           is it up, and what does it know
+    jstack-host env show         how this session is set to work
+    jstack-host plan show ID     a plan's stages, and the proof behind each
     jstack-host doctor           what is missing, and how to fix each thing
     jstack-host uninstall        take it back off
 
@@ -1005,6 +1007,12 @@ CAPABILITIES = (
     # this Mac without anybody typing a second code (grants.py, attach_parent).
     "delegated-minting",
     "managed-access-v1",
+    # `env` and `plan`: the typed session settings and the stage/proof harness
+    # are drivable from the CLI. A dispatcher reads these before handing work
+    # to this Mac — a host that cannot record a proof cannot be given a stage
+    # that declares one, and it has to find that out before, not after.
+    "session-env-v1",
+    "plan-harness-v1",
 )
 
 
@@ -1074,6 +1082,346 @@ def _cmd_files(args) -> int:
         return 2
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("ready", result.get("status", {}).get("ready", True)) else 1
+
+
+# ── env: how a session works ─────────────────────────────────────────────────
+
+def _env_layer(args, *, exclusive: bool):
+    """The layer an `env` call acts on — `(session_id, agent_id)`, or None said.
+
+    There is no global layer to fall back on. `environment._target` refuses a
+    call naming neither, because a row owned by `''` is inherited by every
+    session whose id is also empty — a setting that appears to have been set
+    for the machine and can be found from no screen. So when no flag names a
+    layer, the layer is the session this command is being typed inside, read
+    from the same two variables every other tool in this tree reads it from,
+    and a shell that cannot answer is told to name one rather than having a
+    guess written under it.
+    """
+    import os
+    session = (getattr(args, "session", "") or "").strip()
+    agent = (getattr(args, "agent", "") or "").strip()
+    if exclusive and session and agent:
+        print("name --session or --agent, not both — a value is stored at one "
+              "layer, and which one is the whole meaning of the write",
+              file=sys.stderr)
+        return None
+    if not session and not agent:
+        session = (os.environ.get("CODEX_THREAD_ID")
+                   or os.environ.get("CLAUDE_CODE_SESSION_ID", "")).strip()
+    if not session and not agent:
+        print("no session id in this shell ($CODEX_THREAD_ID and "
+              "$CLAUDE_CODE_SESSION_ID are both unset) — say which layer this "
+              "is about with --session <id> or --agent <id>", file=sys.stderr)
+        return None
+    return session, agent
+
+
+def _env_rows(session: str, agent: str) -> list[dict]:
+    """Every setting in registry order, with the value in force and its source."""
+    from . import environment
+    resolved = environment.resolve(session, agent)
+    return [{"key": s.key, "value": resolved[s.key][0],
+             "source": resolved[s.key][1]} for s in environment.SETTINGS]
+
+
+def _env_print(rows) -> None:
+    print(f"{'SETTING':<20} {'VALUE':<14} SOURCE")
+    for r in rows:
+        print(f"{r['key']:<20} {r['value']:<14} {r['source']}")
+
+
+def _cmd_env_show(args) -> int:
+    """Every setting, what is in force, and which layer answered.
+
+    `source` is printed rather than left to be inferred for the reason
+    `resolve` reports it at all: an inherited value and one set on this sitting
+    read identically, and the difference is what somebody about to change it
+    needs.
+    """
+    _adopt(args)
+    layer = _env_layer(args, exclusive=False)
+    if layer is None:
+        return 2
+    rows = _env_rows(*layer)
+    if getattr(args, "json", False):
+        import json
+        print(json.dumps(rows))
+        return 0
+    _env_print(rows)
+    return 0
+
+
+def _cmd_env_get(args) -> int:
+    """The one value in force, on its own line, for a script to read."""
+    _adopt(args)
+    from . import environment
+    if environment.setting(args.key) is None:
+        print(f"unknown setting: {args.key!r} — `jstack-host env show` lists "
+              "every one this build knows", file=sys.stderr)
+        return 2
+    layer = _env_layer(args, exclusive=False)
+    if layer is None:
+        return 2
+    print(environment.resolve(*layer)[args.key][0])
+    return 0
+
+
+def _env_write(args, value) -> int:
+    """`env set` and `env unset` — one write, one layer, and the result shown.
+
+    A `ValueError` out of `set_value` is printed and exits non-zero because the
+    typed registry only means anything if a typo cannot store cleanly: a key
+    nothing reads, or a value no instruction exists for, is a switch that
+    appears to work and changes nothing any session will ever see.
+
+    What it prints afterwards is the resolved row, not the value passed in —
+    after an unset the two differ, and the resolved one is the answer to the
+    question somebody actually has, which is what this session is running under
+    now.
+    """
+    _adopt(args)
+    from . import environment
+    layer = _env_layer(args, exclusive=True)
+    if layer is None:
+        return 2
+    session, agent = layer
+    try:
+        environment.set_value(args.key, value, session_id=session or None,
+                              agent_id=agent or None)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    _env_print([r for r in _env_rows(session, agent) if r["key"] == args.key])
+    return 0
+
+
+def _cmd_env_set(args) -> int:
+    return _env_write(args, args.value)
+
+
+def _cmd_env_unset(args) -> int:
+    """Clear one layer. Not the same as setting the default — the layer below
+    gets the say back, which for a session means its agent's standing choice."""
+    return _env_write(args, None)
+
+
+# ── plan: the stages, and what closes them ───────────────────────────────────
+
+def _ambient_session(args) -> str:
+    """The session a plan command is being run inside, or `""`.
+
+    Unlike `env`, nothing here needs a layer named: a plan with no session
+    joined is still a plan, and a stage with no session recorded is still a
+    stage. So this reads the same two variables and stays quiet when neither is
+    set, rather than refusing work over a detail that is only ever an
+    attribution.
+    """
+    import os
+    return ((getattr(args, "session", "") or "").strip()
+            or (os.environ.get("CODEX_THREAD_ID")
+                or os.environ.get("CLAUDE_CODE_SESSION_ID", "")).strip())
+
+
+def _cmd_plan_list(args) -> int:
+    _adopt(args)
+    from . import grants, plans
+    rows = plans.list_plans()
+    if getattr(args, "json", False):
+        import json
+        print(json.dumps(rows))
+        return 0
+    if not rows:
+        print('no plans on this host — `jstack-host plan open "<title>"` '
+              "starts one.")
+        return 0
+    print(f"{'PLAN':<38} {'STATUS':<10} {'UPDATED':<18} TITLE")
+    for r in rows:
+        print(f"{r['id']:<38} {r['status']:<10} "
+              f"{grants.stamp(r['updated_at']):<18} {r['title']}")
+    return 0
+
+
+def _cmd_plan_show(args) -> int:
+    """A plan, its stages, and the evidence filed against each one.
+
+    Stages and proofs together in one command because they are one answer: a
+    stage's status is a claim and its proofs are what backs the claim, and a
+    reader shown the first without the second has no way to tell an earned
+    `done` from an asserted one.
+    """
+    _adopt(args)
+    from . import plans
+    p = plans.plan(args.plan_id)
+    if p is None:
+        print(f"no such plan: {args.plan_id}", file=sys.stderr)
+        return 1
+    rows = [{**s, "proofs": plans.proofs(s["id"])} for s in plans.stages(p["id"])]
+
+    if getattr(args, "json", False):
+        import json
+        print(json.dumps({"plan": p, "stages": rows}))
+        return 0
+
+    print(f"plan    {p['id']}")
+    print(f"title   {p['title']}")
+    print(f"status  {p['status']}")
+    for label, key in (("file", "plan_file"), ("engine", "engine"),
+                       ("repo", "repo")):
+        if p[key]:
+            print(f"{label:<7} {p[key]}")
+    if not rows:
+        print("\n  no stages yet — `jstack-host plan stages <id> --from-file "
+              "<plan.md>` reads them out of the markdown.")
+        return 0
+    for s in rows:
+        verify = s["verify_kind"] or "none"
+        if s["verify_spec"]:
+            verify += f" · {s['verify_spec']}"
+        print(f"\n  #{s['ordinal']}  {s['title'] or '(untitled)'}")
+        print(f"      {s['id']}")
+        print(f"      status {s['status']}   verify {verify}")
+        if s["blocked_reason"]:
+            print(f"      blocked  {s['blocked_reason']}")
+        for pr in s["proofs"]:
+            mark = "✓" if pr["ok"] else "✗"
+            print(f"      {mark} {pr['kind']:<9} exit {pr['exit_code']:<4} "
+                  f"{pr['detail']}")
+    return 0
+
+
+def _cmd_plan_open(args) -> int:
+    """Start a plan and print its id — the id every other verb here takes."""
+    _adopt(args)
+    from . import plans
+    print(plans.open_plan(args.title, plan_file=args.file or "",
+                          engine=args.engine or "", repo=args.repo or "",
+                          session_id=_ambient_session(args)))
+    return 0
+
+
+def _cmd_plan_stages(args) -> int:
+    """Read a plan's markdown into stage rows — or refuse and write nothing.
+
+    A parse problem BLOCKS by default. `set_stages` coerces an unparseable
+    `Verify:` line to `none`, and `none` is the one kind that closes on nobody's
+    word but the closer's — so the cost of writing a complained-about plan is a
+    stage that looks gated and is not, which is the exact failure the parser was
+    written after. Refusing writes nothing, the problems name the lines to fix,
+    and the re-run reconciles by ordinal, so the retry is free.
+
+    `--force` is there because some problems are cosmetic (a heading numbered
+    4 that sits third) and the author is entitled to ship the plan anyway; it
+    prints them still, because a warning nobody sees is not a warning.
+    """
+    _adopt(args)
+    from pathlib import Path
+    from . import plan_parse, plans
+    if plans.plan(args.plan_id) is None:
+        print(f"no such plan: {args.plan_id}", file=sys.stderr)
+        return 1
+    try:
+        text = Path(args.from_file).expanduser().read_text()
+    except OSError as exc:
+        print(f"cannot read {args.from_file}: {exc}", file=sys.stderr)
+        return 1
+
+    parsed = plan_parse.parse(text)
+    for problem in parsed.problems:
+        print(problem, file=sys.stderr)
+    if parsed.problems and not args.force:
+        print(f"\n{len(parsed.problems)} problem(s) in that plan — nothing was "
+              "written. Fix the markdown and run this again, or pass --force to "
+              "write the stages exactly as parsed.", file=sys.stderr)
+        return 1
+    if not parsed.stages:
+        print("no stages in that file — a stage is a heading, "
+              "`## Stage <N> — <deliverable>`, with a `Verify:` line under it.",
+              file=sys.stderr)
+        return 1
+
+    plans.set_stages(args.plan_id, parsed.stages)
+    for s in plans.stages(args.plan_id):
+        print(f"{s['id']}  #{s['ordinal']}  {s['status']:<8} {s['title']}")
+    return 0
+
+
+def _cmd_plan_start(args) -> int:
+    """Take a stage, recording who took it and what it was dispatched under."""
+    _adopt(args)
+    from . import environment, plans
+    session = _ambient_session(args)
+    env = {k: v for k, (v, _) in environment.resolve(session).items()} if session else {}
+    plans.stage_start(args.stage_id, session_id=session, env=env)
+    print(f"{args.stage_id}  running")
+    return 0
+
+
+def _cmd_plan_done(args) -> int:
+    """Close a stage, or hand the refusal back word for word.
+
+    `VerificationMissing`'s message names the stage, what it declared and the
+    one call that would satisfy it, because its reader is an agent mid-turn
+    that has to act on it without opening a source file. So it goes to stderr
+    as written — summarising it would leave that reader with a refusal and no
+    remedy, which is how a gate turns into an obstacle somebody routes around.
+    """
+    _adopt(args)
+    from . import plans
+    try:
+        plans.stage_done(args.stage_id)
+    except plans.VerificationMissing as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"{args.stage_id}  done")
+    return 0
+
+
+def _cmd_plan_block(args) -> int:
+    _adopt(args)
+    from . import plans
+    plans.stage_block(args.stage_id, args.reason)
+    print(f"{args.stage_id}  blocked — {args.reason}")
+    return 0
+
+
+def _cmd_plan_proof(args) -> int:
+    """File one piece of evidence by hand — the path for every kind
+    `plan verify` cannot run: a sha, an artifact path, the user's own word."""
+    _adopt(args)
+    from . import plans
+    ok = bool(args.ok)
+    proof_id = plans.add_proof(args.stage_id, args.kind, ok,
+                               detail=args.detail or "", output=args.output or "",
+                               exit_code=args.exit_code)
+    print(f"{'✓' if ok else '✗'} proof {proof_id}  {args.kind}  "
+          f"{args.detail or ''}".rstrip())
+    return 0
+
+
+def _cmd_plan_verify(args) -> int:
+    """Run what the stage declared and record what it said.
+
+    Exits with the check's verdict and not merely with "the check ran", so a
+    caller can chain this into `plan done`; a failing run still writes its proof
+    row, because the history of a check is part of the evidence.
+    """
+    _adopt(args)
+    from . import plans
+    try:
+        proof = plans.run_verify(args.stage_id, cwd=args.cwd)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    mark = "✓" if proof["ok"] else "✗"
+    print(f"{mark} proof {proof['id']}  exit {proof['exit_code']}  "
+          f"{proof['duration_ms']}ms  {proof['detail']}")
+    if not proof["ok"] and proof["output"]:
+        print(proof["output"], file=sys.stderr)
+    return 0 if proof["ok"] else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1265,6 +1613,101 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--ref", default=None, help="build this ref instead of the configured one")
     up.add_argument("--state-dir", default=None)
     up.set_defaults(fn=_cmd_updates_build)
+
+    p = sub.add_parser("env", help="how this session works — delivery, "
+                                   "verification, one agent or one per stage")
+    envs = p.add_subparsers(dest="env_cmd", required=True)
+
+    def _layer_args(q):
+        q.add_argument("--session", default="",
+                       help="the session this is about (default: the session "
+                            "this shell is in, $CODEX_THREAD_ID or "
+                            "$CLAUDE_CODE_SESSION_ID)")
+        q.add_argument("--agent", default="",
+                       help="an agent — the standing default every session it "
+                            "opens inherits")
+        q.add_argument("--state-dir", default=None)
+
+    ev = envs.add_parser("show", help="every setting, its value and its source")
+    _layer_args(ev)
+    ev.add_argument("--json", action="store_true")
+    ev.set_defaults(fn=_cmd_env_show)
+    ev = envs.add_parser("get", help="the value in force for one setting")
+    ev.add_argument("key")
+    _layer_args(ev)
+    ev.set_defaults(fn=_cmd_env_get)
+    ev = envs.add_parser("set", help="set one setting at one layer")
+    ev.add_argument("key")
+    ev.add_argument("value")
+    _layer_args(ev)
+    ev.set_defaults(fn=_cmd_env_set)
+    ev = envs.add_parser("unset", help="clear one layer, back to what it inherits")
+    ev.add_argument("key")
+    _layer_args(ev)
+    ev.set_defaults(fn=_cmd_env_unset)
+
+    p = sub.add_parser("plan", help="plans, stages and the proof that closes one")
+    plans_p = p.add_subparsers(dest="plan_cmd", required=True)
+
+    pl = plans_p.add_parser("list", help="every plan this host is carrying")
+    pl.add_argument("--json", action="store_true")
+    pl.add_argument("--state-dir", default=None)
+    pl.set_defaults(fn=_cmd_plan_list)
+    pl = plans_p.add_parser("show", help="a plan, its stages and their proofs")
+    pl.add_argument("plan_id")
+    pl.add_argument("--json", action="store_true")
+    pl.add_argument("--state-dir", default=None)
+    pl.set_defaults(fn=_cmd_plan_show)
+    pl = plans_p.add_parser("open", help="start a plan and print its id")
+    pl.add_argument("title")
+    pl.add_argument("--file", default="", help="the markdown this plan is authored in")
+    pl.add_argument("--engine", default="")
+    pl.add_argument("--repo", default="")
+    pl.add_argument("--session", default="",
+                    help="the session that authors it (default: this shell's)")
+    pl.add_argument("--state-dir", default=None)
+    pl.set_defaults(fn=_cmd_plan_open)
+    pl = plans_p.add_parser("stages", help="read a plan's markdown into stages")
+    pl.add_argument("plan_id")
+    pl.add_argument("--from-file", required=True, dest="from_file")
+    pl.add_argument("--force", action="store_true",
+                    help="write the stages even though the parse complained")
+    pl.add_argument("--state-dir", default=None)
+    pl.set_defaults(fn=_cmd_plan_stages)
+    pl = plans_p.add_parser("start", help="take a stage")
+    pl.add_argument("stage_id")
+    pl.add_argument("--session", default="")
+    pl.add_argument("--state-dir", default=None)
+    pl.set_defaults(fn=_cmd_plan_start)
+    pl = plans_p.add_parser("done", help="close a stage — refused without its proof")
+    pl.add_argument("stage_id")
+    pl.add_argument("--state-dir", default=None)
+    pl.set_defaults(fn=_cmd_plan_done)
+    pl = plans_p.add_parser("block", help="mark a stage blocked, and on what")
+    pl.add_argument("stage_id")
+    pl.add_argument("--reason", required=True)
+    pl.add_argument("--state-dir", default=None)
+    pl.set_defaults(fn=_cmd_plan_block)
+    pl = plans_p.add_parser("proof", help="file evidence against a stage by hand")
+    pl.add_argument("stage_id")
+    pl.add_argument("--kind", required=True,
+                    help="command, commit, artifact or manual")
+    verdict = pl.add_mutually_exclusive_group(required=True)
+    verdict.add_argument("--ok", action="store_true", help="the check passed")
+    verdict.add_argument("--failed", action="store_true",
+                         help="it ran and did not pass — recorded, not discarded")
+    pl.add_argument("--detail", default="",
+                    help="the sha, the path, or what the user confirmed")
+    pl.add_argument("--output", default="")
+    pl.add_argument("--exit-code", type=int, default=0, dest="exit_code")
+    pl.add_argument("--state-dir", default=None)
+    pl.set_defaults(fn=_cmd_plan_proof)
+    pl = plans_p.add_parser("verify", help="run the stage's own command and record it")
+    pl.add_argument("stage_id")
+    pl.add_argument("--cwd", default=None,
+                    help="run it here (default: this shell's directory)")
+    pl.add_argument("--state-dir", default=None)
+    pl.set_defaults(fn=_cmd_plan_verify)
 
     p = sub.add_parser("files", help="declare and inspect selected-folder SMB access")
     files = p.add_subparsers(dest="files_cmd", required=True)
