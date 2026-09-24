@@ -96,7 +96,7 @@ SETTINGS: tuple[Setting, ...] = (
         ),
         instruction={
             "on": "",
-            "off": "Skip the simulator verification journey on this work — the user is reviewing the change himself.",
+            "off": "Skip the simulator verification journey on this work — the user reviews this change themselves.",
         },
     ),
     Setting(
