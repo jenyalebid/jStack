@@ -331,6 +331,11 @@ class Fleet:
         #: hub serves lands on the hub's client, whatever this run carried in
         #: for the Macs it installs by hand.
         self.served: dict[str, str] = {}
+        #: Guests this run installed a host on by hand, by name. The fresh
+        #: guest is reset before its first cast of a run and kept afterwards:
+        #: the Mac fresh_install adopted is a fleet member for the rest of the
+        #: run, and Update All is expected to reach it.
+        self.installed: set[str] = set()
 
     def guests(self) -> list[Guest]:
         return [self.hub, *self.leaves, *([self.fresh] if self.fresh else [])]
@@ -359,7 +364,9 @@ class Fleet:
             # run that died after installing on it would otherwise hand the
             # next one a Mac that already has a Hub, and the pristine check in
             # install_build would fail a journey the product never reached.
-            if guest is self.fresh:
+            # Once this run has installed on it, it stays: a reset here would
+            # turn the Mac the hub adopted into a row no Mac ever answers for.
+            if guest is self.fresh and guest.name not in self.installed:
                 guest.reset()
             guest.start()
         self.prepare(*cast)
@@ -520,6 +527,7 @@ def fresh_install(journey, fleet: Fleet, build: Build) -> None:
     journey.note(f"installing {build.slug} on pristine guest {guest.name}")
     guest.start()
     install_build(guest, build, fresh=True)
+    fleet.installed.add(guest.name)
     state = guest.installed()
     identity_check(journey, "installed_build", state, build)
     journey.observe("host_identity", {"host_id": guest.host_id(), "updater": state["updater"]})
@@ -571,6 +579,11 @@ def fleet_journey(journey, fleet: Fleet, build: Build) -> None:
     fleet.cast(fleet.hub, second)
     other = fleet.machine(second)
     journey.observe("leaf_remote_update", update_to_build(fleet, second, other, build))
+    # The Mac fresh_install adopted is in this fleet only when this run made
+    # it: a fresh guest no journey installed on is a pristine Mac, not a row.
+    enrolled = fleet.fresh if fleet.fresh and fleet.fresh.name in fleet.installed else None
+    fixture = {hub_machine, leaf_machine, other, *([fleet.machine(enrolled)] if enrolled else [])}
+    forget_strangers(journey, fleet, fixture)
     request = request_id("update-all")
     everything = fleet.hub.queue("all", request)
     machines = {job["machine"]: job["id"] for job in everything["jobs"]}
@@ -581,7 +594,7 @@ def fleet_journey(journey, fleet: Fleet, build: Build) -> None:
     # The parked leaf comes back to find the same queued job and catches up —
     # never a second job minted for the same request.
     completed = {hub_machine, other}
-    for guest in [first, *([fleet.fresh] if fleet.fresh else [])]:
+    for guest in [first, *([enrolled] if enrolled else [])]:
         fleet.cast(fleet.hub, guest)
         machine = fleet.machine(guest)
         if machine in machines:
@@ -596,6 +609,26 @@ def fleet_journey(journey, fleet: Fleet, build: Build) -> None:
     journey.observe("duplicate_request", again)
     fleet.cast(fleet.hub, first)
     journey.observe("denied_authority", denied(fleet, first))
+
+
+def forget_strangers(journey, fleet: Fleet, fixture: set[str]) -> list[str]:
+    """Withdraw the hub's rows for Macs that no longer exist.
+
+    A reset guest comes back as a new machine, so a hub kept across runs
+    holds one row per past run for the fresh Mac, each a job Update All
+    would queue and no Mac would ever finish. They leave by the product's
+    own door — the same forget a real hub needs for a Mac that was wiped
+    under it — and the receipt names them.
+    """
+    strangers = sorted(row["machine"] for row in fleet.hub.inventory()["machines"]
+                       if row["machine"] not in fixture)
+    for machine in strangers:
+        answer = fleet.hub.call(f"/hosts/{machine}/forget", {})
+        expect(answer["status"] == 200, f"the hub would not forget {machine}: {answer}")
+    if strangers:
+        journey.note(f"forgot {len(strangers)} machine(s) no guest answers for: "
+                     + ", ".join(strangers))
+    return strangers
 
 
 def offline_catchup(journey, fleet: Fleet, build: Build) -> None:

@@ -123,6 +123,10 @@ class ScriptedFleet:
         self.release, self.sha, self.state = release, sha, state
         #: The client the hub's feed carries in the build it last offered.
         self.served_client = served_client
+        #: Rows the hub still holds for Macs of earlier runs, and what it was
+        #: asked to forget.
+        self.ghosts: list[str] = []
+        self.forgotten: list[str] = []
         #: What `ifconfig` answers on every guest of this fleet.
         self.address = address
         #: What the lab-flag probe answers: 4 just turned on (what an install
@@ -169,6 +173,11 @@ class ScriptedFleet:
             answer = self.probe(name)
         elif "--path /updates/queue" in command:
             answer = {"status": self.denied_status, "body": "refused"}
+        elif "/forget" in command:
+            machine = command.split("--path /hosts/")[1].split("/forget")[0]
+            self.forgotten.append(machine)
+            self.ghosts = [ghost for ghost in self.ghosts if ghost != machine]
+            answer = {"status": 200, "body": json.dumps({"forgotten": machine})}
         elif "--path" in command:
             answer = {"status": 200, "body": "accepted"}
         elif "queue" in command:
@@ -186,7 +195,8 @@ class ScriptedFleet:
             answer = {"release": CANDIDATE, "machines": [
                 {"machine": machine, "name": machine, "state": self.state, "supervisor": True,
                  "last_contact": 1.0, "observed": {"release": self.release}, "job": {"id": "job-1"}}
-                for machine in {"machine-hub", "machine-leaf-a", "machine-leaf-b", *self.queued}]}
+                for machine in {"machine-hub", "machine-leaf-a", "machine-leaf-b", *self.queued,
+                                *self.ghosts}]}
         elif "--path /updates/queue" in command:
             answer = {"status": self.denied_status, "body": "refused"}
         elif "--path" in command:
@@ -344,10 +354,15 @@ def test_update_all_wakes_the_mac_enrolled_by_fresh_install(runner, subject, tmp
             return result
     scripted = WithFresh()
     fleet = build(runner, scripted, vm_slots=2, fresh="fresh")
+    # What fresh_install leaves behind: a Mac this run installed and adopted.
+    fleet.installed.add("fresh")
+    fleet._ids["fresh"] = "machine-fresh"
     wait = fleet.hub.wait_for
     def checked_wait(state, machine, **kwargs):
         if machine == "machine-fresh":
             assert "fresh" in scripted.booted, "waiting for a parked fresh Mac cannot finish"
+            assert not [c for c in scripted.calls if c[1:3] == ["reset", "fresh"]], \
+                "the adopted fresh Mac was reset on its way back: no Mac answers for its row"
         return wait(state, machine, **kwargs)
     fleet.hub.wait_for = checked_wait
     run = acceptance.Run(tmp_path / "receipts", IDENTITY)
@@ -356,6 +371,43 @@ def test_update_all_wakes_the_mac_enrolled_by_fresh_install(runner, subject, tmp
         runner.fleet_journey(journey, fleet, subject)
     assert run.results["fleet"] == "passed"
     assert scripted.peak <= 2
+    assert scripted.forgotten == [], "a fixture with no strangers forgets nothing"
+
+
+def test_a_fresh_mac_no_journey_installed_on_is_not_waited_for(runner, subject, tmp_path):
+    """`--only fleet`: the fresh guest is reset at its cast and pristine. A hub
+    that still queues a job for the row it left last run has a stranger in
+    its fleet, and the journey says so instead of waiting on a Mac that is
+    not there."""
+    class WithGhost(SlotCountingFleet):
+        def __call__(self, argv, **kwargs):
+            result = super().__call__(argv, **kwargs)
+            command = argv[3] if len(argv) > 3 else ""
+            if "--target all" in command:
+                body = json.loads(result.stdout)
+                body["jobs"].append({"id": "job-stale", "machine": "machine-fresh-of-last-run"})
+                result.stdout = json.dumps(body)
+            return result
+    scripted = WithGhost()
+    fleet = build(runner, scripted, vm_slots=2, fresh="fresh")
+    result, receipt = journey_result(runner, subject, "fleet", scripted, tmp_path,
+                                     vm_slots=2, fresh="fresh")
+    assert result == "failed" and "outside this fixture" in receipt["detail"]
+    assert "machine-fresh-of-last-run" in receipt["detail"]
+
+
+def test_rows_no_guest_answers_for_are_forgotten_before_update_all(runner, subject, tmp_path):
+    """A hub kept across runs holds a row per past run for the reset fresh
+    Mac. Each is a job Update All would queue forever; they leave by the
+    product's forget before the fleet is asked, and the receipt names them."""
+    scripted = ScriptedFleet()
+    scripted.ghosts = ["machine-fresh-run-7", "machine-fresh-run-8"]
+    result, receipt = journey_result(runner, subject, "fleet", scripted, tmp_path)
+    assert result == "passed", receipt["detail"]
+    assert scripted.forgotten == ["machine-fresh-run-7", "machine-fresh-run-8"]
+    assert "machine-hub" not in scripted.forgotten
+    log = (tmp_path / "receipts" / "fleet.log").read_text()
+    assert "forgot 2 machine(s)" in log and "machine-fresh-run-7" in log
 
 
 def test_a_plan_without_slots_keeps_every_guest_running(runner, subject, tmp_path):
@@ -1207,6 +1259,16 @@ def test_the_fresh_guest_is_reset_before_it_is_booted(runner):
     actions = [(argv[1], argv[2]) for argv in scripted.calls if argv[1] in {"reset", "gui"}]
     assert actions.index(("reset", "fresh")) < actions.index(("gui", "fresh"))
     assert ("reset", "hub") not in actions
+
+
+def test_the_fresh_guest_installed_on_this_run_is_kept_across_casts(runner):
+    """After fresh_install the fresh Mac is a fleet member the hub adopted;
+    parking and re-booting it must hand back that Mac, not a clone."""
+    scripted = ResetGuestFleet()
+    fleet = build(runner, scripted, fresh="fresh")
+    fleet.installed.add("fresh")
+    fleet.cast(fleet.hub, fleet.fresh)
+    assert not [argv for argv in scripted.calls if argv[1] == "reset"]
 
 
 def test_only_the_fresh_guest_is_reset(runner):
