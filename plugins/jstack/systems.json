@@ -899,6 +899,113 @@
         "path": "tests/structure.sh",
         "description": "Against the real tree: derives both root listings from git ls-files, compares each to structure.json in both directions — unmanaged tracked entries fail naming each with the fix (declare with a reason, same commit), stale manifest entries fail naming what nothing tracks, and an unreadable manifest or unlistable tree is a failure, never a pass."
       }
+    },
+    {
+      "id": "seat-pad-redirect",
+      "kind": "hook",
+      "name": "Seat Pad Redirect",
+      "status": "live",
+      "description": "SessionStart replaces the client's private scratchpad with a symlink to the seat's own `pad`, so everything a session writes for the user lands in the one folder the seat already shares with them instead of a per-session temp directory nobody opens. An existing scratchpad's contents are moved across rather than stranded, and a collision keeps the pad's copy and renames the incoming one by session id. Resolution is the deepest enclosing seat, so a checkout parked inside a pad belongs to the seat above it.",
+      "code": [
+        "hooks/session-start-pad.py"
+      ],
+      "test": {
+        "type": "script",
+        "path": "tests/session-start-pad.sh",
+        "description": "Runs the real hook on both the override path and the derived default: asserts the symlink lands, that a pre-written file is rescued, that a collision renames the incoming copy, that the deepest seat wins, and that no session id, an unwritable target and garbage stdin all exit without inventing a pad."
+      }
+    },
+    {
+      "id": "compaction-carry",
+      "kind": "hook",
+      "name": "Compaction Carry",
+      "status": "live",
+      "description": "PreCompact writes the checklist the summarizer must honour: uncommitted work by absolute path, the task in the user's own framing, what was ruled out and why, verification actually run, wakes booked and messages sent, and anything muted owed a restoration. Its stdout REPLACES whatever the user typed after `/compact`, so the user's own instructions are echoed first and marked as outranking the checklist, and the whole note stays short enough to read in a terminal because it is printed there too.",
+      "code": [
+        "hooks/precompact-carry.sh"
+      ],
+      "test": {
+        "type": "script",
+        "path": "tests/precompact-carry.sh",
+        "description": "Pipes real PreCompact JSON through the hook: every heading present by name, the length bounds held, the user's instructions carried verbatim and positioned ahead of the checklist, no dangling header when they are absent, and the checklist still printed on empty or malformed stdin."
+      }
+    },
+    {
+      "id": "codex-compaction-carry",
+      "kind": "hook",
+      "name": "Codex Compaction Carry",
+      "status": "live",
+      "description": "Codex compacts server-side: the window is rebuilt from the user's own messages plus the developer prompts, and every assistant message and every tool result in it is dropped. Neither compaction hook on that client carries `additionalContext`, so there is no summarizer to steer — this reads the residue back off the rollout, which compaction does not touch, and injects it at EVERY boundary because an injected developer message does not survive the next one. Only what a session cannot reconstruct: the commands it ran and its own last words, with the budget going to what cannot be re-run.",
+      "code": [
+        "hooks/codex-carry.py",
+        "../../host/jstack_host/codex_carry.py"
+      ],
+      "test": {
+        "type": "script",
+        "path": "tests/codex-carry.sh",
+        "description": "Pipes real SessionStart JSON through the hook against synthetic rollouts: both tool-call shapes read, the user's own message not repeated, a poll loop carried once, a booked wake outranking eighty re-runnable lines, a torn line survived, startup silent, and a Claude transcript left to Claude."
+      }
+    },
+    {
+      "id": "memory-index-ceiling",
+      "kind": "hook",
+      "name": "Memory Index Ceiling",
+      "status": "live",
+      "description": "PreToolUse caps the auto-memory index at a readable length, because an index that grows without bound is loaded into every session of that project and stops being an index. A Write is judged on the content in the payload; an Edit or MultiEdit is judged on the file as it stands on disk. The denial names the current count and the layers that own durable rules instead, so the answer to a full index is moving a line, not deleting one.",
+      "code": [
+        "hooks/memory-ceiling.sh"
+      ],
+      "test": {
+        "type": "script",
+        "path": "tests/memory-ceiling.sh",
+        "description": "Pipes real PreToolUse JSON through the hook: an over-ceiling Write denied with a reason naming the count and the other layers, exactly at the ceiling allowed, Edit and MultiEdit judged on disk, four non-index paths untouched, and an empty or malformed payload allowed through."
+      }
+    },
+    {
+      "id": "attention-marker",
+      "kind": "hook",
+      "name": "Attention Marker",
+      "status": "live",
+      "description": "Raises the waiting dot when a session is blocked on a person and lowers it the moment anything resolves, so a remote board can tell a session that needs an answer from one that is simply thinking. Only a real dialog counts — the two dialog tools and a permission notification — while an idle notification does not. The marker lands in the state directory the Hub's embed marker DECLARES, not one the hook guesses, which is what makes it work on a machine whose Hub is mounted into another server; the same file also carries the turn clock, opened on a prompt and closed at the seam.",
+      "code": [
+        "hooks/attention.py"
+      ],
+      "test": {
+        "type": "script",
+        "path": "tests/attention.sh",
+        "description": "Pipes real hook JSON through the hook and reads the marker off disk: the two dialog tools and a permission notification raise it, an idle notification does not, every resolution lowers it, the marker lands where a synthetic embed marker declares, an environment override outranks that declaration, and a session id that is a path writes nothing outside."
+      }
+    },
+    {
+      "id": "context-ceiling",
+      "kind": "hook",
+      "name": "Context Ceiling",
+      "status": "live",
+      "description": "Tells a session it has got heavy while ending the turn is still cheap, on the load meter's measured cuts rather than the client's configured window — a running session resolves that window once at startup and never re-reads it. Fires once per band on the CROSSING, heaviest band first so a double jump takes the louder, and names the session's own measured floor and what a boundary would free rather than a generic figure. No band at any size prescribes a handoff, because handing off lands below a compaction of the same session and pays for it with the whole live thread.",
+      "code": [
+        "hooks/context-ceiling.py",
+        "../../host/jstack_host/context_ceiling.py"
+      ],
+      "test": {
+        "type": "script",
+        "path": "tests/context-ceiling.sh",
+        "description": "Builds both transcript dialects in-file and pipes real hook JSON through: each cut fires on its crossing only, already-in-band and falling are silent, one message written three times is still one reading, the floor and freed figures are named, the Codex note says server-side and the Claude note does not, and an unreadable transcript stays silent rather than fatal."
+      }
+    },
+    {
+      "id": "turn-budget",
+      "kind": "hook",
+      "name": "Turn Budget",
+      "status": "live",
+      "description": "Caps how long an UNATTENDED run may keep taking turns, because the failure mode of a session nobody is watching is not a wrong answer but an endless one. A soft cut warns with the count, the share of turns that carried no tool call, and the hard cut ahead; the hard cut denies the tool and says to commit, push and book a wake rather than ask to continue. Only sessions with no human engaged are policed — a typed prompt, a mode row or a CLI rollout exempts a session at any count — and a missing or corrupt budget file fails open to the shipped default.",
+      "code": [
+        "hooks/turn-budget.py"
+      ],
+      "test": {
+        "type": "script",
+        "path": "tests/turn-budget.sh",
+        "description": "Pipes real PreToolUse JSON through the hook in both dialects: silent under the soft cut, the warning carrying the counts and the hard cut, the hard cut denying with the wake instruction, an engaged session never policed at any count, per-kind budgets honoured, and a corrupt budget file falling back to the shipped default."
+      }
     }
   ]
 }
