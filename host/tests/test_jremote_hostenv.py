@@ -168,7 +168,7 @@ def test_instance_root_reads_the_install_marker_without_a_shell(monkeypatch, tmp
     fake_home.mkdir()
     monkeypatch.setattr(hostenv, "HOME", fake_home)
     agents = tmp_path / "work" / "Alpine" / "Agents"
-    (agents / "Jarvis").mkdir(parents=True)
+    (agents / "Alder").mkdir(parents=True)
     # No marker yet: the shipped blank-tab behaviour.
     assert hostenv.instance_root() == fake_home / "Agents"
     # The installer writes the marker; the same env-less host now finds it.
@@ -177,7 +177,7 @@ def test_instance_root_reads_the_install_marker_without_a_shell(monkeypatch, tmp
     assert hostenv.instance_root() == agents
     monkeypatch.setenv("JREMOTE_HOST_PROFILE", "default")
     hostenv.reset_profile()
-    assert set(hostenv.active_agents()) == {"jarvis"}
+    assert set(hostenv.active_agents()) == {"alder"}
 
 
 def test_jstack_root_env_beats_the_marker(monkeypatch, tmp_path):

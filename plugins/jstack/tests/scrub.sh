@@ -52,6 +52,23 @@ TERMS = [
     ("J&J",       r"J&J",           0),     # the org's short name
     ("auto-work", r"\bauto-work\b", re.I),  # the org's project-board name
     ("org-infra-path", r"Operations/Infrastructure", 0),  # the org's private repo path
+    # The machine account's home. Never allowlisted anywhere, which is what
+    # lets the `jarvis` term be excused where it appears as the installer's
+    # shipped default agent name: a hardcoded path to this Mac still fails.
+    ("home-path", r"/Users/jarvis", 0),
+]
+
+# ── shipped literals ─────────────────────────────────────────────────────────
+# Cut out of a line before the terms are applied, each with its reason. These
+# are identifiers the product already publishes and cannot rename: the ban is
+# on the org's identity leaking in, not on the product being unable to say
+# what it is called on disk. Narrow by construction — the literal is removed,
+# so a bare `jenya` on the same line still fails.
+SHIPPED = [
+    # The Mac app's bundle identifier, chosen before any of this was public
+    # and now baked into its container paths, its keychain items and its
+    # App Store record. Renaming it orphans every installed copy.
+    ("dev.jenya.jRemote", "the client app's bundle identifier, unrenameable"),
 ]
 COMPILED = [(label, re.compile(pat, flags)) for label, pat, flags in TERMS]
 
@@ -106,6 +123,15 @@ ALLOW_PREFIX = {
         "the host of that app, open-sourced deliberately — it names itself",
     ("app/", "jremote"):
         "the installer for that app — closed binary, open install path",
+    ("verify/", "jremote"):
+        "the acceptance suite drives that app as a user does — it installs it, "
+        "clicks it and reads its windows, and a scenario that may not name what "
+        "it is driving cannot describe what it saw",
+    ("verify/", "jarvis"):
+        "the scenarios run the shipped installer with its shipped defaults, and "
+        "the default first agent workspace is named there — same ground as the "
+        "install.sh entry above. The home-path term still fails under verify/, "
+        "which is the leak this one would otherwise hide",
 }
 
 SELF = "plugins/jstack/tests/scrub.sh"  # holds the term list; cannot scan itself
@@ -141,6 +167,8 @@ for rel in paths:
         continue  # binary — not a carrier of prose identity
     scanned += 1
     for lineno, line in enumerate(raw.decode("utf-8", "replace").splitlines(), 1):
+        for literal, _reason in SHIPPED:
+            line = line.replace(literal, "")
         for label, rx in COMPILED:
             if not rx.search(line):
                 continue
