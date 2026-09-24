@@ -1,4 +1,4 @@
-"""One unattended acceptance run over disposable Macs, writing nine receipts.
+"""One unattended acceptance run over disposable Macs, one receipt per journey.
 
 Every journey here drives the shipped code: the real installer, the real
 supervisor under launchd, the real authenticated routes, real bundle
@@ -697,10 +697,289 @@ def lan_address(guest: Guest) -> str:
     return address
 
 
+# ── Shell access (#131): what a grant leaves on the machines
+
+SHELL_KEY = "~/.local/state/jremote/ssh/id_jremote"
+SUDOERS_DROPIN = "/etc/sudoers.d/jremote-managed"
+AUTHORIZED_BLOCK = ("/usr/bin/awk '/^# >>> jremote managed keys >>>$/{f=1;next} "
+                    "/^# <<< jremote managed keys <<</{f=0} f' "
+                    "~/.ssh/authorized_keys 2>/dev/null; true")
+PARENT_DIGEST = ("/usr/bin/shasum -a 256 ~/.local/state/jremote/parent.json "
+                 "| /usr/bin/awk '{print $1}'")
+LAB_TOOL = Path(__file__).with_name("managed_update_lab.py")
+
+
+def authorized_block(guest: Guest) -> list[str]:
+    out = guest.sh(AUTHORIZED_BLOCK)
+    return sorted(line.strip() for line in out.splitlines() if line.strip())
+
+
+def ssh_over(guest: Guest, alias: str, command: str) -> str:
+    """Over the granted path; a refusal comes back as text, never an exception."""
+    return guest.sh(f"/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=20 "
+                    f"{shlex.quote(alias)} {shlex.quote(command)} 2>&1 || echo REFUSED-$?")
+
+
+def hub_host_row(fleet: Fleet, machine: str) -> dict:
+    answer = fleet.hub.call("/hosts")
+    expect(answer["status"] == 200, f"the hub's /hosts answered {answer['status']}")
+    for row in json.loads(answer["body"]).get("hosts", []):
+        if row.get("key") == machine:
+            return row
+    return {}
+
+
+def shell_alias(fleet: Fleet, machine: str) -> tuple[dict, str]:
+    from jstack_host.enrolment import peer_name
+    row = hub_host_row(fleet, machine)
+    expect(row.get("shell_user"), f"the hub row for {machine} names no shell account")
+    return row, (peer_name(row["name"]) or machine)
+
+
+def shell_adopt(journey, fleet: Fleet, candidate: Candidate) -> None:
+    """Adoption itself granted the hub shell; prove the material is live, then
+    prove a joiner re-run changes none of it."""
+    guest = fleet.leaves[0]
+    machine = fleet.machine(guest)
+    answer = guest.call("/host")
+    expect(answer["status"] == 200, f"the leaf's /host answered {answer['status']}")
+    features = json.loads(answer["body"]).get("features", {})
+    expect(features.get("shell_access") is True,
+           f"the leaf does not report shell_access: {features}")
+    journey.observe("capability_reported", {"machine": machine, "shell_access": True})
+    row, alias = shell_alias(fleet, machine)
+    config = fleet.hub.sh("/bin/cat ~/.ssh/config 2>/dev/null; true")
+    expect(f"Host {alias}" in config, f"the hub's ssh config names no {alias}")
+    journey.observe("granted_at_adoption", {"machine": machine, "alias": alias,
+                                            "shell_user": row["shell_user"]})
+    uname = ssh_over(fleet.hub, alias, "/usr/bin/uname -a")
+    expect("Darwin" in uname and "REFUSED" not in uname,
+           f"the hub could not shell into {alias}: {uname.strip()[-300:]}")
+    journey.observe("hub_shell_answers", {"alias": alias, "uname": uname.strip()[:200]})
+    # A grant carries no standing sudo. The lab image gives admin its own
+    # passwordless sudo, so `sudo -n` proves nothing here either way — the
+    # assertable fact is that adoption laid no drop-in.
+    dropin = ssh_over(fleet.hub, alias,
+                      f"sudo -n /bin/ls {SUDOERS_DROPIN} 2>&1 || echo ABSENT")
+    expect("ABSENT" in dropin,
+           f"adoption laid a sudoers drop-in: {dropin.strip()[-300:]}")
+    journey.observe("no_standing_root", {"dropin": "absent"})
+    expect(fleet.plan.get("adopt_command"), "a joiner re-run needs 'adopt_command' in the plan")
+    before = authorized_block(guest)
+    pubkey_before = guest.sh(f"/bin/cat {SHELL_KEY}.pub").strip()
+    guest.sh(fleet.plan["adopt_command"], timeout=900)
+    time.sleep(SETTLE)
+    after = authorized_block(guest)
+    expect(after == before, f"the joiner re-run changed the authorized block: "
+                            f"{before} -> {after}")
+    expect(len(after) == len(set(after)), f"the joiner re-run duplicated keys: {after}")
+    expect(guest.sh(f"/bin/cat {SHELL_KEY}.pub").strip() == pubkey_before,
+           "the joiner re-run rotated the machine's identity")
+    again = ssh_over(fleet.hub, alias, "/usr/bin/uname -a")
+    expect("Darwin" in again and "REFUSED" not in again,
+           f"hub shell broke across the joiner re-run: {again.strip()[-300:]}")
+    journey.observe("joiner_rerun_idempotent", {"keys": len(after),
+                                                "identity_rotated": False,
+                                                "hub_shell": "answers"})
+
+
+def lab_call(lab_root: str, port: int, hub_address: str, *argv: str,
+             timeout: int = 300) -> dict:
+    done = subprocess.run([sys.executable, str(LAB_TOOL), "--root", lab_root,
+                           "--port", str(port), "--hub-address", hub_address, *argv],
+                          capture_output=True, text=True, timeout=timeout)
+    if done.returncode:
+        raise AcceptanceFailure(f"lab {argv[0]} failed: "
+                                + (done.stderr or done.stdout).strip()[-800:])
+    out = done.stdout
+    return json.loads(out[out.index("{"):]) if "{" in out else {}
+
+
+def await_lab(port: int, timeout: int = 90) -> None:
+    import urllib.request
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",
+                                        timeout=3) as response:
+                if response.status == 200:
+                    return
+        except OSError:
+            pass
+        time.sleep(2)
+    raise AcceptanceFailure(f"the lab hub never answered on port {port}")
+
+
+def lab_teardown(fleet: Fleet, server, adopted: list[Guest]) -> list[str]:
+    """Undo the lab re-parenting whatever happened: dev parent record back,
+    then a local refresh so each leaf re-pulls its own hub's key — without it
+    the fleet leaves this journey missing the material shell_detach reads."""
+    failures: list[str] = []
+    if server is not None:
+        server.terminate()
+        with contextlib.suppress(Exception):
+            server.wait(timeout=30)
+    for guest in adopted:
+        try:
+            guest.sh("/bin/mv -f ~/.local/state/jremote/parent.previous-update-lab.json "
+                     "~/.local/state/jremote/parent.json")
+            guest.sh(f"/bin/rm -f {GUEST_HOME}/{guest.name}-lab-record.json "
+                     f"{GUEST_HOME}/{guest.name}-lab-record.grant.json")
+            fleet.cast(fleet.hub, guest)
+            refreshed = guest.call("/shell/refresh", {})
+            steps = (json.loads(refreshed["body"]).get("steps", [])
+                     if refreshed["status"] == 200 else [])
+            expect(refreshed["status"] == 200 and steps
+                   and all(step.get("ok") for step in steps),
+                   f"{guest.name} could not re-pull its hub set: {refreshed}")
+            expect(authorized_block(guest),
+                   f"{guest.name} came out of the lab with an empty authorized block")
+        except AcceptanceFailure as exc:
+            failures.append(str(exc))
+    return failures
+
+
+def shell_flip(journey, fleet: Fleet, candidate: Candidate) -> None:
+    """Leaf→leaf, with the hub role on the host (managed_update_lab): the two
+    leaf VMs fill both slots and the grant mechanics are address-independent.
+    Both leaves are re-parented onto the lab for the flip and restored after."""
+    import tempfile
+    from jstack_host.enrolment import peer_name
+    expect(len(fleet.leaves) >= 2, "the pair needs two managed Macs")
+    leaf_a, leaf_b = fleet.leaves[0], fleet.leaves[1]
+    machine_a, machine_b = fleet.machine(leaf_a), fleet.machine(leaf_b)
+    # The lab claims its root itself and refuses a pre-existing dir without
+    # its marker — hand it a path that does not exist yet, under our tempdir.
+    lab_root = str(Path(tempfile.mkdtemp(prefix="shell-lab-")) / "updates-lab")
+    port = int(fleet.plan.get("shell_lab_port") or 19090)
+    server, adopted, error = None, [], None
+    try:
+        hub_address = ""
+        for guest in (leaf_a, leaf_b):
+            gateway = guest.sh("/sbin/route -n get default "
+                               "| /usr/bin/awk '/gateway/{print $2}'").strip()
+            expect(gateway, f"{guest.name} has no route back to the host")
+            hub_address = gateway
+            record = Path(lab_root) / f"{guest.name}-lab-record.json"
+            lab_call(lab_root, port, gateway, "enrol-shell", fleet.machine(guest),
+                     "--name", guest.name, "--address", guest.vm("ip", guest.name).strip(),
+                     "--pubkey", guest.sh(f"/bin/cat {SHELL_KEY}.pub").strip(),
+                     "--user", guest.sh("/usr/bin/id -un").strip(),
+                     "--record", str(record))
+            guest.copy(record, f"{GUEST_HOME}/{record.name}")
+            guest.tool_call("adopt", "--record", f"{GUEST_HOME}/{record.name}")
+            adopted.append(guest)
+            grant_name = record.name[:-len(".json")] + ".grant.json"
+            issued = guest.sh("/bin/cat " + shlex.quote(f"{GUEST_HOME}/{grant_name}"))
+            grant = Path(lab_root) / grant_name
+            grant.write_text(issued[issued.index("{"):])
+            lab_call(lab_root, port, gateway, "remember", str(grant))
+        stamps = {g.name: g.sh(PARENT_DIGEST).strip() for g in (leaf_a, leaf_b)}
+        log = (Path(lab_root) / "serve.log").open("w")
+        server = subprocess.Popen([sys.executable, str(LAB_TOOL), "--root", lab_root,
+                                   "--port", str(port), "--hub-address", hub_address,
+                                   "serve"], stdout=log, stderr=subprocess.STDOUT)
+        await_lab(port)
+        on = lab_call(lab_root, port, hub_address, "shell-flip", machine_b,
+                      "--src", machine_a, "--allowed", "true")
+        bad = [s for s in on.get("steps", []) if not s.get("ok")]
+        expect(on.get("allowed") is True and on.get("steps") and not bad,
+               f"the grant flip did not land cleanly: {bad or on}")
+        journey.observe("granted_pair", {"src": machine_a, "dst": machine_b,
+                                         "steps": on["steps"]})
+        key_a = leaf_a.sh(f"/bin/cat {SHELL_KEY}.pub").strip().split()[1]
+        expect(any(key_a in line for line in authorized_block(leaf_b)),
+               f"{leaf_b.name} did not receive {leaf_a.name}'s key")
+        alias_b = peer_name(leaf_b.name) or machine_b
+        config_a = leaf_a.sh("/bin/cat ~/.ssh/config 2>/dev/null; true")
+        expect(f"Host {alias_b}" in config_a,
+               f"{leaf_a.name} gained no peer entry for {alias_b}")
+        answer = ssh_over(leaf_a, alias_b, "/usr/bin/uname -a")
+        expect("Darwin" in answer and "REFUSED" not in answer,
+               f"{leaf_a.name} could not shell into {alias_b}: {answer.strip()[-300:]}")
+        journey.observe("peer_shell_answers", {"src": leaf_a.name, "alias": alias_b,
+                                               "uname": answer.strip()[:200]})
+        off = lab_call(lab_root, port, hub_address, "shell-flip", machine_b,
+                       "--src", machine_a, "--allowed", "false")
+        bad = [s for s in off.get("steps", []) if not s.get("ok")]
+        expect(off.get("allowed") is False and off.get("steps") and not bad,
+               f"the revoke flip did not land cleanly: {bad or off}")
+        remaining = authorized_block(leaf_b)
+        expect(not any(key_a in line for line in remaining),
+               f"{leaf_b.name} kept {leaf_a.name}'s key after the revoke")
+        journey.observe("revoked_pair", {"steps": off["steps"],
+                                         "keys_left": len(remaining)})
+        refused = ssh_over(leaf_a, alias_b, "/usr/bin/uname -a")
+        expect("REFUSED" in refused,
+               f"{leaf_a.name} still shells into {alias_b}: {refused.strip()[-300:]}")
+        journey.observe("refused_immediately", {"alias": alias_b,
+                                                "answer": refused.strip()[-300:]})
+        after = {g.name: g.sh(PARENT_DIGEST).strip() for g in (leaf_a, leaf_b)}
+        expect(after == stamps, f"a flip rewrote an adoption record: {stamps} -> {after}")
+        journey.observe("no_readoption", {"parent_records": after})
+    except BaseException as exc:
+        error = exc
+    failures = lab_teardown(fleet, server, adopted)
+    if error is not None:
+        raise error
+    expect(not failures, f"the lab restore did not put the fleet back: {failures}")
+
+
+def shell_detach(journey, fleet: Fleet, candidate: Candidate) -> None:
+    """Runs last: detach is terminal for its leaf, and `sandbox.py reset`
+    re-provisions the fleet after a full run. leaves[0], never leaves[-1] —
+    that leaf's credential died in the revocation journey, and detach has to
+    tell the parent goodbye with a live one."""
+    guest = fleet.leaves[0]
+    machine = fleet.machine(guest)
+    _, alias = shell_alias(fleet, machine)
+    uname = ssh_over(fleet.hub, alias, "/usr/bin/uname -a")
+    expect("Darwin" in uname and "REFUSED" not in uname,
+           f"hub shell into {alias} was not working before detach: {uname.strip()[-300:]}")
+    journey.observe("shell_before_detach", {"alias": alias, "uname": uname.strip()[:200]})
+    out = guest.sh("~/.local/bin/jstack-host detach --json", timeout=900)
+    result = json.loads(out[out.index("{"):])
+    bad = [s for s in result.get("steps", []) if not s.get("ok")]
+    expect(result.get("detached") is True and not bad,
+           f"detach did not come apart cleanly: {bad or result}")
+    journey.observe("detach_steps", {"detached": result["detached"],
+                                     "steps": [{k: s.get(k) for k in ("step", "ok", "note")}
+                                               for s in result["steps"]]})
+    block = authorized_block(guest)
+    expect(not block, f"granted keys survived detach: {block}")
+    sudoers = guest.sh(f"sudo -n /bin/ls {SUDOERS_DROPIN} 2>&1 || echo ABSENT").strip()
+    expect("ABSENT" in sudoers, f"the sudoers drop-in survived detach: {sudoers[-200:]}")
+    identity = guest.sh(f"/bin/ls {SHELL_KEY} 2>&1 || echo ABSENT").strip()
+    expect("ABSENT" in identity, f"the machine identity survived detach: {identity[-200:]}")
+    journey.observe("material_gone", {"authorized_block": block,
+                                      "sudoers": "absent", "identity": "absent"})
+    # The lab image ships Remote Login on, so the grant recorded "already on"
+    # and detach must leave it on — which is also what keeps this very ssh
+    # channel alive to make the observation.
+    remote_login = guest.sh("sudo -n /usr/sbin/systemsetup -getremotelogin").strip()
+    expect("On" in remote_login,
+           f"Remote Login was on before the grant and is not now: {remote_login}")
+    journey.observe("remote_login_restored", {"systemsetup": remote_login[-120:]})
+    row_after = hub_host_row(fleet, machine)
+    expect(not row_after, f"the hub still lists {machine}: {row_after.get('name')}")
+    config = fleet.hub.sh("/bin/cat ~/.ssh/config 2>/dev/null; true")
+    expect(f"Host {alias}" not in config, f"the hub's ssh config still names {alias}")
+    journey.observe("hub_forgot_machine", {"machine": machine, "alias_dropped": alias})
+    refused = ssh_over(fleet.hub, alias, "/usr/bin/uname -a")
+    expect("REFUSED" in refused,
+           f"the hub can still shell into a detached machine: {refused.strip()[-300:]}")
+    journey.observe("hub_shell_refused", {"alias": alias,
+                                          "answer": refused.strip()[-300:]})
+
+
+# Two journeys are permanent for their leaf and order the tail: revocation
+# kills leaves[-1]'s credential, so everything needing a live pair runs before
+# it; shell_detach removes leaves[0] from the fleet entirely, so it runs last.
 JOURNEYS = {"fresh_install": fresh_install, "upgrade": upgrade, "fleet": fleet_journey,
             "offline_catchup": offline_catchup, "session_survival": session_survival,
             "interruption": interruption, "off_network": off_network,
-            "revocation": revocation}
+            "shell_adopt": shell_adopt, "shell_flip": shell_flip,
+            "revocation": revocation, "shell_detach": shell_detach}
 
 # The guests each journey drives; everyone else may be parked on a
 # slot-limited host. The fleet journey swaps its own leaves mid-flight.
@@ -711,7 +990,11 @@ CAST = {"fresh_install": lambda f: (f.hub, f.fresh),
         "session_survival": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
         "interruption": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
         "revocation": lambda f: (f.hub, f.leaves[-1] if f.leaves else None),
-        "off_network": lambda f: (f.hub, f.leaves[-1] if f.leaves else None)}
+        "off_network": lambda f: (f.hub, f.leaves[-1] if f.leaves else None),
+        "shell_adopt": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
+        # Both leaves live at once; the hub role runs on the host (the lab).
+        "shell_flip": lambda f: tuple(f.leaves[:2]),
+        "shell_detach": lambda f: (f.hub, f.leaves[0] if f.leaves else None)}
 
 
 # ── Operations the journeys are written in terms of
@@ -1055,8 +1338,10 @@ def unsupported(fleet: Fleet, name: str) -> str | None:
         return "the plan names no managed Mac to take off the LAN"
     if name == "fresh_install" and fleet.fresh is None:
         return "the plan names no pristine guest"
-    if name == "fleet" and len(fleet.leaves) < 2:
+    if name in ("fleet", "shell_flip") and len(fleet.leaves) < 2:
         return "the plan names fewer than two managed Macs"
+    if name == "shell_detach" and len(fleet.leaves) < 2:
+        return "the plan's only managed Mac loses its credential to the revocation journey"
     if name != "fresh_install" and not fleet.leaves:
         return "the plan names no managed Mac"
     return None

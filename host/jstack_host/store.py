@@ -217,9 +217,25 @@ CREATE TABLE IF NOT EXISTS hosts (
   seq INTEGER NOT NULL DEFAULT 0,
   device_id TEXT NOT NULL DEFAULT '',
   sees_home INTEGER NOT NULL DEFAULT 1,
-  sees_leaves INTEGER NOT NULL DEFAULT 1
+  sees_leaves INTEGER NOT NULL DEFAULT 1,
+  -- The machine's SSH public key and enrolled account, presented at adoption.
+  -- Public material only: the private key never leaves the machine that
+  -- minted it, so like the rest of this table there is no column a secret
+  -- could sit in.
+  shell_pubkey TEXT NOT NULL DEFAULT '',
+  shell_user TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS hosts_seq ON hosts(seq);
+-- The hub-held shell grant matrix: a row means the machine `src` may open a
+-- shell on the machine `dst`. Per pair, like sees_home/sees_leaves are per
+-- leaf; the hub itself appears in no row because hub -> leaf is uncondition-
+-- al. Absence is refusal, so revoking is DELETE, not a flag.
+CREATE TABLE IF NOT EXISTS shell_grants (
+  src TEXT NOT NULL,
+  dst TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(src, dst)
+);
 -- Device identities for the API — the host's own table, and it NEVER rides
 -- sync. If tokens travelled with MetaSync, revoking one device would revoke
 -- all of them and every host's credentials would pool in one store
@@ -1494,6 +1510,44 @@ class SessionStore:
                 "WHERE key=? AND deleted=0",
                 (int(sees_home), int(sees_leaves), time.time(), seq, key))
             return cur.rowcount > 0
+
+    def set_host_shell(self, key: str, pubkey: str, user: str) -> bool:
+        with self._write_lock, self._conn() as db:
+            seq = self._bump_seq(db)
+            cur = db.execute(
+                "UPDATE hosts SET shell_pubkey=?, shell_user=?, updated_at=?, "
+                "seq=? WHERE key=? AND deleted=0",
+                (pubkey, user, time.time(), seq, key))
+            return cur.rowcount > 0
+
+    def set_shell_grant(self, src: str, dst: str, allowed: bool) -> None:
+        with self._write_lock, self._conn() as db:
+            if allowed:
+                db.execute("INSERT OR IGNORE INTO shell_grants (src, dst, "
+                           "created_at) VALUES (?,?,?)",
+                           (src, dst, int(time.time())))
+            else:
+                db.execute("DELETE FROM shell_grants WHERE src=? AND dst=?",
+                           (src, dst))
+
+    def shell_sources_for(self, dst: str) -> list[str]:
+        """Which machines may open a shell on `dst` — its authorized set."""
+        with self._conn() as db:
+            return [r[0] for r in db.execute(
+                "SELECT src FROM shell_grants WHERE dst=? ORDER BY src", (dst,))]
+
+    def shell_targets_for(self, src: str) -> list[str]:
+        """Which machines `src` may open a shell on — its reach."""
+        with self._conn() as db:
+            return [r[0] for r in db.execute(
+                "SELECT dst FROM shell_grants WHERE src=? ORDER BY dst", (src,))]
+
+    def drop_shell_grants(self, key: str) -> None:
+        """Every pair `key` is half of, both directions — forgetting a machine
+        ends its reach and its reachability; a re-adoption starts from none."""
+        with self._write_lock, self._conn() as db:
+            db.execute("DELETE FROM shell_grants WHERE src=? OR dst=?",
+                       (key, key))
 
     def is_host_credential(self, device_id: str) -> bool:
         """Recognize old adoption tokens even when their machine was renamed."""

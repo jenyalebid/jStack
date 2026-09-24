@@ -43,6 +43,12 @@ REQUIRED: dict[str, tuple[str, ...]] = {
     "interruption": ("interrupted_job", "recovered_state", "retry_current", "reboot_resume"),
     "revocation": ("revoked_device", "cancelled_job", "rejected_request", "unchanged_release"),
     "off_network": ("device", "transport", "release_notice", "session_journey"),
+    "shell_adopt": ("granted_at_adoption", "capability_reported", "hub_shell_answers",
+                    "no_standing_root", "joiner_rerun_idempotent"),
+    "shell_flip": ("granted_pair", "peer_shell_answers", "revoked_pair",
+                   "refused_immediately", "no_readoption"),
+    "shell_detach": ("shell_before_detach", "detach_steps", "material_gone",
+                     "remote_login_restored", "hub_forgot_machine", "hub_shell_refused"),
 }
 PASSED = "passed"
 
