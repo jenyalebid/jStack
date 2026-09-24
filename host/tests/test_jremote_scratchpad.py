@@ -14,8 +14,8 @@ the same folder; Clear takes the folder it was pressed on and all of it;
 uploads land where the pane is pointed and come back marked as the user's; every
 route sits behind the bearer token.
 
-Ownership and the sweep are pinned in `test_seat_pads.py`, where the hook that
-makes a session's scratchpad this folder is also exercised.
+The hook that makes a session's scratchpad this folder is pinned separately, as a
+live contract against the shipped hook: `plugins/jstack/tests/session-start-pad.sh`.
 """
 
 import os
