@@ -1,9 +1,9 @@
 """The three doors the Info window's Source row presses.
 
-The whole point of the read route is what it does *not* do. Boss's report was
-"I open settings and it starts downloading": a window that checks on open turns
-looking into acting. So the first test here fails if reading the route reaches
-GitHub at all, by any path — `check()`, a client, a socket.
+The whole point of the read route is what it does *not* do. The reported
+symptom was "I open settings and it starts downloading": a window that checks
+on open turns looking into acting. So the first test here fails if reading the
+route reaches GitHub at all, by any path — `check()`, a client, a socket.
 """
 import json
 import threading
