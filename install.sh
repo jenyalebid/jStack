@@ -1101,14 +1101,39 @@ HOST_INSTALLER="$CHECKOUT/host/install.sh"
 JSTACK_HUB_CURRENT=0
 if [ "$(uname -s)" = "Darwin" ] && [ "$WANT_HOST" != "0" ]; then
     if [ -d "/Applications/jStack Hub.app" ]; then
+        HUB_IDENTITY="/Applications/jStack Hub.app/Contents/Resources/packages/release-identity.json"
         if curl -fsS -m 3 http://127.0.0.1:9090/api/health >/dev/null 2>&1; then
             installed_release="$(sed -nE 's/.*"release": *"([^"]+)".*/\1/p' \
-                "/Applications/jStack Hub.app/Contents/Resources/packages/release-identity.json" 2>/dev/null)"
-            ok "Hub already installed and answering${installed_release:+ (release $installed_release)}"
-            note "moving it forward is \`jstack-host updates build\`, not a re-run of this: the sealed installer does not adopt an installation it did not make"
-            JSTACK_HUB_CURRENT=1
-            HOST_INSTALLED=1
-            SIGNED_HUB=1
+                "$HUB_IDENTITY" 2>/dev/null)"
+            # Answering is not the whole question. Which installer put it there
+            # decides whether it can move itself forward, and `origin` is the
+            # only honest answer to that: it is written solely by a machine that
+            # compiled the bundle for itself, and it is sealed under
+            # Contents/Resources, so a publisher's release carries none.
+            #
+            # A publisher's release is every Mac installed before builds
+            # replaced releases. That Hub's CLI offers `updates enable` and
+            # `updates channel` and no `build` — so leaving it alone and naming
+            # `jstack-host updates build` hands its owner a verb their Hub does
+            # not have, on the one machine shape that cannot get it any other
+            # way. It follows a release line nothing will ever publish to again.
+            # So it is replaced by a Hub compiled here, which is the only thing
+            # that moves it forward at all.
+            if grep -q '"kind"[[:space:]]*:[[:space:]]*"source-build"' "$HUB_IDENTITY" 2>/dev/null; then
+                ok "Hub already installed and answering${installed_release:+ (release $installed_release)}"
+                note "moving it forward is \`jstack-host updates build\`, not a re-run of this: the sealed installer does not adopt an installation it did not make"
+                JSTACK_HUB_CURRENT=1
+                HOST_INSTALLED=1
+                SIGNED_HUB=1
+            elif [ "$DRY_RUN" = "1" ]; then
+                would "replace the ${installed_release:-published} Hub with one built from $REF"
+            else
+                warn "the installed Hub is a published release${installed_release:+ ($installed_release)} and cannot build itself forward — replacing it with a build from $REF"
+                for role in host menu updater; do
+                    launchctl bootout "gui/$(id -u)/live.jstack.hub.$role" >/dev/null 2>&1 || true
+                done
+                rm -rf "/Applications/jStack Hub.app"
+            fi
         else
             warn "a jStack Hub app is present but its host is not answering — replacing it"
             if [ "$DRY_RUN" = "1" ]; then

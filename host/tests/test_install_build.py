@@ -292,10 +292,53 @@ def test_one_writer_lands_both_a_hubs_build_and_an_installers(installing, tmp_pa
 
 def test_install_sh_installs_a_ref_and_downloads_no_release():
     assert "--ref" in CODE and "JSTACK_REF" in CODE
-    assert "git clone --quiet --branch" in CODE
+    assert re.search(r"git clone --quiet [^\n]*--branch", CODE)
     assert "merge --ff-only" in CODE
     for gone in ("RELEASE_TAG", "stack-release", "releases/download", "tar xzf"):
         assert gone not in CODE, f"install.sh still downloads a release: {gone}"
+
+
+def test_install_sh_clones_one_branch_so_no_binary_rides_in_on_another():
+    """The app is served off a branch of this repo, and a plain clone would put
+    that blob in every user's checkout and keep it there. Every clone here is
+    single-branch, so a ref nobody asked for is never fetched."""
+    clones = re.findall(r"git clone[^\n]*", CODE)
+    assert clones
+    for clone in clones:
+        assert "--single-branch" in clone, f"clone fetches every branch: {clone}"
+
+
+def test_install_sh_moves_a_release_snapshot_forward_instead_of_refusing_it():
+    """Every Mac installed before builds replaced releases has a $CHECKOUT that
+    is not a checkout: the old installer untarred a publisher snapshot there,
+    so it carries host/release-identity.json and no .git. Step 2 refused
+    exactly that shape, which made the first thing the new installer did on
+    every deployed Mac be to die.
+
+    It is moved aside and never deleted — it is the only copy of what the last
+    release shipped, and an installer that deletes what it did not write is
+    #130."""
+    assert "host/release-identity.json" in CODE
+    assert ".snapshot-" in CODE
+    snapshot = CODE[CODE.index("host/release-identity.json"):]
+    snapshot = snapshot[:snapshot.index("elif [ -e ")]
+    assert 'mv "$CHECKOUT" "$ASIDE"' in snapshot
+    for destructive in ("rm -rf \"$CHECKOUT\"", "rm -r \"$CHECKOUT\""):
+        assert destructive not in snapshot, f"the old snapshot is deleted: {destructive}"
+
+
+def test_install_sh_replaces_a_published_hub_rather_than_naming_a_verb_it_lacks():
+    """A Hub that answers is left alone only when it records that this machine
+    built it. A published release carries no `origin` marker, follows a release
+    line nothing will publish to again, and its CLI has `updates enable` and
+    `updates channel` and no `build` — so the note telling its owner to run
+    `jstack-host updates build` names a verb that Hub does not have, on the one
+    machine shape that cannot get it any other way."""
+    assert '"kind"[[:space:]]*:[[:space:]]*"source-build"' in CODE
+    guard = CODE[CODE.index("Hub already installed and answering"):]
+    guard = guard[:guard.index("jStack Hub app is present but its host")]
+    assert "cannot build itself forward" in guard
+    assert 'rm -rf "/Applications/jStack Hub.app"' in guard
 
 
 def test_install_sh_never_deletes_uncommitted_work_in_the_checkout():
