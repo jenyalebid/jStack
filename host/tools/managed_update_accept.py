@@ -35,12 +35,18 @@ import time
 import uuid
 from pathlib import Path
 
+from jstack_host.acceptance import HarnessFault
+
 GUEST_HOME = "/Users/admin"
 GUEST_TOOL = GUEST_HOME + "/update-vm.py"
 GUEST_FAULT = GUEST_HOME + "/update-fault.py"
 GUEST_PYTHON = "/Applications/jStack Hub.app/Contents/MacOS/JStackPython"
 GUEST_HOST_CLI = GUEST_HOME + "/.local/bin/jstack-host"
 GUEST_TMUX = "/Applications/jStack Hub.app/Contents/MacOS/tmux"
+# The guest-side halves of this runner, shipped beside it. A reset guest has
+# neither, so the runner lays them down itself before any journey uses one.
+GUEST_TOOLS = {GUEST_TOOL: Path(__file__).resolve().parent / "managed_update_vm.py",
+               GUEST_FAULT: Path(__file__).resolve().parent / "managed_update_fault.py"}
 #: How long a spawned session gets to answer on its own before the runner looks
 #: at its pane. Releases before ca7cf89 left the bypass warning on screen (the
 #: watcher ran an unquoted tmux path), so a session on such a PRIOR never
@@ -143,6 +149,14 @@ class Guest:
 
     def copy(self, source: Path, destination: str) -> None:
         self.vm("cp", self.name, str(source), destination)
+
+    def absent(self, paths: list[str]) -> list[str]:
+        """Which of these guest paths do not exist, asked in one round trip."""
+        if not paths:
+            return []
+        listed = " ".join(shlex.quote(path) for path in paths)
+        answer = self.sh(f"for p in {listed}; do [ -e \"$p\" ] || printf '%s\\n' \"$p\"; done")
+        return [line for line in answer.splitlines() if line in paths]
 
     def start(self) -> str:
         """GUI, because the menu bar and the client app are part of the proof."""
@@ -267,6 +281,9 @@ class Fleet:
         self.fresh = Guest(plan["fresh"], tool, run=run) if plan.get("fresh") else None
         self.off_lan = plan.get("off_lan")
         self.slots = int(plan.get("vm_slots") or 0)
+        self.fixtures = list(plan.get("fixtures") or [])
+        self.provision = plan.get("provision")
+        self._run = run
         self._ids: dict[str, str] = {}
         self.build: Build | None = None
         self.prior: Build | None = None
@@ -304,8 +321,37 @@ class Fleet:
                     guest.stop()
         for guest in cast:
             guest.start()
+        self.prepare(*cast)
         for guest in cast:
             self.readopt(guest)
+
+    def prepare(self, *guests: Guest) -> None:
+        """Put back what `vm.sh reset` takes away before a journey leans on it.
+
+        A reset clones a pristine Mac, which carries none of the lab's
+        fixtures. The runner's own guest tools it copies every time. The
+        plan's `fixtures` (absolute guest paths — the adopt script, the lab's
+        env agent) are re-laid by its `provision` host command, `{guest}`
+        standing for the guest's name, when any is absent. One still absent
+        after that is a harness fault: the journey never reached the product.
+        """
+        for guest in guests:
+            try:
+                for remote, local in GUEST_TOOLS.items():
+                    guest.copy(local, remote)
+                missing = guest.absent(self.fixtures)
+                if missing and self.provision:
+                    command = [part.replace("{guest}", guest.name)
+                               for part in shlex.split(self.provision)]
+                    done = self._run(command, capture_output=True, text=True, timeout=1800)
+                    if done.returncode:
+                        raise HarnessFault(f"{guest.name}: provisioning failed: "
+                                           + (done.stderr or done.stdout).strip()[-800:])
+                    missing = guest.absent(self.fixtures)
+            except AcceptanceFailure as exc:
+                raise HarnessFault(f"{guest.name}: could not stage fixtures: {exc}") from exc
+            if missing:
+                raise HarnessFault(f"fixture missing: {guest.name}:{missing[0]}")
 
     def machine(self, guest: Guest) -> str:
         if guest.name not in self._ids:
@@ -1167,6 +1213,7 @@ def main() -> int:
     if not fleet.slots:
         for leaf in fleet.leaves:
             leaf.start()
+    fleet.prepare(fleet.hub)
     # The hub builds the commit before any receipt is written: the build id it
     # comes out with is what the fleet is offered, and a run that cannot even
     # build has nothing to write receipts about.

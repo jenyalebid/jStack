@@ -917,3 +917,63 @@ def test_read_freeze_wants_a_stopped_pid_and_a_copy_in_flight(runner, output):
     good = '{"injected": "freeze", "job": "j", "pid": 3, "copies": ["/Applications/a.incoming-j"]}\n'
     assert runner.read_freeze(SimpleNamespace(communicate=lambda timeout=None: (good, ""),
                                               returncode=0))["job"] == "j"
+
+
+class ResetGuestFleet(ScriptedFleet):
+    """A fleet whose guests hold only what was put there since their reset."""
+
+    def __init__(self, *, provisions=True, **kwargs):
+        super().__init__(**kwargs)
+        self.present: dict[str, set[str]] = {}
+        self.provisions = provisions
+
+    def __call__(self, argv, **kwargs):
+        if argv[0] == "provision":
+            self.calls.append(list(argv))
+            if self.provisions:
+                self.present.setdefault(argv[1], set()).add("/Users/admin/adopt-to-hub.sh")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        _, action, name, *rest = argv
+        if action == "cp":
+            self.present.setdefault(name, set()).add(rest[1])
+        if action == "ssh" and rest[0].startswith("for p in"):
+            self.calls.append(list(argv))
+            wanted = [part.strip("'") for part in rest[0].split(";")[0].split()[3:]]
+            absent = [path for path in wanted if path not in self.present.get(name, set())]
+            return subprocess.CompletedProcess(argv, 0, "".join(p + "\n" for p in absent), "")
+        return super().__call__(argv, **kwargs)
+
+
+def test_a_reset_guest_gets_the_runner_s_own_tools_back_before_its_journey(runner):
+    scripted = ResetGuestFleet()
+    fleet = build(runner, scripted, fresh="fresh")
+    fleet.cast(fleet.hub, fleet.fresh)
+    for name in ("hub", "fresh"):
+        assert {runner.GUEST_TOOL, runner.GUEST_FAULT} <= scripted.present[name]
+
+
+def test_a_missing_plan_fixture_is_provisioned_before_the_journey(runner):
+    scripted = ResetGuestFleet()
+    fleet = build(runner, scripted, fresh="fresh", fixtures=["/Users/admin/adopt-to-hub.sh"],
+                  provision="provision {guest} --tools-only")
+    fleet.cast(fleet.hub, fleet.fresh)
+    assert ["provision", "fresh", "--tools-only"] in scripted.calls
+    assert "/Users/admin/adopt-to-hub.sh" in scripted.present["fresh"]
+
+
+def test_a_fixture_still_missing_is_a_harness_receipt_not_a_failed_journey(
+        runner, subject, tmp_path):
+    scripted = ResetGuestFleet(provisions=False)
+    fleet = build(runner, scripted, fresh="fresh", fixtures=["/Users/admin/adopt-to-hub.sh"],
+                  provision="provision {guest}")
+    run = acceptance.Run(tmp_path / "receipts", IDENTITY)
+    with run.journey("fresh_install") as journey:
+        fleet.cast(*runner.CAST["fresh_install"](fleet))
+        runner.fresh_install(journey, fleet, subject)
+    receipt = json.loads((tmp_path / "receipts" / "fresh_install.json").read_text())
+    assert receipt["result"] == "harness"
+    assert receipt["detail"] == "fixture missing: hub:/Users/admin/adopt-to-hub.sh"
+    state = acceptance.inspect(tmp_path / "receipts", IDENTITY)["fresh_install"]
+    assert state["state"] == "harness"
+    with pytest.raises(releases.ReleaseError, match="fresh_install: harness"):
+        acceptance.gate(tmp_path / "receipts", IDENTITY)

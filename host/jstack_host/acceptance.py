@@ -45,6 +45,13 @@ REQUIRED: dict[str, tuple[str, ...]] = {
     "off_network": ("device", "transport", "build_notice", "session_journey"),
 }
 PASSED = "passed"
+HARNESS = "harness"
+
+
+class HarnessFault(RuntimeError):
+    """The lab could not stage a journey — a fixture a reset guest lost, a guest
+    the runner could not reach. Written as `harness`, never `failed`: a failed
+    journey has to mean the commit under test, and this says nothing about it."""
 
 
 SOURCE = re.compile(r"[0-9a-f]{40}")
@@ -121,6 +128,9 @@ class Run:
             record.lines.append(when(time.time()) + " aborted by operator")
             self.write(record, "failed", "run aborted")
             raise
+        except HarnessFault as exc:
+            record.lines.append(traceback.format_exc().rstrip())
+            self.write(record, HARNESS, str(exc))
         except Exception as exc:
             record.lines.append(traceback.format_exc().rstrip())
             self.write(record, "failed", f"{type(exc).__name__}: {exc}")
