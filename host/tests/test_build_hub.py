@@ -241,3 +241,42 @@ def test_a_hub_rebuilding_itself_locates_the_framework_it_builds_around(monkeypa
     assert "/opt/python3 is not a framework build" in str(refused.value)
     assert "has no pip" in str(refused.value)
     assert "3.12" in str(refused.value)
+
+
+def test_a_build_input_is_found_where_it_lives_not_only_on_path(monkeypatch, tmp_path):
+    """A build runs from launchd or over ssh, with PATH=/usr/bin:/bin:/usr/sbin:/sbin.
+
+    tmux comes from Homebrew because the installer put it there, and none of
+    Homebrew is on that PATH — so `shutil.which` answered no about a binary
+    sitting at /opt/homebrew/bin/tmux and the build called it missing.
+    """
+    brew = tmp_path / "opt/homebrew/bin"
+    brew.mkdir(parents=True)
+    tmux = brew / "tmux"
+    tmux.write_text("#!/bin/sh\n")
+    tmux.chmod(0o755)
+    monkeypatch.setattr(build_hub, "TOOL_DIRS", (str(brew), "/usr/bin"))
+    monkeypatch.setattr(build_hub.shutil, "which", lambda name: None)
+    monkeypatch.delenv("JSTACK_BUILD_TMUX", raising=False)
+    assert build_hub.build_tool("tmux", "JSTACK_BUILD_TMUX") == tmux
+
+    # PATH still wins when it has an answer, and the override wins over both.
+    on_path = tmp_path / "path/tmux"
+    on_path.parent.mkdir()
+    on_path.write_text("#!/bin/sh\n")
+    on_path.chmod(0o755)
+    monkeypatch.setattr(build_hub.shutil, "which", lambda name: str(on_path))
+    assert build_hub.build_tool("tmux", "JSTACK_BUILD_TMUX") == on_path
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_text("#!/bin/sh\n")
+    elsewhere.chmod(0o755)
+    monkeypatch.setenv("JSTACK_BUILD_TMUX", str(elsewhere))
+    assert build_hub.build_tool("tmux", "JSTACK_BUILD_TMUX") == elsewhere
+
+    # A directory named like the tool is not the tool, and neither is a file
+    # without its executable bit.
+    monkeypatch.delenv("JSTACK_BUILD_TMUX")
+    monkeypatch.setattr(build_hub.shutil, "which", lambda name: None)
+    tmux.chmod(0o644)
+    with pytest.raises(ValueError, match="not on PATH and not in"):
+        build_hub.build_tool("tmux", "JSTACK_BUILD_TMUX")

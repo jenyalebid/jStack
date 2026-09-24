@@ -237,6 +237,30 @@ def build_interpreter() -> Interpreter:
           "a framework interpreter that has pip.")
 
 
+#: Where the installer's Homebrew puts what it was told to install. A build
+#: runs from launchd or over ssh, and neither hands the process a login
+#: shell's PATH — on a stock Mac that is /usr/bin:/bin:/usr/sbin:/sbin, which
+#: contains none of it.
+TOOL_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin")
+
+
+def build_tool(name: str, override: str = "") -> Path:
+    """A build input, found where it lives rather than where PATH points.
+
+    `shutil.which("tmux")` answered no on a Mac whose tmux the installer had
+    itself put at /opt/homebrew/bin/tmux, and the build died calling it a
+    missing requirement. Absence and invisibility are not the same fact, and
+    only one of them is the operator's to fix.
+    """
+    searched = [os.environ.get(override) if override else None, shutil.which(name),
+                *(directory + "/" + name for directory in TOOL_DIRS)]
+    for candidate in searched:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return Path(candidate)
+    raise ValueError(f"{name} is required as a build input — it is not on PATH and not in "
+                     + ", ".join(TOOL_DIRS))
+
+
 def stage_mesh_tools(stack: Path, packages: Path) -> Path:
     """Put the mesh scripts where `hostenv.peer_script()` reads them.
 
@@ -359,10 +383,8 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
                            ("JStackHostBar", "host/menubar/JStackHostBar.swift")):
         command(["xcrun", "swiftc", "-O", "-o", str(macos / name), str(stack / relative)], timeout=180)
     from .bundle_tools import bundle
-    tmux = shutil.which("tmux")
-    if not tmux:
-        raise ValueError("tmux is required as a build input")
-    bundle(Path(tmux), macos / "tmux", contents / "Frameworks/Tools", resources / "Licenses")
+    bundle(build_tool("tmux", "JSTACK_BUILD_TMUX"), macos / "tmux",
+           contents / "Frameworks/Tools", resources / "Licenses")
     python_license = source / "Resources/English.lproj/Documentation/license.html"
     if not python_license.is_file():
         raise ValueError("Python distribution license notice is required")
