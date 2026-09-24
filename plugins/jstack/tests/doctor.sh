@@ -124,6 +124,26 @@ g=$(grade_of "$TMP/broken.json" rules)
 [ "$g" = "fail" ] && pass "a dead symlink is a failure, not an installed rule"
 rm -f "$TMP/home/.claude/rules/canvas.md"
 
+# ── a hook that takes a subcommand is not a missing file ───────────────────
+# The check tested the whole command line as a path, so every hook carrying an
+# argument graded missing on a machine where the file was present and
+# executable — seven of the shipped twenty-seven. A validator that reports a
+# healthy machine as broken costs exactly what one reporting a broken machine
+# as healthy costs: nobody reads it after the second time.
+
+g=$(run_doctor --json 2>/dev/null | grade_of /dev/stdin hooks 2>/dev/null || true)
+run_doctor --json > "$TMP/hooks.json" 2>/dev/null
+g=$(grade_of "$TMP/hooks.json" hooks)
+if [ "$g" = "ok" ]; then
+    pass "hooks that take a subcommand are found, not reported missing"
+else
+    detail=$(python3 -c "import json,sys
+d=json.load(open(sys.argv[1]))
+for c in (d.get('checks') or d):
+    if c.get('name')=='hooks': print(c.get('detail',''))" "$TMP/hooks.json" 2>/dev/null)
+    fail "the shipped hooks should all resolve, got '$g': $detail"
+fi
+
 # ── unparseable config is a failure, because both readers swallow it ────────
 # install() and load_defaults() catch JSONDecodeError and fall back to
 # built-ins, silently. Nothing else on the machine will ever mention it.

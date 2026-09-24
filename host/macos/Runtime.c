@@ -9,6 +9,27 @@
 #include <string.h>
 #include <unistd.h>
 
+/* Who has to have signed these bytes.
+ *
+ * A published Hub answers with the publisher's Developer ID team. A Hub
+ * compiled on the machine that will run it cannot: there is no such identity
+ * on that Mac, so it is signed ad-hoc and answers with the bundle identifier
+ * alone. Demanding the team unconditionally is why a locally built Hub got
+ * all the way through its build and then failed its own sealed installer.
+ *
+ * Compiled in rather than read at launch, because the seal this check
+ * enforces covers this binary: a bundle cannot relax its own requirement
+ * without invalidating the signature that carries it. A marker read out of
+ * Resources at launch could be set by whoever assembled the bundle, which is
+ * the one party the check exists to answer for.
+ */
+#ifdef JSTACK_SOURCE_BUILD
+#define JSTACK_REQUIREMENT "identifier \"live.jstack.hub\""
+#else
+#define JSTACK_REQUIREMENT "anchor apple generic and certificate leaf[subject.OU] = \"MZ95H77RQQ\" " \
+                           "and identifier \"live.jstack.hub\""
+#endif
+
 static int verify_bundle(const char *macos) {
     char bundle_path[PATH_MAX], resolved[PATH_MAX];
     int length = snprintf(bundle_path, sizeof bundle_path, "%s/../..", macos);
@@ -19,9 +40,7 @@ static int verify_bundle(const char *macos) {
     SecRequirementRef requirement = NULL;
     OSStatus status = SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code);
     if (status == errSecSuccess) status = SecRequirementCreateWithString(
-        CFSTR("anchor apple generic and certificate leaf[subject.OU] = \"MZ95H77RQQ\" and "
-              "identifier \"live.jstack.hub\""),
-        kSecCSDefaultFlags, &requirement);
+        CFSTR(JSTACK_REQUIREMENT), kSecCSDefaultFlags, &requirement);
     if (status == errSecSuccess) status = SecStaticCodeCheckValidity(code,
         kSecCSCheckAllArchitectures | kSecCSCheckNestedCode | kSecCSStrictValidate, requirement);
     if (requirement) CFRelease(requirement);

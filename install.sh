@@ -693,11 +693,37 @@ if [ -d "$CHECKOUT/.git" ]; then
             || die "could not fast-forward $CHECKOUT to origin/$REF — it has diverged; move it aside and re-run"
         ok "on $REF at $(git -C "$CHECKOUT" log --oneline -1)"
     fi
+elif [ -f "$CHECKOUT/host/release-identity.json" ]; then
+    # A Mac installed before builds replaced releases has no checkout here at
+    # all: the old installer untarred a publisher snapshot into this path. It
+    # carries a release identity and no .git, and that pair is the whole
+    # signature — a working tree of somebody's has no release identity, and a
+    # real checkout has a .git. Anything else still falls through to the
+    # refusal below.
+    #
+    # It is moved aside, never deleted. It is the only copy of whatever the
+    # last release shipped, and an installer that deletes what it did not
+    # write is exactly issue #130.
+    PRIOR="$(sed -nE 's/.*"release": *"([^"]+)".*/\1/p' "$CHECKOUT/host/release-identity.json" | head -1)"
+    ASIDE="$CHECKOUT.snapshot-${PRIOR:-unknown}"
+    SUFFIX=2
+    while [ -e "$ASIDE" ]; do ASIDE="$CHECKOUT.snapshot-${PRIOR:-unknown}-$SUFFIX"; SUFFIX=$((SUFFIX + 1)); done
+    if [ "$DRY_RUN" = "1" ]; then
+        would "move the $PRIOR release snapshot to $ASIDE and clone $REF over it"
+    else
+        warn "$CHECKOUT holds the $PRIOR release snapshot, not a checkout — this Mac was installed before builds replaced releases"
+        mv "$CHECKOUT" "$ASIDE" || die "could not move the old snapshot to $ASIDE"
+        ok "old snapshot kept at $ASIDE"
+        run_long "cloning $REPO_URL ($REF)" \
+            git clone --quiet --single-branch --branch "$REF" "$REPO_URL" "$CHECKOUT" \
+            || die "clone of $REF failed, and the old snapshot is still at $ASIDE — see $LAST_LOG"
+        ok "on $REF at $(git -C "$CHECKOUT" log --oneline -1)"
+    fi
 elif [ -e "$CHECKOUT" ]; then
     die "$CHECKOUT exists and is not a git checkout — move it aside or pass --checkout DIR"
 else
     run_long "cloning $REPO_URL ($REF)" \
-        git clone --quiet --branch "$REF" "$REPO_URL" "$CHECKOUT" \
+        git clone --quiet --single-branch --branch "$REF" "$REPO_URL" "$CHECKOUT" \
         || die "clone of $REF failed — see $LAST_LOG"
     [ "$DRY_RUN" = "1" ] || ok "cloned in ${LAST_ELAPSED}s at $(git -C "$CHECKOUT" log --oneline -1)"
 fi
@@ -714,9 +740,34 @@ if [ -z "$CLAUDE" ]; then
 else
     # A directory-source marketplace means the plugin runs FROM the checkout:
     # `git pull` is the update, and there is no versioned cache to go stale.
-    if "$CLAUDE" plugin marketplace list 2>/dev/null | grep -q "jStack"; then
-        ok "marketplace jStack already registered"
+    #
+    # Which directory it names is the whole question, and asking whether the
+    # name is registered does not ask it. A Mac moved off a release install
+    # carries a registration pointing into that release's stage, and the host
+    # step moves that stage aside minutes later; the name still matches, so
+    # this step used to declare victory and leave every rule, command and hook
+    # resolving from a directory that is no longer there. The plugin's own
+    # store is the honest answer — it is what `marketplace add` writes.
+    REGISTERED="$(python3 - "$HOME/.claude/settings.json" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    settings = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(0)
+source = settings.get("extraKnownMarketplaces", {}).get("jStack", {}).get("source", {})
+if source.get("source") == "directory":
+    print(source.get("path", ""))
+PY
+)"
+    if [ "$REGISTERED" = "$CHECKOUT" ]; then
+        ok "marketplace jStack → $CHECKOUT"
+    elif [ "$DRY_RUN" = "1" ]; then
+        would "point the jStack marketplace at $CHECKOUT"
     else
+        if [ -n "$REGISTERED" ]; then
+            warn "marketplace jStack pointed at $REGISTERED — re-pointing it at $CHECKOUT"
+            run "$CLAUDE" plugin marketplace remove jStack >/dev/null 2>&1 || true
+        fi
         run "$CLAUDE" plugin marketplace add "$CHECKOUT" >/dev/null 2>&1 \
             && ok "marketplace jStack → $CHECKOUT" \
             || warn "could not register the marketplace"
@@ -793,21 +844,57 @@ fi
 
 step "Rules and bare commands"
 
+# A link this installer made is ours to correct; anything else in these
+# directories is the user's and is never touched. The test is where the link
+# points, not whether something sits at the name — the same distinction the
+# marketplace step above and the PATH step below are careful about, and the
+# reason a Mac moved off a release install ended up reporting two dozen
+# missing rules: the links pointed into that release's stage, the stage was
+# moved aside by a later step, and "already present" was true of every one of
+# them right up until the moment it stopped being true.
+ours() {
+    case "$1" in
+        "$CHECKOUT"/*|*/rules-stage/*|*/commands-stage/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 link_stage() {
-    local src="$1" dst="$2" label="$3" made=0 kept=0
+    local src="$1" dst="$2" label="$3" made=0 kept=0 moved=0 dropped=0
     [ -d "$src" ] || { warn "no $src"; return; }
     run mkdir -p "$dst"
     for f in "$src"/*.md; do
         [ -e "$f" ] || continue
         local target="$dst/$(basename "$f")"
+        if [ -L "$target" ]; then
+            local at; at="$(readlink "$target")"
+            if [ "$at" = "$f" ]; then kept=$((kept+1)); continue; fi
+            if ours "$at"; then
+                run rm -f "$target"
+                run ln -s "$f" "$target" && moved=$((moved+1))
+                continue
+            fi
+        fi
         if [ -e "$target" ] || [ -L "$target" ]; then kept=$((kept+1)); continue; fi
         run ln -s "$f" "$target" && made=$((made+1))
     done
-    if [ "$kept" -gt 0 ]; then
-        ok "$made $label linked, $kept left alone (already present)"
-    else
-        ok "$made $label linked into $dst"
-    fi
+    # A name this checkout no longer ships leaves a link behind that no pass
+    # above ever visits, because the loop walks what exists now. It points at
+    # nothing and it is ours, so it goes — a dead link holds no bytes and
+    # carries its own provenance in its target.
+    for target in "$dst"/*.md; do
+        [ -L "$target" ] || continue
+        [ -e "$target" ] && continue
+        ours "$(readlink "$target")" || continue
+        run rm -f "$target" && dropped=$((dropped+1))
+    done
+    # Counted, not decorated: `${n:+...}` treats a zero count as something to
+    # report, which is how a clean run learns to say "0 re-pointed".
+    SUMMARY="$made $label linked into $dst"
+    [ "$moved" -gt 0 ] && SUMMARY="$SUMMARY, $moved re-pointed"
+    [ "$dropped" -gt 0 ] && SUMMARY="$SUMMARY, $dropped dead link(s) dropped"
+    [ "$kept" -gt 0 ] && SUMMARY="$SUMMARY, $kept left alone"
+    ok "$SUMMARY"
 }
 
 link_stage "$PLUGIN/rules-stage"    "$HOME/.claude/rules"    "rules"
@@ -838,13 +925,37 @@ step "Adapters on PATH"
 PROFILE="$(profile_path)"
 LINE="export PATH=\"$BIN:\$PATH\"  # jstack"
 
-if command -v log_event >/dev/null 2>&1; then
-    ok "already reachable — $(command -v log_event)"
-elif [ -f "$PROFILE" ] && grep -qF "$BIN" "$PROFILE" 2>/dev/null; then
-    ok "$PROFILE already has it — open a new shell to pick it up"
+# "An adapter is reachable" and "the adapter is this checkout's" are different
+# questions, and only the second one matters — the same distinction the root
+# declaration below is careful about. Asking the first one is why a Mac moved
+# off a release install ended with no adapters at all: its profile pointed at a
+# copy inside a release stage under the state dir, `command -v` found it and
+# this step declared victory, and the host step then moved that state dir aside
+# — leaving a PATH entry to nothing on a machine the installer called done.
+if [ "$(command -v log_event 2>/dev/null)" = "$BIN/log_event" ]; then
+    ok "already reachable — $BIN/log_event"
 elif [ "$DRY_RUN" = "1" ]; then
-    would "append to $PROFILE: $LINE"
+    would "point $PROFILE at $BIN"
 else
+    # Any earlier jstack line goes, or a dead stage keeps winning the lookup by
+    # sitting in front of ours. Removed by counting rather than by trusting
+    # grep: a profile is the user's file, and truncating one because a pipe
+    # failed is not a trade this script makes.
+    if [ -f "$PROFILE" ]; then
+        stale="$(grep -c '  # jstack$' "$PROFILE" 2>/dev/null || true)"
+        if [ "${stale:-0}" -gt 0 ]; then
+            before="$(wc -l < "$PROFILE")"
+            pruned="$(mktemp)"
+            grep -v '  # jstack$' "$PROFILE" > "$pruned" 2>/dev/null || true
+            if [ "$((before - $(wc -l < "$pruned")))" -eq "$stale" ]; then
+                cat "$pruned" > "$PROFILE"
+                warn "dropped $stale stale jstack PATH line(s) from $PROFILE"
+            else
+                warn "left $PROFILE alone — its jstack lines did not come out cleanly"
+            fi
+            rm -f "$pruned"
+        fi
+    fi
     # Appended, not asked. Every skill, hook and agent in the stack calls these
     # 18 tools by bare name, so declining left an install that was complete and
     # unusable — and said so in one yellow line above a green verdict. The line
@@ -1072,17 +1183,180 @@ HOST_INSTALLER="$CHECKOUT/host/install.sh"
 # builds the ref the hub follows; a Hub app that is present but dead is torn
 # down and reinstalled fresh; leftover legacy services or state are purged
 # rather than silently steering the install onto the legacy path.
+# The Hub this Mac runs is the commit the checkout is on, compiled here —
+# nothing pre-built is downloaded any more. `build_hub` copies the runtime out
+# of the interpreter running it and accepts exactly the audited CPython 3.12
+# framework (release.sh makes the same demand of the publisher), and it drives
+# clang, swiftc and tmux.
+#
+# Asked HERE, before the block below decides to replace a published Hub, and
+# not where the build itself runs. Asked there it cost a machine its working
+# install: the published Hub was unregistered and deleted and the host's state
+# moved aside, and only then did the script discover there was no interpreter
+# to build the replacement with. It named the remedy correctly and left a Mac
+# with no Hub at all. Nothing is torn down until the replacement is known to
+# be buildable.
+#
+# Two of the three install themselves, because "go and fetch three things"
+# is not an answer a machine should give when it can fetch them. The two that
+# do are the two with a source worth trusting, and each is checked the way
+# `app/install.sh` checks the Mac app — who signed it, and whether Apple
+# notarized it — rather than taken on the strength of the URL.
+# `run_long` backgrounds what it runs, and a background process that reads the
+# terminal is stopped by SIGTTIN rather than answered — so a `sudo` that
+# prompts inside it hangs forever instead of asking. The password is taken
+# here, in the foreground, once; the privileged command itself then runs
+# non-interactively inside the progress wrapper.
+sudo_authorize() {
+    sudo -n true 2>/dev/null && return 0
+    [ "$DRY_RUN" = "1" ] && return 0
+    sudo -p "admin password ($1): " -v 2>/dev/null
+}
+
+PSF_TEAM="BMM5U3QVKW"
+PY_VERSION="3.12.10"
+PY_PKG_URL="https://www.python.org/ftp/python/$PY_VERSION/python-$PY_VERSION-macos11.pkg"
+
+# python.org ships a Developer ID package signed by the Python Software
+# Foundation and notarized by Apple. Verified before it is run, and refused on
+# either count — an installer that would run an unverified root package is a
+# worse problem than the missing interpreter.
+install_framework_python() {
+    local dir pkg sig
+    dir="$(mktemp -d)"; pkg="$dir/python-$PY_VERSION.pkg"
+    run_long "downloading CPython $PY_VERSION from python.org" \
+        curl -fsSL -o "$pkg" "$PY_PKG_URL" || { rm -rf "$dir"; return 1; }
+    sig="$(pkgutil --check-signature "$pkg" 2>&1)"
+    case "$sig" in
+        *"Developer ID Installer: Python Software Foundation ($PSF_TEAM)"*) ;;
+        *) warn "the python.org package is not signed by the Python Software Foundation ($PSF_TEAM) — refusing it"
+           rm -rf "$dir"; return 1 ;;
+    esac
+    case "$sig" in
+        *"Notarization: trusted by the Apple notary service"*) ;;
+        *) warn "the python.org package is not notarized by Apple — refusing it"
+           rm -rf "$dir"; return 1 ;;
+    esac
+    ok "python.org package — Python Software Foundation ($PSF_TEAM), notarized by Apple"
+    sudo_authorize "installing CPython $PY_VERSION" || { rm -rf "$dir"; return 1; }
+    run_long "installing CPython $PY_VERSION" \
+        sudo -n installer -pkg "$pkg" -target / || { rm -rf "$dir"; return 1; }
+    rm -rf "$dir"
+    [ -x "$FRAMEWORK_PY" ]
+}
+
+# Apple's own, through Apple's own updater. `xcode-select --install` raises a
+# dialog nobody is standing in front of; the marker file is what makes the
+# same package appear as a labelled update this can install without one.
+install_command_line_tools() {
+    local marker label
+    marker=/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    : > "$marker" 2>/dev/null || return 1
+    label="$(softwareupdate --list 2>/dev/null \
+        | sed -n 's/^\* Label: \(Command Line Tools for Xcode.*\)$/\1/p' \
+        | sort -V | tail -1)"
+    if [ -z "$label" ]; then rm -f "$marker"; return 1; fi
+    sudo_authorize "installing the Command Line Tools" || { rm -f "$marker"; return 1; }
+    run_long "installing $label" sudo -n softwareupdate --install "$label"
+    local rc=$?
+    rm -f "$marker"
+    [ "$rc" -eq 0 ] || return 1
+    xcrun --find clang >/dev/null 2>&1
+}
+
+ensure_build_inputs() {
+    FRAMEWORK_PY="${JSTACK_BUILD_PYTHON:-/Library/Frameworks/Python.framework/Versions/3.12/bin/python3}"
+    BUILD_VENV="$CHECKOUT/host/.venv312"
+    HUB_STATE="$HOME/.local/state/jremote"
+
+    if [ ! -x "$BUILD_VENV/bin/python3" ] && [ ! -x "$FRAMEWORK_PY" ]; then
+        if [ "$DRY_RUN" = "1" ]; then
+            would "install CPython $PY_VERSION from python.org"
+        else
+            warn "no CPython 3.12 framework at $FRAMEWORK_PY — the Hub is compiled here, so it is a build input"
+            install_framework_python \
+                || die "could not install the CPython 3.12 framework.
+     Install python.org's macOS $PY_VERSION package by hand, or set
+     JSTACK_BUILD_PYTHON to a 3.12 framework interpreter, then re-run."
+            ok "CPython 3.12 framework — $FRAMEWORK_PY"
+        fi
+    fi
+
+    if ! xcrun --find clang >/dev/null 2>&1 || ! xcrun --find swiftc >/dev/null 2>&1; then
+        if [ "$DRY_RUN" = "1" ]; then
+            would "install the Command Line Tools through softwareupdate"
+        else
+            warn "no clang or swiftc — the Hub's runtime shim and its menu bar are compiled here"
+            install_command_line_tools \
+                || die "could not install the Command Line Tools.
+     Install them by hand: xcode-select --install, then re-run."
+            ok "Command Line Tools — $(xcrun --find clang)"
+        fi
+    fi
+
+    # The one with nothing to pin. tmux publishes source, not a signed build,
+    # so there is no team and no notarization to check the way the other two
+    # are checked — Homebrew is the source, and that is said rather than
+    # dressed up as the same kind of trust.
+    if ! command -v tmux >/dev/null 2>&1; then
+        if [ "$DRY_RUN" = "1" ]; then
+            would "install tmux with Homebrew"
+        elif command -v brew >/dev/null 2>&1; then
+            warn "no tmux on PATH — the Hub bundles it, so it is a build input"
+            note "tmux ships as source, so unlike the other two there is no signature to pin — this is Homebrew's build"
+            run_long "installing tmux with Homebrew" brew install tmux \
+                || die "brew install tmux failed — see $LAST_LOG"
+            command -v tmux >/dev/null 2>&1 \
+                || die "tmux still is not on PATH after installing it — open a new shell and re-run."
+        else
+            die "no tmux on PATH, and no Homebrew to install it with — the Hub bundles tmux, so it is a build input.
+     Install Homebrew (https://brew.sh) then re-run, or put a tmux on PATH yourself."
+        fi
+    fi
+
+    ok "build inputs — CPython 3.12 framework, clang, swiftc, tmux"
+}
+
+if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ]; then
+    ensure_build_inputs
+fi
+
 JSTACK_HUB_CURRENT=0
 if [ "$(uname -s)" = "Darwin" ] && [ "$WANT_HOST" != "0" ]; then
     if [ -d "/Applications/jStack Hub.app" ]; then
+        HUB_IDENTITY="/Applications/jStack Hub.app/Contents/Resources/packages/release-identity.json"
         if curl -fsS -m 3 http://127.0.0.1:9090/api/health >/dev/null 2>&1; then
             installed_release="$(sed -nE 's/.*"release": *"([^"]+)".*/\1/p' \
-                "/Applications/jStack Hub.app/Contents/Resources/packages/release-identity.json" 2>/dev/null)"
-            ok "Hub already installed and answering${installed_release:+ (release $installed_release)}"
-            note "moving it forward is \`jstack-host updates build\`, not a re-run of this: the sealed installer does not adopt an installation it did not make"
-            JSTACK_HUB_CURRENT=1
-            HOST_INSTALLED=1
-            SIGNED_HUB=1
+                "$HUB_IDENTITY" 2>/dev/null)"
+            # Answering is not the whole question. Which installer put it there
+            # decides whether it can move itself forward, and `origin` is the
+            # only honest answer to that: it is written solely by a machine that
+            # compiled the bundle for itself, and it is sealed under
+            # Contents/Resources, so a publisher's release carries none.
+            #
+            # A publisher's release is every Mac installed before builds
+            # replaced releases. That Hub's CLI offers `updates enable` and
+            # `updates channel` and no `build` — so leaving it alone and naming
+            # `jstack-host updates build` hands its owner a verb their Hub does
+            # not have, on the one machine shape that cannot get it any other
+            # way. It follows a release line nothing will ever publish to again.
+            # So it is replaced by a Hub compiled here, which is the only thing
+            # that moves it forward at all.
+            if grep -q '"kind"[[:space:]]*:[[:space:]]*"source-build"' "$HUB_IDENTITY" 2>/dev/null; then
+                ok "Hub already installed and answering${installed_release:+ (release $installed_release)}"
+                note "moving it forward is \`jstack-host updates build\`, not a re-run of this: the sealed installer does not adopt an installation it did not make"
+                JSTACK_HUB_CURRENT=1
+                HOST_INSTALLED=1
+                SIGNED_HUB=1
+            elif [ "$DRY_RUN" = "1" ]; then
+                would "replace the ${installed_release:-published} Hub with one built from $REF"
+            else
+                warn "the installed Hub is a published release${installed_release:+ ($installed_release)} and cannot build itself forward — replacing it with a build from $REF"
+                for role in host menu updater; do
+                    launchctl bootout "gui/$(id -u)/live.jstack.hub.$role" >/dev/null 2>&1 || true
+                done
+                rm -rf "/Applications/jStack Hub.app"
+            fi
         else
             warn "a jStack Hub app is present but its host is not answering — replacing it"
             if [ "$DRY_RUN" = "1" ]; then
@@ -1127,29 +1401,7 @@ if [ "$(uname -s)" = "Darwin" ] && [ "$WANT_HOST" != "0" ]; then
 fi
 if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ] \
         && [ "${JSTACK_HUB_CURRENT:-0}" != "1" ]; then
-    # The Hub this Mac runs is the commit the checkout is on, compiled here —
-    # nothing pre-built is downloaded any more. `build_hub` copies the runtime
-    # out of the interpreter running it and accepts exactly the audited CPython
-    # 3.12 framework (release.sh makes the same demand of the publisher), and it
-    # drives clang, swiftc and tmux. A Mac missing one of those cannot install;
-    # it is told which one and what to do, rather than handed a traceback ten
-    # minutes into a build.
-    FRAMEWORK_PY="${JSTACK_BUILD_PYTHON:-/Library/Frameworks/Python.framework/Versions/3.12/bin/python3}"
-    BUILD_VENV="$CHECKOUT/host/.venv312"
-    HUB_STATE="$HOME/.local/state/jremote"
-    if [ ! -x "$BUILD_VENV/bin/python3" ] && [ ! -x "$FRAMEWORK_PY" ]; then
-        die "the Hub is compiled on this Mac and that needs the audited CPython 3.12 framework.
-     It is not at $FRAMEWORK_PY — install python.org's
-     macOS 3.12 package, or set JSTACK_BUILD_PYTHON to a 3.12 framework interpreter."
-    fi
-    for tool in clang swiftc; do
-        xcrun --find "$tool" >/dev/null 2>&1 \
-            || die "no $tool — the Hub's runtime shim and its menu bar are compiled here.
-     Install the Command Line Tools: xcode-select --install"
-    done
-    command -v tmux >/dev/null 2>&1 \
-        || die "no tmux on PATH — the Hub bundles it, so it is a build input.
-     Install it: brew install tmux"
+    # Already settled, before anything on this Mac was taken apart.
     # Signing is optional, and on all but the publisher's Mac it is absent.
     # A Hub built here is then signed ad-hoc, which the sealed installer now
     # adopts: the bundle records that this machine built it, and the pinned
@@ -1161,7 +1413,6 @@ if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ] \
         die "JSTACK_SIGNING_CONFIG points at no file: $SIGNING_CONFIG
      Unset it to build a Hub signed with this machine's own key."
     fi
-    ok "build inputs — CPython 3.12 framework, clang, swiftc, tmux"
 
     if [ "$DRY_RUN" = "1" ]; then
         would "build the Hub from $REF and install it into /Applications"

@@ -274,13 +274,20 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
     (packages / "release-identity.json").write_text(json.dumps({
         **identity,
         "package_sha256": fingerprint(packages / "jstack_host")}) + "\n")
+    # The runtime gate asks who signed the bundle it is about to import from.
+    # A Hub built on the Mac that will run it is signed ad-hoc — that Mac holds
+    # no Developer ID — so asking for the publisher's team makes every such
+    # build unlaunchable, which is what it did. The answer is chosen here, at
+    # compile time, so the seal covers the choice: a bundle that relaxed its
+    # own requirement would no longer verify. A published Hub is unchanged.
+    origin = ["-DJSTACK_SOURCE_BUILD"] if isinstance(identity.get("origin"), dict) else []
     command(["xcrun", "clang", "-O2", "-Wall", "-Wextra", "-Werror", "-mmacosx-version-min=13.0",
-             "-framework", "Security", "-framework", "CoreFoundation",
+             "-framework", "Security", "-framework", "CoreFoundation", *origin,
              "-I" + str(source / "include/python3.12"), str(stack / "host/macos/Runtime.c"),
              str(source / "Python"), "-o", str(macos / "JStackRuntime")])
     shutil.copy2(macos / "JStackRuntime", macos / "JStackCLI")
     command(["xcrun", "clang", "-O2", "-Wall", "-Wextra", "-Werror", "-mmacosx-version-min=13.0",
-             "-framework", "Security", "-framework", "CoreFoundation",
+             "-framework", "Security", "-framework", "CoreFoundation", *origin,
              "-DJSTACK_PYTHON", "-I" + str(source / "include/python3.12"),
              str(stack / "host/macos/Runtime.c"), str(source / "Python"), "-o", str(macos / "JStackPython")])
     for name, relative in (("JStackHub", "host/macos/ServiceControl.swift"),

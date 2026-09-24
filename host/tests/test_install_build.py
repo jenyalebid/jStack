@@ -292,10 +292,88 @@ def test_one_writer_lands_both_a_hubs_build_and_an_installers(installing, tmp_pa
 
 def test_install_sh_installs_a_ref_and_downloads_no_release():
     assert "--ref" in CODE and "JSTACK_REF" in CODE
-    assert "git clone --quiet --branch" in CODE
+    assert re.search(r"git clone --quiet [^\n]*--branch", CODE)
     assert "merge --ff-only" in CODE
     for gone in ("RELEASE_TAG", "stack-release", "releases/download", "tar xzf"):
         assert gone not in CODE, f"install.sh still downloads a release: {gone}"
+
+
+def test_install_sh_clones_one_branch_so_no_binary_rides_in_on_another():
+    """The app is served off a branch of this repo, and a plain clone would put
+    that blob in every user's checkout and keep it there. Every clone here is
+    single-branch, so a ref nobody asked for is never fetched."""
+    clones = re.findall(r"git clone[^\n]*", CODE)
+    assert clones
+    for clone in clones:
+        assert "--single-branch" in clone, f"clone fetches every branch: {clone}"
+
+
+def test_install_sh_moves_a_release_snapshot_forward_instead_of_refusing_it():
+    """Every Mac installed before builds replaced releases has a $CHECKOUT that
+    is not a checkout: the old installer untarred a publisher snapshot there,
+    so it carries host/release-identity.json and no .git. Step 2 refused
+    exactly that shape, which made the first thing the new installer did on
+    every deployed Mac be to die.
+
+    It is moved aside and never deleted — it is the only copy of what the last
+    release shipped, and an installer that deletes what it did not write is
+    #130."""
+    assert "host/release-identity.json" in CODE
+    assert ".snapshot-" in CODE
+    snapshot = CODE[CODE.index("host/release-identity.json"):]
+    snapshot = snapshot[:snapshot.index("elif [ -e ")]
+    assert 'mv "$CHECKOUT" "$ASIDE"' in snapshot
+    for destructive in ("rm -rf \"$CHECKOUT\"", "rm -r \"$CHECKOUT\""):
+        assert destructive not in snapshot, f"the old snapshot is deleted: {destructive}"
+
+
+def test_install_sh_replaces_a_published_hub_rather_than_naming_a_verb_it_lacks():
+    """A Hub that answers is left alone only when it records that this machine
+    built it. A published release carries no `origin` marker, follows a release
+    line nothing will publish to again, and its CLI has `updates enable` and
+    `updates channel` and no `build` — so the note telling its owner to run
+    `jstack-host updates build` names a verb that Hub does not have, on the one
+    machine shape that cannot get it any other way."""
+    assert '"kind"[[:space:]]*:[[:space:]]*"source-build"' in CODE
+    guard = CODE[CODE.index("Hub already installed and answering"):]
+    guard = guard[:guard.index("jStack Hub app is present but its host")]
+    assert "cannot build itself forward" in guard
+    assert 'rm -rf "/Applications/jStack Hub.app"' in guard
+
+
+def test_the_runtime_gate_does_not_demand_a_team_a_self_built_hub_cannot_have():
+    """The Hub's C runtime validates the seal before importing any module, and
+    it asked for the publisher's Developer ID team unconditionally. A Hub
+    compiled on the Mac that runs it is signed ad-hoc — that Mac holds no such
+    identity — so every source build built cleanly and then failed its own
+    sealed installer at the last step.
+
+    The requirement is chosen at compile time, not read from Resources at
+    launch: the seal covers this binary, so a bundle cannot relax its own rule
+    without invalidating the signature that carries it. A marker read at launch
+    could be written by whoever assembled the bundle, which is the one party
+    the check answers for.
+    """
+    runtime = (REPO / "host/macos/Runtime.c").read_text()
+    assert "#ifdef JSTACK_SOURCE_BUILD" in runtime
+    assert "CFSTR(JSTACK_REQUIREMENT)" in runtime
+    # The team pin is still what a published Hub demands.
+    strict = runtime[runtime.index("#else"):runtime.index("#endif")]
+    assert "MZ95H77RQQ" in strict and "anchor apple generic" in strict
+    relaxed = runtime[runtime.index("#ifdef JSTACK_SOURCE_BUILD"):runtime.index("#else")]
+    assert "MZ95H77RQQ" not in relaxed
+    assert "live.jstack.hub" in relaxed
+
+
+def test_a_source_build_compiles_the_runtime_that_will_accept_it():
+    """Both the service runtime and the interpreter shim are built from the
+    same file, so both carry the requirement and both need the define."""
+    import inspect
+    source = inspect.getsource(build_hub._build)
+    assert 'origin = ["-DJSTACK_SOURCE_BUILD"] if isinstance(identity.get("origin"), dict) else []' in source
+    compiles = [line for line in source.splitlines() if "Runtime.c" in line]
+    assert len(compiles) == 2
+    assert source.count("*origin") == 2
 
 
 def test_install_sh_never_deletes_uncommitted_work_in_the_checkout():
@@ -305,6 +383,92 @@ def test_install_sh_never_deletes_uncommitted_work_in_the_checkout():
                         "-source-$(date"):
         assert destructive not in CODE, f"install.sh still discards work: {destructive}"
     assert "has uncommitted work (above)" in CODE
+
+
+def test_install_sh_puts_this_checkouts_adapters_on_path_not_merely_some():
+    """It asked whether `log_event` resolved at all. On a Mac moved off a
+    release install the answer was yes and wrong: the profile pointed into a
+    release stage under the state dir, which the host step moves aside minutes
+    later. The install finished green with no adapter reachable at all."""
+    assert 'command -v log_event 2>/dev/null)" = "$BIN/log_event"' in CODE
+    # And the stale line is taken out, or the dead stage keeps winning.
+    assert "'  # jstack$'" in CODE
+    assert "dropped $stale stale jstack PATH line(s)" in CODE
+
+
+def test_install_sh_points_the_marketplace_at_this_checkout_not_merely_at_a_name():
+    """The registration is what every rule, command and hook resolves through.
+    A Mac moved off a release install carries one naming that release's stage,
+    and the host step moves the stage aside minutes later — so `grep -q jStack`
+    answered yes and left the whole plugin resolving from a deleted directory."""
+    assert '"$REGISTERED" = "$CHECKOUT"' in CODE
+    # Read from the plugin's own store, which is what `marketplace add` writes.
+    assert "extraKnownMarketplaces" in CODE
+    assert "marketplace jStack pointed at $REGISTERED" in CODE
+
+
+def test_install_sh_repoints_a_rule_link_of_ours_that_points_somewhere_else():
+    """`[ -L "$target" ]` was true of a link into a stage that no longer
+    exists, and "already present" kept it that way for the life of the Mac."""
+    assert 'ours "$at"' in CODE
+    assert "*/rules-stage/*|*/commands-stage/*" in CODE
+    assert "re-pointed" in CODE
+
+
+def test_install_sh_drops_a_dead_link_of_ours_that_no_pass_would_revisit():
+    """A name this checkout no longer ships is never walked by the linking
+    loop, so it needs its own sweep — and only ours, never the user's."""
+    assert "dead link(s) dropped" in CODE
+    assert 'ours "$(readlink "$target")" || continue' in CODE
+
+
+def test_install_sh_settles_build_inputs_before_it_takes_a_working_hub_apart():
+    """It asked for the interpreter where the build runs, which is after the
+    published Hub has been unregistered, deleted and its state moved aside. A
+    Mac with no CPython 3.12 framework was left with no Hub at all, under a
+    correctly worded remedy."""
+    call = CODE.index("    ensure_build_inputs")
+    # The teardown on the INSTALL path, not the one --uninstall does.
+    replace = CODE.index("cannot build itself forward")
+    teardown = CODE.index('rm -rf "/Applications/jStack Hub.app"', replace)
+    assert call < teardown, "build inputs are settled after the Hub is deleted"
+    # And after the checkout exists, since the venv it may find lives there.
+    assert CODE.index('step "jStack source at $CHECKOUT ($REF)"') < call
+
+
+def test_install_sh_verifies_the_python_package_before_it_runs_it_as_root():
+    """A root package fetched over the network and run unverified is a worse
+    problem than the missing interpreter it would fix."""
+    assert "pkgutil --check-signature" in CODE
+    assert 'Developer ID Installer: Python Software Foundation ($PSF_TEAM)' in CODE
+    assert "Notarization: trusted by the Apple notary service" in CODE
+    assert 'PSF_TEAM="BMM5U3QVKW"' in CODE
+    # Refused on either count, rather than installed with a warning.
+    assert CODE.count("refusing it") >= 2
+
+
+def test_install_sh_claims_the_build_inputs_check_once_because_it_runs_once():
+    """The line survived where the check used to be, so a run announced the
+    inputs twice — the second time from a block that no longer looks at them."""
+    assert CODE.count('ok "build inputs') == 1
+
+
+def test_install_sh_asks_for_the_password_in_the_foreground_not_inside_run_long():
+    """`run_long` backgrounds what it runs, and a background process reading
+    the terminal is stopped by SIGTTIN rather than answered — a `sudo` that
+    prompts in there hangs instead of asking."""
+    assert "sudo_authorize" in CODE
+    # Inside the progress wrapper, every sudo is non-interactive.
+    for line in CODE.splitlines():
+        if "run_long" in line and "sudo" in line:
+            assert "sudo -n" in line, f"an interactive sudo inside run_long: {line.strip()}"
+
+
+def test_install_sh_does_not_dress_homebrews_tmux_up_as_a_pinned_signature():
+    """The other two carry a Developer ID and Apple's notarization. tmux
+    publishes source, so it carries neither, and the difference is said."""
+    assert "no signature to pin" in INSTALL
+    assert "brew install tmux" in CODE
 
 
 def test_install_sh_names_a_remedy_for_every_build_input_it_requires():
