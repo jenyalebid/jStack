@@ -329,6 +329,128 @@ CREATE TABLE IF NOT EXISTS session_closes (
 );
 CREATE INDEX IF NOT EXISTS closes_session ON session_closes(session_id, closed_at DESC);
 CREATE INDEX IF NOT EXISTS closes_at ON session_closes(closed_at DESC);
+
+-- ── Session environment ──
+--
+-- How a session WORKS, as against what it is working on: run the simulator
+-- journey or skip it, deliver by distribute or by build, one agent or one per
+-- stage. Facts a transcript never carries and the user restates every session
+-- until something holds them.
+--
+-- Two tables and not one with a nullable scope column, because they are two
+-- different kinds of row: a session value is a decision about this sitting,
+-- an agent value is a standing default every future sitting of that agent
+-- inherits. `environment.resolve()` walks session → agent → registry default
+-- and reports which layer answered, so a screen can show an inherited value
+-- as inherited rather than as a local one somebody set.
+--
+-- Keyed on session_id in their OWN table for `session_launch`'s reason: the
+-- indexer rewrites the `sessions` row whole from the transcript on every
+-- append, and a column there would be wiped the next time the file grew.
+--
+-- No `seq`: these are not in the device sync set. Adding a table to
+-- `changes_since` is a wire change that needs the app's table epoch reset,
+-- and the app reads both layers live over the API instead.
+CREATE TABLE IF NOT EXISTS session_env (
+  session_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL DEFAULT '',
+  updated_at REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (session_id, key)
+);
+CREATE TABLE IF NOT EXISTS agent_env (
+  agent_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL DEFAULT '',
+  updated_at REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (agent_id, key)
+);
+
+-- ── Work: plans, stages, tasks, proofs ──
+--
+-- A plan is the deliverable end result; a stage is one isolated verifiable
+-- unit of work inside it; a task is the order of operations inside a stage.
+-- The markdown a provider's plan mode writes stays the authored artifact —
+-- `plan_file` points at it — and these rows are the state it cannot hold:
+-- what has started, what finished, and what proof says so.
+--
+-- The rows exist so "is this done" has an answer that is not a sentence. A
+-- stage declares its proof kind up front (`verify_kind`), and the writer
+-- refuses to close a stage that declared one without a passing `stage_proofs`
+-- row. That refusal is the whole enforcement story; there is no blocking hook
+-- anywhere in it, so nothing here can wedge a session.
+--
+-- `plan_sessions` is many-to-many on purpose: a plan outlives the session that
+-- authored it, and a splitoff, a resume or a per-stage subagent joins the same
+-- plan by id rather than forking a second copy of it. `stages.session_id` is
+-- the narrower fact — which session ran that one stage — and is how a
+-- subagent's work stays attributable to the stage it was dispatched for.
+--
+-- `stages.env` is the resolved environment at the moment the stage was
+-- dispatched, JSON, snapshot not reference. There is deliberately no config
+-- column on `plans`: configuration belongs to the session, and a plan reads
+-- whichever session is driving it. Recording the snapshot answers "how was
+-- this run" without pretending the setting was the plan's own.
+CREATE TABLE IF NOT EXISTS plans (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'planning',
+  plan_file TEXT NOT NULL DEFAULT '',
+  engine TEXT NOT NULL DEFAULT '',
+  repo TEXT NOT NULL DEFAULT '',
+  created_at REAL NOT NULL DEFAULT 0,
+  updated_at REAL NOT NULL DEFAULT 0,
+  deleted INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS plans_updated ON plans(updated_at DESC);
+CREATE TABLE IF NOT EXISTS plan_sessions (
+  plan_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT '',
+  joined_at REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (plan_id, session_id)
+);
+CREATE INDEX IF NOT EXISTS plan_sessions_session ON plan_sessions(session_id);
+CREATE TABLE IF NOT EXISTS stages (
+  id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL DEFAULT '',
+  ordinal INTEGER NOT NULL DEFAULT 0,
+  title TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  verify_kind TEXT NOT NULL DEFAULT 'none',
+  verify_spec TEXT NOT NULL DEFAULT '',
+  session_id TEXT NOT NULL DEFAULT '',
+  env TEXT NOT NULL DEFAULT '',
+  blocked_reason TEXT NOT NULL DEFAULT '',
+  started_at REAL NOT NULL DEFAULT 0,
+  finished_at REAL NOT NULL DEFAULT 0,
+  updated_at REAL NOT NULL DEFAULT 0,
+  UNIQUE (plan_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS stages_plan ON stages(plan_id, ordinal);
+CREATE TABLE IF NOT EXISTS stage_tasks (
+  id TEXT PRIMARY KEY,
+  stage_id TEXT NOT NULL DEFAULT '',
+  ordinal INTEGER NOT NULL DEFAULT 0,
+  subject TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  native_id TEXT NOT NULL DEFAULT '',
+  updated_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS stage_tasks_stage ON stage_tasks(stage_id, ordinal);
+CREATE TABLE IF NOT EXISTS stage_proofs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stage_id TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT '',
+  ok INTEGER NOT NULL DEFAULT 0,
+  detail TEXT NOT NULL DEFAULT '',
+  output TEXT NOT NULL DEFAULT '',
+  exit_code INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  created_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS stage_proofs_stage ON stage_proofs(stage_id, created_at DESC);
 """
 
 # Session-row fields that sync/serve — everything except indexer bookkeeping.
@@ -409,6 +531,25 @@ class SessionStore:
                 yield db
         finally:
             db.close()
+
+    @contextlib.contextmanager
+    def conn(self) -> Iterator[sqlite3.Connection]:
+        """A connection for a sibling module that owns tables in this file.
+
+        `environment.py` and `plans.py` declare their tables in `_SCHEMA` —
+        they have to, or `_add_missing_columns` never reaches an existing
+        store — but their CRUD is theirs, not this class's: a store that grew
+        a method per table of every feature stops being a session index and
+        becomes the whole host with a `.db_path`.
+
+        Exposed rather than letting them call `_conn` so the discipline in it
+        stays one decision in one place: WAL, a 30s busy timeout, a
+        transaction per block, and the connection CLOSED rather than left to
+        the cyclic collector — the leak that filled the descriptor table and
+        took the host down once already.
+        """
+        with self._conn() as db:
+            yield db
 
     @staticmethod
     def _canonicalise_shortcut_ids(db: sqlite3.Connection) -> None:
