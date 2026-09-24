@@ -1,3 +1,6 @@
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -181,3 +184,99 @@ def test_a_present_peer_table_is_not_blamed_for_a_missing_tool(tmp_path, monkeyp
     monkeypatch.setattr(tunnel, "HUB_CONF", conf)
     monkeypatch.setattr(tunnel, "PEER_SCRIPT", tmp_path / "gone/wg_peer.py")
     assert tunnel.missing_for_pairing() == [tmp_path / "gone/wg_peer.py"]
+
+
+def test_a_hub_rebuilding_itself_locates_the_framework_it_builds_around(monkeypatch, tmp_path):
+    """The interpreter running the build is never assumed to be the one built around.
+
+    `jstack-host` runs from the checkout venv, which the installer makes on
+    whatever python3 the Mac already had — 3.14 from Homebrew on a stock
+    machine — and the sealed Hub runs JStackPython, which is 3.12 with no pip.
+    Both failed: the first on the version guard, the second on "No module
+    named pip". Install worked either way, so every machine could install and
+    none could update itself.
+    """
+    from jstack_host import build_hub
+
+    def answering(**overrides):
+        answer = {"prefix": str(framework), "version": "3.12.10", "pip": True} | overrides
+        return json.dumps(answer)
+
+    framework = tmp_path / "Library/Frameworks/Python.framework/Versions/3.12"
+    framework.mkdir(parents=True)
+    (framework / "Python").write_bytes(b"\xcf\xfa\xed\xfe")
+    asked, answers = [], {}
+
+    def probe(argv, **kwargs):
+        asked.append(argv[0])
+        if argv[0] not in answers:
+            return subprocess.CompletedProcess(argv, 1, "", "no such file")
+        return subprocess.CompletedProcess(argv, 0, answers[argv[0]], "")
+
+    monkeypatch.setattr(build_hub.subprocess, "run", probe)
+    monkeypatch.delenv("JSTACK_BUILD_PYTHON", raising=False)
+
+    # The running interpreter is a pipless 3.12 and a Homebrew 3.14 at once —
+    # neither is what the bundle embeds, and the framework is found regardless.
+    answers[build_hub.FRAMEWORK_PYTHON] = answering()
+    answers[sys.executable] = answering(version="3.14.7", pip=True, prefix=str(tmp_path / "brew"))
+    found = build_hub.build_interpreter()
+    assert found == build_hub.Interpreter(build_hub.FRAMEWORK_PYTHON, framework, "3.12.10")
+    assert asked[0] == build_hub.FRAMEWORK_PYTHON
+
+    # JSTACK_BUILD_PYTHON is asked first and wins when it qualifies.
+    monkeypatch.setenv("JSTACK_BUILD_PYTHON", "/opt/python3")
+    answers["/opt/python3"] = answering()
+    asked.clear()
+    assert build_hub.build_interpreter().executable == "/opt/python3"
+    assert asked == ["/opt/python3"]
+
+    # A 3.12 that is not a framework build, and one without pip, are both
+    # refused — and the refusal says which was which.
+    del answers["/opt/python3"], answers[build_hub.FRAMEWORK_PYTHON]
+    answers["/opt/python3"] = answering(prefix=str(tmp_path / "plain"))
+    answers[sys.executable] = answering(pip=False)
+    with pytest.raises(RuntimeError) as refused:
+        build_hub.build_interpreter()
+    assert "/opt/python3 is not a framework build" in str(refused.value)
+    assert "has no pip" in str(refused.value)
+    assert "3.12" in str(refused.value)
+
+
+def test_a_build_input_is_found_where_it_lives_not_only_on_path(monkeypatch, tmp_path):
+    """A build runs from launchd or over ssh, with PATH=/usr/bin:/bin:/usr/sbin:/sbin.
+
+    tmux comes from Homebrew because the installer put it there, and none of
+    Homebrew is on that PATH — so `shutil.which` answered no about a binary
+    sitting at /opt/homebrew/bin/tmux and the build called it missing.
+    """
+    brew = tmp_path / "opt/homebrew/bin"
+    brew.mkdir(parents=True)
+    tmux = brew / "tmux"
+    tmux.write_text("#!/bin/sh\n")
+    tmux.chmod(0o755)
+    monkeypatch.setattr(build_hub, "TOOL_DIRS", (str(brew), "/usr/bin"))
+    monkeypatch.setattr(build_hub.shutil, "which", lambda name: None)
+    monkeypatch.delenv("JSTACK_BUILD_TMUX", raising=False)
+    assert build_hub.build_tool("tmux", "JSTACK_BUILD_TMUX") == tmux
+
+    # PATH still wins when it has an answer, and the override wins over both.
+    on_path = tmp_path / "path/tmux"
+    on_path.parent.mkdir()
+    on_path.write_text("#!/bin/sh\n")
+    on_path.chmod(0o755)
+    monkeypatch.setattr(build_hub.shutil, "which", lambda name: str(on_path))
+    assert build_hub.build_tool("tmux", "JSTACK_BUILD_TMUX") == on_path
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_text("#!/bin/sh\n")
+    elsewhere.chmod(0o755)
+    monkeypatch.setenv("JSTACK_BUILD_TMUX", str(elsewhere))
+    assert build_hub.build_tool("tmux", "JSTACK_BUILD_TMUX") == elsewhere
+
+    # A directory named like the tool is not the tool, and neither is a file
+    # without its executable bit.
+    monkeypatch.delenv("JSTACK_BUILD_TMUX")
+    monkeypatch.setattr(build_hub.shutil, "which", lambda name: None)
+    tmux.chmod(0o644)
+    with pytest.raises(ValueError, match="not on PATH and not in"):
+        build_hub.build_tool("tmux", "JSTACK_BUILD_TMUX")

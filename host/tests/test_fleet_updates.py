@@ -23,12 +23,11 @@ def release():
     key = Ed25519PrivateKey.generate()
     components = {name: {"file": name + ".zip", "sha256": hashlib.sha256(b"artifact").hexdigest(),
                          "bytes": 8, "version": "1"} for name in releases.COMPONENTS}
-    artifacts = hashlib.sha256(releases.canonical(components)).hexdigest()
     manifest = {"schema": 1, "release": "test-1", "components": components,
                 "sources": {"stack": "a" * 40, "client": "b" * 40},
                 "compatibility": {"protocol": 1, "rollback": True, "platform": "macos",
                                   "architecture": "arm64", "minimum_os": "13.0"},
-                "receipts": {name: {"result": "passed", "skipped": 0, "artifacts": artifacts,
+                "receipts": {name: {"result": "passed", "skipped": 0, "source": "a" * 40,
                                     "evidence_sha256": "c" * 64} for name in releases.RECEIPTS}}
     envelope = releases.sign(manifest, key.private_bytes_raw())
     return key, base64.b64encode(key.public_key().public_bytes_raw()).decode(), envelope
@@ -89,7 +88,7 @@ def test_signature_rejects_payload_and_trust_key_substitution(release):
 
 
 @pytest.mark.parametrize("mutation", ["none", "skipped", "stale", "wrong_digest", "failed"])
-def test_every_receipt_a_release_carries_is_a_pass_for_these_exact_bytes(release, mutation):
+def test_every_receipt_a_release_carries_is_a_pass_for_this_exact_commit(release, mutation):
     _, _, envelope = release
     manifest = envelope["manifest"]
     receipt = manifest["receipts"]["off_network"]
@@ -98,7 +97,7 @@ def test_every_receipt_a_release_carries_is_a_pass_for_these_exact_bytes(release
     elif mutation == "skipped":
         receipt["skipped"] = 1
     elif mutation == "stale":
-        manifest["components"]["stack"]["version"] = "2"
+        manifest["sources"]["stack"] = "f" * 40
     elif mutation == "wrong_digest":
         receipt["evidence_sha256"] = ""
     else:
@@ -223,9 +222,12 @@ def test_offline_job_delivered_on_reconnect_and_revocation_refuses_it(rig):
     assert inventory["machines"][1]["state"] == "pending/offline"
     headers = {"Authorization": "Bearer " + token}
     path = "/api/jremote/v1/managed/updates/heartbeat"
+    atomic_json(fleet.root() / "config.json", {"public_key": "hub-key"})
     response = remote.post(path, headers=headers, json={"observation": {"supervisor": 1}})
     assert response.status_code == 200, response.text
     assert response.json()["job"]["id"] == queued.json()["jobs"][0]["id"]
+    # The key the job is signed with rides beside it (#144).
+    assert response.json()["public_key"] == "hub-key"
     assert remote.post("/api/jremote/v1/managed/updates/check", headers=headers).status_code == 200
     devices.revoke(row["id"])
     assert remote.post(path, headers=headers, json={}).status_code == 401
@@ -301,6 +303,69 @@ def supervisor(tmp_path, release, backend=None):
         return httpx.Response(200, json={"job": job})
     client = httpx.Client(transport=httpx.MockTransport(transport))
     return Supervisor(root, configuration, backend or Backend(), client), job
+
+
+def managed_supervisor(tmp_path, release, *, pinned: str, answer: dict):
+    """A leaf: its parent on file, `pinned` as the key it installed with, and a
+    parent that answers every heartbeat with `answer` beside the job."""
+    daemon, job = supervisor(tmp_path, release)
+    (tmp_path / "parent.json").write_text(json.dumps(
+        {"parent_url": "http://parent:9090", "token": "leaf-token"}))
+    daemon.config["public_key"] = pinned
+    atomic_json(daemon.root / "config.json", dict(daemon.config))
+
+    def transport(request):
+        if request.method == "GET":
+            return httpx.Response(200, content=b"artifact")
+        body = json.loads(request.content)
+        if body.get("state"):
+            job["state"] = body["state"]
+        if body.get("observation", {}).get("verified"):
+            job["state"] = "current"
+        return httpx.Response(200, json={"job": job, **answer})
+    daemon.client = httpx.Client(transport=httpx.MockTransport(transport))
+    return daemon, job
+
+
+def test_a_leaf_takes_its_parents_key_from_the_heartbeat_and_verifies_the_job_with_it(tmp_path, release):
+    """#144. The leaf installed from a bundle signed by one key; the parent
+    that adopted it builds and signs with its own. The job it sends is
+    unverifiable against the pinned key — and the key that fixes that comes
+    down the same authenticated connection, before the job is verified."""
+    stale = base64.b64encode(Ed25519PrivateKey.generate().public_key().public_bytes_raw()).decode()
+    daemon, job = managed_supervisor(tmp_path, release, pinned=stale,
+                                     answer={"public_key": release[1]})
+    daemon.tick()
+    assert daemon.backend.events == ["compatible", "stage", "apply"], daemon.current
+    assert daemon.config["public_key"] == release[1]
+    assert json.loads((daemon.root / "config.json").read_text())["public_key"] == release[1]
+    # Durable across the daemon's own re-read of its settings.
+    daemon.refresh_settings()
+    assert daemon.config["public_key"] == release[1]
+
+
+@pytest.mark.parametrize("offered", ["", "not a key", base64.b64encode(b"short").decode(), 7, None])
+def test_a_leaf_keeps_its_key_when_the_parent_offers_nothing_usable(tmp_path, release, offered):
+    daemon, _ = managed_supervisor(tmp_path, release, pinned=release[1],
+                                   answer={"public_key": offered} if offered is not None else {})
+    daemon.tick()
+    assert daemon.config["public_key"] == release[1]
+    assert daemon.backend.events == ["compatible", "stage", "apply"]
+
+
+def test_a_hub_never_takes_a_key_from_its_own_local_heartbeat(tmp_path, release):
+    """Only a parent is a trust root. The hub's local heartbeat answers with
+    the same field, and a hub must not re-pin itself off it."""
+    daemon, job = supervisor(tmp_path, release)
+    foreign = base64.b64encode(Ed25519PrivateKey.generate().public_key().public_bytes_raw()).decode()
+
+    def transport(request):
+        if request.method == "GET":
+            return httpx.Response(200, content=b"artifact")
+        return httpx.Response(200, json={"job": job, "public_key": foreign})
+    daemon.client = httpx.Client(transport=httpx.MockTransport(transport))
+    daemon.tick()
+    assert daemon.config["public_key"] == release[1]
 
 
 def test_supervisor_stages_before_apply_then_requires_hub_confirmation(tmp_path, release):

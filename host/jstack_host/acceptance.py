@@ -1,10 +1,10 @@
 """Acceptance receipts written from observations, never from a declaration.
 
-The journeys in `release_manifest.RECEIPTS` are what a candidate must
-survive before it can be offered to a fleet. Each journey here names the facts
-it has to observe. A run records those facts while the journey executes against
-the exact artifact set of the candidate under test, and the receipt is written
-from that record — there is no call that marks a journey passed.
+The journeys in `release_manifest.RECEIPTS` are what a commit must survive
+before a fleet is moved onto it. Each journey here names the facts it has to
+observe. A run records those facts while the journey executes against a Mac
+built from the commit under test, and the receipt is written from that record
+— there is no call that marks a journey passed.
 
 A journey that raises, that ends without every required observation, or that
 never ran is written down as exactly that. `gate` then refuses promotion and
@@ -16,8 +16,8 @@ manifest; their values go into the evidence log the receipt is hashed against.
 """
 from __future__ import annotations
 
-import hashlib
 import json
+import re
 import time
 import traceback
 from contextlib import contextmanager
@@ -30,29 +30,46 @@ from .update_supervisor import atomic_json
 # the contract's own words, not a convenient
 # subset: adding a journey to the runner never adds a way to skip one of these.
 REQUIRED: dict[str, tuple[str, ...]] = {
-    "fresh_install": ("installed_release", "host_identity", "plugin_versions",
+    "fresh_install": ("installed_build", "host_identity", "plugin_versions",
                       "app_versions", "pairing", "new_session"),
-    "upgrade": ("previous_release", "installed_release", "host_identity",
+    "upgrade": ("previous_build", "installed_build", "host_identity",
                 "plugin_versions", "app_versions"),
     "fleet": ("hub_self_update", "leaf_local_update", "leaf_remote_update",
               "update_all", "duplicate_request", "denied_authority"),
     "offline_catchup": ("queued_offline", "offline_state", "same_job_current",
                         "fresh_observation"),
     "session_survival": ("session_pid", "surviving_pid", "new_output", "app_relaunch",
-                         "candidate_new_session"),
+                         "built_new_session"),
     "interruption": ("interrupted_job", "recovered_state", "retry_current", "reboot_resume"),
-    "revocation": ("revoked_device", "cancelled_job", "rejected_request", "unchanged_release"),
-    "off_network": ("device", "transport", "release_notice", "session_journey"),
+    "revocation": ("revoked_device", "cancelled_job", "rejected_request", "unchanged_build"),
+    "off_network": ("device", "transport", "build_notice", "session_journey"),
 }
 PASSED = "passed"
+HARNESS = "harness"
 
 
-def artifact_set(manifest: dict) -> str:
-    """A receipt belongs to one exact component set. Rebuilt bytes need new runs."""
-    components = manifest["components"]
-    if set(components) != releases.COMPONENTS:
-        raise releases.ReleaseError("a release must include stack, menubar and client")
-    return hashlib.sha256(releases.canonical(components)).hexdigest()
+class HarnessFault(RuntimeError):
+    """The lab could not stage a journey — a fixture a reset guest lost, a guest
+    the runner could not reach. Written as `harness`, never `failed`: a failed
+    journey has to mean the commit under test, and this says nothing about it."""
+
+
+SOURCE = re.compile(r"[0-9a-f]{40}")
+
+
+def source_of(build: dict) -> str:
+    """A receipt belongs to one commit, not to one machine's bytes.
+
+    The artifact digest used to be the binding, and it cannot be one any more:
+    every Mac builds the Hub itself, so two honest installs of the same commit
+    differ byte for byte — a gzip stamp, a machine's own signing key. Binding
+    on bytes would make a fleet's own receipts refuse the fleet. What all of
+    them share, and what a journey actually put under test, is the commit.
+    """
+    sha = build.get("sha")
+    if not isinstance(sha, str) or not SOURCE.fullmatch(sha):
+        raise releases.ReleaseError("a build must name the commit it was built from")
+    return sha
 
 
 def when(moment: float) -> str:
@@ -89,19 +106,19 @@ class Journey:
 
 
 class Run:
-    """An acceptance run over one candidate, writing one receipt per journey."""
+    """An acceptance run over one commit, writing one receipt per journey."""
 
-    def __init__(self, receipts: Path, manifest: dict):
+    def __init__(self, receipts: Path, build: dict):
         self.dir = Path(receipts)
-        self.release = releases.identifier(manifest["release"])
-        self.artifacts = artifact_set(manifest)
+        self.build = releases.identifier(build["build"])
+        self.source = source_of(build)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.results: dict[str, str] = {}
 
     @contextmanager
     def journey(self, name: str):
         """Run one journey. Its failure is a receipt, not an aborted run: the
-        remaining journeys still tell us what else this candidate cannot do."""
+        remaining journeys still tell us what else this commit cannot do."""
         if name not in REQUIRED:
             raise releases.ReleaseError(f"unknown acceptance journey: {name}")
         record = Journey(name)
@@ -111,6 +128,9 @@ class Run:
             record.lines.append(when(time.time()) + " aborted by operator")
             self.write(record, "failed", "run aborted")
             raise
+        except HarnessFault as exc:
+            record.lines.append(traceback.format_exc().rstrip())
+            self.write(record, HARNESS, str(exc))
         except Exception as exc:
             record.lines.append(traceback.format_exc().rstrip())
             self.write(record, "failed", f"{type(exc).__name__}: {exc}")
@@ -126,16 +146,16 @@ class Run:
     def write(self, record: Journey, result: str, detail: str) -> dict:
         finished = time.time()
         log = self.dir / (record.name + ".log")
-        body = [f"journey: {record.name}", f"release: {self.release}",
-                f"artifacts: {self.artifacts}", f"started: {when(record.started)}", "--",
+        body = [f"journey: {record.name}", f"build: {self.build}",
+                f"source: {self.source}", f"started: {when(record.started)}", "--",
                 *record.lines, "--", f"result: {result}",
                 "observed: " + (", ".join(record.observed) or "none"),
                 "missing: " + (", ".join(record.missing) or "none"),
                 "detail: " + (detail or "none"), f"finished: {when(finished)}"]
         log.write_text("\n".join(body) + "\n")
-        receipt = {"journey": record.name, "release": self.release, "result": result,
+        receipt = {"journey": record.name, "build": self.build, "result": result,
                    "skipped": 1 if result == "skipped" else 0, "detail": detail,
-                   "artifacts": self.artifacts, "evidence_sha256": releases.digest(log),
+                   "source": self.source, "evidence_sha256": releases.digest(log),
                    "observed": sorted(record.observed), "missing": sorted(record.missing),
                    "started": when(record.started), "finished": when(finished)}
         atomic_json(self.dir / (record.name + ".json"), receipt)
@@ -145,7 +165,7 @@ class Run:
         return receipt
 
     def summary(self) -> dict:
-        return {"release": self.release, "artifacts": self.artifacts,
+        return {"build": self.build, "source": self.source,
                 "results": dict(sorted(self.results.items())),
                 "passed": sorted(n for n, r in self.results.items() if r == PASSED)}
 
@@ -207,11 +227,11 @@ def _fabricated(receipt: dict, evidence: Path) -> str:
     return ""
 
 
-def inspect(receipts: Path, manifest: dict) -> dict[str, dict]:
+def inspect(receipts: Path, build: dict) -> dict[str, dict]:
     """What every journey's receipt says right now, checked against its bytes."""
     receipts = Path(receipts)
-    artifacts = artifact_set(manifest)
-    release = manifest["release"]
+    source = source_of(build)
+    identifier = build["build"]
     state = {}
     for name in sorted(releases.RECEIPTS):
         path, evidence = receipts / (name + ".json"), receipts / (name + ".log")
@@ -230,10 +250,10 @@ def inspect(receipts: Path, manifest: dict) -> dict[str, dict]:
             answer = ("evidence_missing", "receipt has no evidence log")
         elif releases.digest(evidence) != receipt.get("evidence_sha256"):
             answer = ("evidence_changed", "evidence log changed after the run")
-        elif receipt.get("artifacts") != artifacts:
-            answer = ("other_artifacts", "receipt belongs to a different artifact set")
-        elif receipt.get("release") not in (None, release):
-            answer = ("other_release", f"receipt names release {receipt.get('release')}")
+        elif receipt.get("source") != source:
+            answer = ("other_source", "receipt was written against a different commit")
+        elif receipt.get("build") not in (None, identifier):
+            answer = ("other_build", f"receipt names build {receipt.get('build')}")
         elif result != PASSED or receipt.get("skipped") != 0:
             answer = (result, receipt.get("detail") or
                       ("missing " + ", ".join(receipt.get("missing") or []) if receipt.get("missing")
@@ -248,12 +268,12 @@ def inspect(receipts: Path, manifest: dict) -> dict[str, dict]:
     return state
 
 
-def gate(receipts: Path, manifest: dict) -> dict[str, dict]:
-    """The only door to promotion. Every journey passes, or none of them count."""
-    state = inspect(receipts, manifest)
+def gate(receipts: Path, build: dict) -> dict[str, dict]:
+    """The only door a commit reaches the fleet through. All pass, or none count."""
+    state = inspect(receipts, build)
     problems = [f"{name}: {entry['state']}" + (f" — {entry['detail']}" if entry["detail"] else "")
                 for name, entry in state.items() if entry["state"] != PASSED]
     if problems:
         raise releases.ReleaseError(
-            "acceptance is incomplete; promotion refused:\n  " + "\n  ".join(problems))
+            "acceptance is incomplete; this commit is refused:\n  " + "\n  ".join(problems))
     return {name: entry["receipt"] for name, entry in state.items()}

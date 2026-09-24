@@ -300,29 +300,6 @@ def land(feed: Path, output: Path, envelope: dict) -> Path:
     return feed / release_id
 
 
-#: The one way past the adopted-machine refusal below, and it is typed, never
-#: defaulted: `JSTACK_BUILD_DESPITE_LEAVES=1 jstack-host updates build`. The
-#: machine that publishes for a fleet has to build eventually, and re-keying
-#: its leaves by hand afterwards is a decision somebody makes on purpose.
-DESPITE_LEAVES = "JSTACK_BUILD_DESPITE_LEAVES"
-
-
-def adopted() -> list[str]:
-    """The machines that take their updates from this one.
-
-    Exactly the rows `updates/queue` will send a job to: a forgotten row takes
-    nothing, and a row with no bound credential has no updater to strand.
-    """
-    try:
-        from .store import get_store
-        rows = get_store().list_hosts()
-    except Exception as exc:  # a store that cannot be read is not "no leaves"
-        raise releases.ReleaseError(
-            "could not read this hub's adopted machines: " + str(exc)) from exc
-    return [row["name"] or row["key"] for row in rows
-            if not row["deleted"] and row["device_id"]]
-
-
 def build_refusal(root: Path, config: dict) -> str:
     """Why this machine must not build, or `""` if it may.
 
@@ -335,17 +312,10 @@ def build_refusal(root: Path, config: dict) -> str:
     if not config.get("github_repo"):
         return "this host has no source repository to build from"
     # A build mints this hub's own key and rotates `public_key` to it
-    # (`_offer`). A leaf verifies its parent's jobs against the key it pinned
-    # when it installed, so the first build under it makes every future job
-    # unverifiable there — and the key that would fix it only arrives inside an
-    # update the leaf now refuses. #144 holds the fix; this refusal holds the
-    # fleet.
-    names = adopted()
-    if names and os.environ.get(DESPITE_LEAVES) != "1":
-        return ("this hub has adopted machines (" + ", ".join(names) + ") and a build "
-                "would rotate the release key they trust, leaving them unable to verify "
-                "any update from this hub — see #144. Forget them, or build with "
-                f"{DESPITE_LEAVES}=1 and re-adopt them afterwards.")
+    # (`_offer`). The machines this hub adopted learn that key on their next
+    # heartbeat (`update_supervisor.pin_parent_key`, #144), so a hub with
+    # leaves builds like any other; it used to refuse, because the key only
+    # travelled inside the update the leaves could no longer verify.
     return ""
 
 

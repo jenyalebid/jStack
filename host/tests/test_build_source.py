@@ -38,13 +38,12 @@ def published(feed: Path, key, *, stack=OLD, sequence=5, ref="stable", client=b"
         body = client if name == "client" else (name + "-bytes").encode()
         components[name] = {"file": name + ".zip", "version": "1",
                             "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
-    artifacts = hashlib.sha256(releases.canonical(components)).hexdigest()
     manifest = {"schema": 1, "release": "published-1", "components": components,
                 "sequence": sequence, "channel": {"github_repo": "example/stack", "name": ref},
                 "sources": {"stack": stack, "client": "b" * 40},
                 "compatibility": {"protocol": 1, "rollback": True, "platform": "macos",
                                   "architecture": "arm64", "minimum_os": "13.0"},
-                "receipts": {name: {"result": "passed", "skipped": 0, "artifacts": artifacts,
+                "receipts": {name: {"result": "passed", "skipped": 0, "source": stack,
                                     "evidence_sha256": "c" * 64} for name in releases.RECEIPTS}}
     envelope = releases.sign(manifest, key.private_bytes_raw())
     (feed / manifest["release"]).mkdir(parents=True, exist_ok=True)
@@ -270,10 +269,9 @@ def test_a_source_build_verifies_without_receipts_but_never_while_carrying_them(
     assert releases.validate(manifest)["release"] == "local-1"
     with pytest.raises(releases.ReleaseError, match="acceptance evidence"):
         releases.validate(_minimal())
-    artifacts = hashlib.sha256(releases.canonical(manifest["components"])).hexdigest()
     with pytest.raises(releases.ReleaseError, match="cannot carry acceptance receipts"):
         releases.validate({**manifest, "receipts": {
-            name: {"result": "passed", "skipped": 0, "artifacts": artifacts,
+            name: {"result": "passed", "skipped": 0, "source": manifest["sources"]["stack"],
                    "evidence_sha256": "c" * 64} for name in releases.RECEIPTS}})
 
 
@@ -340,36 +338,12 @@ def _adopt(key="leaf-one", name="Office Mac", device="device-1"):
     return grid
 
 
-def test_a_hub_that_adopted_machines_will_not_rotate_the_key_under_them(builder):
-    """#144: a build mints this hub's own key and `_offer` rotates
-    `public_key` to it, while a leaf verifies every job against the key it
-    pinned at install. The first build under a leaf makes it refuse the very
-    update that would re-key it, so until #144 is fixed the build is refused."""
-    root, feed, config, calls = builder
-    _adopt()
-    with pytest.raises(releases.ReleaseError, match="#144"):
-        build_source.build(root, config)
-    # Refused before anything started: no marker, no git, no feed movement.
-    assert not (root / "build.json").exists() and not calls
-    assert json.loads((feed / "latest.json").read_text())["manifest"]["release"] == "published-1"
-
-
-def test_a_forgotten_or_unbound_machine_is_not_a_leaf_that_blocks_a_build(builder):
-    """Exactly the rows a job is sent to. A tombstone takes no job, and a row
-    with no credential has no updater to strand."""
-    root, _, config, _ = builder
-    grid = _adopt("leaf-gone")
-    grid.forget_host("leaf-gone")
-    grid.upsert_host("leaf-unbound", "Never Paired", "10.66.0.10")
-    assert build_source.adopted() == []
-    assert build_source.build(root, config)["release"]
-
-
-def test_the_hatch_past_the_leaf_refusal_is_typed_and_never_the_default(builder, monkeypatch):
+def test_a_hub_with_adopted_machines_builds_like_any_other(builder):
+    """#144. A build rotates this hub's key, and the machines it adopted learn
+    the new key on their next heartbeat — so nothing about having leaves is a
+    reason not to build, and no hatch is needed to get past one."""
     root, _, config, _ = builder
     _adopt()
-    assert build_source.build_refusal(root, config)
-    monkeypatch.setenv(build_source.DESPITE_LEAVES, "1")
     assert build_source.build_refusal(root, config) == ""
     assert build_source.build(root, config)["release"]
 

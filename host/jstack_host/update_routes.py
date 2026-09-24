@@ -342,7 +342,12 @@ def heartbeat(machine: str, authority: str, body: Heartbeat) -> dict:
         result = fleet.public_job(job)
         if result and job["state"] in fleet.ACTIVE:
             result["envelope"] = json.loads(job["envelope"])
-        return {"job": result, "offer": offered()}
+        # The key this hub signs its offers with, on the one connection the
+        # leaf already takes its authority from. A leaf pinned the key of the
+        # bundle that installed it, and a hub that builds signs with its own —
+        # so without this, the first build under a leaf stranded it (#144).
+        return {"job": result, "offer": offered(),
+                "public_key": fleet.config().get("public_key", "")}
     except (ReleaseError, ValueError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
