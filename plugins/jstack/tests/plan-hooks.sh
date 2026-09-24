@@ -220,6 +220,17 @@ out="$(exiting $S "$TMP/good.md")"
    || fail "good-plan" "stages wrong: $(query $S 'st')"
 pass "good-plan-recorded"
 
+# (3b) The row was minted at the first plan-mode PROMPT, so it carries that
+#      prompt as its title and no file at all. Approval is the only moment the
+#      authored title and the real path exist — and `plan_file` is the column
+#      the document route reads, so a plan that misses it here has a document
+#      nobody can open for the rest of its life.
+[[ "$(query $S 'p and p["title"]')" == "The work harness" ]] \
+   || fail "authored-meta" "title still the prompt's: $(query $S 'p and p["title"]')"
+[[ "$(query $S 'p and p["plan_file"]')" == "$TMP/good.md" ]] \
+   || fail "authored-meta" "plan_file not recorded: $(query $S 'p and p["plan_file"]')"
+pass "authored-title-and-file"
+
 # (4) The one shape that blocks, and what the author is handed. They have almost
 #     certainly never seen `rules-stage/execution-gates.md` — plan mode does not
 #     author through Edit, so the path-scoped rule never injected — which is why
@@ -280,10 +291,10 @@ pass "cosmetic-allowed"
 printf 'not a directory' > "$TMP/brokenstate"
 G=broken-$$
 out="$(JREMOTE_STATE_DIR="$TMP/brokenstate" bash -c "$(declare -f exiting); PY='$PY'; EXIT_HOOK='$EXIT_HOOK'; CLAUDE_T='$CLAUDE_T'; exiting $G '$TMP/good.md'"; echo "rc=$?")"
-[[ "$out" == "rc=0" ]] || fail "fail-shut" "a broken store did not let the tool through: $out"
+[[ "$out" == "rc=0" ]] || fail "fail-open" "a broken store did not let the tool through: $out"
 out="$(JREMOTE_STATE_DIR="$TMP/brokenstate" bash -c "$(declare -f prompt); PY='$PY'; WATCH='$WATCH'; prompt $G plan '$CLAUDE_T'"; echo "rc=$?")"
-[[ "$out" == "rc=0" ]] || fail "fail-shut" "the watch hook did not survive a broken store: $out"
-pass "fail-shut-on-own-error"
+[[ "$out" == "rc=0" ]] || fail "fail-open" "the watch hook did not survive a broken store: $out"
+pass "fail-open-on-own-error"
 
 # (8) The native task lists, mirrored onto the stage being worked. Claude's own
 #     rows are richer than ours; id, subject and status come across and the
@@ -344,9 +355,11 @@ pass "append-only"
 
 # (11) A Codex matcher does not name a tool Codex will never send. It widened
 #      the group to nothing: `Bash|ExitPlanMode|Agent` selected two tools and
-#      claimed three. Only the alternatives go — a group left naming nothing
-#      else stays registered, because `test_managed_config_carries_every_hook_
-#      the_plugin_declares` asserts that every declared hook translates.
+#      claimed three. A group that still names a tool Codex has keeps it and
+#      loses the rest; a group naming nothing else cannot fire at all and is
+#      left out of the file entirely, reported rather than written — a dead
+#      line in an operator-owned config answers "is the gate wired on Codex"
+#      with a yes.
 "$PY" - "$HOST" "$PLUGIN_ROOT" <<'EOF' || fail "codex-matchers" "a Codex matcher lost or kept the wrong tool"
 import sys
 sys.path.insert(0, sys.argv[1])
@@ -356,6 +369,12 @@ body, _ = codex_hooks.managed_config(Path(sys.argv[2]))
 assert 'matcher = "Bash|Agent"' in body, "the absent tool was not stripped from a mixed matcher"
 assert 'matcher = "Bash|ExitPlanMode|Agent"' not in body, "the absent tool survived"
 assert 'matcher = "Edit|Write"' in body, "a matcher with nothing absent in it was rewritten"
+assert 'matcher = "ExitPlanMode"' not in body, "a group Codex could never fire was registered"
+assert "plan-exit.py" not in body, "the Claude-only plan gate was written into Codex's config"
+_, dropped = codex_hooks.managed_hooks(
+    __import__("json").loads((Path(sys.argv[2]) / "hooks/hooks.json").read_text()),
+    Path(sys.argv[2]))
+assert "PreToolUse[ExitPlanMode]" in dropped, f"dropped silently: {dropped}"
 EOF
 pass "codex-matchers"
 

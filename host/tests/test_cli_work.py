@@ -358,3 +358,44 @@ def test_opening_a_plan_joins_the_session_that_typed_it(monkeypatch):
 def test_show_says_so_rather_than_traceback_on_an_id_that_is_not_a_plan():
     code, _, err = _cli("plan", "show", "no-such-plan")
     assert code != 0 and "no-such-plan" in err
+
+
+def test_filing_stages_records_the_file_they_came_out_of(tmp_path):
+    """The Codex path's only chance at both facts.
+
+    Codex has no `ExitPlanMode`, so nothing hands it the plan's markdown; the
+    session writes the file and runs this verb. The file just parsed IS the
+    plan's authored source, and its heading is the title its author wrote —
+    `plan_file` is also the column the document route reads, so a plan filed
+    without it has a document nobody can open.
+    """
+    plan_id, code, _, err = _plan_with_stages(tmp_path)
+    assert code == 0, err
+    row = plans.plan(plan_id)
+    assert row["plan_file"] == str(tmp_path / "plan.md")
+    assert row["title"] == "Work harness"
+
+
+def test_a_plan_is_activated_from_the_shell_and_a_typo_is_not(tmp_path):
+    """`plan stages` files the stages and leaves the plan at `planning`, because
+    filing work is not working it. On the Claude path the exit hook flips it;
+    Codex has no exit hook, so without this verb a plan driven from the shell
+    stays `planning` forever and never reads as live."""
+    plan_id, code, _, err = _plan_with_stages(tmp_path)
+    assert code == 0, err
+    assert plans.plan(plan_id)["status"] == "planning"
+
+    code, out, err = _cli("plan", "activate", plan_id)
+    assert code == 0, err
+    assert out.strip() == "active"
+    assert plans.plan(plan_id)["status"] == "active"
+
+    assert _cli("plan", "finish", plan_id)[0] == 0
+    assert plans.plan(plan_id)["status"] == "done"
+    assert _cli("plan", "abandon", plan_id)[0] == 0
+    assert plans.plan(plan_id)["status"] == "abandoned"
+
+    for verb in ("activate", "finish", "abandon"):
+        code, _, err = _cli("plan", verb, "ghost")
+        assert code == 1, verb
+        assert "no such plan: 'ghost'" in err

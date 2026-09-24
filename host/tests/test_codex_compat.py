@@ -323,22 +323,56 @@ def test_the_walkup_block_is_written_once():
 
 
 def test_managed_config_carries_every_hook_the_plugin_declares():
-    """The manifest is the one definition; this is only its Codex spelling. A
-    hook that fails to translate is a hook that silently never runs."""
+    """The manifest is the one definition; this is only its Codex spelling.
+
+    A hook that fails to translate is a hook that silently never runs, so the
+    property is not that nothing is dropped — it is that nothing is dropped
+    QUIETLY. Every declared handler is either written to the file or named in
+    `dropped`, and the only groups allowed in the second set are the ones whose
+    matcher names no tool Codex has: those cannot fire whatever we write.
+    """
     import tomllib
     from jstack_host import codex_hooks as module
     text, dropped = module.managed_config(PLUGIN)
-    assert dropped == []
     parsed = tomllib.loads(text)
     declared = json.loads((PLUGIN / "hooks/hooks.json").read_text())["hooks"]
+    unfireable = []
     for event, groups in declared.items():
         # An event only one engine has is carried under the other's spelling, never
         # dropped — see `CODEX_ALIASES`.
         event = module.CODEX_ALIASES.get(event, event)
-        written = [h["command"] for group in parsed["hooks"][event] for h in group["hooks"]]
+        written = [h["command"] for group in parsed["hooks"].get(event, ())
+                   for h in group["hooks"]]
         for group in groups:
+            matcher = group.get("matcher") or ""
+            if matcher and not [t for t in matcher.split("|")
+                                if t not in module.CODEX_ABSENT_TOOLS]:
+                unfireable.append(f"{event}[{matcher}]")
+                continue
             for handler in group["hooks"]:
                 assert handler["command"].replace("${CLAUDE_PLUGIN_ROOT}", str(PLUGIN)) in written
+    # Nothing else may go missing: an event Codex cannot honour would land here
+    # too, and this is the test that has to notice it.
+    assert sorted(dropped) == sorted(unfireable)
+
+
+def test_a_group_codex_could_never_fire_is_left_out_and_said_out_loud():
+    """`ExitPlanMode` is Claude's tool. Codex ends plan mode by flipping
+    `permission_mode`, so a group matching only that name is dead however it is
+    spelled — and a dead line in an operator-owned file is worse than no line,
+    because it answers "is the gate wired on Codex" with a yes."""
+    from jstack_host import codex_hooks as module
+    manifest = {"hooks": {"PreToolUse": [
+        {"matcher": "ExitPlanMode", "hooks": [
+            {"type": "command", "command": "/gate.py"}]},
+        {"matcher": "Bash|ExitPlanMode", "hooks": [
+            {"type": "command", "command": "/env.py"}]}]}}
+    text, dropped = module.managed_hooks(manifest, Path("/plug"))
+    assert "/gate.py" not in text
+    assert dropped == ["PreToolUse[ExitPlanMode]"]
+    # The mixed group keeps the tool Codex does have, and loses only the name.
+    assert 'matcher = "Bash"' in text
+    assert "/env.py" in text
 
 
 def test_managed_config_keeps_codex_event_spelling_and_drops_what_it_cannot_run():

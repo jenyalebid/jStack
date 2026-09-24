@@ -314,3 +314,43 @@ def test_stages_written_before_the_column_existed_keep_their_proofs():
 
     plans.stage_done(stage_id)
     assert plans.stage(stage_id)["status"] == "done"
+
+
+# ── the plan row itself ──────────────────────────────────────────────────────
+
+def test_the_authored_title_and_file_reach_a_row_minted_from_a_prompt():
+    """The common path: the row exists before anything has been authored.
+
+    `plan-mode-watch` mints it at the first plan-mode prompt, titled from that
+    prompt, with no file. Approval is where the real title and the real path
+    finally exist, and this is the only writer that can put them on the row.
+    """
+    plan_id = plans.open_plan("make the thing go fast maybe, I was thinking")
+    plans.update_plan_meta(plan_id, title="Session Environment",
+                           plan_file="/p/cuddly-waddling-pie.md")
+    row = plans.plan(plan_id)
+    assert row["title"] == "Session Environment"
+    assert row["plan_file"] == "/p/cuddly-waddling-pie.md"
+
+
+def test_a_field_nobody_named_is_not_a_field_set_to_nothing():
+    plan_id = plans.open_plan("t", plan_file="/p/a.md")
+    plans.update_plan_meta(plan_id, title="better")
+    assert plans.plan(plan_id)["plan_file"] == "/p/a.md"
+    # `""` IS a value, and clears — the distinction the `None` default carries.
+    plans.update_plan_meta(plan_id, plan_file="")
+    assert plans.plan(plan_id)["plan_file"] == ""
+    assert plans.plan(plan_id)["title"] == "better"
+    with pytest.raises(ValueError):
+        plans.update_plan_meta(plan_id)
+
+
+def test_a_plan_id_nothing_answers_to_is_refused_by_every_plan_writer():
+    """An UPDATE on a missing row succeeds and changes nothing, so a mistyped
+    id would read back as a plan that was activated."""
+    for call in (lambda: plans.activate("ghost"),
+                 lambda: plans.finish("ghost"),
+                 lambda: plans.abandon("ghost"),
+                 lambda: plans.update_plan_meta("ghost", title="x")):
+        with pytest.raises(ValueError, match="no such plan"):
+            call()

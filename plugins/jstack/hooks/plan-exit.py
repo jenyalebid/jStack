@@ -157,6 +157,13 @@ def main() -> int:
             repo=str(payload.get("cwd") or ""), session_id=session_id, role="author")
     else:
         plan_id = plan["id"]
+        # The row was minted at plan-mode entry, titled from the first prompt
+        # and knowing no file. This is the moment both are actually authored,
+        # and the only one — nothing later in the plan's life sees them again.
+        authored = str(tool_input.get("planFilePath") or "")
+        if parsed.title or authored:
+            plans.update_plan_meta(plan_id, title=parsed.title or None,
+                                   plan_file=authored or None)
 
     if parsed.stages and not refused:
         try:
@@ -176,7 +183,7 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception:
-        # Fail SHUT on our own errors: the tool goes through. A traceback out of
+        # Fail OPEN on our own errors: the tool goes through. A traceback out of
         # a PreToolUse hook reads as a broken tool, not a broken plan, and this
         # one stands in front of plan mode for every session on the machine.
         raise SystemExit(0)

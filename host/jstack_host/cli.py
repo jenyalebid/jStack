@@ -1364,9 +1364,46 @@ def _cmd_plan_stages(args) -> int:
         # a stage whose kind nothing can read has no proof that would ever close
         # it, and writing it would rebuild the hole this harness exists to shut.
         return _refusal(exc)
+    # The file just parsed IS this plan's authored markdown, and its heading is
+    # the title its author wrote. On the Codex path this call is the only place
+    # either is ever established: the row was minted from a prompt at plan-mode
+    # entry, and `plan_file` is the column the document route reads.
+    plans.update_plan_meta(args.plan_id, plan_file=str(Path(args.from_file).expanduser()),
+                           title=parsed.title or None)
     for s in plans.stages(args.plan_id):
         print(f"{s['id']}  #{s['ordinal']}  {s['status']:<8} {s['title']}")
     return 0
+
+
+def _cmd_plan_status(args, verb: str) -> int:
+    """Move the whole plan's status — the three shell verbs share one body.
+
+    `plan stages` leaves a plan at `planning`, because filing stages is not the
+    same as working them. On the Claude path `plan-exit.py` flips it at
+    approval; the Codex path has no exit tool, so without these verbs a plan
+    driven from the shell stays `planning` forever and the tab never shows it
+    as live.
+    """
+    _adopt(args)
+    from . import plans
+    try:
+        getattr(plans, verb)(args.plan_id)
+    except ValueError as exc:
+        return _refusal(exc)
+    print(plans.plan(args.plan_id)["status"])
+    return 0
+
+
+def _cmd_plan_activate(args) -> int:
+    return _cmd_plan_status(args, "activate")
+
+
+def _cmd_plan_finish(args) -> int:
+    return _cmd_plan_status(args, "finish")
+
+
+def _cmd_plan_abandon(args) -> int:
+    return _cmd_plan_status(args, "abandon")
 
 
 def _cmd_plan_start(args) -> int:
@@ -1704,6 +1741,18 @@ def build_parser() -> argparse.ArgumentParser:
                          "refused, because nothing could ever close it")
     pl.add_argument("--state-dir", default=None)
     pl.set_defaults(fn=_cmd_plan_stages)
+    pl = plans_p.add_parser("activate", help="the plan is being worked now")
+    pl.add_argument("plan_id")
+    pl.add_argument("--state-dir", default=None)
+    pl.set_defaults(fn=_cmd_plan_activate)
+    pl = plans_p.add_parser("finish", help="the whole plan is done")
+    pl.add_argument("plan_id")
+    pl.add_argument("--state-dir", default=None)
+    pl.set_defaults(fn=_cmd_plan_finish)
+    pl = plans_p.add_parser("abandon", help="the plan is not being worked")
+    pl.add_argument("plan_id")
+    pl.add_argument("--state-dir", default=None)
+    pl.set_defaults(fn=_cmd_plan_abandon)
     pl = plans_p.add_parser("start", help="take a stage")
     pl.add_argument("stage_id")
     pl.add_argument("--session", default="")

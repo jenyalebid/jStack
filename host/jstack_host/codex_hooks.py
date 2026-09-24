@@ -56,11 +56,11 @@ CODEX_ALIASES = {"Notification": "PermissionRequest", "PermissionDenied": "Inter
 # through the permission request, and it ends plan mode by flipping
 # `permission_mode` rather than by calling a tool.
 #
-# Only the alternatives are removed, never the group. A group whose matcher
-# names nothing else is left registered on a tool Codex will never send, which
-# costs nothing at runtime and reads in the file as though it were wired;
-# removing it is blocked by `test_managed_config_carries_every_hook_the_plugin
-# _declares`, which asserts that every declared hook translates.
+# A group that still names a tool Codex has keeps that tool and loses the rest.
+# A group whose matcher names NOTHING else cannot ever fire, so it is dropped
+# and reported rather than written: left in, it costs nothing at runtime but
+# reads in the file as though it were wired, and the next person to ask why the
+# plan gate never ran on Codex finds a line saying it is registered.
 CODEX_ABSENT_TOOLS = frozenset({"AskUserQuestion", "ExitPlanMode"})
 
 # Per-hook fields Codex reads, in its spelling. PascalCase is load-bearing here
@@ -85,7 +85,10 @@ def managed_hooks(manifest, plugin):
         for group in groups:
             matcher = group.get("matcher") or ""
             kept = [t for t in matcher.split("|") if t not in CODEX_ABSENT_TOOLS]
-            if matcher and kept:
+            if matcher and not kept:
+                dropped.append(f"{event}[{matcher}]")
+                continue
+            if matcher:
                 matcher = "|".join(kept)
             lines.append(f"[[hooks.{event}]]")
             if matcher:

@@ -1005,6 +1005,32 @@
       },
       "subsystems": [],
       "notes": "Kill switch for all three hooks: JSTACK_ENV_INJECT_DISABLED=1. Announcement dedup markers sit beside the path-rule markers in /tmp/jstack-rule-cache/<session_id>/ as env-<key>-<value>.marker — keyed on the VALUE so a mid-session flip re-arms rather than being swallowed; re-announcement only after JSTACK_RULE_REINJECT_BYTES of transcript growth. env-delta.py keeps its per-session snapshot in the same dir as environment.json. hooks.json is APPEND-ONLY: Codex keys hook trust by ordinal, so a group or hook inserted above an existing one silently stops it running. env-announce.py's PreToolUse and PostToolUse groups carry matchers rather than taking every tool, because these hooks import the host (~40ms a call) and one beside every tool call of every session may not."
+    },
+    {
+      "id": "work-harness",
+      "kind": "system",
+      "name": "Work Harness",
+      "status": "live",
+      "description": "Plan mode becomes rows, on both engines. `permission_mode: \"plan\"` is on every hook payload of Claude and Codex alike and nothing read it before this; it is the whole cross-vendor seam. The row is minted at the first plan-mode prompt, the stages are parsed at approval, and each stage declares the proof that closes it — command, commit, artifact, manual or none. The writer refuses to close a stage whose declared gate has no passing proof, so \"is this done\" is answered by a stage id and its receipt rather than by a sentence. `none` is a real answer: the bureaucracy scales with the severity of the change instead of taxing a one-line tweak.",
+      "code": [
+        "hooks/plan-mode-watch.py",
+        "hooks/plan-exit.py",
+        "hooks/plan-tasks.py",
+        "hooks/hooks.json",
+        "prompts/plan-gate.md",
+        "rules-stage/execution-gates.md",
+        "../../host/jstack_host/plans.py",
+        "../../host/jstack_host/plan_parse.py"
+      ],
+      "config": [],
+      "docs": [],
+      "test": {
+        "type": "script",
+        "path": "tests/plan-hooks.sh",
+        "description": "Drives the three real hook scripts with the real JSON stdin contract against a store built for the run. The property it protects hardest is CONTAINMENT: plan-exit.py stands in front of ExitPlanMode for every session on this machine, so every shape that must NOT block — a 0-stage plan, a 1-stage plan, a merely cosmetic complaint, a hook that threw — is pinned as hard as the one shape that must. Also pins the planning row minted once per session on both engines, the authored title and plan_file reaching a row that was minted from a prompt, the Codex exit staying honest about what it does not have, native tasks mirrored from both engines, the hooks.json ordinals as append-only, and the Codex matchers dropping the groups Codex could never fire."
+      },
+      "subsystems": [],
+      "notes": "Kill switch for the gate: JSTACK_PLAN_GATE_DISABLED=1. plan-exit.py blocks only a plan that parses to >=2 stages AND holds a stage the writer would refuse, and it fails OPEN on its own exception — a traceback out of a PreToolUse hook reads as a broken tool, not a broken plan. The refusal carries the format contract inline because plan mode does not author through Edit, so the path-scoped rule in rules-stage/execution-gates.md never injected and the model being blocked has never seen it. hooks.json is APPEND-ONLY: Codex keys hook trust by ordinal. plan-mode-watch.py reads its marker and returns BEFORE importing the host, which is what keeps a turn that is not in plan mode at +14ms rather than +58ms."
     }
   ]
 }

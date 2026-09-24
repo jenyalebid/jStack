@@ -105,8 +105,52 @@ def join(plan_id: str, session_id: str, role: str = "") -> None:
             (plan_id, session_id, role or "", _now()))
 
 
+def update_plan_meta(plan_id: str, *, title: str | None = None,
+                     plan_file: str | None = None) -> None:
+    """Correct a plan's title or its authored file after the row exists.
+
+    The row is minted at plan-mode ENTRY, before anything has been authored, so
+    it is titled from the first prompt and knows no file. The real title and the
+    real path only arrive at approval. Without this, both are discarded on the
+    common path and the plan is listed under a truncated prompt forever, with
+    `plan_file` empty — which is the column `GET /plans/{id}/document` reads, so
+    the document is unreachable too.
+
+    `None` means leave that field alone; `""` is a value and clears it. A field
+    nobody named is not the same as a field set to nothing, and collapsing the
+    two would make one caller correcting the title silently erase the path.
+    """
+    sets, vals = [], []
+    if title is not None:
+        sets.append("title = ?")
+        vals.append(title)
+    if plan_file is not None:
+        sets.append("plan_file = ?")
+        vals.append(plan_file)
+    if not sets:
+        raise ValueError("update_plan_meta: name title, plan_file, or both")
+    with store.get_store().conn() as db:
+        _require_plan(db, plan_id)
+        db.execute(f"UPDATE plans SET {', '.join(sets)}, updated_at = ?"
+                   " WHERE id = ?", (*vals, _now(), plan_id))
+
+
+def _require_plan(db, plan_id: str) -> None:
+    """Refuse a plan id nothing answers to, the way the stage writers do.
+
+    An UPDATE naming a row that does not exist reports success and changes
+    nothing, so a mistyped id reads as a plan that was activated. The stage
+    writers already refuse this; a plan writer that did not would be the one
+    place a typo is silently absorbed.
+    """
+    if db.execute("SELECT 1 FROM plans WHERE id = ? AND deleted = 0",
+                  (plan_id,)).fetchone() is None:
+        raise ValueError(f"no such plan: {plan_id!r}")
+
+
 def _set_plan_status(plan_id: str, status: str) -> None:
     with store.get_store().conn() as db:
+        _require_plan(db, plan_id)
         db.execute("UPDATE plans SET status = ?, updated_at = ? WHERE id = ?",
                    (status, _now(), plan_id))
 
