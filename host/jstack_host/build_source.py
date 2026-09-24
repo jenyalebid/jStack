@@ -244,6 +244,50 @@ def inherited(config: dict) -> dict:
     return manifest
 
 
+def assemble(*, release_id: str, notes: str, sequence: int, repo: str, ref: str,
+             machine: str, sha: str, client_sha: str, dependencies: dict,
+             components: dict, compatibility: dict) -> dict:
+    """The one shape of a manifest this machine signs.
+
+    A hub rebuilding itself and an installer building the release it is about
+    to install produce the same document from different inputs. Two spellings
+    of it would be two answers to what a locally built release *is*, and only
+    one of them is inside the signature.
+    """
+    return {
+        "schema": releases.SCHEMA, "release": release_id, "notes": notes,
+        "sequence": sequence,
+        "channel": {"github_repo": repo, "name": ref},
+        # Inside the signed bytes, because it is what excuses this manifest
+        # from the acceptance receipts a publication carries.
+        "origin": {"kind": releases.SOURCE_BUILD, "machine": machine},
+        "sources": {"stack": sha, "client": client_sha},
+        "client_packages": dependencies,
+        "components": components,
+        "compatibility": compatibility,
+        "mobile": {"source": client_sha, "status": "not_distributed"},
+        "receipts": {}}
+
+
+def land(feed: Path, output: Path, envelope: dict) -> Path:
+    """Put a signed build's artifacts in the feed under the release's name."""
+    from .update_supervisor import atomic_json
+    manifest = envelope["manifest"]
+    release_id = manifest["release"]
+    feed.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".build-", dir=feed))
+    for entry in manifest["components"].values():
+        shutil.copy2(output / entry["file"], staging / entry["file"])
+        releases.check_artifact(staging / entry["file"], entry)
+    atomic_json(staging / "manifest.json", envelope)
+    # A directory here with no manifest is the wreckage of a build that died
+    # between the rename and the write; it holds nothing anybody can verify,
+    # so it is replaced rather than left to block this one.
+    shutil.rmtree(feed / release_id, ignore_errors=True)
+    os.rename(staging, feed / release_id)
+    return feed / release_id
+
+
 def build(root: Path, config: dict, *, ref: str | None = None, now=None) -> dict:
     """Build the Hub from the newest commit on this hub's ref, and offer it.
 
@@ -346,36 +390,18 @@ def _build(root: Path, config: dict, ref: str) -> dict:
                     bundle.add(path, arcname=path.name)
         item = previous["components"]["client"]
         shutil.copy2(feed / previous["release"] / item["file"], output / item["file"])
-        manifest = {
-            "schema": releases.SCHEMA, "release": release_id,
-            "notes": f"built on this hub from {repo}@{ref} ({sha[:8]})",
-            "sequence": sequence,
-            "channel": {"github_repo": repo, "name": ref},
-            # Inside the signed bytes, because it is what excuses this
-            # manifest from the acceptance receipts a publication carries.
-            "origin": {"kind": releases.SOURCE_BUILD, "machine": config.get("machine", "")},
-            "sources": {"stack": sha, "client": client_sha},
-            "client_packages": dependencies,
-            "components": {"stack": component(archive, version),
-                           "menubar": component(menu, build_hub.bundle_version(identity, version)),
-                           "client": item},
+        manifest = assemble(
+            release_id=release_id, notes=f"built on this hub from {repo}@{ref} ({sha[:8]})",
+            sequence=sequence, repo=repo, ref=ref, machine=config.get("machine", ""),
+            sha=sha, client_sha=client_sha, dependencies=dependencies,
+            components={"stack": component(archive, version),
+                        "menubar": component(menu, build_hub.bundle_version(identity, version)),
+                        "client": item},
             # The client artifact is the one this hub already holds, so what it
             # will run on is the previous manifest's answer, not a new claim.
-            "compatibility": previous["compatibility"],
-            "mobile": {"source": client_sha, "status": "not_distributed"},
-            "receipts": {}}
+            compatibility=previous["compatibility"])
         envelope = releases.sign(manifest, private)
-        feed.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(prefix=".build-", dir=feed))
-        for entry in manifest["components"].values():
-            shutil.copy2(output / entry["file"], staging / entry["file"])
-            releases.check_artifact(staging / entry["file"], entry)
-        atomic_json(staging / "manifest.json", envelope)
-        # A directory here with no manifest is the wreckage of a build that
-        # died between the rename and the write; it holds nothing anybody can
-        # verify, so it is replaced rather than left to block this one.
-        shutil.rmtree(feed / release_id, ignore_errors=True)
-        os.rename(staging, feed / release_id)
+        land(feed, output, envelope)
         return _offer(root, config, feed, envelope, public)
     finally:
         subprocess.run(["git", "-C", str(source), "worktree", "remove", "--force", str(stack)],
@@ -401,3 +427,214 @@ def _offer(root: Path, config: dict, feed: Path, envelope: dict, public: str) ->
     config["public_key"] = public
     atomic_json(feed / "latest.json", envelope)
     return {"release": envelope["manifest"]["release"], "public_key": public}
+
+
+def compatibility_of(hub: Path, client: Path) -> dict:
+    """What this build runs on, read off the two bundles it is made of.
+
+    A publication states this by hand. An installer has no hand to state it
+    with, and a wrong claim here is a release offered to a Mac that cannot run
+    it — so it is read back from the bundles, and the release runs on neither
+    of them unless both do.
+    """
+    import platform
+    from .update_macos import bundle_info
+    minimums = []
+    for bundle in (hub, client):
+        value = str(bundle_info(bundle).get("LSMinimumSystemVersion", "")).strip()
+        if not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", value):
+            raise releases.ReleaseError(f"{bundle.name} states no minimum macOS version")
+        minimums.append(value)
+    return {"protocol": 1, "rollback": True, "platform": "macos",
+            "architecture": platform.machine(),
+            "minimum_os": max(minimums, key=lambda v: tuple(int(p) for p in v.split(".")))}
+
+
+def client_component(client: Path, output: Path) -> tuple[dict, str]:
+    """The installed jRemote, archived as this build's client artifact.
+
+    jRemote is not built here and its release is downloaded once, by the
+    installer that verified it. The honest bytes to offer are therefore the
+    ones already on the disk. `JStackSourceCommit` is the commit they were
+    built from; without it the manifest cannot name a client revision and no
+    later build can carry one forward.
+    """
+    from .update_macos import bundle_info, command
+    info = bundle_info(client)
+    commit = str(info.get("JStackSourceCommit", "")).strip()
+    if not re.fullmatch(r"[a-f0-9]{40}", commit):
+        raise releases.ReleaseError(
+            f"{client.name} does not record the commit it was built from")
+    archive = output / (client.stem + ".zip")
+    command(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(client), str(archive)],
+            timeout=900)
+    return component(archive, str(info["CFBundleVersion"])), commit
+
+
+def installable(app: Path) -> None:
+    """Refuse a bundle the sealed installer would reject, before it is moved.
+
+    `install_signed.identity` pins the publisher's signing team and asks
+    Gatekeeper; an ad-hoc signature satisfies neither. Reaching that check
+    with the bundle already in /Applications turns a missing credential into
+    a codesign requirement failure nine frames down.
+    """
+    from . import app_services
+    from .update_macos import command
+    try:
+        app_services.verify(app, "live.jstack.hub")
+        command(["/usr/sbin/spctl", "--assess", "--type", "execute", str(app)])
+    except Exception as exc:
+        raise releases.ReleaseError(
+            "this Mac built a Hub the sealed installer will not adopt: it is signed "
+            "ad-hoc, and installation requires a notarized bundle from the publisher's "
+            "signing team. Point JSTACK_SIGNING_CONFIG at a release configuration "
+            f"carrying sign_identity and notary_credentials. ({exc})") from exc
+
+
+def bootstrap(checkout: Path, output: Path, key_dir: Path, *, repo: str, ref: str,
+              client: Path | None = None, signing: dict | None = None,
+              machine: str = "") -> dict:
+    """Build the release the installer running this is about to install.
+
+    `_build` is the same act on a hub that already exists: it fetches the ref
+    into its own source dir and carries the client artifact and the
+    compatibility block forward from the release it holds. An installing Mac
+    holds neither. It has a checkout already on the ref and the client it just
+    installed, so those are what it names; from the manifest down it is the
+    same code, signed with the same machine key.
+
+    Without a client there is no complete manifest to sign — `COMPONENTS` wants
+    all three — so the Hub is still built and installed and the feed stays
+    empty, which is what `--no-app` asks for.
+    """
+    from . import build_hub
+    from .update_macos import command
+    from .update_supervisor import atomic_json
+    repo = repository(repo)
+    ref = channel_ref({"channel": ref})
+    private, public = build_key(key_dir)
+    sha = command(["git", "-C", str(checkout), "rev-parse", "HEAD"]).strip()
+    if not SHA.fullmatch(sha):
+        raise releases.ReleaseError("the checkout is not on a commit this build can name")
+    sequence = int(command(["git", "-C", str(checkout), "rev-list", "--count", sha]).strip())
+    date = release_date()
+    output.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="install-build-", suffix=".noindex"))
+    stack = work / "stack"
+    try:
+        command(["git", "-C", str(checkout), "worktree", "add", "--detach", str(stack), sha],
+                timeout=600)
+        # Out of the commit, not the working tree: the version this release
+        # declares has to be the one inside the bytes it ships.
+        version = json.loads(
+            (stack / "plugins/jstack/.claude-plugin/plugin.json").read_text())["version"]
+        item, client_sha = client_component(client, output) if client else (None, "")
+        release_id = source_identity(date, sha, client_sha, {})
+        identity = {"release": release_id, "sha": sha, "version": version, "date": date,
+                    "github_repo": repo, "sequence": sequence, "channel": ref}
+        app = build_hub.build(stack, output, version, signing, release_id=release_id,
+                              github_repo=repo, date=date, trust_key=public)
+        menu = output / "menubar-notarized.zip"
+        if signing:
+            build_hub.notarize(app, output, signing)
+            shutil.move(output / "hub-notarized.zip", menu)
+        else:
+            command(["/usr/bin/ditto", "-c", "-k", "--keepParent", str(app), str(menu)],
+                    timeout=900)
+        installable(app)
+        compatibility = compatibility_of(app, client) if item else None
+        shutil.rmtree(app, ignore_errors=True)
+        answer = {"release": release_id, "sha": sha, "ref": ref, "version": version,
+                  "menubar": str(menu), "public_key": public, "offer": bool(item)}
+        if not item:
+            return answer
+        # After the Hub is built, because `build_hub` archives HEAD and refuses
+        # a dirty `host/`: these two files exist only in the tarball the
+        # installing machine unpacks, and `stage()` reads the identity back out
+        # of exactly this tree.
+        (stack / "host/jstack_host/release-trust.json").write_text(
+            json.dumps({"algorithm": "Ed25519", "public_key": public}, indent=2) + "\n")
+        from .sourcestamp import fingerprint
+        (stack / "host/release-identity.json").write_text(json.dumps({
+            **identity, "package_sha256": fingerprint(stack / "host/jstack_host")}))
+        archive = output / "stack.tar.gz"
+        with tarfile.open(archive, "w:gz") as bundle:
+            for path in sorted(stack.iterdir()):
+                if path.name != ".git":
+                    bundle.add(path, arcname=path.name)
+        manifest = assemble(
+            release_id=release_id,
+            notes=f"built by the installer from {repo}@{ref} ({sha[:8]})",
+            sequence=sequence, repo=repo, ref=ref, machine=machine, sha=sha,
+            client_sha=client_sha, dependencies={},
+            components={"stack": component(archive, version),
+                        "menubar": component(menu, build_hub.bundle_version(identity, version)),
+                        "client": item},
+            compatibility=compatibility)
+        atomic_json(output / "manifest.json", releases.sign(manifest, private))
+        return answer
+    finally:
+        subprocess.run(["git", "-C", str(checkout), "worktree", "remove", "--force", str(stack)],
+                       capture_output=True, timeout=300)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def seed(root: Path, output: Path, *, ref: str) -> dict:
+    """Make what the installer built this hub's first offer.
+
+    `inherited()` refuses on an empty feed, so a hub that never lands its own
+    first release can never build a second one — and a hub with no feed serves
+    no leaf. The install that produced these bytes lands them itself, through
+    the writer `updates build` uses.
+    """
+    from .update_supervisor import atomic_json
+    config_path = root / "config.json"
+    config = json.loads(config_path.read_text())
+    _, public = build_key(root)
+    if config.get("public_key") != public:
+        raise releases.ReleaseError(
+            "this hub does not trust the key its own installer signed with")
+    envelope = json.loads((output / "manifest.json").read_text())
+    manifest = releases.verify(envelope, public,
+                               promoted=not config.get("candidate_test", False))
+    feed = Path(config["feed_dir"])
+    land(feed, output, envelope)
+    atomic_json(feed / "latest.json", envelope)
+    # The ref this Mac was installed from. `install_signed.provision` reads it
+    # out of the bundle's release identity, which `build_hub` does not write.
+    if config.get("channel") != ref:
+        atomic_json(config_path, {**json.loads(config_path.read_text()), "channel": ref})
+    return {"release": manifest["release"], "feed": str(feed)}
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Build a release on this machine and offer it.")
+    actions = parser.add_subparsers(dest="action", required=True)
+    build_args = actions.add_parser("bootstrap")
+    build_args.add_argument("--checkout", type=Path, required=True)
+    build_args.add_argument("--output", type=Path, required=True)
+    build_args.add_argument("--key-dir", type=Path, required=True)
+    build_args.add_argument("--client", type=Path)
+    build_args.add_argument("--repo", required=True)
+    build_args.add_argument("--ref", required=True)
+    build_args.add_argument("--machine", default="")
+    build_args.add_argument("--signing", type=Path,
+                            help="release configuration carrying a signing block")
+    seed_args = actions.add_parser("seed")
+    seed_args.add_argument("--root", type=Path, required=True)
+    seed_args.add_argument("--output", type=Path, required=True)
+    seed_args.add_argument("--ref", required=True)
+    args = parser.parse_args()
+    if args.action == "bootstrap":
+        signing = json.loads(args.signing.read_text()).get("signing") if args.signing else None
+        result = bootstrap(args.checkout, args.output, args.key_dir, repo=args.repo, ref=args.ref,
+                           client=args.client, signing=signing, machine=args.machine)
+    else:
+        result = seed(args.root, args.output, ref=args.ref)
+    print(json.dumps(result))
+
+
+if __name__ == "__main__":
+    main()

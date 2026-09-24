@@ -258,9 +258,17 @@ def test_install_sh_never_deletes_uncommitted_work_in_the_checkout():
 def test_install_sh_names_a_remedy_for_every_build_input_it_requires():
     """A Mac without these cannot install, which is intended — but a traceback
     ten minutes into a build is not the way to say so."""
-    for remedy in ("python.org", "xcode-select --install", "brew install tmux"):
+    for remedy in ("python.org", "xcode-select --install", "brew install tmux",
+                   "JSTACK_SIGNING_CONFIG"):
         assert remedy in CODE, f"no remedy offered for a missing build input: {remedy}"
     assert "Python.framework/Versions/3.12" in CODE
+
+
+def test_the_signing_gate_is_named_the_same_way_in_both_places():
+    """install.sh refuses before the build and `installable()` refuses after
+    it; two spellings of that requirement would leave one of them to rot."""
+    import inspect
+    assert "JSTACK_SIGNING_CONFIG" in inspect.getsource(build_source.installable)
 
 
 def test_install_sh_lands_its_build_in_the_feed_through_the_one_writer():
