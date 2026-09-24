@@ -316,9 +316,9 @@ class MacBackend:
         stack = stage / "stack"
         stack.mkdir()
         safe_tar(directory / manifest["components"]["stack"]["file"], stack)
-        identity = json.loads((stack / "host/release-identity.json").read_text())
+        identity = json.loads(releases.identity_file(stack / "host").read_text())
         from .sourcestamp import fingerprint
-        if (identity.get("release") != manifest["release"] or
+        if (releases.build_id(identity) != releases.build_id(manifest) or
                 identity.get("sha") != manifest["sources"]["stack"] or
                 identity.get("package_sha256") != fingerprint(stack / "host/jstack_host")):
             raise releases.ReleaseError("packaged host identity differs from release")

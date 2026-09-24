@@ -62,7 +62,8 @@ def test_macho_does_not_follow_symlinks(tmp_path):
 def test_release_bundle_uses_the_manifest_identity():
     identity = build_hub.release_identity("a" * 40, "0.70.0", release_id="2026-09-21-aaaaaaaa",
                                           github_repo="https://github.com/owner/repo.git", date="2026-09-21")
-    assert identity == {"sha": "a" * 40, "release": "2026-09-21-aaaaaaaa", "version": "0.70.0",
+    assert identity == {"sha": "a" * 40, "build": "2026-09-21-aaaaaaaa",
+                        "release": "2026-09-21-aaaaaaaa", "version": "0.70.0",
                         "github_repo": "owner/repo", "date": "2026-09-21"}
 
 

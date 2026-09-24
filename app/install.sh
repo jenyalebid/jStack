@@ -177,9 +177,14 @@ if [ -z "$REPO" ]; then
     REPO="$(printf '%s' "$ORIGIN" \
         | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')"
 fi
-if [ -z "$REPO" ] && [ -f "$SELF_DIR/../host/release-identity.json" ]; then
-    # A release snapshot has no git remote; its identity names the repo.
-    REPO="$(sed -n 's/.*"github_repo": *"\([^"]*\)".*/\1/p' "$SELF_DIR/../host/release-identity.json")"
+if [ -z "$REPO" ]; then
+    # A built stack has no git remote; its identity names the repo, under
+    # whichever name the build that made it used.
+    SELF_IDENTITY="$SELF_DIR/../host/build-identity.json"
+    [ -f "$SELF_IDENTITY" ] || SELF_IDENTITY="$SELF_DIR/../host/release-identity.json"
+    if [ -f "$SELF_IDENTITY" ]; then
+        REPO="$(sed -n 's/.*"github_repo": *"\([^"]*\)".*/\1/p' "$SELF_IDENTITY")"
+    fi
 fi
 [ -n "$REPO" ] || die "could not tell which repo to download from — run this from a clone, or pass --repo OWNER/NAME"
 case "$REPO" in

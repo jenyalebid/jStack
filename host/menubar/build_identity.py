@@ -28,7 +28,9 @@ from pathlib import Path
 
 def source(repo: Path) -> tuple[str, bool]:
     """`(sha, dirty)` for `repo` — `("", False)` when nothing knows."""
-    release = repo / "host/release-identity.json"
+    release = repo / "host/build-identity.json"
+    if not release.is_file():
+        release = repo / "host/release-identity.json"
     if release.exists():
         # A release is sealed: the sha is a fact of the archive, and there is
         # no tree here that could have moved off it.

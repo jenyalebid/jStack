@@ -221,9 +221,9 @@ class AppBackend(MacBackend):
             if kind == "menubar":
                 from .sourcestamp import fingerprint
                 packages = candidate / "Contents/Resources/packages"
-                identity = json.loads((packages / "release-identity.json").read_text())
+                identity = json.loads(releases.identity_file(packages).read_text())
                 if (identity.get("sha") != manifest["sources"]["stack"] or
-                        identity.get("release") != manifest["release"] or
+                        releases.build_id(identity) != releases.build_id(manifest) or
                         identity.get("package_sha256") != fingerprint(packages / "jstack_host")):
                     raise releases.ReleaseError("signed app source identity differs from release")
                 if self._automation_catalog(candidate) != installed_catalog:

@@ -121,12 +121,12 @@ def release_identity(source_sha: str, version: str, *, release_id=None, github_r
     of a signing team no such machine holds. Both are sealed by the signature
     over the bundle, which is the only reason either can be believed.
     """
-    from .release_manifest import SOURCE_BUILD, identifier
+    from .release_manifest import SOURCE_BUILD, identifier, named
     from .build_source import channel_ref, repository
     if any(value is not None for value in (release_id, github_repo, date)):
         if not release_id or not github_repo or not _is_date(date):
             raise ValueError("release builds require release ID, GitHub origin and an ISO date together")
-        identity = {"sha": source_sha, "release": identifier(release_id), "version": version,
+        identity = {"sha": source_sha, **named(identifier(release_id)), "version": version,
                     "date": date, "github_repo": repository(github_repo)}
         if channel is not None:
             # `channel_ref` reads an empty ref as `stable`, which is right for a
@@ -143,7 +143,7 @@ def release_identity(source_sha: str, version: str, *, release_id=None, github_r
         return identity
     if channel is not None or origin is not None:
         raise ValueError("a dev build follows no release line and has no release origin")
-    return {"sha": source_sha, "release": f"hub-{version}-{source_sha[:8]}", "version": version}
+    return {"sha": source_sha, **named(f"hub-{version}-{source_sha[:8]}"), "version": version}
 
 
 def _is_date(value) -> bool:
@@ -360,9 +360,9 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
         (packages / "jstack_host/release-trust.json").write_text(json.dumps(
             {"algorithm": "Ed25519", "public_key": trust_key}, indent=2) + "\n")
     from .sourcestamp import fingerprint
-    (packages / "release-identity.json").write_text(json.dumps({
-        **identity,
-        "package_sha256": fingerprint(packages / "jstack_host")}) + "\n")
+    from .release_manifest import write_identity
+    write_identity(packages, {
+        **identity, "package_sha256": fingerprint(packages / "jstack_host")})
     # The runtime gate asks who signed the bundle it is about to import from.
     # A Hub built on the Mac that will run it is signed ad-hoc — that Mac holds
     # no Developer ID — so asking for the publisher's team makes every such

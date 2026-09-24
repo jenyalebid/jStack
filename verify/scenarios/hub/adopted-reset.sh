@@ -50,7 +50,7 @@ case "$MODE" in
     *local*) echo "OK mode is local: $MODE" ;;
     *)       echo "FAIL mode is not local: $MODE" ;;
 esac
-echo "installed release: $(sed -n 's/.*"release": "\([^"]*\)".*/\1/p' "/Applications/jStack Hub.app/Contents/Resources/packages/release-identity.json" 2>/dev/null)"
+echo "installed release: $(sed -n 's/.*"\(build\|release\)": "\([^"]*\)".*/\2/p' "$(p=/Applications/jStack\ Hub.app/Contents/Resources/packages; [ -f "$p/build-identity.json" ] && echo "$p/build-identity.json" || echo "$p/release-identity.json")" 2>/dev/null)"
 pgrep -f JStackHostBar >/dev/null && echo "OK menu bar running" || echo "FAIL menu bar not running"
 echo DONE-ADOPTED-RESET
 EOF

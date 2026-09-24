@@ -21,8 +21,8 @@ echo "== verdict =="
 # the checkout; a checkout is a git clone and carries no such file. What this
 # Mac runs is the bundle it compiled, and the bundle is where the identity is
 # — sealed under Contents/Resources, so it cannot be edited after signing.
-HUB_ID="/Applications/jStack Hub.app/Contents/Resources/packages/release-identity.json"
-rel="$(sed -n 's/.*"release": "\([^"]*\)".*/\1/p' "$HUB_ID" 2>/dev/null)"
+HUB_ID="$(p=/Applications/jStack\ Hub.app/Contents/Resources/packages; [ -f "$p/build-identity.json" ] && echo "$p/build-identity.json" || echo "$p/release-identity.json")"
+rel="$(sed -n 's/.*"\(build\|release\)": "\([^"]*\)".*/\2/p' "$HUB_ID" 2>/dev/null)"
 [ -n "$rel" ] && echo "OK installed release: $rel" || echo "FAIL no release identity"
 # `origin` is written only by a machine that compiled the bundle for itself,
 # and a publisher's release carries none — so this is the one honest answer to

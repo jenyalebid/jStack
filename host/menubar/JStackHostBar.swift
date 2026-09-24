@@ -625,15 +625,30 @@ struct UpdateSource: Decodable {
     var sha: String?
     var dirty: Bool?
     var version: String?
+    var build: String?
+    /// The name `build` had while jStack published releases. A hub still on
+    /// that side of the rename sends only this, so the window reads both.
     var release: String?
-    var build: Int?
 
-    /// What identifies a release is its hash and date — never a counter, and
+    private enum CodingKeys: String, CodingKey { case sha, dirty, version, build, release }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sha = try c.decodeIfPresent(String.self, forKey: .sha)
+        dirty = try c.decodeIfPresent(Bool.self, forKey: .dirty)
+        version = try c.decodeIfPresent(String.self, forKey: .version)
+        release = try c.decodeIfPresent(String.self, forKey: .release)
+        // Before the identity, `build` was a counter: an integer, retired and
+        // never shown. A hub that still sends one must not crash the window.
+        build = try? c.decodeIfPresent(String.self, forKey: .build)
+    }
+
+    /// What identifies a build is its hash and date — never a counter, and
     /// never the package semver. `version` still exists because the plugin
     /// manifest and CFBundleVersion require one, but it says nothing about
-    /// which build this is: two different releases share it. `build` is the
-    /// retired counter and is deliberately not rendered.
+    /// which build this is: two different builds share it.
     var displayVersion: String {
+        if let build, !build.isEmpty { return build }
         if let release, !release.isEmpty { return release }
         return version ?? "Version not reported"
     }
@@ -654,8 +669,12 @@ struct HubSourceCheck: Decodable {
 struct HubBuildPhase: Decodable {
     var state: String?
     var ref: String?
+    var build: String?
     var release: String?
     var detail: String?
+
+    /// Either name, because a hub can be on either side of the rename.
+    var identity: String? { build ?? release }
 }
 
 /// The build half of this hub, as `/updates/source` answers it: the ref it
@@ -698,8 +717,8 @@ struct HubSource: Decodable {
             let detail = build?.detail ?? ""
             return "Build failed" + (detail.isEmpty ? "." : ": \(detail)")
         case "built":
-            if let release = build?.release, release != running?.release {
-                return "Built \(release). Install it under Software Updates."
+            if let built = build?.identity, built != running?.displayVersion {
+                return "Built \(built). Install it under Software Updates."
             }
         default: break
         }
@@ -715,11 +734,15 @@ struct HubSource: Decodable {
 }
 
 struct UpdateInventory: Decodable {
+    var build: String?
     var release: String?
     var machines: [UpdateMachine]
 
+    /// Either name, because a hub can be on either side of the rename.
+    var offered: String? { build ?? release }
+
     func localUpdate(hostID: String?) -> UpdateMachine? {
-        guard release != nil, let hostID else { return nil }
+        guard offered != nil, let hostID else { return nil }
         return machines.first {
             $0.machine == hostID && ($0.canUpdate || $0.needsBootstrap)
         }
@@ -2190,8 +2213,8 @@ final class StatusController: NSObject {
             submenu.addItem(Self.caption("Checking…"))
             return submenu
         }
-        submenu.addItem(Self.caption(inventory.release.map { "Available release: \($0)" }
-                                       ?? "No release available"))
+        submenu.addItem(Self.caption(inventory.offered.map { "Available build: \($0)" }
+                                       ?? "No build available"))
         let localID = state.identity?.hostId
         for machine in inventory.machines {
             submenu.addItem(.separator())
@@ -2221,7 +2244,7 @@ final class StatusController: NSObject {
                 submenu.addItem(update)
             }
         }
-        if inventory.machines.count > 1 && inventory.release != nil {
+        if inventory.machines.count > 1 && inventory.offered != nil {
             submenu.addItem(.separator())
             let all = Self.action("Update All Macs", #selector(doUpdate), self)
             all.setAccessibilityIdentifier("updates_tap_all")

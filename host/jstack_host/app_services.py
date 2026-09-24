@@ -31,7 +31,7 @@ def source_built(app: Path) -> bool:
     from . import release_manifest as releases
     try:
         identity = json.loads(
-            (app / "Contents/Resources/packages/release-identity.json").read_text())
+            releases.identity_file(app / "Contents/Resources/packages").read_text())
     except (OSError, ValueError):
         return False
     origin = identity.get("origin") if isinstance(identity, dict) else None

@@ -34,7 +34,7 @@ echo "== verdict =="
 [ -f "$C/Data/hosts.marker" ] && echo "FAIL ghost container data survived" || echo "OK ghost container data gone"
 security find-generic-password -s jRemote -a jremote.host.token.GHOST >/dev/null 2>&1 \
     && echo "FAIL ghost keychain token survived" || echo "OK ghost keychain token gone"
-echo "installed release: $(sed -n 's/.*"release": "\([^"]*\)".*/\1/p' "/Applications/jStack Hub.app/Contents/Resources/packages/release-identity.json" 2>/dev/null)"
+echo "installed release: $(sed -n 's/.*"\(build\|release\)": "\([^"]*\)".*/\2/p' "$(p=/Applications/jStack\ Hub.app/Contents/Resources/packages; [ -f "$p/build-identity.json" ] && echo "$p/build-identity.json" || echo "$p/release-identity.json")" 2>/dev/null)"
 sleep 5
 ~/jStack/plugins/jstack/bin/jstack-scheduler status >/dev/null 2>&1 \
     && echo "OK scheduler service healthy" || echo "FAIL scheduler status exit $?"

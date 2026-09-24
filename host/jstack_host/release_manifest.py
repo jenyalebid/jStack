@@ -29,6 +29,20 @@ STABLE_CHANNEL = "stable"
 SOURCE_BUILD = "source-build"
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 HEX = re.compile(r"[a-f0-9]{64}\Z")
+#: What a machine is running: the day it was made, the commit it came from and
+#: the sources it was made out of. It was called a release while jStack
+#: published them, and the identifier itself has not changed — only the word.
+KEY = "build"
+#: The name that key had before. Machines built before the rename write it and
+#: read nothing else, and a hub and a leaf sit on either side of the rename for
+#: as long as it takes the fleet to come across. Both names are written until
+#: no machine in the fleet still reads this one (jStack #177).
+LEGACY_KEY = "release"
+#: The file a built bundle carries its identity in, beside the packages it
+#: ships. An installed Hub predating the rename has the old name on disk and
+#: is read by whatever installer or updater arrives next, so both are read.
+IDENTITY_FILE = "build-identity.json"
+LEGACY_IDENTITY_FILE = "release-identity.json"
 
 
 class ReleaseError(ValueError):
@@ -37,8 +51,51 @@ class ReleaseError(ValueError):
 
 def identifier(value: object) -> str:
     if not isinstance(value, str) or not IDENTIFIER.fullmatch(value):
-        raise ReleaseError("invalid release identifier")
+        raise ReleaseError("invalid build identifier")
     return value
+
+
+def build_id(value: object) -> str:
+    """The build a manifest, an identity file or a machine's report names.
+
+    Either name answers. Anything that crosses machines writes both, so what
+    comes back is whichever name the far side's own code knows.
+    """
+    if not isinstance(value, dict):
+        return ""
+    return str(value.get(KEY) or value.get(LEGACY_KEY) or "")
+
+
+def named(build: str) -> dict:
+    """One build under both its names, for anything another machine reads."""
+    return {KEY: build, LEGACY_KEY: build}
+
+
+def identity_file(directory: Path) -> Path:
+    """Where a built bundle records what it is, under whichever name it used.
+
+    Returns the current name when neither exists, so a writer gets the name to
+    write and a reader gets the name that is actually there.
+    """
+    legacy = directory / LEGACY_IDENTITY_FILE
+    current = directory / IDENTITY_FILE
+    return legacy if legacy.is_file() and not current.is_file() else current
+
+
+def write_identity(directory: Path, identity: dict) -> dict:
+    """Lay a bundle's identity down under both names, both keys inside.
+
+    The machine that installs a bundle runs the code it had before, not the
+    code inside the bundle: a Hub on the last release reads
+    `release-identity.json` out of the tarball and out of the app it staged,
+    and refuses the update when the file is not there. So the first build
+    after the rename is exactly the one that must still carry the old name.
+    """
+    identity = {**identity, **named(build_id(identity))}
+    text = json.dumps(identity) + "\n"
+    for name in (IDENTITY_FILE, LEGACY_IDENTITY_FILE):
+        (directory / name).write_text(text)
+    return identity
 
 
 def canonical(value: dict) -> bytes:
@@ -53,7 +110,7 @@ def digest(path: Path) -> str:
 def validate(manifest: dict, *, promoted: bool = True) -> dict:
     if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
         raise ReleaseError("unsupported release schema")
-    identifier(manifest.get("release"))
+    identifier(build_id(manifest))
     components = manifest.get("components")
     if not isinstance(components, dict) or set(components) != COMPONENTS:
         raise ReleaseError("release components do not match its schema")

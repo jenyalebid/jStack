@@ -15,6 +15,8 @@ import re
 import subprocess
 import time
 
+from jstack_host import release_manifest
+
 
 def run(*args):
     result = subprocess.run(args, text=True, capture_output=True, timeout=60)
@@ -44,7 +46,8 @@ def main():
     result = {"phase": args.phase, "sources": {}, "gatekeeper": gatekeeper}
     run("/usr/bin/codesign", "--verify", "--deep", "--strict", str(app))
     run("/usr/sbin/spctl", "--assess", "--type", "execute", str(app))
-    result["sources"][app.name] = json.loads((app / "Contents/Resources/packages/release-identity.json").read_text())
+    packages = app / "Contents/Resources/packages"
+    result["sources"][app.name] = json.loads(release_manifest.identity_file(packages).read_text())
     arguments = (runtime, "install", "--app", str(app),
                  "--state-dir", str(state), "--port", "9391", "--bind", "127.0.0.1")
     if args.phase == "install":

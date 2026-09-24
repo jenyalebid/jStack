@@ -645,14 +645,17 @@ def check_versions() -> dict:
         # A shipped release copy has no .git on purpose — its identity file
         # is the identity. Grading it as a broken checkout told people with
         # git installed to install git.
-        try:
-            identity = json.loads(
-                (checkout / "host" / "release-identity.json").read_text())
-        except (OSError, json.JSONDecodeError):
-            identity = None
+        identity = None
+        for name in ("build-identity.json", "release-identity.json"):
+            try:
+                identity = json.loads((checkout / "host" / name).read_text())
+                break
+            except (OSError, json.JSONDecodeError):
+                continue
         if identity and identity.get("sha"):
             sha = str(identity["sha"])
-            rel = identity.get("release") or identity.get("version") or "release"
+            rel = (identity.get("build") or identity.get("release")
+                   or identity.get("version") or "build")
             if pin and pin == sha:
                 return _check("versions", OK, f"shipped copy {rel} at "
                               f"{sha[:12]} — cache in step with it")

@@ -62,10 +62,11 @@ def repair_native(public_key: str, settings: dict, *, state_dir: Path | None,
 def stage_runtime(package: Path, root: Path) -> Path:
     """Keep the bootstrap's exact source identity beside its copied package."""
     from . import sourcestamp
-    identity_path = package.parent / "release-identity.json"
+    from .release_manifest import build_id, identity_file, named, write_identity
+    identity_path = identity_file(package.parent)
     identity = (json.loads(identity_path.read_text()) if identity_path.exists() else
                 {**sourcestamp.capture(), "package_sha256": sourcestamp.fingerprint(package)})
-    identity.setdefault("release", "")
+    identity.update(named(build_id(identity)))
     identity_bytes = json.dumps(identity, sort_keys=True).encode()
     stamp = hashlib.sha256(identity_bytes + b"".join(
         p.read_bytes() for p in sorted(package.glob("*.py")))).hexdigest()[:16]
@@ -76,7 +77,7 @@ def stage_runtime(package: Path, root: Path) -> Path:
         staging = Path(tempfile.mkdtemp(prefix=".stage-", dir=destination.parent))
         shutil.copytree(package, staging / "jstack_host",
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-        atomic_json(staging / "release-identity.json", identity)
+        write_identity(staging, identity)
         os.rename(staging, destination)
     return destination
 
@@ -147,9 +148,10 @@ def bootstrap(public_key: str, *, state_dir: Path | None = None, load=True,
     from . import releases as app_releases
     configuration["feed_dir"] = str(app_releases.RELEASE_DIR.parent / "fleet")
     from .build_source import repository
+    from .release_manifest import identity_file
     origin = subprocess.run(["git", "-C", str(package), "remote", "get-url", "origin"],
                             capture_output=True, text=True)
-    identity_path = package.parent / "release-identity.json"
+    identity_path = identity_file(package.parent)
     identity = json.loads(identity_path.read_text()) if identity_path.exists() else {}
     source = old_config.get("github_repo") or identity.get("github_repo") or origin.stdout.strip()
     if source:

@@ -84,7 +84,11 @@ def test_bootstrap_preserves_release_identity_and_loaded_fingerprint(tmp_path, m
                 "version": "1.0", "package_sha256": sourcestamp.fingerprint(package)}
     (package.parent / "release-identity.json").write_text(json.dumps(identity))
     staged = install_updater.stage_runtime(package, tmp_path / "state")
-    assert json.loads((staged / "release-identity.json").read_text()) == identity
+    # Both names on disk, both keys inside: the runtime this stages may be
+    # read by code from either side of the rename.
+    both = {**identity, "build": identity["release"]}
+    assert json.loads((staged / "release-identity.json").read_text()) == both
+    assert json.loads((staged / "build-identity.json").read_text()) == both
     monkeypatch.setattr(sourcestamp, "_PKG", staged / "jstack_host")
     monkeypatch.setattr(sourcestamp, "_stamp", None)
     monkeypatch.setattr(sourcestamp, "_git", lambda *args: "")

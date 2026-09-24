@@ -267,7 +267,7 @@ def assemble(*, release_id: str, notes: str, sequence: int, repo: str, ref: str,
     one of them is inside the signature.
     """
     return {
-        "schema": releases.SCHEMA, "release": release_id, "notes": notes,
+        "schema": releases.SCHEMA, **releases.named(release_id), "notes": notes,
         "sequence": sequence,
         "channel": {"github_repo": repo, "name": ref},
         # Inside the signed bytes, because it is what excuses this manifest
@@ -366,7 +366,8 @@ def build(root: Path, config: dict, *, ref: str | None = None, now=None) -> dict
                            "started": time.time() if now is None else now})
     try:
         result = _build(root, config, ref)
-        atomic_json(progress, {"state": "built", "ref": ref, "release": result["release"],
+        atomic_json(progress, {"state": "built", "ref": ref,
+                               **releases.named(releases.build_id(result)),
                                "finished": time.time()})
         return result
     except Exception as exc:
@@ -421,7 +422,7 @@ def _build(root: Path, config: dict, ref: str) -> dict:
                 isinstance(previous.get("sequence"), int) and sequence < previous["sequence"]):
             raise releases.ReleaseError(f"{ref} is behind the build this hub already holds")
         built_by = source_origin(config.get("machine", ""))
-        identity = {"release": release_id, "sha": sha, "version": version, "date": date,
+        identity = {**releases.named(release_id), "sha": sha, "version": version, "date": date,
                     "github_repo": repo, "sequence": sequence, "channel": ref,
                     "origin": built_by}
         app = build_hub.build(stack, output, version, config.get("signing"),
@@ -445,8 +446,8 @@ def _build(root: Path, config: dict, ref: str) -> dict:
         trust = stack / "host/jstack_host/release-trust.json"
         trust.write_text(json.dumps({"algorithm": "Ed25519", "public_key": public}, indent=2) + "\n")
         from .sourcestamp import fingerprint
-        (stack / "host/release-identity.json").write_text(json.dumps({
-            **identity, "package_sha256": fingerprint(stack / "host/jstack_host")}))
+        releases.write_identity(stack / "host", {
+            **identity, "package_sha256": fingerprint(stack / "host/jstack_host")})
         archive = output / "stack.tar.gz"
         with tarfile.open(archive, "w:gz") as bundle:
             for path in sorted(stack.iterdir()):
@@ -593,7 +594,7 @@ def bootstrap(checkout: Path, output: Path, key_dir: Path, *, repo: str, ref: st
         item, client_sha = client_component(client, output) if client else (None, "")
         release_id = source_identity(date, sha, client_sha, {})
         built_by = source_origin(machine)
-        identity = {"release": release_id, "sha": sha, "version": version, "date": date,
+        identity = {**releases.named(release_id), "sha": sha, "version": version, "date": date,
                     "github_repo": repo, "sequence": sequence, "channel": ref,
                     "origin": built_by}
         app = build_hub.build(stack, output, version, signing, release_id=release_id,
@@ -609,7 +610,7 @@ def bootstrap(checkout: Path, output: Path, key_dir: Path, *, repo: str, ref: st
         installable(app)
         compatibility = compatibility_of(app, client) if item else None
         shutil.rmtree(app, ignore_errors=True)
-        answer = {"release": release_id, "sha": sha, "ref": ref, "version": version,
+        answer = {**releases.named(release_id), "sha": sha, "ref": ref, "version": version,
                   "menubar": str(menu), "public_key": public, "offer": bool(item)}
         if not item:
             return answer
@@ -620,8 +621,8 @@ def bootstrap(checkout: Path, output: Path, key_dir: Path, *, repo: str, ref: st
         (stack / "host/jstack_host/release-trust.json").write_text(
             json.dumps({"algorithm": "Ed25519", "public_key": public}, indent=2) + "\n")
         from .sourcestamp import fingerprint
-        (stack / "host/release-identity.json").write_text(json.dumps({
-            **identity, "package_sha256": fingerprint(stack / "host/jstack_host")}))
+        releases.write_identity(stack / "host", {
+            **identity, "package_sha256": fingerprint(stack / "host/jstack_host")})
         archive = output / "stack.tar.gz"
         with tarfile.open(archive, "w:gz") as bundle:
             for path in sorted(stack.iterdir()):

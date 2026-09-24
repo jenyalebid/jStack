@@ -168,7 +168,9 @@ def test_the_tarball_carries_the_identity_and_the_key_stage_reads_back(installin
     release = built(installing)["release"]
     with tarfile.open(output / "stack.tar.gz") as archive:
         identity = json.loads(archive.extractfile("host/release-identity.json").read())
+        renamed = json.loads(archive.extractfile("host/build-identity.json").read())
         trust = json.loads(archive.extractfile("host/jstack_host/release-trust.json").read())
+    assert identity == renamed and identity["build"] == release
     assert identity["release"] == release and identity["sha"] == HEAD
     assert identity["channel"] == "dev" and identity["package_sha256"]
     assert trust["public_key"] == build_source.build_key(keys)[1]

@@ -186,9 +186,11 @@ managed_ready() {{
 # under it). Empty when no Hub is installed, or it predates the identity file.
 installed_release() {{
     local f
-    f="$(find "$HUB_APP/Contents/Resources" -maxdepth 3 -name release-identity.json 2>/dev/null | head -1)"
+    f="$(find "$HUB_APP/Contents/Resources" -maxdepth 3 \\
+        \\( -name build-identity.json -o -name release-identity.json \\) 2>/dev/null | head -1)"
     [ -n "$f" ] || return 0
-    sed -n 's/.*"release": *"\\([^"]*\\)".*/\\1/p' "$f" | head -1
+    sed -n -e 's/.*"build": *"\\([^"]*\\)".*/\\1/p' \\
+           -e 's/.*"release": *"\\([^"]*\\)".*/\\1/p' "$f" | head -1
 }}
 needs_install=""
 if ! managed_ready; then

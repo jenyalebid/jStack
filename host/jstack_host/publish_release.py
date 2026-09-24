@@ -64,7 +64,7 @@ def sign_hub(stack: Path, output: Path, version: str, config: dict) -> None:
     built from it is stored machine-locally by promote(), never in the feed.
     """
     from . import build_hub
-    identity = json.loads((stack / "host/release-identity.json").read_text())
+    identity = json.loads(releases.identity_file(stack / "host").read_text())
     variants = [("menubar-notarized.zip", None)]
     catalog_path = config.get("local_catalog")
     if catalog_path:
@@ -72,7 +72,7 @@ def sign_hub(stack: Path, output: Path, version: str, config: dict) -> None:
     for name, catalog in variants:
         destination = output / (name.removesuffix(".zip") + "-build")
         app = build_hub.build(stack, destination, version, config, catalog=catalog,
-                              release_id=identity["release"], github_repo=identity["github_repo"],
+                              release_id=releases.build_id(identity), github_repo=identity["github_repo"],
                               date=identity["date"])
         build_hub.notarize(app, destination, config)
         shutil.copy2(destination / "hub-notarized.zip", output / name)
@@ -123,10 +123,10 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
                        "--abbrev-ref", "HEAD"]).strip()
     channel = releases.STABLE_CHANNEL if channel in ("main", "HEAD") else channel
     from .sourcestamp import fingerprint
-    (stack / "host/release-identity.json").write_text(json.dumps({
-        "release": release_id, "sha": stack_sha, "version": version, "date": date,
+    releases.write_identity(stack / "host", {
+        **releases.named(release_id), "sha": stack_sha, "version": version, "date": date,
         "github_repo": github_repo, "sequence": sequence, "channel": channel,
-        "package_sha256": fingerprint(stack / "host/jstack_host")}))
+        "package_sha256": fingerprint(stack / "host/jstack_host")})
     archive = output / "stack.tar.gz"
     with tarfile.open(archive, "w:gz") as bundle:
         for path in sorted(stack.iterdir()):
@@ -169,8 +169,8 @@ def seal(work: Path, config: dict, notes: str) -> Path:
     """Resume after completed signing without building different bytes."""
     from . import build_hub
     stack, client = work / "stack", work / "Projects/client"
-    identity = json.loads((stack / "host/release-identity.json").read_text())
-    release_id, stack_sha = identity["release"], identity["sha"]
+    identity = json.loads(releases.identity_file(stack / "host").read_text())
+    release_id, stack_sha = releases.build_id(identity), identity["sha"]
     release_id = releases.identifier(release_id)
     output, app_output = work / release_id, work / "client-output"
     for repository in (stack, client, *sorted((work / "Packages").glob("*"))):
@@ -188,8 +188,7 @@ def seal(work: Path, config: dict, notes: str) -> Path:
     shutil.copy2(app, destination)
     if config.get("local_catalog") and not (output / "hub-catalog.zip").is_file():
         raise releases.ReleaseError("configured private capability variant was not built for this candidate")
-    manifest = {"schema": releases.SCHEMA, "release": release_id, "notes": notes,
-                "build": identity.get("build"),
+    manifest = {"schema": releases.SCHEMA, **releases.named(release_id), "notes": notes,
                 "sequence": identity.get("sequence"),
                 "channel": {"github_repo": identity.get("github_repo"),
                             "name": identity.get("channel") or releases.STABLE_CHANNEL},
@@ -243,7 +242,7 @@ def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -
 
 def build_of(manifest: dict) -> dict:
     """The commit a receipt binds to, named the way `acceptance` names it."""
-    return {"build": manifest["release"], "sha": manifest["sources"]["stack"]}
+    return {"build": releases.build_id(manifest), "sha": manifest["sources"]["stack"]}
 
 
 def promote(candidate: Path, receipts_dir: Path, feed: Path, private_key: bytes,

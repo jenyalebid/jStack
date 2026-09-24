@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from . import devices, fleet_updates as fleet, hostenv, managed_access
 from .auth import current_device
+from . import release_manifest as releases
 from .release_manifest import ReleaseError, identifier
 
 router = APIRouter()
@@ -52,7 +53,7 @@ def inventory(request: Request, device_id: str = Depends(current_device)):
     local_admin(request, device_id)
     from .store import get_store
     offer = offered()
-    desired = offer["manifest"]["release"] if offer else None
+    desired = releases.build_id(offer["manifest"]) if offer else None
     store = fleet.FleetStore()
     # Only a recent supervisor report implies update capability. Reading this
     # endpoint must not manufacture a supervisor heartbeat on an old install.
@@ -61,7 +62,7 @@ def inventory(request: Request, device_id: str = Depends(current_device)):
         for row in get_store().list_hosts():
             if not row["deleted"]:
                 rows.append(store.inventory(row["key"], row["name"], desired))
-    return {"release": desired, "machines": rows}
+    return {**releases.named(desired or ""), "machines": rows}
 
 
 # ── The ref this hub follows ────────────────────────────────────────────────
@@ -102,7 +103,8 @@ def _source() -> dict:
         "managed": managed_access.is_leaf(),
         # The same four keys `/host` reports its source with, so the window
         # renders a build here exactly as it renders one there.
-        "running": {"release": running.get("release", ""), "sha": running.get("sha", ""),
+        "running": {**releases.named(releases.build_id(running)),
+                    "sha": running.get("sha", ""),
                     "version": running.get("version", ""), "dirty": bool(running.get("dirty"))},
         "check": {"status": status.get("status", "unknown"),
                   "head": status.get("head", ""),

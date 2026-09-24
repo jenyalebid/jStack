@@ -70,10 +70,11 @@ def capture() -> dict:
             _stamp["version"] = json.loads(manifest.read_text())["version"]
         # An immutable release archive has no .git. Its identity is packaged
         # into the signed stack artifact, not copied from desired fleet state.
-        identity = _PKG.parent / "release-identity.json"
+        from .release_manifest import build_id, identity_file, named
+        identity = identity_file(_PKG.parent)
         if identity.is_file():
             data = json.loads(identity.read_text())
-            _stamp.update(sha=data["sha"], release=data["release"],
+            _stamp.update(sha=data["sha"], **named(build_id(data)),
                           dirty=data.get("package_sha256") != fingerprint(_PKG))
             if data.get("version"):
                 _stamp["version"] = data["version"]

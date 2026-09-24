@@ -66,7 +66,9 @@ def test_reading_the_source_reports_the_last_answer_and_asks_for_no_new_one(rig,
     body = console.get(SOURCE).json()
     assert body["ref"] == "stable" and body["repository"] == "example/stack"
     assert body["enabled"] is True and body["managed"] is False
-    assert body["running"] == {"release": "2026-09-20-aaaaaaaa-1234", "sha": "a" * 40,
+    # Under both names: a window from either side of the rename reads it.
+    assert body["running"] == {"build": "2026-09-20-aaaaaaaa-1234",
+                               "release": "2026-09-20-aaaaaaaa-1234", "sha": "a" * 40,
                                "version": "0.75.0", "dirty": False}
     # Verbatim from channel.json, timestamp included: a window that cannot tell
     # a stale verdict from a live one renders the stale one as live.

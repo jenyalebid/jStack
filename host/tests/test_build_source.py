@@ -409,8 +409,12 @@ def test_a_build_lands_the_shape_stage_already_consumes(builder):
         releases.check_artifact(feed / release / item["file"], item)
     with tarfile.open(feed / release / "stack.tar.gz") as bundle:
         identity = json.loads(bundle.extractfile("host/release-identity.json").read())
+        renamed = json.loads(bundle.extractfile("host/build-identity.json").read())
         trust = json.loads(bundle.extractfile("host/jstack_host/release-trust.json").read())
-    # stage() reads exactly these three facts back out of the tarball.
+    # stage() reads exactly these three facts back out of the tarball — the
+    # stage() of the machine being updated, which may predate the rename and
+    # know only the old file name.
+    assert identity == renamed and identity["build"] == release
     assert identity["release"] == release and identity["sha"] == manifest["sources"]["stack"]
     assert identity["package_sha256"] and identity["channel"] == "stable"
     assert trust["public_key"] == build_source.build_key(root)[1]

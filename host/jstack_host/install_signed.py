@@ -39,7 +39,8 @@ def identity(app: Path, identifier: str) -> dict:
         command(["/usr/sbin/spctl", "--assess", "--type", "execute", str(app)])
     from .sourcestamp import fingerprint
     packages = app / "Contents/Resources/packages"
-    value = json.loads((packages / "release-identity.json").read_text())
+    from .release_manifest import identity_file
+    value = json.loads(identity_file(packages).read_text())
     if value.get("package_sha256") != fingerprint(packages / "jstack_host"):
         raise ValueError("installed package differs from its sealed source identity")
     return value

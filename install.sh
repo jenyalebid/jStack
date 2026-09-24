@@ -1335,10 +1335,14 @@ fi
 JSTACK_HUB_CURRENT=0
 if [ "$(uname -s)" = "Darwin" ] && [ "$WANT_HOST" != "0" ]; then
     if [ -d "/Applications/jStack Hub.app" ]; then
-        HUB_IDENTITY="/Applications/jStack Hub.app/Contents/Resources/packages/release-identity.json"
+        # Either name: a Hub installed before builds replaced releases wrote
+        # the old one, and this installer is the newer of the two.
+        HUB_PACKAGES="/Applications/jStack Hub.app/Contents/Resources/packages"
+        HUB_IDENTITY="$HUB_PACKAGES/build-identity.json"
+        [ -f "$HUB_IDENTITY" ] || HUB_IDENTITY="$HUB_PACKAGES/release-identity.json"
         if curl -fsS -m 3 http://127.0.0.1:9090/api/health >/dev/null 2>&1; then
-            installed_release="$(sed -nE 's/.*"release": *"([^"]+)".*/\1/p' \
-                "$HUB_IDENTITY" 2>/dev/null)"
+            installed_release="$(sed -nE 's/.*"(build|release)": *"([^"]+)".*/\2/p' \
+                "$HUB_IDENTITY" 2>/dev/null | head -1)"
             # Answering is not the whole question. Which installer put it there
             # decides whether it can move itself forward, and `origin` is the
             # only honest answer to that: it is written solely by a machine that
