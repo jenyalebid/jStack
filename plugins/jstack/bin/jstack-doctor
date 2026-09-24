@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -314,7 +315,13 @@ def check_hooks() -> dict:
                 for h in (entry.get("hooks") or [])]
     bad = []
     for cmd in commands:
-        p = Path(cmd.replace("${CLAUDE_PLUGIN_ROOT}", str(PLUGIN_ROOT)))
+        # A hook command is a command line, not a path: seven of these carry a
+        # subcommand, and testing the whole string as a filename reported every
+        # one of them missing on a machine where the file was present and
+        # executable. Split the template before substituting, so a plugin root
+        # with a space in it stays one token.
+        argv = shlex.split(cmd) or [cmd]
+        p = Path(argv[0].replace("${CLAUDE_PLUGIN_ROOT}", str(PLUGIN_ROOT)))
         if not p.is_file():
             bad.append(f"{p.name} (missing)")
         elif not os.access(p, os.X_OK):
