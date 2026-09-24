@@ -270,6 +270,10 @@ class Fleet:
         self._ids: dict[str, str] = {}
         self.build: Build | None = None
         self.prior: Build | None = None
+        #: Leaves owing a re-pin because the hub built since they last adopted.
+        #: Paid when the leaf is next booted, not at build time: a parked guest
+        #: cannot be re-adopted, and a two-slot host parks most of them.
+        self.owed: set[str] = set()
         #: What the hub's own build of a ref came out as. A build id folds in
         #: the client and the dependency set the *building* machine holds, so
         #: the hub's id for a commit and a fresh Mac's id for the same commit
@@ -300,6 +304,8 @@ class Fleet:
                     guest.stop()
         for guest in cast:
             guest.start()
+        for guest in cast:
+            self.readopt(guest)
 
     def machine(self, guest: Guest) -> str:
         if guest.name not in self._ids:
@@ -328,15 +334,17 @@ class Fleet:
         self.offered[build.ref] = built["release"]
         self.build = build
         if adopted:
-            for leaf in self.leaves:
-                self.readopt(leaf)
+            self.owed = {leaf.name for leaf in self.leaves}
         return built["release"]
 
     def readopt(self, guest: Guest) -> None:
         """Re-pin a leaf on the key the hub's newest build minted (#144)."""
+        if guest.name not in self.owed:
+            return
         expect(self.plan.get("adopt_command"),
                "re-adopting a leaf after a hub build needs 'adopt_command' in the plan")
         guest.sh(self.plan["adopt_command"], timeout=900)
+        self.owed.discard(guest.name)
         time.sleep(SETTLE)
 
 
