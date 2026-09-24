@@ -10,12 +10,12 @@ def test_server_env_drops_interpreter_private_vars(monkeypatch):
     monkeypatch.setenv("PYTHONPATH", "/Applications/jStack Hub.app/Contents/Resources/packages")
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     monkeypatch.setenv("PYTHONHOME", "/nowhere")
-    monkeypatch.setenv("HOME", "/Users/someone")
+    monkeypatch.setenv("HOME", "/Users/x")
     env = managed._server_env()
     assert "PYTHONPATH" not in env
     assert "PYTHONDONTWRITEBYTECODE" not in env
     assert "PYTHONHOME" not in env
-    assert env["HOME"] == "/Users/someone"
+    assert env["HOME"] == "/Users/x"
     assert env["PATH"] == managed._PATH
 
 
