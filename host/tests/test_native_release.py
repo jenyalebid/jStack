@@ -33,6 +33,28 @@ def test_receipts_bind_the_exact_commit():
         releases.validate(value)
 
 
+def test_receipts_written_against_artifact_bytes_still_read():
+    """Every release published before the build model bound its receipts to
+    the artifact digest, not the commit. The hub's first build inherits its
+    client from one of those (build_source.inherited), and a Mac behind by
+    months is judged by this code: the older binding is read on its own terms,
+    and a receipt of either shape that names the wrong thing is refused."""
+    import hashlib
+    value = manifest()
+    digest = hashlib.sha256(releases.canonical(value["components"])).hexdigest()
+    for receipt in value["receipts"].values():
+        del receipt["source"]
+        receipt["artifacts"] = digest
+    releases.validate(value)
+    value["components"]["menubar"]["sha256"] = "c" * 64
+    with pytest.raises(ValueError, match="receipt"):
+        releases.validate(value)
+    value["components"]["menubar"]["sha256"] = "a" * 64
+    value["receipts"]["fleet"]["source"] = "f" * 40
+    with pytest.raises(ValueError, match="receipt"):
+        releases.validate(value)
+
+
 def test_retired_services_owner_cannot_reenter_the_feed():
     value = manifest()
     value["components"]["services"] = dict(value["components"]["menubar"], file="services.zip")
