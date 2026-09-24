@@ -392,6 +392,61 @@ def test_a_build_lands_the_shape_stage_already_consumes(builder):
     assert trust["public_key"] == build_source.build_key(root)[1]
 
 
+def test_a_hub_with_private_capabilities_builds_their_variant_beside_the_feed(builder, tmp_path, monkeypatch):
+    """The Mac that builds is the one Mac whose Hub carries the private
+    catalog, and `stage()` on that Mac takes its menubar from
+    `local_components/<release>/hub-catalog.zip`. A build with nothing there
+    is a build the builder itself cannot install."""
+    from jstack_host import build_hub
+    root, feed, config, _ = builder
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text('{"tunnel": {"argv": ["/bin/true"]}}')
+    store = tmp_path / "local-components"
+    config = {**config, "local_catalog": str(catalog), "local_components": str(store)}
+    compile_hub, built = build_hub.build, []
+
+    def compile_variant(stack, output, version, signing, **kwargs):
+        built.append((kwargs.get("catalog"), kwargs["release_id"], kwargs["trust_key"],
+                      kwargs["date"], kwargs["channel"]))
+        return compile_hub(stack, output, version, signing, **kwargs)
+
+    monkeypatch.setattr(build_hub, "build", compile_variant)
+    release = build_source.build(root, config)["release"]
+    public = build_source.build_key(root)[1]
+    # The public bundle first, then the same identity with the catalog in it.
+    assert [item[0] for item in built] == [None, {"tunnel": {"argv": ["/bin/true"]}}]
+    assert {item[1:] for item in built} == {(release, public, build_source.release_date(), "stable")}
+    variant = store / release / "hub-catalog.zip"
+    assert zipfile.ZipFile(variant).namelist() == ["jStack Hub.app/Contents/Info.plist"]
+    # Machine-local only: the feed carries the public bundle and nothing else.
+    assert not (feed / release / "hub-catalog.zip").exists()
+    manifest = releases.verify(json.loads((feed / release / "manifest.json").read_text()), public)
+    assert {item["file"] for item in manifest["components"].values()} == {
+        "stack.tar.gz", "menubar-notarized.zip", "client.zip"}
+
+
+def test_private_capabilities_with_nowhere_to_store_the_variant_refuse_to_build(builder, tmp_path):
+    root, feed, config, _ = builder
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text("{}")
+    before = (feed / "latest.json").read_bytes()
+    with pytest.raises(releases.ReleaseError, match="local_components"):
+        build_source.build(root, {**config, "local_catalog": str(catalog)})
+    assert (feed / "latest.json").read_bytes() == before
+
+
+def test_a_reoffer_whose_variant_is_gone_says_so_at_the_build(builder, tmp_path):
+    root, _, config, _ = builder
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text("{}")
+    store = tmp_path / "local-components"
+    config = {**config, "local_catalog": str(catalog), "local_components": str(store)}
+    release = build_source.build(root, config)["release"]
+    (store / release / "hub-catalog.zip").unlink()
+    with pytest.raises(releases.ReleaseError, match=f"private capability build for {release} is missing"):
+        build_source.build(root, config)
+
+
 def test_a_build_carries_the_client_artifact_forward_byte_for_byte(builder):
     """jRemote's Mac app is not built here, so the honest thing to name is the
     exact client this hub already holds and has already verified."""
