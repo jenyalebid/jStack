@@ -244,6 +244,21 @@ def build_interpreter() -> Interpreter:
 TOOL_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin")
 
 
+def own_tools() -> Path | None:
+    """The `Contents/MacOS` of the sealed app this code is running from.
+
+    A hub builds the next hub from inside the current one, and that runtime
+    puts its own `Contents/MacOS` at the front of PATH so the host resolves
+    the tmux it ships. Every `shutil.which` in a build therefore answers with
+    a build OUTPUT before it answers with a build input. None when the code
+    is running from a checkout, which is the only other place it runs.
+    """
+    for parent in Path(__file__).resolve().parents:
+        if parent.name == "Contents" and parent.parent.suffix == ".app":
+            return parent / "MacOS"
+    return None
+
+
 def build_tool(name: str, override: str = "") -> Path:
     """A build input, found where it lives rather than where PATH points.
 
@@ -251,12 +266,25 @@ def build_tool(name: str, override: str = "") -> Path:
     itself put at /opt/homebrew/bin/tmux, and the build died calling it a
     missing requirement. Absence and invisibility are not the same fact, and
     only one of them is the operator's to fix.
+
+    The opposite failure is the one a hub hits every time it rebuilds itself:
+    inside the sealed app `shutil.which` answers with the app's own bundled
+    tmux, which sits beside no license notice, so `bundle` refuses it and the
+    build dies on an input the machine has — `updates build` and the Rebuild
+    button both, on every installed hub. A tool this product already shipped
+    is not a source for the next one; its provenance would be laundered one
+    build at a time. So the running bundle's own directory is skipped
+    wherever it is offered, including through the override.
     """
+    bundled = own_tools()
     searched = [os.environ.get(override) if override else None, shutil.which(name),
                 *(directory + "/" + name for directory in TOOL_DIRS)]
     for candidate in searched:
-        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
-            return Path(candidate)
+        if not candidate or not Path(candidate).is_file() or not os.access(candidate, os.X_OK):
+            continue
+        if bundled is not None and Path(candidate).resolve().parent == bundled:
+            continue
+        return Path(candidate)
     raise ValueError(f"{name} is required as a build input — it is not on PATH and not in "
                      + ", ".join(TOOL_DIRS))
 

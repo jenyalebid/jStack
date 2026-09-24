@@ -282,6 +282,50 @@ def test_a_build_input_is_found_where_it_lives_not_only_on_path(monkeypatch, tmp
         build_hub.build_tool("tmux", "JSTACK_BUILD_TMUX")
 
 
+def test_a_hub_never_builds_itself_from_its_own_bundled_tool(monkeypatch, tmp_path):
+    """The sealed runtime puts `Contents/MacOS` first on PATH, so a hub
+    rebuilding itself was handed its own tmux — a binary beside no license
+    notice, which `bundle` refuses. `updates build` died there on every
+    installed hub, naming a tool the machine plainly has.
+    """
+    app = tmp_path / "jStack Hub.app/Contents/MacOS"
+    app.mkdir(parents=True)
+    shipped = app / "tmux"
+    shipped.write_text("#!/bin/sh\n")
+    shipped.chmod(0o755)
+    brew = tmp_path / "opt/homebrew/bin"
+    brew.mkdir(parents=True)
+    source = brew / "tmux"
+    source.write_text("#!/bin/sh\n")
+    source.chmod(0o755)
+
+    monkeypatch.setattr(build_hub, "own_tools", lambda: app)
+    monkeypatch.setattr(build_hub, "TOOL_DIRS", (str(brew), "/usr/bin"))
+    monkeypatch.setattr(build_hub.shutil, "which", lambda name: str(shipped))
+    monkeypatch.setenv("JSTACK_BUILD_TMUX", str(shipped))
+    # Offered by PATH and by the override, and refused through both: the
+    # build input is the one Homebrew put on the machine.
+    assert build_hub.build_tool("tmux", "JSTACK_BUILD_TMUX") == source
+
+    # With nothing else on the machine the build stops, rather than copying a
+    # shipped binary forward without its notice.
+    monkeypatch.setattr(build_hub, "TOOL_DIRS", ("/nonexistent",))
+    with pytest.raises(ValueError, match="not on PATH and not in"):
+        build_hub.build_tool("tmux", "JSTACK_BUILD_TMUX")
+
+
+def test_own_tools_answers_only_inside_a_sealed_app(monkeypatch, tmp_path):
+    """From a checkout there is no bundle to exclude, and excluding a guessed
+    one would drop a real build input."""
+    assert build_hub.own_tools() is None or build_hub.own_tools().name == "MacOS"
+    sealed = tmp_path / "jStack Hub.app/Contents/Resources/packages/jstack_host"
+    sealed.mkdir(parents=True)
+    module = sealed / "build_hub.py"
+    module.write_text("")
+    monkeypatch.setattr(build_hub, "__file__", str(module))
+    assert build_hub.own_tools() == (sealed.resolve().parents[2] / "MacOS")
+
+
 def _signed(monkeypatch, tmp_path, config):
     calls = []
     monkeypatch.setattr(build_hub, "command", lambda argv, **kw: calls.append(argv) or "")
