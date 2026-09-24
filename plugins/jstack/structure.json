@@ -34,9 +34,10 @@
     "docs": "repo-level docs and specs",
     "host": "the host-side python package (jstack_host) — machine-local pieces a portable plugin cannot ship",
     "install.sh": "the installer — directory-source marketplace, so git pull is the update",
-    "release.sh": "coordinated release build and evidence-gated promotion entry point",
     "plugins": "the catalog's contents; today one plugin, jstack",
-    "product.md": "what jStack is as a product"
+    "product.md": "what jStack is as a product",
+    "release.sh": "coordinated release build and evidence-gated promotion entry point",
+    "verify": "the acceptance journeys — each scenario drives a real install in a GUI guest and reads the verdict off its terminal, so what ships is asserted on a machine and not in a mock; run.sh is the runner, lib/ its shared shell"
   },
   "plugin_root": {
     ".claude-plugin": "Claude Code plugin manifest — the version lives here",
