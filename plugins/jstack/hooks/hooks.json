@@ -49,6 +49,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Bash|ExitPlanMode|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/env-announce.py",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -75,6 +85,11 @@
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/codex-carry.py",
             "timeout": 15,
             "additionalContextLimit": 16000
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/env-entry.py",
+            "timeout": 10
           }
         ]
       }
@@ -111,6 +126,11 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/takeover-command.py",
             "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/env-delta.py",
+            "timeout": 10
           }
         ]
       }
@@ -137,6 +157,11 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stop-compact-delivery.sh",
             "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/env-announce.py",
+            "timeout": 10
           }
         ]
       }
@@ -174,6 +199,16 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/attention.py clear",
             "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/env-announce.py",
+            "timeout": 10
           }
         ]
       }
