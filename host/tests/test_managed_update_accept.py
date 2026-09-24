@@ -1,10 +1,10 @@
 """The acceptance runner's journeys, driven against a scripted fleet.
 
 A runner that reports what it hoped for is worse than no runner, so what is
-pinned here is the refusal: a guest that claims `current` while still running
-the old release, a menu credential that is allowed to queue somebody else's
-update, a fleet with one leaf standing in for two. Each of those must end as
-`failed` or `incomplete`, never as a receipt that would open the promotion gate.
+pinned here is the refusal: a guest that claims `current` while still built
+from the old commit, a menu credential that is allowed to queue somebody
+else's update, a fleet with one leaf standing in for two. Each of those must
+end as `failed` or `incomplete`, never as a receipt that would open the gate.
 
 The fleet is scripted rather than booted — booting is what the live run does.
 What these tests own is the logic between the observations.
@@ -21,7 +21,18 @@ import pytest
 from jstack_host import acceptance, release_manifest as releases
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools/managed_update_accept.py"
-PRIOR, CANDIDATE = "20260915T000000Z-aaaaaaaa", "20260916T192622Z-1737a381"
+#: The subject is a commit, so the scripted fleet moves a sha. The build ids
+#: ride along because the hub still reports one and the menu bar's
+#: CFBundleVersion is read back out of it.
+PRIOR_SHA, HEAD_SHA = "a" * 40, "1" * 40
+PRIOR = "2026-09-15-aaaaaaaa-0000000000000000"
+CANDIDATE = "2026-09-16-11111111-1111111111111111"
+REPO = "https://github.com/jenyalebid/jStack.git"
+
+
+def dated(build_id: str) -> str:
+    """The menu bar's CFBundleVersion: the build's own date, digits only."""
+    return "".join(build_id.split("-")[:3])
 
 
 def test_off_network_requires_a_working_lan_before_isolation(runner, monkeypatch):
@@ -77,36 +88,38 @@ def runner():
     return module
 
 
+def a_build(runner, monkeypatch, tmp_path, ref, sha, *, version="0.69.3", client="70"):
+    """A `Build` without the network: what the ref resolves to is scripted."""
+    app = tmp_path / (ref + "-jRemote.app")
+    app.mkdir(exist_ok=True)
+    monkeypatch.setattr(runner.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, sha + "\trefs/heads/" + ref, ""))
+    monkeypatch.setattr(runner, "git", lambda checkout, *argv, **kwargs:
+                        json.dumps({"version": version}) if argv[0] == "show" else "")
+    monkeypatch.setattr(runner, "bundle_build", lambda _: client)
+    return runner.Build(REPO, ref, checkout=tmp_path, client=app)
+
+
 @pytest.fixture
-def candidate(tmp_path, runner):
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    directory = tmp_path / "candidate"
-    directory.mkdir()
-    components = {}
-    for name in sorted(releases.COMPONENTS):
-        body = (name + " bytes").encode()
-        (directory / (name + ".zip")).write_bytes(body)
-        components[name] = {"file": name + ".zip", "version": "70" if name == "client" else "0.69.3",
-                            "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
-    manifest = {"schema": 1, "release": CANDIDATE, "components": components,
-                "sources": {"stack": "1" * 40, "client": "2" * 40},
-                "compatibility": {"protocol": 1, "rollback": True, "platform": "macos",
-                                  "architecture": "arm64", "minimum_os": "26.0"},
-                "receipts": {}}
-    key = Ed25519PrivateKey.generate()
-    import base64
-    (directory / "candidate.json").write_text(json.dumps(
-        releases.sign(manifest, key.private_bytes_raw(), promoted=False)))
-    public = base64.b64encode(key.public_key().public_bytes_raw()).decode()
-    return runner.Candidate(directory, public)
+def subject(tmp_path, runner, monkeypatch):
+    return a_build(runner, monkeypatch, tmp_path, "dev", HEAD_SHA)
+
+
+@pytest.fixture
+def earlier(tmp_path, runner, monkeypatch):
+    return a_build(runner, monkeypatch, tmp_path, "main", PRIOR_SHA)
+
+
+#: What a hub answers when it has built the commit under test.
+IDENTITY = {"build": CANDIDATE, "sha": HEAD_SHA}
 
 
 class ScriptedFleet:
     """One disposable fleet's answers, in the shape vm.sh and the tools give them."""
 
-    def __init__(self, *, release=PRIOR, state="current", client="70", menubar="0.69.3",
-                 plugin="0.69.3", denied_status=403):
-        self.release, self.state = release, state
+    def __init__(self, *, release=PRIOR, sha=PRIOR_SHA, state="current", client="70",
+                 menubar=None, plugin="0.69.3", denied_status=403):
+        self.release, self.sha, self.state = release, sha, state
         self.client, self.menubar, self.plugin = client, menubar, plugin
         self.denied_status = denied_status
         self.calls: list[list[str]] = []
@@ -115,10 +128,12 @@ class ScriptedFleet:
     def probe(self, name):
         return {"host_id": "machine-" + name,
                 "observed": {"release": self.release,
-                             "host_source": {"sha": "1" * 40, "release": self.release, "dirty": False},
-                             "updater_source": {"sha": "1" * 40}, "verified": True,
+                             "host_source": {"sha": self.sha, "release": self.release,
+                                             "dirty": False},
+                             "updater_source": {"sha": self.sha}, "verified": True,
                              "components": {"client": {"installed": self.client, "running_pids": [11]},
-                                            "menubar": {"installed": self.menubar, "running_pids": [12]},
+                                            "menubar": {"installed": self.menubar or dated(self.release),
+                                                        "running_pids": [12]},
                                             "plugins": {"claude": {"version": self.plugin}}}},
                 "job": {}, "adopted": True, "managed": True}
 
@@ -141,8 +156,8 @@ class ScriptedFleet:
             targets = (["machine-hub", "machine-leaf-a", "machine-leaf-b"] if target == "all"
                        else [f"machine-{name}" if target == "self" else target])
             self.queued.extend(targets)
-            # The release the fleet actually moves to when a job is queued.
-            self.release = CANDIDATE
+            # The commit the fleet actually moves to when a job is queued.
+            self.release, self.sha = CANDIDATE, HEAD_SHA
             # One request ID names one job per machine, however often it arrives.
             answer = {"jobs": [{"id": f"job-{request}-{machine}", "machine": machine}
                                for machine in targets], "errors": []}
@@ -158,64 +173,70 @@ class ScriptedFleet:
         return subprocess.CompletedProcess(argv, 0, json.dumps(answer), "")
 
 
-def build(runner, fleet, **plan):
-    return runner.Fleet({"vm_tool": "/bin/vm.sh", "hub": "hub", "leaves": ["leaf-a", "leaf-b"],
-                         "prior_candidate": "/tmp/prior", **plan}, run=fleet)
+def build(runner, fleet, *, prior=None, **plan):
+    made = runner.Fleet({"vm_tool": "/bin/vm.sh", "hub": "hub", "leaves": ["leaf-a", "leaf-b"],
+                         **plan}, run=fleet)
+    made.prior = prior if prior is not None else SimpleNamespace(
+        sha=PRIOR_SHA, ref="main", slug="main@" + PRIOR_SHA[:8])
+    # What the hub came back with when it built the ref, without building.
+    made.offered["dev"] = CANDIDATE
+    return made
 
 
-def journey_result(runner, candidate, name, fleet, tmp_path, **plan):
-    run = acceptance.Run(tmp_path / "receipts", candidate.manifest)
+def journey_result(runner, subject, name, fleet, tmp_path, **plan):
+    run = acceptance.Run(tmp_path / "receipts", IDENTITY)
     with run.journey(name) as journey:
-        runner.JOURNEYS[name](journey, build(runner, fleet, **plan), candidate)
+        runner.JOURNEYS[name](journey, build(runner, fleet, **plan), subject)
     return run.results[name], json.loads((tmp_path / "receipts" / (name + ".json")).read_text())
 
 
-def test_an_upgrade_that_really_lands_records_every_required_fact(runner, candidate, tmp_path):
-    result, receipt = journey_result(runner, candidate, "upgrade", ScriptedFleet(), tmp_path)
+def test_an_upgrade_that_really_lands_records_every_required_fact(runner, subject, tmp_path):
+    result, receipt = journey_result(runner, subject, "upgrade", ScriptedFleet(), tmp_path)
     assert result == "passed"
     assert receipt["observed"] == sorted(acceptance.REQUIRED["upgrade"])
 
 
-def test_a_machine_that_claims_current_on_the_old_release_fails(runner, candidate, tmp_path):
+def test_a_machine_that_claims_current_on_the_old_commit_fails(runner, subject, tmp_path):
     class Stuck(ScriptedFleet):
         def __call__(self, argv, **kwargs):
             done = super().__call__(argv, **kwargs)
-            self.release = PRIOR  # reports current, never actually moves
+            # Reports current, never actually builds the new commit.
+            self.release, self.sha = PRIOR, PRIOR_SHA
             return done
 
-    result, receipt = journey_result(runner, candidate, "upgrade", Stuck(), tmp_path)
+    result, receipt = journey_result(runner, subject, "upgrade", Stuck(), tmp_path)
     assert result == "failed"
-    assert "reports release" in receipt["detail"]
-    assert "installed_release" in receipt["missing"]
+    assert "built " + PRIOR_SHA in receipt["detail"]
+    assert "installed_build" in receipt["missing"]
 
 
-def test_a_stale_app_bundle_under_a_new_host_fails(runner, candidate, tmp_path):
-    result, receipt = journey_result(runner, candidate, "upgrade",
+def test_a_stale_app_bundle_under_a_new_host_fails(runner, subject, tmp_path):
+    result, receipt = journey_result(runner, subject, "upgrade",
                                      ScriptedFleet(client="69"), tmp_path)
     assert result == "failed" and "client is 69" in receipt["detail"]
 
 
-def test_a_plugin_left_on_the_old_version_fails(runner, candidate, tmp_path):
-    result, receipt = journey_result(runner, candidate, "upgrade",
+def test_a_plugin_left_on_the_old_version_fails(runner, subject, tmp_path):
+    result, receipt = journey_result(runner, subject, "upgrade",
                                      ScriptedFleet(plugin="0.69.2"), tmp_path)
     assert result == "failed" and "plugin claude is 0.69.2" in receipt["detail"]
 
 
-def test_a_leaf_allowed_to_queue_another_machine_fails_the_fleet_journey(runner, candidate, tmp_path):
-    result, receipt = journey_result(runner, candidate, "fleet",
+def test_a_leaf_allowed_to_queue_another_machine_fails_the_fleet_journey(runner, subject, tmp_path):
+    result, receipt = journey_result(runner, subject, "fleet",
                                      ScriptedFleet(denied_status=200), tmp_path)
     assert result == "failed"
     assert "queue another machine" in receipt["detail"]
     assert receipt["missing"] == ["denied_authority"]
 
 
-def test_a_settled_failed_machine_never_reads_as_reaching_the_release(runner, candidate, tmp_path):
-    result, receipt = journey_result(runner, candidate, "upgrade",
+def test_a_settled_failed_machine_never_reads_as_reaching_the_release(runner, subject, tmp_path):
+    result, receipt = journey_result(runner, subject, "upgrade",
                                      ScriptedFleet(state="failed"), tmp_path)
     assert result == "failed" and "failed" in receipt["detail"]
 
 
-def test_one_leaf_cannot_stand_in_for_the_contract_s_two(runner, candidate, tmp_path):
+def test_one_leaf_cannot_stand_in_for_the_contract_s_two(runner, subject, tmp_path):
     fleet = build(runner, ScriptedFleet(), leaves=["leaf-a"])
     assert runner.unsupported(fleet, "fleet") == "the plan names fewer than two managed Macs"
     assert runner.unsupported(fleet, "off_network") is None, "one leaf is enough to go off the LAN"
@@ -243,13 +264,13 @@ class SlotCountingFleet(ScriptedFleet):
         return super().__call__(argv, **kwargs)
 
 
-def test_a_two_slot_host_never_boots_a_third_guest(runner, candidate, tmp_path):
+def test_a_two_slot_host_never_boots_a_third_guest(runner, subject, tmp_path):
     scripted = SlotCountingFleet()
     fleet = build(runner, scripted, vm_slots=2)
-    run = acceptance.Run(tmp_path / "receipts", candidate.manifest)
+    run = acceptance.Run(tmp_path / "receipts", IDENTITY)
     with run.journey("fleet") as journey:
         fleet.cast(*runner.CAST["fleet"](fleet))
-        runner.JOURNEYS["fleet"](journey, fleet, candidate)
+        runner.JOURNEYS["fleet"](journey, fleet, subject)
     assert run.results["fleet"] == "passed"
     assert scripted.peak <= 2, "the fleet journey booted more guests than the host has slots"
     assert any(call[1] == "stop" for call in scripted.calls), \
@@ -263,7 +284,7 @@ def test_a_cast_larger_than_the_slots_is_refused(runner):
         fleet.cast(fleet.hub, fleet.leaves[0], fleet.leaves[1])
 
 
-def test_update_all_wakes_the_mac_enrolled_by_fresh_install(runner, candidate, tmp_path):
+def test_update_all_wakes_the_mac_enrolled_by_fresh_install(runner, subject, tmp_path):
     class WithFresh(SlotCountingFleet):
         def __call__(self, argv, **kwargs):
             result = super().__call__(argv, **kwargs)
@@ -283,30 +304,30 @@ def test_update_all_wakes_the_mac_enrolled_by_fresh_install(runner, candidate, t
             assert "fresh" in scripted.booted, "waiting for a parked fresh Mac cannot finish"
         return wait(state, machine, **kwargs)
     fleet.hub.wait_for = checked_wait
-    run = acceptance.Run(tmp_path / "receipts", candidate.manifest)
+    run = acceptance.Run(tmp_path / "receipts", IDENTITY)
     with run.journey("fleet") as journey:
         fleet.cast(*runner.CAST["fleet"](fleet))
-        runner.fleet_journey(journey, fleet, candidate)
+        runner.fleet_journey(journey, fleet, subject)
     assert run.results["fleet"] == "passed"
     assert scripted.peak <= 2
 
 
-def test_a_plan_without_slots_keeps_every_guest_running(runner, candidate, tmp_path):
+def test_a_plan_without_slots_keeps_every_guest_running(runner, subject, tmp_path):
     scripted = SlotCountingFleet()
     fleet = build(runner, scripted)
-    run = acceptance.Run(tmp_path / "receipts", candidate.manifest)
+    run = acceptance.Run(tmp_path / "receipts", IDENTITY)
     with run.journey("fleet") as journey:
         fleet.cast(*runner.CAST["fleet"](fleet))
-        runner.JOURNEYS["fleet"](journey, fleet, candidate)
+        runner.JOURNEYS["fleet"](journey, fleet, subject)
     assert run.results["fleet"] == "passed"
     assert not any(call[1] == "stop" for call in scripted.calls), \
         "without vm_slots nothing may be parked"
 
 
-def test_a_plan_that_is_not_marked_disposable_is_refused(runner, tmp_path, candidate, monkeypatch):
+def test_a_plan_that_is_not_marked_disposable_is_refused(runner, tmp_path, monkeypatch):
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps({"vm_tool": "/bin/vm.sh", "hub": "production-hub"}))
-    monkeypatch.setattr("sys.argv", ["accept", "--candidate", str(candidate.dir),
+    monkeypatch.setattr("sys.argv", ["accept", "--ref", "dev",
                                      "--receipts", str(tmp_path / "r"), "--plan", str(plan)])
     with pytest.raises(SystemExit) as exit_code:
         runner.main()
@@ -361,7 +382,7 @@ def test_unrelated_process_cannot_prove_a_new_session(runner, monkeypatch):
         runner.new_session(Guest())
 
 
-def test_fresh_install_refuses_existing_menu_before_any_write(runner, candidate):
+def test_fresh_install_refuses_existing_menu_before_any_write(runner, subject):
     class Guest:
         name = "fresh"
         def sh(self, command):
@@ -369,32 +390,36 @@ def test_fresh_install_refuses_existing_menu_before_any_write(runner, candidate)
             return "/Applications/JStack Host.app"
 
     with pytest.raises(runner.AcceptanceFailure, match="not pristine"):
-        runner.install_candidate(Guest(), candidate, fresh=True)
+        runner.install_build(Guest(), subject, fresh=True)
 
 
-def test_candidate_installer_installs_the_sealed_hub_from_candidate_bytes(runner, candidate, monkeypatch):
+def test_the_installer_is_fetched_from_the_ref_and_clones_it(runner, subject, monkeypatch):
     commands = []
     monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    monkeypatch.setattr(runner.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
     class Guest:
         name = "fresh"
         def sh(self, command, **kwargs):
             commands.append(command)
-            if "route -n get default" in command:
-                return "192.168.64.1\n"
             return ""
         def copy(self, *args):
             pass
 
-    runner.install_candidate(Guest(), candidate, fresh=True)
-    assert not any("| /usr/bin/tail" in command for command in commands)
-    assert not any("ditto -x -k" in command and "~/Applications" in command for command in commands)
-    # The one installer does the menu bar too; its own install.sh is an
-    # internal step that refuses a direct call.
+    runner.install_build(Guest(), subject, fresh=True)
+    # Nothing of the product is carried in: no stack tarball, no untar, no
+    # sealed Hub. The guest fetches the installer from the commit and clones.
+    assert not any("tar -xzf" in command for command in commands)
+    fetch = next(command for command in commands if "curl" in command)
+    assert subject.sha in fetch and "raw.githubusercontent.com" in fetch
     install = next(command for command in commands if "install.sh --yes" in command)
-    assert "--no-claude --no-app" in install
+    assert "--no-claude --no-app" in install and "--ref dev" in install
+    assert "JSTACK_REPO_URL=" + REPO in install
     assert not any("menubar/install.sh" in command for command in commands)
-    # The Hub zip must come from the candidate, not the published release.
-    assert "JSTACK_REPO_URL=http://192.168.64.1:" in install
+    # The Mac app is the one exception and it lands *before* the installer,
+    # which names an already-installed jRemote.app as the client of its build.
+    app = next(command for command in commands if "ditto -x -k" in command)
+    assert "/Applications" in app and commands.index(app) < commands.index(install)
     # The sealed provisioner writes candidate_test false; the lab flips it
     # and restarts the updater so the run verifies unpromoted envelopes.
     flip = next(command for command in commands if "candidate_test" in command)
@@ -404,19 +429,19 @@ def test_candidate_installer_installs_the_sealed_hub_from_candidate_bytes(runner
                for command in commands)
 
 
-def test_candidate_repo_serves_the_tag_and_the_candidate_assets(runner, candidate):
-    from urllib.error import HTTPError
-    from urllib.request import urlopen
-    with runner.candidate_repo(candidate) as port:
-        base = f"http://127.0.0.1:{port}/jstack.git"
-        refs = urlopen(base + "/info/refs?service=git-upload-pack").read().decode()
-        assert refs == f"{candidate.stack_sha}\trefs/tags/stack-release-{candidate.release}\n"
-        asset = urlopen(base + f"/releases/download/any-tag/{candidate.file('menubar').name}").read()
-        assert asset == candidate.file("menubar").read_bytes()
-        with pytest.raises(HTTPError):
-            urlopen(base + "/releases/download/any-tag/absent.zip")
-        with pytest.raises(HTTPError):
-            urlopen(base + f"/{candidate.file('menubar').name}")
+def test_a_build_reads_what_the_commit_declares_not_the_working_tree(runner, tmp_path, monkeypatch):
+    made = a_build(runner, monkeypatch, tmp_path, "dev", HEAD_SHA, version="9.9.9")
+    assert made.sha == HEAD_SHA and made.version("stack") == "9.9.9"
+    assert made.slug == "dev@" + HEAD_SHA[:8]
+    assert made.raw_url == (
+        "https://raw.githubusercontent.com/jenyalebid/jStack/" + HEAD_SHA + "/install.sh")
+
+
+def test_a_ref_the_repo_does_not_carry_is_named_not_guessed(runner, tmp_path, monkeypatch):
+    monkeypatch.setattr(runner.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
+    with pytest.raises(runner.AcceptanceFailure, match="has no branch nope"):
+        runner.Build(REPO, "nope", checkout=tmp_path)
 
 
 def test_new_session_with_a_provider_but_no_reply_fails(runner, monkeypatch):
@@ -438,9 +463,9 @@ def test_new_session_with_a_provider_but_no_reply_fails(runner, monkeypatch):
 
 
 def test_selected_journey_retains_existing_exact_artifact_receipts(
-        runner, candidate, tmp_path, monkeypatch):
+        runner, subject, tmp_path, monkeypatch):
     receipts = tmp_path / "receipts"
-    run = acceptance.Run(receipts, candidate.manifest)
+    run = acceptance.Run(receipts, IDENTITY)
     with run.journey("upgrade") as journey:
         for check in acceptance.REQUIRED["upgrade"]:
             # One value under every check is what a pasted receipt looks like,
@@ -451,29 +476,24 @@ def test_selected_journey_retains_existing_exact_artifact_receipts(
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps({"disposable": True, "vm_tool": "/bin/vm.sh", "hub": "hub",
                                 "leaves": ["leaf-a", "leaf-b"]}))
-    monkeypatch.setattr(runner, "Candidate", lambda *args: candidate)
+    monkeypatch.setattr(runner, "Build", lambda *args, **kwargs: subject)
     fleet = build(runner, ScriptedFleet())
-    monkeypatch.setattr(fleet, "offer", lambda _: None)
+    monkeypatch.setattr(fleet, "offer", lambda _: CANDIDATE)
     monkeypatch.setattr(runner, "Fleet", lambda *args, **kwargs: fleet)
-    monkeypatch.setattr("sys.argv", ["accept", "--candidate", str(candidate.dir),
+    monkeypatch.setattr("sys.argv", ["accept", "--ref", "dev",
                                      "--receipts", str(receipts), "--plan", str(plan),
                                      "--only", "fleet"])
     assert runner.main() == 1  # Other required journeys still missing.
     assert (receipts / "upgrade.json").read_bytes() == original
-    assert acceptance.inspect(receipts, candidate.manifest)["upgrade"]["state"] == "passed"
+    assert acceptance.inspect(receipts, IDENTITY)["upgrade"]["state"] == "passed"
 
 
-def test_staging_prior_restores_candidate_offer_on_update_failure(
-        runner, candidate, tmp_path, monkeypatch):
-    from types import SimpleNamespace
-    prior = tmp_path / "prior"
-    prior.mkdir()
-    (prior / "candidate.json").write_text(json.dumps({"manifest": {"release": PRIOR}}))
-    fleet = build(runner, ScriptedFleet(release=CANDIDATE), prior_candidate=str(prior))
-    fleet.candidate = candidate
+def test_staging_prior_puts_the_ref_under_test_back_on_update_failure(
+        runner, subject, tmp_path, monkeypatch):
+    fleet = build(runner, ScriptedFleet(release=CANDIDATE, sha=HEAD_SHA))
+    fleet.build = subject
     offered = []
-    monkeypatch.setattr(runner, "Candidate", lambda *args: SimpleNamespace(release=PRIOR))
-    monkeypatch.setattr(fleet, "offer", lambda c: offered.append(c.release))
+    monkeypatch.setattr(fleet, "offer", lambda b: offered.append(b.sha))
 
     def failed(*args, **kwargs):
         raise runner.AcceptanceFailure("update failed")
@@ -481,7 +501,7 @@ def test_staging_prior_restores_candidate_offer_on_update_failure(
     monkeypatch.setattr(fleet.hub, "wait_for", failed)
     with pytest.raises(runner.AcceptanceFailure, match="update failed"):
         runner.stage_prior(fleet, fleet.leaves[0])
-    assert offered == [PRIOR, candidate.release]
+    assert offered == [PRIOR_SHA, HEAD_SHA]
 
 
 def test_artifact_fault_is_restored_when_refusal_probe_fails(runner):
@@ -494,8 +514,8 @@ def test_artifact_fault_is_restored_when_refusal_probe_fails(runner):
             raise runner.AcceptanceFailure("hub disconnected")
 
     with pytest.raises(runner.AcceptanceFailure, match="disconnected"):
-        runner.refused_release(SimpleNamespace(plan={}, hub=Hub()),
-                               SimpleNamespace(installed=lambda: {"release": PRIOR}), "leaf")
+        runner.refused_build(SimpleNamespace(plan={}, hub=Hub()),
+                             SimpleNamespace(installed=lambda: {"build": PRIOR}), "leaf")
     assert calls == ["tamper", "restore-artifact"]
 
 
@@ -503,16 +523,16 @@ def test_artifact_fault_is_restored_when_refusal_probe_fails(runner):
                                          ("host unavailable", False)])
 def test_hub_refusal_requires_artifact_error_and_unchanged_installation(runner, detail, valid):
     from types import SimpleNamespace
-    state = dict(release=PRIOR, sha="a" * 40, client="69", menubar="69")
+    state = dict(build=PRIOR, sha=PRIOR_SHA, client="69", menubar="69")
     guest = SimpleNamespace(installed=lambda: state)
     hub = SimpleNamespace(tool_call=lambda _: None,
                           call=lambda *args: {"status": 503, "body": detail})
     fleet = SimpleNamespace(plan={}, hub=hub)
     if valid:
-        assert runner.refused_release(fleet, guest, "leaf")["unchanged_release"] == PRIOR
+        assert runner.refused_build(fleet, guest, "leaf")["unchanged_build"] == PRIOR
     else:
         with pytest.raises(runner.AcceptanceFailure, match="unrelated"):
-            runner.refused_release(fleet, guest, "leaf")
+            runner.refused_build(fleet, guest, "leaf")
 
 
 def test_revocation_failure_restores_the_fixture_supervisor(runner, monkeypatch):
@@ -533,7 +553,7 @@ def test_revocation_failure_restores_the_fixture_supervisor(runner, monkeypatch)
     assert "launchctl print" in commands[-1]
 
 
-def test_a_hub_restarting_into_the_candidate_survives_refused_polls(runner):
+def test_a_hub_restarting_into_the_new_build_survives_refused_polls(runner):
     fleet = ScriptedFleet(state="current")
     polls = {"refused": 2}
 
@@ -608,7 +628,7 @@ def test_a_prior_stuck_on_the_bypass_warning_is_answered_and_recorded(runner, mo
     assert session["pid"] == 1676
 
 
-def test_a_candidate_session_left_on_the_bypass_warning_fails_by_name(runner, monkeypatch):
+def test_a_new_build_session_left_on_the_bypass_warning_fails_by_name(runner, monkeypatch):
     ticks = iter([0, 1, 10, 31, 241, 242])
     monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(runner.time, "sleep", lambda _: None)
@@ -616,8 +636,8 @@ def test_a_candidate_session_left_on_the_bypass_warning_fails_by_name(runner, mo
 
     with pytest.raises(runner.AcceptanceFailure, match="startup watcher never answered"):
         runner.new_session(guest)
-    assert state["nudged"] == [], "the runner must never press keys into a candidate's session"
-    assert state["reprompted"] == [], "the runner must never feed a candidate's session either"
+    assert state["nudged"] == [], "the runner must never press keys into a new build's session"
+    assert state["reprompted"] == [], "the runner must never feed a new build's session either"
 
 
 def test_a_prior_is_not_nudged_before_the_grace_period(runner, monkeypatch):
@@ -631,8 +651,8 @@ def test_a_prior_is_not_nudged_before_the_grace_period(runner, monkeypatch):
     assert state["nudged"] == []
 
 
-def test_session_survival_requires_an_unaided_session_on_the_candidate(runner):
-    assert "candidate_new_session" in acceptance.REQUIRED["session_survival"]
+def test_session_survival_requires_an_unaided_session_on_the_new_build(runner):
+    assert "built_new_session" in acceptance.REQUIRED["session_survival"]
 
 
 def _booting_guest(runner, answers):
@@ -743,17 +763,17 @@ def test_a_leaf_with_no_updater_process_fails_before_any_fault(runner):
         runner.ensure_true_updater(acceptance.Journey("interruption"), guest)
 
 
-def test_the_reboot_leg_reboots_a_stale_updater_on_the_candidate_and_records_it(runner, monkeypatch, tmp_path):
+def test_the_reboot_leg_reboots_a_stale_updater_on_the_new_build_and_records_it(runner, monkeypatch, tmp_path):
     fleet, guest, offered, queued, power = _reboot_fleet(
         runner, monkeypatch, tmp_path, settled_detail=SETTLED_DETAIL)
     bundles = iter([STALE_UPDATER, TRUE_UPDATER])
     guest.sh = lambda command, **kwargs: next(bundles) if command == runner.UPDATER_BUNDLE else ""
     journey = acceptance.Journey("interruption")
     result = runner.reboot_mid_apply(journey, fleet, guest, "leaf-id",
-                                     SimpleNamespace(release=CANDIDATE, public_key="k"))
+                                     SimpleNamespace(sha=HEAD_SHA, ref="dev", slug="dev@" + HEAD_SHA[:8]))
     assert power == ["stop", "start", "stop", "start"], "one reboot to shed the stale updater, one mid-copy"
     assert any("#119" in line and ".failed-job-x" in line for line in journey.lines)
-    assert result["state"] == "failed" and result["retry_release"] == PRIOR
+    assert result["state"] == "failed" and result["retry_sha"] == PRIOR_SHA
 
 
 def test_the_reboot_leg_fails_when_the_stale_updater_survives_its_reboot(runner, monkeypatch, tmp_path):
@@ -762,8 +782,8 @@ def test_the_reboot_leg_fails_when_the_stale_updater_survives_its_reboot(runner,
     guest.sh = lambda command, **kwargs: STALE_UPDATER if command == runner.UPDATER_BUNDLE else ""
     with pytest.raises(runner.AcceptanceFailure, match="after a reboot the updater still runs from"):
         runner.reboot_mid_apply(acceptance.Journey("interruption"), fleet, guest, "leaf-id",
-                                SimpleNamespace(release=CANDIDATE, public_key="k"))
-    assert offered == [], "nothing is offered until the candidate's own updater is the live one"
+                                SimpleNamespace(sha=HEAD_SHA, ref="dev", slug="dev@" + HEAD_SHA[:8]))
+    assert offered == [], "nothing is offered until this commit's own updater is the live one"
 
 
 def _fault_fleet(runner, monkeypatch, *, fault_result, prior_release=PRIOR):
@@ -771,7 +791,7 @@ def _fault_fleet(runner, monkeypatch, *, fault_result, prior_release=PRIOR):
     hub = SimpleNamespace(queue=lambda machine, request: queued.append(request) or
                           {"jobs": [{"id": "job-" + request.split("-")[1]}]},
                           wait_for=lambda state, machine: {"state": state, "job": {}})
-    guest = SimpleNamespace(name="leaf", installed=lambda: {"release": prior_release,
+    guest = SimpleNamespace(name="leaf", installed=lambda: {"build": prior_release, "sha": PRIOR_SHA,
                                                              "client": "91", "menubar": "20260922"},
                             sh=lambda command, **kwargs: (
                                 TRUE_UPDATER if command == runner.UPDATER_BUNDLE else ""),
@@ -788,7 +808,7 @@ def test_a_kill_that_fails_for_a_leftover_copy_is_not_an_interrupted_apply(runne
         "state": "failed", "job": "j1", "detail": "unfinished incoming app requires recovery"})
     journey = acceptance.Journey("interruption")
     with pytest.raises(runner.AcceptanceFailure, match="not from an interrupted apply"):
-        runner.interruption(journey, fleet, SimpleNamespace(release=CANDIDATE))
+        runner.interruption(journey, fleet, SimpleNamespace(sha=HEAD_SHA, ref="dev", slug="dev@" + HEAD_SHA[:8]))
     assert journey.observed == {}
 
 
@@ -807,56 +827,56 @@ def test_the_prior_s_leftover_copy_is_recorded_and_removed_before_the_retry(runn
             return TRUE_UPDATER
         return ""
     guest.sh = shell
-    releases = iter([PRIOR, CANDIDATE])
-    guest.installed = lambda: {"release": next(releases)}
+    moves = iter([(PRIOR, PRIOR_SHA), (CANDIDATE, HEAD_SHA)])
+    guest.installed = lambda: dict(zip(("build", "sha"), next(moves)))
     monkeypatch.setattr(runner, "reboot_mid_apply",
-                        lambda journey, fleet, guest, machine, candidate: {"job": "j3", "state": "failed"})
+                        lambda journey, fleet, guest, machine, build: {"job": "j3", "state": "failed"})
     journey = acceptance.Journey("interruption")
 
-    runner.interruption(journey, fleet, SimpleNamespace(release=CANDIDATE))
+    runner.interruption(journey, fleet, SimpleNamespace(sha=HEAD_SHA, ref="dev", slug="dev@" + HEAD_SHA[:8]))
 
     import shlex
     assert "/bin/rm -rf -- " + shlex.quote("/Applications/jRemote.app.incoming-" + CANDIDATE) in commands
     assert not any("/Applications/*" in command for command in commands), "no shell globs reach the guest's zsh"
     assert any("jRemote.app.incoming-" in line and "#117" in line for line in journey.lines)
     assert commands.index(next(c for c in commands if c.startswith("/bin/rm"))) > 0
-    assert journey.observed["retry_current"]["release"] == CANDIDATE
+    assert journey.observed["retry_current"]["sha"] == HEAD_SHA
     assert journey.missing == ()
 
 
 def _reboot_fleet(runner, monkeypatch, tmp_path, *, settled_detail, leftovers=""):
-    prior = tmp_path / "prior"
-    prior.mkdir()
+    prior = SimpleNamespace(sha=PRIOR_SHA, ref="main", slug="main@" + PRIOR_SHA[:8])
     offered, queued, power = [], [], []
-    monkeypatch.setattr(runner, "Candidate", lambda *args: SimpleNamespace(release=PRIOR))
     monkeypatch.setattr(runner, "arm_fault", lambda guest, fault: fault)
     monkeypatch.setattr(runner, "read_freeze", lambda process: {
         "injected": "freeze", "job": "job-reboot", "pid": 41, "copies": ["/Applications/x.incoming-j"]})
     hub = SimpleNamespace(
         queue=lambda machine, request: queued.append(request) or {"jobs": [{"id": "job-" + request.split("-")[1]}]},
         wait_for=lambda state, machine: {"state": state, "job": {"id": "job-reboot", "detail": settled_detail}})
-    installed = iter([{"release": CANDIDATE}, {"release": CANDIDATE}, {"release": PRIOR}])
+    installed = iter([{"build": CANDIDATE, "sha": HEAD_SHA},
+                      {"build": CANDIDATE, "sha": HEAD_SHA},
+                      {"build": PRIOR, "sha": PRIOR_SHA}])
     guest = SimpleNamespace(name="leaf", installed=lambda: next(installed),
                             stop=lambda: power.append("stop"), start=lambda: power.append("start"),
                             sh=lambda command, **kwargs: (
                                 leftovers if command == runner.RESIDUE_LISTING
                                 else TRUE_UPDATER if command == runner.UPDATER_BUNDLE else ""))
-    fleet = SimpleNamespace(prior=prior, hub=hub, offer=lambda c: offered.append(c.release))
+    fleet = SimpleNamespace(prior=prior, hub=hub, offer=lambda b: offered.append(b.sha))
     return fleet, guest, offered, queued, power
 
 
-def test_a_reboot_mid_copy_fails_keeps_the_release_and_the_next_request_lands(
+def test_a_reboot_mid_copy_fails_keeps_the_build_and_the_next_request_lands(
         runner, monkeypatch, tmp_path):
     fleet, guest, offered, queued, power = _reboot_fleet(
         runner, monkeypatch, tmp_path, settled_detail=SETTLED_DETAIL)
-    candidate = SimpleNamespace(release=CANDIDATE, public_key="k")
+    candidate = SimpleNamespace(sha=HEAD_SHA, ref="dev", slug="dev@" + HEAD_SHA[:8])
 
     result = runner.reboot_mid_apply(acceptance.Journey("interruption"), fleet, guest, "leaf-id", candidate)
 
     assert power == ["stop", "start"]
-    assert result["state"] == "failed" and result["release_kept"] == CANDIDATE
-    assert result["retry_release"] == PRIOR and result["frozen_copies"]
-    assert offered == [PRIOR, CANDIDATE], "the candidate offer comes back whatever happened"
+    assert result["state"] == "failed" and result["build_kept"] == CANDIDATE
+    assert result["retry_sha"] == PRIOR_SHA and result["frozen_copies"]
+    assert offered == [PRIOR_SHA, HEAD_SHA], "the ref under test is offered again whatever happened"
     assert [request.split("-")[1] for request in queued] == ["reboot", "reboot"]
 
 
@@ -864,8 +884,8 @@ def test_a_reboot_that_settles_any_other_way_fails_by_its_detail(runner, monkeyp
     fleet, guest, offered, queued, power = _reboot_fleet(
         runner, monkeypatch, tmp_path, settled_detail="unfinished incoming app requires recovery")
     with pytest.raises(runner.AcceptanceFailure, match="settled the job as 'unfinished incoming"):
-        runner.reboot_mid_apply(acceptance.Journey("interruption"), fleet, guest, "leaf-id", SimpleNamespace(release=CANDIDATE, public_key="k"))
-    assert offered == [PRIOR, CANDIDATE]
+        runner.reboot_mid_apply(acceptance.Journey("interruption"), fleet, guest, "leaf-id", SimpleNamespace(sha=HEAD_SHA, ref="dev", slug="dev@" + HEAD_SHA[:8]))
+    assert offered == [PRIOR_SHA, HEAD_SHA]
 
 
 def test_a_recovered_updater_that_leaves_a_copy_behind_fails(runner, monkeypatch, tmp_path):
@@ -873,15 +893,15 @@ def test_a_recovered_updater_that_leaves_a_copy_behind_fails(runner, monkeypatch
         runner, monkeypatch, tmp_path, settled_detail=SETTLED_DETAIL,
         leftovers="/Applications/jStack Hub.app.incoming-job-reboot\n")
     with pytest.raises(runner.AcceptanceFailure, match="left \\['/Applications/jStack Hub.app.incoming"):
-        runner.reboot_mid_apply(acceptance.Journey("interruption"), fleet, guest, "leaf-id", SimpleNamespace(release=CANDIDATE, public_key="k"))
+        runner.reboot_mid_apply(acceptance.Journey("interruption"), fleet, guest, "leaf-id", SimpleNamespace(sha=HEAD_SHA, ref="dev", slug="dev@" + HEAD_SHA[:8]))
 
 
-def test_the_reboot_leg_refuses_a_guest_not_on_the_candidate(runner, monkeypatch, tmp_path):
+def test_the_reboot_leg_refuses_a_guest_not_on_the_commit_under_test(runner, monkeypatch, tmp_path):
     fleet, guest, offered, queued, power = _reboot_fleet(
         runner, monkeypatch, tmp_path, settled_detail=SETTLED_DETAIL)
-    guest.installed = lambda: {"release": PRIOR}
-    with pytest.raises(runner.AcceptanceFailure, match="needs the candidate's updater"):
-        runner.reboot_mid_apply(acceptance.Journey("interruption"), fleet, guest, "leaf-id", SimpleNamespace(release=CANDIDATE, public_key="k"))
+    guest.installed = lambda: {"build": PRIOR, "sha": PRIOR_SHA}
+    with pytest.raises(runner.AcceptanceFailure, match="needs this commit's updater"):
+        runner.reboot_mid_apply(acceptance.Journey("interruption"), fleet, guest, "leaf-id", SimpleNamespace(sha=HEAD_SHA, ref="dev", slug="dev@" + HEAD_SHA[:8]))
     assert offered == [] and power == []
 
 

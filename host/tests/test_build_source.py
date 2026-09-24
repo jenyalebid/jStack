@@ -38,13 +38,12 @@ def published(feed: Path, key, *, stack=OLD, sequence=5, ref="stable", client=b"
         body = client if name == "client" else (name + "-bytes").encode()
         components[name] = {"file": name + ".zip", "version": "1",
                             "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
-    artifacts = hashlib.sha256(releases.canonical(components)).hexdigest()
     manifest = {"schema": 1, "release": "published-1", "components": components,
                 "sequence": sequence, "channel": {"github_repo": "example/stack", "name": ref},
                 "sources": {"stack": stack, "client": "b" * 40},
                 "compatibility": {"protocol": 1, "rollback": True, "platform": "macos",
                                   "architecture": "arm64", "minimum_os": "13.0"},
-                "receipts": {name: {"result": "passed", "skipped": 0, "artifacts": artifacts,
+                "receipts": {name: {"result": "passed", "skipped": 0, "source": stack,
                                     "evidence_sha256": "c" * 64} for name in releases.RECEIPTS}}
     envelope = releases.sign(manifest, key.private_bytes_raw())
     (feed / manifest["release"]).mkdir(parents=True, exist_ok=True)
@@ -270,10 +269,9 @@ def test_a_source_build_verifies_without_receipts_but_never_while_carrying_them(
     assert releases.validate(manifest)["release"] == "local-1"
     with pytest.raises(releases.ReleaseError, match="acceptance evidence"):
         releases.validate(_minimal())
-    artifacts = hashlib.sha256(releases.canonical(manifest["components"])).hexdigest()
     with pytest.raises(releases.ReleaseError, match="cannot carry acceptance receipts"):
         releases.validate({**manifest, "receipts": {
-            name: {"result": "passed", "skipped": 0, "artifacts": artifacts,
+            name: {"result": "passed", "skipped": 0, "source": manifest["sources"]["stack"],
                    "evidence_sha256": "c" * 64} for name in releases.RECEIPTS}})
 
 

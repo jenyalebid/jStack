@@ -23,12 +23,11 @@ def release():
     key = Ed25519PrivateKey.generate()
     components = {name: {"file": name + ".zip", "sha256": hashlib.sha256(b"artifact").hexdigest(),
                          "bytes": 8, "version": "1"} for name in releases.COMPONENTS}
-    artifacts = hashlib.sha256(releases.canonical(components)).hexdigest()
     manifest = {"schema": 1, "release": "test-1", "components": components,
                 "sources": {"stack": "a" * 40, "client": "b" * 40},
                 "compatibility": {"protocol": 1, "rollback": True, "platform": "macos",
                                   "architecture": "arm64", "minimum_os": "13.0"},
-                "receipts": {name: {"result": "passed", "skipped": 0, "artifacts": artifacts,
+                "receipts": {name: {"result": "passed", "skipped": 0, "source": "a" * 40,
                                     "evidence_sha256": "c" * 64} for name in releases.RECEIPTS}}
     envelope = releases.sign(manifest, key.private_bytes_raw())
     return key, base64.b64encode(key.public_key().public_bytes_raw()).decode(), envelope
@@ -89,7 +88,7 @@ def test_signature_rejects_payload_and_trust_key_substitution(release):
 
 
 @pytest.mark.parametrize("mutation", ["none", "skipped", "stale", "wrong_digest", "failed"])
-def test_every_receipt_a_release_carries_is_a_pass_for_these_exact_bytes(release, mutation):
+def test_every_receipt_a_release_carries_is_a_pass_for_this_exact_commit(release, mutation):
     _, _, envelope = release
     manifest = envelope["manifest"]
     receipt = manifest["receipts"]["off_network"]
@@ -98,7 +97,7 @@ def test_every_receipt_a_release_carries_is_a_pass_for_these_exact_bytes(release
     elif mutation == "skipped":
         receipt["skipped"] = 1
     elif mutation == "stale":
-        manifest["components"]["stack"]["version"] = "2"
+        manifest["sources"]["stack"] = "f" * 40
     elif mutation == "wrong_digest":
         receipt["evidence_sha256"] = ""
     else:
