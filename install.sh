@@ -740,9 +740,34 @@ if [ -z "$CLAUDE" ]; then
 else
     # A directory-source marketplace means the plugin runs FROM the checkout:
     # `git pull` is the update, and there is no versioned cache to go stale.
-    if "$CLAUDE" plugin marketplace list 2>/dev/null | grep -q "jStack"; then
-        ok "marketplace jStack already registered"
+    #
+    # Which directory it names is the whole question, and asking whether the
+    # name is registered does not ask it. A Mac moved off a release install
+    # carries a registration pointing into that release's stage, and the host
+    # step moves that stage aside minutes later; the name still matches, so
+    # this step used to declare victory and leave every rule, command and hook
+    # resolving from a directory that is no longer there. The plugin's own
+    # store is the honest answer — it is what `marketplace add` writes.
+    REGISTERED="$(python3 - "$HOME/.claude/settings.json" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    settings = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(0)
+source = settings.get("extraKnownMarketplaces", {}).get("jStack", {}).get("source", {})
+if source.get("source") == "directory":
+    print(source.get("path", ""))
+PY
+)"
+    if [ "$REGISTERED" = "$CHECKOUT" ]; then
+        ok "marketplace jStack → $CHECKOUT"
+    elif [ "$DRY_RUN" = "1" ]; then
+        would "point the jStack marketplace at $CHECKOUT"
     else
+        if [ -n "$REGISTERED" ]; then
+            warn "marketplace jStack pointed at $REGISTERED — re-pointing it at $CHECKOUT"
+            run "$CLAUDE" plugin marketplace remove jStack >/dev/null 2>&1 || true
+        fi
         run "$CLAUDE" plugin marketplace add "$CHECKOUT" >/dev/null 2>&1 \
             && ok "marketplace jStack → $CHECKOUT" \
             || warn "could not register the marketplace"
@@ -819,21 +844,57 @@ fi
 
 step "Rules and bare commands"
 
+# A link this installer made is ours to correct; anything else in these
+# directories is the user's and is never touched. The test is where the link
+# points, not whether something sits at the name — the same distinction the
+# marketplace step above and the PATH step below are careful about, and the
+# reason a Mac moved off a release install ended up reporting two dozen
+# missing rules: the links pointed into that release's stage, the stage was
+# moved aside by a later step, and "already present" was true of every one of
+# them right up until the moment it stopped being true.
+ours() {
+    case "$1" in
+        "$CHECKOUT"/*|*/rules-stage/*|*/commands-stage/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 link_stage() {
-    local src="$1" dst="$2" label="$3" made=0 kept=0
+    local src="$1" dst="$2" label="$3" made=0 kept=0 moved=0 dropped=0
     [ -d "$src" ] || { warn "no $src"; return; }
     run mkdir -p "$dst"
     for f in "$src"/*.md; do
         [ -e "$f" ] || continue
         local target="$dst/$(basename "$f")"
+        if [ -L "$target" ]; then
+            local at; at="$(readlink "$target")"
+            if [ "$at" = "$f" ]; then kept=$((kept+1)); continue; fi
+            if ours "$at"; then
+                run rm -f "$target"
+                run ln -s "$f" "$target" && moved=$((moved+1))
+                continue
+            fi
+        fi
         if [ -e "$target" ] || [ -L "$target" ]; then kept=$((kept+1)); continue; fi
         run ln -s "$f" "$target" && made=$((made+1))
     done
-    if [ "$kept" -gt 0 ]; then
-        ok "$made $label linked, $kept left alone (already present)"
-    else
-        ok "$made $label linked into $dst"
-    fi
+    # A name this checkout no longer ships leaves a link behind that no pass
+    # above ever visits, because the loop walks what exists now. It points at
+    # nothing and it is ours, so it goes — a dead link holds no bytes and
+    # carries its own provenance in its target.
+    for target in "$dst"/*.md; do
+        [ -L "$target" ] || continue
+        [ -e "$target" ] && continue
+        ours "$(readlink "$target")" || continue
+        run rm -f "$target" && dropped=$((dropped+1))
+    done
+    # Counted, not decorated: `${n:+...}` treats a zero count as something to
+    # report, which is how a clean run learns to say "0 re-pointed".
+    SUMMARY="$made $label linked into $dst"
+    [ "$moved" -gt 0 ] && SUMMARY="$SUMMARY, $moved re-pointed"
+    [ "$dropped" -gt 0 ] && SUMMARY="$SUMMARY, $dropped dead link(s) dropped"
+    [ "$kept" -gt 0 ] && SUMMARY="$SUMMARY, $kept left alone"
+    ok "$SUMMARY"
 }
 
 link_stage "$PLUGIN/rules-stage"    "$HOME/.claude/rules"    "rules"

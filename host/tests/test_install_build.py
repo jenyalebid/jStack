@@ -396,6 +396,32 @@ def test_install_sh_puts_this_checkouts_adapters_on_path_not_merely_some():
     assert "dropped $stale stale jstack PATH line(s)" in CODE
 
 
+def test_install_sh_points_the_marketplace_at_this_checkout_not_merely_at_a_name():
+    """The registration is what every rule, command and hook resolves through.
+    A Mac moved off a release install carries one naming that release's stage,
+    and the host step moves the stage aside minutes later — so `grep -q jStack`
+    answered yes and left the whole plugin resolving from a deleted directory."""
+    assert '"$REGISTERED" = "$CHECKOUT"' in CODE
+    # Read from the plugin's own store, which is what `marketplace add` writes.
+    assert "extraKnownMarketplaces" in CODE
+    assert "marketplace jStack pointed at $REGISTERED" in CODE
+
+
+def test_install_sh_repoints_a_rule_link_of_ours_that_points_somewhere_else():
+    """`[ -L "$target" ]` was true of a link into a stage that no longer
+    exists, and "already present" kept it that way for the life of the Mac."""
+    assert 'ours "$at"' in CODE
+    assert "*/rules-stage/*|*/commands-stage/*" in CODE
+    assert "re-pointed" in CODE
+
+
+def test_install_sh_drops_a_dead_link_of_ours_that_no_pass_would_revisit():
+    """A name this checkout no longer ships is never walked by the linking
+    loop, so it needs its own sweep — and only ours, never the user's."""
+    assert "dead link(s) dropped" in CODE
+    assert 'ours "$(readlink "$target")" || continue' in CODE
+
+
 def test_install_sh_names_a_remedy_for_every_build_input_it_requires():
     """A Mac without these cannot install, which is intended — but a traceback
     ten minutes into a build is not the way to say so."""
