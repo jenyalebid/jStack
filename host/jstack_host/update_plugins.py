@@ -40,23 +40,21 @@ def run(argv: list[str]) -> str:
 def serves_a_checkout(root: str) -> bool:
     """Is this marketplace served from a git checkout rather than a shipped copy?
 
-    A machine that DEVELOPS jStack registers its marketplace against the
-    checkout, and everything downstream reads that registration: `plugin
-    update`, the nightly currency heal, `jstack-doctor`. Moving it to a
-    release stage pins all of them to one commit forever — the update re-reads
-    a directory that cannot change and correctly reports nothing to do, so the
-    drift is both permanent and invisible. A leaf has no checkout to protect
-    and moves exactly as before. `.git` is a file in a worktree, so test for
-    existence rather than for a directory.
+    It decides one thing only: whether the update may rewrite the registration
+    to somewhere else. A checkout moves itself — the update fetches the commit
+    into it — so pointing it at a frozen stage would pin `plugin update`, the
+    nightly currency heal and `jstack-doctor` to one commit forever, each of
+    them reading its ground truth from the thing that is wrong. Observed on a
+    hub 2026-09-17 → 2026-09-21: four nights of a green self-heal over a plugin
+    stuck at 0.69.3 while the checkout reached 0.69.5.
+
+    It does NOT decide whether the provider is updated. Every Mac installs from
+    a commit now, so every registration is a checkout, and skipping them was
+    skipping the whole job: `observed()` answered for no engine and `install()`
+    refreshed no cache, on every machine there is. `.git` is a file in a
+    worktree, so test for existence rather than for a directory.
     """
     return (Path(root) / ".git").exists()
-
-
-def pinned(kind: str, root: str) -> None:
-    """Say what was left alone. A release that silently declines half its work
-    is indistinguishable from one that did it."""
-    print(f"update: leaving the {kind} jStack marketplace at {root} — it serves a "
-          f"checkout, which no release stage can stand in for", flush=True)
 
 
 def discover() -> list[dict]:
@@ -72,12 +70,10 @@ def discover() -> list[dict]:
                 raise ReleaseError("convert the jStack marketplace to a local source before managed updates")
             root = entry["source"]["path"]
             binary = shutil.which("claude", path=tool_path()) or str(home / ".local/bin/claude")
-            if serves_a_checkout(root):
-                pinned("claude", root)
-            else:
-                result.append({"kind": "claude", "binary": binary, "root": root,
-                               "config": str(claude_dir / "settings.json"), "marketplace": str(marketplace_file),
-                               "ledger": str(claude_dir / "plugins/installed_plugins.json")})
+            result.append({"kind": "claude", "binary": binary, "root": root,
+                           "checkout": serves_a_checkout(root),
+                           "config": str(claude_dir / "settings.json"), "marketplace": str(marketplace_file),
+                           "ledger": str(claude_dir / "plugins/installed_plugins.json")})
     codex_dir = Path(os.environ.get("CODEX_HOME", home / ".codex"))
     native_config = codex_dir / "config.toml"
     if native_config.exists():
@@ -87,11 +83,9 @@ def discover() -> list[dict]:
                 raise ReleaseError("convert the native jStack marketplace to a local source before managed updates")
             root = entry["source"]
             binary = shutil.which("codex", path=tool_path()) or str(home / ".local/bin/codex")
-            if serves_a_checkout(root):
-                pinned("codex", root)
-            else:
-                result.append({"kind": "codex", "binary": binary, "root": root,
-                               "config": str(native_config), "hooks": str(codex_dir / "hooks.json")})
+            result.append({"kind": "codex", "binary": binary, "root": root,
+                           "checkout": serves_a_checkout(root),
+                           "config": str(native_config), "hooks": str(codex_dir / "hooks.json")})
     return result
 
 
@@ -109,15 +103,22 @@ def replace_references(path: Path, old: str, new: str):
 
 def install(providers: list[dict], stack: Path):
     for provider in providers:
-        for field in ("config", "hooks", "marketplace"):
-            if provider.get(field):
-                replace_references(Path(provider[field]), provider["root"], str(stack))
-        move_shell_references(provider["root"], str(stack))
+        # A checkout stays where it is; the update moved its contents, not its
+        # path. Only a shipped copy is relocated onto what was just staged.
+        if not provider.get("checkout"):
+            for field in ("config", "hooks", "marketplace"):
+                if provider.get(field):
+                    replace_references(Path(provider[field]), provider["root"], str(stack))
+            move_shell_references(provider["root"], str(stack))
         binary = provider["binary"]
+        # Where the engine is told to read the plugin from. Naming the stage
+        # for a checkout would move the registration the branch above just
+        # declined to move.
+        source = provider["root"] if provider.get("checkout") else str(stack)
         if provider["kind"] == "claude":
             run([binary, "plugin", "update", "jstack@jStack", "--scope", "user"])
         else:
-            run([binary, "plugin", "marketplace", "add", str(stack)])
+            run([binary, "plugin", "marketplace", "add", source])
             run([binary, "plugin", "add", "jstack@jstack", "--json"])
 
 

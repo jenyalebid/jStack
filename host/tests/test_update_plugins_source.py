@@ -1,21 +1,22 @@
-"""A release must not take the marketplace away from a checkout.
+"""A release must not take the marketplace away from a checkout — nor skip it.
 
 `discover()` reads whatever directory the engines have jStack registered
 against and `install()` rewrites every reference to point at the release stage
-instead. On a leaf that is the whole mechanism: there is no checkout, the
-shipped copy is the only copy, and moving the reference is how the plugin
-updates at all.
+instead. On a shipped copy that is the whole mechanism: there is no checkout,
+the copy is the only copy, and moving the reference is how the plugin updates.
 
-On a machine that DEVELOPS jStack it is a trap with no exit. The stage is one
-frozen commit; once the registration points at it, `claude plugin update`
-re-reads a directory that cannot change and correctly reports nothing to do,
-the nightly currency heal runs forever without landing, and `jstack-doctor`
-compares the stage against a cache taken from the stage and calls it agreement.
-Every probe that could catch it reads its ground truth from the thing that is
-wrong. Observed on a hub 2026-09-17 → 2026-09-21: four nights of a green-ish
-self-heal over a plugin pinned at 0.69.3 while the checkout reached 0.69.5.
+Pointing a checkout at a stage is a trap with no exit. The stage is one frozen
+commit; once the registration points at it, `claude plugin update` re-reads a
+directory that cannot change and correctly reports nothing to do, the nightly
+currency heal runs forever without landing, and `jstack-doctor` compares the
+stage against a cache taken from the stage and calls it agreement. Every probe
+that could catch it reads its ground truth from the thing that is wrong.
+Observed on a hub 2026-09-17 → 2026-09-21: four nights of a green-ish self-heal
+over a plugin pinned at 0.69.3 while the checkout reached 0.69.5.
 
-So the checkout wins, and the release says out loud what it left alone.
+So the checkout's PATH is left alone. Its cache is not: dropping the provider
+entirely was the other half of the same bug, and once every Mac installs from a
+commit there is no machine it did not silently disable.
 """
 
 import json
@@ -96,24 +97,64 @@ def test_a_leaf_still_moves(home):
     assert kinds == {"claude": str(root), "codex": str(root)}
 
 
-def test_a_registered_checkout_is_left_alone(home, capsys):
+def test_a_registered_checkout_is_discovered_and_marked_as_one(home):
+    """Discovered, because its cache still has to be refreshed; marked, because
+    that mark is the only thing standing between it and the stage."""
     repo = _checkout(home)
     _claude(home, repo)
     _codex(home, repo)
-    assert update_plugins.discover() == []
-    said = capsys.readouterr().out
-    assert said.count(str(repo)) == 2
-    assert "claude" in said and "codex" in said
+    found = {p["kind"]: p for p in update_plugins.discover()}
+    assert set(found) == {"claude", "codex"}
+    assert all(p["root"] == str(repo) and p["checkout"] for p in found.values())
 
 
-def test_one_engine_on_a_checkout_does_not_pin_the_other(home):
+def test_the_mark_is_per_engine(home):
     """The two registrations are independent — a machine can develop against
-    Claude and run Codex from a shipped copy. Skipping must be per engine."""
+    Claude and run Codex from a shipped copy."""
     repo, shipped = _checkout(home), _shipped(home)
     _claude(home, repo)
     _codex(home, shipped)
-    assert [(p["kind"], p["root"]) for p in update_plugins.discover()] == \
-        [("codex", str(shipped))]
+    found = {p["kind"]: p for p in update_plugins.discover()}
+    assert (found["claude"]["root"], found["claude"]["checkout"]) == (str(repo), True)
+    assert (found["codex"]["root"], found["codex"]["checkout"]) == (str(shipped), False)
+
+
+def test_a_checkout_keeps_its_path_and_still_gets_its_cache_refreshed(home, monkeypatch):
+    """The whole point. The reference is not rewritten to the stage, and the
+    engine is still told to re-read the plugin — from the checkout.
+
+    Skipping the provider did both at once, so on every Mac that installs from
+    a commit the plugin never moved and no probe could see that it had not.
+    """
+    repo, stage = _checkout(home), _shipped(home)
+    _claude(home, repo)
+    _codex(home, repo)
+    asked = []
+    monkeypatch.setattr(update_plugins, "run", lambda argv: asked.append(argv) or "[]")
+    moved = []
+    monkeypatch.setattr(update_plugins, "replace_references",
+                        lambda *a: moved.append(a))
+    monkeypatch.setattr(update_plugins, "move_shell_references",
+                        lambda *a: moved.append(a))
+    update_plugins.install(update_plugins.discover(), stage)
+    assert moved == []
+    assert ["plugin", "update", "jstack@jStack", "--scope", "user"] == asked[0][1:]
+    assert str(repo) in asked[1] and str(stage) not in asked[1]
+
+
+def test_a_shipped_copy_is_still_relocated_onto_the_stage(home, monkeypatch):
+    """The leaf path must not change: there the move IS the update."""
+    shipped = _shipped(home)
+    stage = shipped.parent / "next"
+    stage.mkdir()
+    _codex(home, shipped)
+    asked, moved = [], []
+    monkeypatch.setattr(update_plugins, "run", lambda argv: asked.append(argv) or "[]")
+    monkeypatch.setattr(update_plugins, "replace_references", lambda *a: moved.append(a))
+    monkeypatch.setattr(update_plugins, "move_shell_references", lambda *a: moved.append(a))
+    update_plugins.install(update_plugins.discover(), stage)
+    assert moved and all(a[-1] == str(stage) for a in moved)
+    assert str(stage) in asked[0]
 
 
 def test_a_non_directory_marketplace_still_refuses_before_the_checkout_test(home):
