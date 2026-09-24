@@ -122,3 +122,30 @@ def test_prefs_describes_the_registry():
     assert env.prefs() == [
         {"key": s.key, "label": s.label, "kind": s.kind,
          "values": list(s.values), "default": s.default} for s in env.SETTINGS]
+
+
+def test_an_unusable_value_reads_as_silence_at_both_readers():
+    """`get` and `resolve` must agree about the same row.
+
+    A value outside the setting's current `values` is the residue of an enum
+    that lost a member while rows holding it stayed. `resolve` already drops it.
+    If `get` handed it back raw, the two readers would answer differently about
+    one row and every caller would have to know which it was holding — and the
+    one reading raw would surface a mode to the model that no instruction
+    exists for.
+    """
+    with store.get_store().conn() as db:
+        db.execute("INSERT INTO session_env (session_id, key, value, updated_at)"
+                   " VALUES (?,?,?,?)", (SESSION, "delivery_method", "carrier_pigeon", 0))
+
+    assert env.get("delivery_method", session_id=SESSION) == ""
+    resolved = env.resolve(SESSION)
+    assert resolved["delivery_method"] == ("none", "default")
+    assert env.state_line(resolved) == ""
+
+
+def test_a_usable_value_still_comes_back_from_get():
+    """The filter must not swallow the values it is there to let through."""
+    env.set_value("delivery_method", "distribute", session_id=SESSION)
+    assert env.get("delivery_method", session_id=SESSION) == "distribute"
+    assert env.get("delivery_method", agent_id=AGENT) == ""

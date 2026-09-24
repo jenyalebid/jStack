@@ -143,18 +143,27 @@ def _target(session_id: str | None, agent_id: str | None) -> tuple[str, str, str
 
 def get(key: str, *, session_id: str | None = None,
         agent_id: str | None = None) -> str:
-    """The raw value stored at ONE layer, `""` if that layer is silent.
+    """The value stored at ONE layer, `""` if that layer is silent.
 
     No walk and no default: this is what an editor screen needs to show a
     session's own value as set-here rather than as inherited. `resolve` is the
     one that answers what is actually in force.
+
+    Unusable values read as silence, exactly as `_layer` treats them — a value
+    outside the setting's current `values` is one no instruction exists for any
+    more, and a layer holding one has nothing to say. Filtering in only one of
+    the two readers is the real hazard: they would answer differently about the
+    same row, and every caller would have to know which one it was holding.
     """
     table, column, owner = _target(session_id, agent_id)
     with store.get_store().conn() as db:
         row = db.execute(
             f"SELECT value FROM {table} WHERE {column}=? AND key=?",
             (owner, key)).fetchone()
-    return row["value"] if row else ""
+    if not row:
+        return ""
+    s = setting(key)
+    return row["value"] if s is not None and row["value"] in s.values else ""
 
 
 def set_value(key: str, value: str | None, *, session_id: str | None = None,
