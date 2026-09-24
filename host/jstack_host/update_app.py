@@ -280,7 +280,8 @@ class AppBackend(MacBackend):
         app = Path(self.config["menubar_path"])
         if self._statuses(app) != transaction["services"]:
             raise releases.ReleaseError("service approvals changed since staging")
-        update_plugins.install(transaction["providers"], Path(transaction["stack"]))
+        update_plugins.install(transaction["providers"], Path(transaction["stack"]),
+                               transaction["manifest"].get("sources", {}).get("stack"))
         self._stop_services(app, transaction["services"])
         built_here = self._built_here(job)
         for kind, record in transaction["apps"].items():

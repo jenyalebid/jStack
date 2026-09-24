@@ -426,7 +426,8 @@ class MacBackend:
     def apply(self, job: dict):
         transaction = job["transaction"]
         from . import update_plugins
-        update_plugins.install(transaction["providers"], Path(transaction["stack"]))
+        update_plugins.install(transaction["providers"], Path(transaction["stack"]),
+                               transaction["manifest"].get("sources", {}).get("stack"))
         self._unload("menubar")
         built_here = self._built_here(job)
         for kind, app in transaction["apps"].items():

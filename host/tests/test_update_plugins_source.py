@@ -227,3 +227,90 @@ def test_a_missing_provider_cli_names_where_it_looked(home, monkeypatch, tmp_pat
     _codex(home, _shipped(home))
     with pytest.raises(update_plugins.ReleaseError, match="codex CLI is missing.*empty"):
         update_plugins.prepare()
+
+
+# ── the checkout moves to the commit the update installs ─────────────────────
+
+
+def _git(*argv, cwd):
+    import subprocess
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@x", "-c",
+                           "commit.gpgsign=false", *argv], cwd=cwd, check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _origin_and_clone(tmp_path):
+    """An origin two commits deep, and a clone left on the first — what
+    `install.sh` leaves behind once the ref has moved on."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git("init", "--quiet", "-b", "main", cwd=origin)
+    plugin = origin / "plugins/jstack/.claude-plugin/plugin.json"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text('{"version": "0.78.0"}')
+    _git("add", ".", cwd=origin)
+    _git("commit", "--quiet", "-m", "0.78.0", cwd=origin)
+    first = _git("rev-parse", "HEAD", cwd=origin)
+    plugin.write_text('{"version": "0.79.0"}')
+    _git("commit", "--quiet", "-am", "0.79.0", cwd=origin)
+    second = _git("rev-parse", "HEAD", cwd=origin)
+    clone = tmp_path / "jStack"
+    _git("clone", "--quiet", str(origin), str(clone), cwd=tmp_path)
+    _git("reset", "--quiet", "--hard", first, cwd=clone)
+    return clone, first, second
+
+
+def _provider(clone):
+    return {"kind": "claude", "binary": "/bin/true", "root": str(clone), "checkout": True}
+
+
+def test_a_checkout_is_moved_to_the_commit_the_update_installs(tmp_path, monkeypatch):
+    """The commit the manifest names is what `plugin update` then reads. The
+    clone follows its branch, so a branch that can fast-forward keeps its name."""
+    clone, first, second = _origin_and_clone(tmp_path)
+    asked = []
+    monkeypatch.setattr(update_plugins, "run", lambda argv: asked.append(argv) or "[]")
+    update_plugins.install([_provider(clone)], tmp_path / "stack", second)
+    assert _git("rev-parse", "HEAD", cwd=clone) == second
+    assert _git("symbolic-ref", "--short", "HEAD", cwd=clone) == "main"
+    assert '"0.79.0"' in (clone / "plugins/jstack/.claude-plugin/plugin.json").read_text()
+    assert asked[0][1:] == ["plugin", "update", "jstack@jStack", "--scope", "user"]
+
+
+def test_a_branch_that_cannot_fast_forward_is_left_alone_and_the_checkout_detached(tmp_path, monkeypatch):
+    clone, first, second = _origin_and_clone(tmp_path)
+    (clone / "local.txt").write_text("mine")
+    _git("add", "local.txt", cwd=clone)
+    _git("commit", "--quiet", "-m", "local work", cwd=clone)
+    mine = _git("rev-parse", "main", cwd=clone)
+    monkeypatch.setattr(update_plugins, "run", lambda argv: "[]")
+    update_plugins.install([_provider(clone)], tmp_path / "stack", second)
+    assert _git("rev-parse", "HEAD", cwd=clone) == second
+    assert _git("rev-parse", "main", cwd=clone) == mine, "no branch is moved off its own commits"
+
+
+def test_an_uncommitted_change_refuses_the_move_by_name(tmp_path, monkeypatch):
+    clone, first, second = _origin_and_clone(tmp_path)
+    (clone / "plugins/jstack/.claude-plugin/plugin.json").write_text('{"version": "hand-edited"}')
+    asked = []
+    monkeypatch.setattr(update_plugins, "run", lambda argv: asked.append(argv) or "[]")
+    with pytest.raises(update_plugins.ReleaseError, match="uncommitted changes"):
+        update_plugins.install([_provider(clone)], tmp_path / "stack", second)
+    assert _git("rev-parse", "HEAD", cwd=clone) == first and asked == []
+
+
+def test_a_checkout_already_on_the_commit_and_a_shipped_copy_are_not_touched(home, tmp_path, monkeypatch):
+    clone, first, second = _origin_and_clone(tmp_path)
+    _git("reset", "--quiet", "--hard", second, cwd=clone)
+    _git("remote", "remove", "origin", cwd=clone)  # a fetch here would fail loudly
+    monkeypatch.setattr(update_plugins, "run", lambda argv: "[]")
+    monkeypatch.setattr(update_plugins, "replace_references", lambda *a: None)
+    monkeypatch.setattr(update_plugins, "move_shell_references", lambda *a: None)
+    update_plugins.install([_provider(clone)], tmp_path / "stack", second)
+    assert _git("rev-parse", "HEAD", cwd=clone) == second
+    shipped = _shipped(home)
+    fetched = []
+    monkeypatch.setattr(update_plugins, "advance", lambda *a: fetched.append(a))
+    update_plugins.install([{**_provider(shipped), "checkout": False}], tmp_path / "stack", second)
+    update_plugins.install([_provider(clone)], tmp_path / "stack", None)
+    assert fetched == []

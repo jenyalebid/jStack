@@ -101,7 +101,48 @@ def replace_references(path: Path, old: str, new: str):
         atomic_bytes(path, changed.encode())
 
 
-def install(providers: list[dict], stack: Path):
+def advance(root: str, sha: str) -> None:
+    """Bring a checkout onto the commit this update installs.
+
+    `plugin update` re-reads the plugin from the marketplace's directory, and
+    a checkout that nothing moves serves the commit it was cloned at forever:
+    the hub that built 0.79.0 verified itself against a plugin still read from
+    the 0.78.0 clone `install.sh` made (verify-journeys, 2026-09-24), and on
+    every commit before the bump the versions agreed while the files did not.
+    The update moves the checkout the way it moves everything else — to the
+    commit the manifest names. A branch that can fast-forward keeps its name;
+    anything else is left detached on the commit, no branch touched. An
+    uncommitted change is the one thing this refuses to run over: a Mac that
+    develops jStack in its registered checkout is told, by name, rather than
+    have its work moved under it.
+    """
+    from .update_macos import command
+    git = ["git", "-C", root]
+    if command([*git, "status", "--porcelain", "--untracked-files=no"]).strip():
+        raise ReleaseError(f"the jStack checkout at {root} has uncommitted changes; it was "
+                           f"not moved to {sha[:8]} and the plugin stays where it is")
+    if command([*git, "rev-parse", "HEAD"]).strip() == sha:
+        return
+    if subprocess.run([*git, "cat-file", "-e", sha + "^{commit}"], capture_output=True).returncode:
+        command([*git, "fetch", "--force", "origin", sha], timeout=3600)
+    on_branch = not subprocess.run([*git, "symbolic-ref", "--quiet", "HEAD"],
+                                   capture_output=True).returncode
+    if not (on_branch and not subprocess.run([*git, "merge", "--ff-only", "--quiet", sha],
+                                             capture_output=True).returncode):
+        command([*git, "checkout", "--quiet", "--detach", sha])
+    # The tree is written from the commit, not trusted to the move: a file
+    # touched within the second its index entry was written reads as clean
+    # to git and is skipped by the checkout. Safe, since nothing uncommitted
+    # survived the check above; untracked files are not git's to remove.
+    command([*git, "reset", "--quiet", "--hard", "HEAD"])
+
+
+def install(providers: list[dict], stack: Path, sha: str | None = None):
+    # Every checkout the engines read the plugin from, moved once, before any
+    # engine is told to re-read it. A shipped copy has no commit to move to.
+    for root in sorted({p["root"] for p in providers if p.get("checkout")}):
+        if sha:
+            advance(root, sha)
     for provider in providers:
         # A checkout stays where it is; the update moved its contents, not its
         # path. Only a shipped copy is relocated onto what was just staged.
