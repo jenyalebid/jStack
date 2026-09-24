@@ -35,8 +35,8 @@ def test_every_check_answers_with_a_grade(machine):
     names = [r["name"] for r in results]
     assert names == ["python", "claude", "tmux", "websocket", "open files", "token",
                      "profile", "agents", "registry", "timeline", "transcripts",
-                     "scheduler", "allowance", "codex hooks", "repos", "service", "source", "app",
-                     "files"]
+                     "scheduler", "allowance", "codex hooks", "hook owners", "repos",
+                     "service", "source", "app", "files"]
     assert all(r["grade"] in (doctor.OK, doctor.WARN, doctor.FAIL) for r in results)
     by = {r["name"]: r for r in results}
     assert by["token"]["grade"] == doctor.FAIL, "no token minted in this state dir"
@@ -219,3 +219,69 @@ def test_status_and_doctor_adopt_the_installed_agents_environment(machine, tmp_p
     assert os.environ["JREMOTE_INSTANCE_ROOT"] == str(tmp_path / "Agents")
     assert os.environ["JREMOTE_STATE_DIR"] == str(tmp_path / "elsewhere"), "the shell's export wins"
     assert install_host.installed_environment(tmp_path / "missing.plist") == {}
+
+
+# ── one owner per mechanism ──
+#
+# The duplicate this check exists for cost session 244ca668 two compactions on
+# one delivered turn (2026-09-24): the shipped stop hook and the hand-wired copy
+# of it held different lock names, so each believed it was the only one.
+
+def _plugin(tmp_path, monkeypatch, shipped, owners):
+    plugin = tmp_path / "plugins" / "jstack"
+    (plugin / "hooks").mkdir(parents=True)
+    (plugin / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {
+        "Stop": [{"hooks": [{"type": "command",
+                             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/" + name}
+                            for name in shipped]}]}}))
+    (plugin / "hooks" / "owners.json").write_text(json.dumps({"mechanisms": owners}))
+    from jstack_host import plugin_paths
+    monkeypatch.setattr(plugin_paths, "jstack_root", lambda: plugin)
+    return plugin
+
+
+def _settings(tmp_path, monkeypatch, commands):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text(json.dumps({"hooks": {
+        "Stop": [{"hooks": [{"type": "command", "command": c} for c in commands]}]}}))
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+OWNERS = [{"mechanism": "compact on delivery", "ships": "stop-compact-delivery.sh",
+           "replaces": ["compact_on_delivery.py"]}]
+
+
+def test_a_hand_wired_copy_of_a_shipped_hook_is_named(machine, monkeypatch):
+    _plugin(machine, monkeypatch, ["stop-compact-delivery.sh"], OWNERS)
+    _settings(machine, monkeypatch,
+              ["~/Operations/Infrastructure/assistant/hooks/compact_on_delivery.py"])
+    r = doctor.check_hook_owners()
+    assert r["grade"] == doctor.WARN
+    assert "compact on delivery (Stop)" in r["detail"]
+    assert "settings.json" in r["hint"]
+
+
+def test_the_shipped_copy_is_not_its_own_duplicate(machine, monkeypatch):
+    plugin = _plugin(machine, monkeypatch, ["stop-compact-delivery.sh"], OWNERS)
+    # Both spellings of reaching the shipped hook: the variable and the resolved path.
+    _settings(machine, monkeypatch, ["${CLAUDE_PLUGIN_ROOT}/hooks/stop-compact-delivery.sh",
+                                     f"{plugin}/hooks/stop-compact-delivery.sh"])
+    r = doctor.check_hook_owners()
+    assert r["grade"] == doctor.OK and "1 shipped hooks" in r["detail"]
+
+
+def test_a_hook_that_declares_no_mechanism_cannot_be_policed_and_says_so(machine, monkeypatch):
+    _plugin(machine, monkeypatch, ["stop-compact-delivery.sh", "stop-new-thing.py"], OWNERS)
+    _settings(machine, monkeypatch, [])
+    r = doctor.check_hook_owners()
+    assert r["grade"] == doctor.WARN
+    assert "stop-new-thing.py" in r["detail"] and "owners.json" in r["hint"]
+
+
+def test_a_machine_with_no_user_settings_has_nothing_to_double(machine, monkeypatch):
+    _plugin(machine, monkeypatch, ["stop-compact-delivery.sh"], OWNERS)
+    monkeypatch.setenv("HOME", str(machine / "bare"))
+    r = doctor.check_hook_owners()
+    assert r["grade"] == doctor.OK

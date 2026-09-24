@@ -21,7 +21,9 @@ the validator must never be the thing that hides a broken machine.
 from __future__ import annotations
 
 import importlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -267,6 +269,74 @@ def check_codex_hooks() -> dict:
     return _check("codex hooks", OK, f"{hooks} hooks active for every session", note)
 
 
+def check_hook_owners() -> dict:
+    """One owner per mechanism — is anything the plugin ships also wired by hand?
+
+    Two copies of one hook is not a redundancy, it is the mechanism running
+    twice, and the second run is not harmless: the copies hold separate locks
+    under separate names, so each believes it is alone. On 2026-09-24 the
+    compact-on-delivery port shipped while the hand-wired copy stayed in
+    settings.json, and a delivered turn got `/compact` twice — the second
+    landing on the summary the first had just produced, with each copy reading
+    the other's keystroke as the user's own turn and sending no continue.
+    Nothing on the machine could answer whether a mechanism had two owners,
+    which is what this reports: `hooks/owners.json` declares the mechanism each
+    shipped hook owns and the hand-wired spellings it replaces, and a spelling
+    still wired in settings.json is a duplicate. A hook shipped without an
+    entry there is an undeclared owner — nothing can detect its twin, so it is
+    reported too rather than passing quietly.
+    """
+    from . import plugin_paths
+
+    plugin = plugin_paths.jstack_root()
+    try:
+        manifest = json.loads((plugin / "hooks/hooks.json").read_text())
+        owners = json.loads((plugin / "hooks/owners.json").read_text())["mechanisms"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return _check("hook owners", WARN, f"cannot read the hook manifest: {exc}",
+                      f"expected hooks.json and owners.json under {plugin}/hooks")
+
+    shipped = {os.path.basename((hook.get("command") or "").split()[0])
+               for groups in (manifest.get("hooks") or {}).values()
+               for group in groups
+               for hook in (group.get("hooks") or [])
+               if (hook.get("command") or "").split()}
+    undeclared = sorted(shipped - {m.get("ships") for m in owners})
+
+    settings_path = Path.home() / ".claude/settings.json"
+    try:
+        settings = json.loads(settings_path.read_text())
+    except OSError:
+        settings = {}          # no user settings: nothing to double
+    except ValueError as exc:
+        return _check("hook owners", WARN, f"{settings_path} is not readable JSON: {exc}")
+
+    twins = []
+    for event, groups in (settings.get("hooks") or {}).items():
+        for group in groups or []:
+            for hook in (group.get("hooks") or []):
+                command = hook.get("command") or ""
+                if "CLAUDE_PLUGIN_ROOT" in command or str(plugin) in command:
+                    continue   # the shipped copy, however it was reached
+                names = {os.path.basename(token) for token in re.findall(r"[\w.$/~-]+", command)}
+                for owner in owners:
+                    spellings = set(owner.get("replaces") or []) | {owner.get("ships")}
+                    if names & spellings:
+                        twins.append(f"{owner.get('mechanism')} ({event})")
+
+    if twins:
+        return _check("hook owners", WARN,
+                      f"{len(twins)} mechanism(s) wired twice — the plugin's copy and a "
+                      f"hand-wired one both run: {', '.join(sorted(set(twins)))}",
+                      f"remove those entries from {settings_path}; the plugin ships the owner")
+    if undeclared:
+        return _check("hook owners", WARN,
+                      f"{len(undeclared)} shipped hook(s) declare no mechanism, so a "
+                      f"hand-wired twin of them cannot be detected: {', '.join(undeclared)}",
+                      f"add them to {plugin}/hooks/owners.json")
+    return _check("hook owners", OK, f"{len(shipped)} shipped hooks, one owner each")
+
+
 def check_repos() -> dict:
     repos = hostenv.repos()
     if not repos:
@@ -460,6 +530,7 @@ def check_file_sharing() -> dict:
 CHECKS = (check_python, check_claude, check_tmux, check_websocket, check_fd_limit,
           check_token, check_profile, check_agents, check_registry, check_timeline,
           check_transcripts, check_scheduler, check_allowance, check_codex_hooks,
+          check_hook_owners,
           check_repos,
           check_service, check_source, check_app, check_file_sharing)
 
