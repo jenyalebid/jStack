@@ -426,13 +426,23 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
 
 def sign(app: Path, config: dict | None):
     binaries = [path for path in app.rglob("*") if macho(path)]
-    signing = ["/usr/bin/codesign", "--force", "--options", "runtime"]
+    signing = ["/usr/bin/codesign", "--force"]
     if config:
+        # The hardened runtime is what notarization demands, and only a
+        # Developer ID build is ever notarized. It also turns on library
+        # validation: a process may map only libraries signed by Apple or by
+        # its own Team ID. An ad-hoc signature has no Team ID, so a hardened
+        # ad-hoc JStackRuntime cannot load the ad-hoc Python framework beside
+        # it — dyld refuses with "different Team IDs" (macOS 26.7), and every
+        # Hub built on a Mac without a Developer ID died at its first launch.
+        # The runtime gate and the updater's check ask a source build only
+        # for its identifier, never for the hardening flag.
         if config.get("sign_keychain_password_file"):
             command(["/usr/bin/security", "unlock-keychain", "-p",
                      Path(config["sign_keychain_password_file"]).read_text().strip(), config["sign_keychain"]])
             command(["/usr/bin/security", "set-keychain-settings", config["sign_keychain"]])
-        signing += ["--timestamp", "--keychain", config["sign_keychain"], "--sign", config["sign_identity"]]
+        signing += ["--options", "runtime", "--timestamp", "--keychain", config["sign_keychain"],
+                    "--sign", config["sign_identity"]]
     else:
         signing += ["--sign", "-"]
     for path in sorted(binaries, key=lambda p: len(p.parts), reverse=True):
