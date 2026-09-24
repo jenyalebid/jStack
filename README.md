@@ -21,8 +21,8 @@ curl -fsSL https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh |
 
 ## Reset
 
-Wipes everything — state, token, credentials — then installs the latest
-published release clean. Devices re-pair afterward.
+Wipes everything — state, token, credentials — then builds the current main
+commit clean. Devices re-pair afterward.
 
 ```
 curl -fsSL https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh | bash -s -- --purge
