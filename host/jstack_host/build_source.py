@@ -300,6 +300,55 @@ def land(feed: Path, output: Path, envelope: dict) -> Path:
     return feed / release_id
 
 
+#: The one way past the adopted-machine refusal below, and it is typed, never
+#: defaulted: `JSTACK_BUILD_DESPITE_LEAVES=1 jstack-host updates build`. The
+#: machine that publishes for a fleet has to build eventually, and re-keying
+#: its leaves by hand afterwards is a decision somebody makes on purpose.
+DESPITE_LEAVES = "JSTACK_BUILD_DESPITE_LEAVES"
+
+
+def adopted() -> list[str]:
+    """The machines that take their updates from this one.
+
+    Exactly the rows `updates/queue` will send a job to: a forgotten row takes
+    nothing, and a row with no bound credential has no updater to strand.
+    """
+    try:
+        from .store import get_store
+        rows = get_store().list_hosts()
+    except Exception as exc:  # a store that cannot be read is not "no leaves"
+        raise releases.ReleaseError(
+            "could not read this hub's adopted machines: " + str(exc)) from exc
+    return [row["name"] or row["key"] for row in rows
+            if not row["deleted"] and row["device_id"]]
+
+
+def build_refusal(root: Path, config: dict) -> str:
+    """Why this machine must not build, or `""` if it may.
+
+    One rule with two readers: `build()` raises it, and the window asks it
+    before drawing a Rebuild button — a button that answers with an error is
+    the same lie as a check that reports state it cannot observe.
+    """
+    if config.get("managed") or (root.parent / "parent.json").exists():
+        return "a managed machine takes its builds from its parent"
+    if not config.get("github_repo"):
+        return "this host has no source repository to build from"
+    # A build mints this hub's own key and rotates `public_key` to it
+    # (`_offer`). A leaf verifies its parent's jobs against the key it pinned
+    # when it installed, so the first build under it makes every future job
+    # unverifiable there — and the key that would fix it only arrives inside an
+    # update the leaf now refuses. #144 holds the fix; this refusal holds the
+    # fleet.
+    names = adopted()
+    if names and os.environ.get(DESPITE_LEAVES) != "1":
+        return ("this hub has adopted machines (" + ", ".join(names) + ") and a build "
+                "would rotate the release key they trust, leaving them unable to verify "
+                "any update from this hub — see #144. Forget them, or build with "
+                f"{DESPITE_LEAVES}=1 and re-adopt them afterwards.")
+    return ""
+
+
 def build(root: Path, config: dict, *, ref: str | None = None, now=None) -> dict:
     """Build the Hub from the newest commit on this hub's ref, and offer it.
 
@@ -308,8 +357,9 @@ def build(root: Path, config: dict, *, ref: str | None = None, now=None) -> dict
     so stage/install/verify take over from here unchanged.
     """
     from .update_supervisor import atomic_json
-    if config.get("managed") or (root.parent / "parent.json").exists():
-        raise releases.ReleaseError("a managed machine takes its builds from its parent")
+    refusal = build_refusal(root, config)
+    if refusal:
+        raise releases.ReleaseError(refusal)
     ref = channel_ref({"channel": ref} if ref else config)
     progress = root / "build.json"
     atomic_json(progress, {"state": "building", "ref": ref,

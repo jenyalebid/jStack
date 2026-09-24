@@ -644,6 +644,76 @@ struct UpdateObservation: Decodable {
     var hostSource: UpdateSource?
 }
 
+struct HubSourceCheck: Decodable {
+    var status: String?
+    var head: String?
+    var checked: Double?
+    var detail: String?
+}
+
+struct HubBuildPhase: Decodable {
+    var state: String?
+    var ref: String?
+    var release: String?
+    var detail: String?
+}
+
+/// The build half of this hub, as `/updates/source` answers it: the ref it
+/// follows, the build it is running, and what the last check and the last
+/// build each ended in. Reading it costs three local files and no request —
+/// which is the reason the window may poll it, and the reason opening the
+/// window never starts a download.
+struct HubSource: Decodable {
+    var ref: String
+    var repository: String?
+    var enabled: Bool
+    var managed: Bool?
+    var running: UpdateSource?
+    var check: HubSourceCheck?
+    var build: HubBuildPhase?
+    var canBuild: Bool
+    var blocked: String?
+
+    /// The refs this window offers. A hub can be pointed at any branch, but
+    /// only from a terminal: a two-way control that rewrote a feature branch
+    /// to `main` on the next click would lose the ref nobody else records.
+    static let offered = ["stable", "dev"]
+
+    /// `stable` is the name main answers to in the config; `main` is the name
+    /// the person picking it knows.
+    static func label(_ ref: String) -> String { ref == "stable" ? "main" : ref }
+
+    var building: Bool { build?.state == "building" }
+    var switchable: Bool { enabled && managed != true && Self.offered.contains(ref) }
+
+    /// One line for the whole state. Order matters: the build half is newer
+    /// than any check, so a finished build is reported over a check that still
+    /// says "behind" because it predates it.
+    var summary: String {
+        switch build?.state {
+        case "building": return "Building \(Self.label(build?.ref ?? ref))…"
+        case "stalled":
+            return "A build was interrupted. Press Rebuild now to start a new one."
+        case "failed":
+            let detail = build?.detail ?? ""
+            return "Build failed" + (detail.isEmpty ? "." : ": \(detail)")
+        case "built":
+            if let release = build?.release, release != running?.release {
+                return "Built \(release). Install it under Software Updates."
+            }
+        default: break
+        }
+        switch check?.status {
+        case "current": return "Up to date with \(Self.label(ref))."
+        case "behind": return "\(Self.label(ref)) has moved ahead. Rebuild to take it."
+        case "failed":
+            let detail = check?.detail ?? ""
+            return "Could not check \(Self.label(ref))" + (detail.isEmpty ? "." : ": \(detail)")
+        default: return "Not checked yet."
+        }
+    }
+}
+
 struct UpdateInventory: Decodable {
     var release: String?
     var machines: [UpdateMachine]
@@ -900,6 +970,39 @@ final class HostProbe {
         }
     }
 
+    /// What this hub follows and what it is running. Cheap and answer-only —
+    /// it reports the last check rather than performing one, so polling it
+    /// while the window is open costs the hub three file reads.
+    func source(_ done: @escaping (HubSource?) -> Void) {
+        guard let token = HostAgent.updaterToken() else {
+            return DispatchQueue.main.async { done(nil) }
+        }
+        get("http://127.0.0.1:\(HostAgent.port())\(Self.apiPrefix)/updates/source", token: token) { data, status in
+            let value = status == 200
+                ? data.flatMap { try? Self.decoder.decode(HubSource.self, from: $0) } : nil
+            DispatchQueue.main.async { done(value) }
+        }
+    }
+
+    func follow(ref: String, token: String, _ done: @escaping (Bool, String) -> Void) {
+        post("/updates/source/ref", token: token, timeout: 15,
+             payload: try? JSONEncoder().encode(["ref": ref]), done)
+    }
+
+    func rebuild(token: String, _ done: @escaping (Bool, String) -> Void) {
+        post("/updates/source/build", token: token, timeout: 30, done)
+    }
+
+    /// What the hub actually said, out of the `{"detail": …}` FastAPI wraps a
+    /// refusal in. A dialog that shows the JSON sends its reader to the logs.
+    static func reason(_ text: String) -> String {
+        guard let data = text.data(using: .utf8),
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let detail = body["detail"] as? String, !detail.isEmpty
+        else { return text }
+        return detail
+    }
+
     func update(target: String, requestID: String,
                 _ done: @escaping (Bool, String) -> Void) {
         guard let token = HostAgent.updaterToken(),
@@ -981,6 +1084,7 @@ final class HostProbe {
     /// logs, so whatever the host actually answered is carried up verbatim.
     private func post(_ path: String, token: String, timeout: TimeInterval,
                       body: [String: Bool]? = nil,
+                      payload: Data? = nil,
                       removal: Bool = false,
                       _ done: @escaping (Bool, String) -> Void) {
         let port = HostAgent.port()
@@ -989,8 +1093,8 @@ final class HostProbe {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        if let body {
-            req.httpBody = try? JSONEncoder().encode(body)
+        if let encoded = payload ?? body.flatMap({ try? JSONEncoder().encode($0) }) {
+            req.httpBody = encoded
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         req.timeoutInterval = timeout
@@ -1769,11 +1873,64 @@ struct InfoMachineSection: View {
     }
 }
 
+/// Where the hub's software comes from, and the two presses that move it: the
+/// ref it follows, and a rebuild. They are separate on purpose — picking a ref
+/// writes a name and does nothing else, so nothing on this machine downloads
+/// or builds until somebody asks for it in as many words.
+struct InfoSourceSection: View {
+    let source: HubSource
+    let busy: Bool
+    let follow: (String) -> Void
+    let rebuild: () -> Void
+
+    var body: some View {
+        Section {
+            LabeledContent("Build", value: source.running?.displayVersion ?? "Not reported")
+            if let sha = source.running?.sha, !sha.isEmpty {
+                LabeledContent("Commit", value: String(sha.prefix(12))
+                               + (source.running?.dirty == true ? " (modified)" : ""))
+                    .textSelection(.enabled)
+            }
+            if source.switchable {
+                Picker("Follows", selection: Binding(get: { source.ref }, set: follow)) {
+                    ForEach(HubSource.offered, id: \.self) { ref in
+                        Text(HubSource.label(ref)).tag(ref)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(busy)
+                .accessibilityIdentifier("info_source_ref")
+            } else {
+                LabeledContent("Follows", value: HubSource.label(source.ref))
+            }
+            Text(source.summary).font(.callout).foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            if source.canBuild {
+                Button("Rebuild now", action: rebuild)
+                    .disabled(busy || source.building)
+                    .accessibilityIdentifier("info_source_rebuild")
+            } else if let blocked = source.blocked, !blocked.isEmpty {
+                // Why there is no button, rather than a button that answers
+                // with an error dialog.
+                Text(blocked).font(.callout).foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        } header: {
+            Label("Source", systemImage: "arrow.triangle.branch")
+                .font(.headline)
+        }
+    }
+}
+
 struct HostInfoForm: View {
     let machine: String
     let status: String
     let version: String
     let source: String?
+    let hubSource: HubSource?
+    let sourceBusy: Bool
+    let follow: (String) -> Void
+    let rebuild: () -> Void
     let app: InfoAppSnapshot
     let updateStatus: String
     let error: String?
@@ -1795,6 +1952,10 @@ struct HostInfoForm: View {
                 }
                 if let localCommand { InfoCommand(command: localCommand) }
                 if let allCommand { InfoCommand(command: allCommand) }
+            }
+            if let hubSource, hubSource.enabled {
+                InfoSourceSection(source: hubSource, busy: sourceBusy,
+                                  follow: follow, rebuild: rebuild)
             }
             ForEach(machines, id: \.machine) { machine in
                 InfoMachineSection(machine: machine, command: commands[machine.machine])
@@ -1841,6 +2002,8 @@ final class StatusController: NSObject {
     private var updateActionStatus: String?
     private var menuIsOpen = false
     private var infoWindow: HostInfoWindow?
+    private var hubSource: HubSource?
+    private var sourceBusy = false
 
     override init() {
         super.init()
@@ -1865,6 +2028,15 @@ final class StatusController: NSObject {
     }
 
     func refresh() {
+        // Only while the window that renders it is open: the menu never shows
+        // the source row, so a closed window is a request with no reader.
+        if infoWindow != nil {
+            probe.source { [weak self] value in
+                guard let self, let value else { return }
+                self.hubSource = value
+                self.refreshInfoWindow()
+            }
+        }
         probe.updates { [weak self] inventory, error in
             guard let self else { return }
             self.updateInventory = inventory
@@ -2137,6 +2309,10 @@ final class StatusController: NSObject {
             status: state.isUp ? (state.identity?.mode?.isManaged == true ? "Running · Managed Mac" : "Running") : "Not running",
             version: source?.displayVersion ?? "Version not reported",
             source: source?.sha,
+            hubSource: hubSource,
+            sourceBusy: sourceBusy,
+            follow: { [weak self] ref in self?.followRef(ref) },
+            rebuild: { [weak self] in self?.rebuildSource() },
             app: InfoAppSnapshot.read(),
             updateStatus: updateActionStatus ?? (updateError != nil ? "Could not check for updates"
                 : local?.summary ?? (updateInventory == nil ? "Checking…" : "No update published")),
@@ -2146,6 +2322,41 @@ final class StatusController: NSObject {
             commands: commands, allCommand: commands["all"],
             open: { [weak self] in self?.doOpenApp() },
             download: { [weak self] in self?.downloadClient() }))
+    }
+
+    /// Follow another ref. This writes a name; it pulls nothing and builds
+    /// nothing, and the row's status line goes to "behind" at the next check.
+    private func followRef(_ ref: String) {
+        guard !sourceBusy, ref != hubSource?.ref,
+              let token = HostAgent.updaterToken() else { return }
+        sourceBusy = true
+        // Hold the press on screen until the hub answers: the ten-second poll
+        // would otherwise snap the control back to the old ref mid-request.
+        hubSource?.ref = ref
+        refreshInfoWindow()
+        probe.follow(ref: ref, token: token) { [weak self] ok, detail in
+            self?.finishSource(ok, detail, "Could not switch the source branch")
+        }
+    }
+
+    private func rebuildSource() {
+        guard !sourceBusy, let token = HostAgent.updaterToken() else { return }
+        sourceBusy = true
+        refreshInfoWindow()
+        probe.rebuild(token: token) { [weak self] ok, detail in
+            self?.finishSource(ok, detail, "Could not start the build")
+        }
+    }
+
+    private func finishSource(_ ok: Bool, _ detail: String, _ title: String) {
+        sourceBusy = false
+        if !ok {
+            let alert = NSAlert()
+            alert.messageText = title
+            alert.informativeText = HostProbe.reason(detail)
+            alert.runModal()
+        }
+        refresh()
     }
 
     private func downloadClient() {

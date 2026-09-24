@@ -322,7 +322,64 @@ def builder(tmp_path, publisher, monkeypatch):
     monkeypatch.setattr(build_hub, "build", compile_hub)
     monkeypatch.setattr(build_source, "fetch", lambda *args: HEAD)
     monkeypatch.setattr(build_source.subprocess, "run", lambda *a, **k: None)
+    # The grid this hub adopted into, per test. The package-level store is one
+    # file for the whole session, so a leaf another module enrolled would
+    # otherwise decide whether these builds are allowed to run.
+    from jstack_host import store as stores
+    from jstack_host.store import SessionStore
+    grid = SessionStore(db_path=tmp_path / "grid.sqlite")
+    monkeypatch.setattr(stores, "get_store", lambda: grid)
     return root, feed, config, calls
+
+
+def _adopt(key="leaf-one", name="Office Mac", device="device-1"):
+    from jstack_host import store as stores
+    grid = stores.get_store()
+    grid.upsert_host(key, name, "10.66.0.9")
+    grid.bind_host_device(key, device)
+    return grid
+
+
+def test_a_hub_that_adopted_machines_will_not_rotate_the_key_under_them(builder):
+    """#144: a build mints this hub's own key and `_offer` rotates
+    `public_key` to it, while a leaf verifies every job against the key it
+    pinned at install. The first build under a leaf makes it refuse the very
+    update that would re-key it, so until #144 is fixed the build is refused."""
+    root, feed, config, calls = builder
+    _adopt()
+    with pytest.raises(releases.ReleaseError, match="#144"):
+        build_source.build(root, config)
+    # Refused before anything started: no marker, no git, no feed movement.
+    assert not (root / "build.json").exists() and not calls
+    assert json.loads((feed / "latest.json").read_text())["manifest"]["release"] == "published-1"
+
+
+def test_a_forgotten_or_unbound_machine_is_not_a_leaf_that_blocks_a_build(builder):
+    """Exactly the rows a job is sent to. A tombstone takes no job, and a row
+    with no credential has no updater to strand."""
+    root, _, config, _ = builder
+    grid = _adopt("leaf-gone")
+    grid.forget_host("leaf-gone")
+    grid.upsert_host("leaf-unbound", "Never Paired", "10.66.0.10")
+    assert build_source.adopted() == []
+    assert build_source.build(root, config)["release"]
+
+
+def test_the_hatch_past_the_leaf_refusal_is_typed_and_never_the_default(builder, monkeypatch):
+    root, _, config, _ = builder
+    _adopt()
+    assert build_source.build_refusal(root, config)
+    monkeypatch.setenv(build_source.DESPITE_LEAVES, "1")
+    assert build_source.build_refusal(root, config) == ""
+    assert build_source.build(root, config)["release"]
+
+
+def test_a_machine_with_nowhere_to_build_from_says_so_instead_of_raising_a_key_error(builder):
+    root, _, config, _ = builder
+    assert build_source.build_refusal(root, {}) == "this host has no source repository to build from"
+    assert build_source.build_refusal(root, {**config, "managed": True}) == \
+        "a managed machine takes its builds from its parent"
+    assert build_source.build_refusal(root, config) == ""
 
 
 def test_a_build_lands_an_offer_this_hub_signed_itself(builder, publisher):

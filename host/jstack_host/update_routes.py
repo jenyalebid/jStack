@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import threading
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -60,6 +62,159 @@ def inventory(request: Request, device_id: str = Depends(current_device)):
             if not row["deleted"]:
                 rows.append(store.inventory(row["key"], row["name"], desired))
     return {"release": desired, "machines": rows}
+
+
+# ── The ref this hub follows ────────────────────────────────────────────────
+#
+# The three doors `jstack-host updates channel` and `updates build` already
+# are, opened to the menu bar: read what is followed, follow something else,
+# build it. Nothing here runs by itself — no tick reaches these, and each one
+# is a press. A route that checked on open would be the download-on-settings
+# bug in a new layer, so the read below touches nothing but three local files.
+
+#: Read-modify-write on `build.json` across concurrent presses. Within this
+#: process only, which is the only concurrency a double-click produces; the
+#: durable guard is the marker itself, which the CLI and the supervisor read.
+_build_gate = threading.Lock()
+
+
+def _source() -> dict:
+    """What this hub follows, what it is running, and what was last observed.
+
+    Three local reads and no request: the ref out of the updater config, the
+    last check's answer out of `channel.json`, the build half out of
+    `build.json`. `checked` is in the answer because a window that renders a
+    stale verdict as a live one is the lie this shape exists to prevent.
+    """
+    from . import build_source, sourcestamp
+    root = fleet.root()
+    config = fleet.config()
+    try:
+        status = json.loads((root / "channel.json").read_text())
+    except (OSError, ValueError):
+        status = {}
+    running = sourcestamp.capture()
+    refusal = build_refusal(root, config)
+    return {
+        "ref": build_source.channel_ref(config),
+        "repository": config.get("github_repo", ""),
+        "enabled": (root / "config.json").exists(),
+        "managed": managed_access.is_leaf(),
+        # The same four keys `/host` reports its source with, so the window
+        # renders a build here exactly as it renders one there.
+        "running": {"release": running.get("release", ""), "sha": running.get("sha", ""),
+                    "version": running.get("version", ""), "dirty": bool(running.get("dirty"))},
+        "check": {"status": status.get("status", "unknown"),
+                  "head": status.get("head", ""),
+                  "checked": status.get("checked", 0),
+                  "detail": status.get("detail", "")},
+        "build": build_source.phase(root),
+        "can_build": not refusal,
+        "blocked": refusal,
+    }
+
+
+def _config() -> dict:
+    """The updater config, with an unreadable one answered as an outage rather
+    than as a traceback — every door below reads it before it decides."""
+    try:
+        return fleet.config()
+    except (ReleaseError, ValueError, OSError) as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+def build_refusal(root, config: dict) -> str:
+    """`build_source`'s own rule, with "not set up yet" folded in."""
+    from . import build_source
+    if not (root / "config.json").exists():
+        return "updates are not enabled on this host"
+    try:
+        return build_source.build_refusal(root, config)
+    except ReleaseError as exc:
+        return str(exc)
+
+
+class SourceRef(BaseModel):
+    #: Not optional and not empty. `channel_ref` reads an empty name as
+    #: `stable`, which is right for a config key absent since before a hub
+    #: could choose — and wrong for a press, where it would silently move the
+    #: machine to main.
+    ref: str = Field(min_length=1, max_length=128)
+
+
+@router.get("/updates/source")
+def source(request: Request, device_id: str = Depends(current_device)):
+    local_admin(request, device_id)
+    try:
+        return _source()
+    except (ReleaseError, ValueError, OSError) as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@router.post("/updates/source/ref")
+def set_source(body: SourceRef, request: Request, device_id: str = Depends(current_device)):
+    """Follow a different ref. Pulls nothing and builds nothing.
+
+    The name is validated by `build_source.channel_ref`, which is what the CLI
+    verb validates with — one definition of a followable ref, so a name the
+    terminal accepts and this refuses cannot exist.
+    """
+    local_admin(request, device_id)
+    from . import build_source
+    from .update_supervisor import atomic_json
+    path = fleet.root() / "config.json"
+    config = _config()
+    if not path.exists():
+        raise HTTPException(409, "updates are not enabled on this host")
+    if managed_access.is_leaf():
+        raise HTTPException(409, "a managed machine runs what its parent built")
+    try:
+        name = build_source.channel_ref({"channel": body.ref})
+    except ReleaseError as exc:
+        raise HTTPException(400, f"{exc}: {body.ref!r}") from exc
+    atomic_json(path, {**config, "channel": name})
+    return _source()
+
+
+def _run_build(root, config: dict) -> None:
+    from . import build_source
+    from .update_supervisor import atomic_json
+    try:
+        build_source.build(root, config)
+    except Exception as exc:
+        # `build()` records its own failures. This covers the ones it raises
+        # before it starts recording, which would otherwise leave the marker
+        # written below saying "building" until the six-hour stall window.
+        if build_source.phase(root).get("state") == "building":
+            atomic_json(root / "build.json",
+                        {"state": "failed", "detail": str(exc), "finished": time.time()})
+
+
+@router.post("/updates/source/build")
+def build_source_now(request: Request, device_id: str = Depends(current_device)):
+    """Build the followed ref. Answers now; the work outlives the request.
+
+    The `building` marker is written here rather than left to the worker: the
+    caller reads the phase back immediately, and a marker written by a thread
+    that has not been scheduled yet is a window reporting "idle" over a build
+    already in flight.
+    """
+    local_admin(request, device_id)
+    from . import build_source
+    from .update_supervisor import atomic_json
+    root, config = fleet.root(), _config()
+    refusal = build_refusal(root, config)
+    if refusal:
+        raise HTTPException(409, refusal)
+    with _build_gate:
+        if build_source.phase(root).get("state") == "building":
+            raise HTTPException(409, "a build is already running on this hub")
+        atomic_json(root / "build.json",
+                    {"state": "building", "ref": build_source.channel_ref(config),
+                     "started": time.time()})
+    threading.Thread(target=_run_build, args=(root, config),
+                     name="jstack-source-build", daemon=True).start()
+    return _source()
 
 
 class QueueRequest(BaseModel):
