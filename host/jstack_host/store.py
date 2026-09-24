@@ -426,6 +426,12 @@ CREATE TABLE IF NOT EXISTS stages (
   started_at REAL NOT NULL DEFAULT 0,
   finished_at REAL NOT NULL DEFAULT 0,
   updated_at REAL NOT NULL DEFAULT 0,
+  -- When this stage's GATE last moved, which is not when the row last changed.
+  -- A proof is evidence about a declaration, so one filed before the
+  -- declaration it is being counted against proves the previous gate and not
+  -- this one. Default 0 on purpose: rows that predate the column keep every
+  -- proof they have, because nothing about their gate is known to have moved.
+  verify_set_at REAL NOT NULL DEFAULT 0,
   UNIQUE (plan_id, ordinal)
 );
 CREATE INDEX IF NOT EXISTS stages_plan ON stages(plan_id, ordinal);

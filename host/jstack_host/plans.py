@@ -132,6 +132,21 @@ def set_stages(plan_id: str, parsed_stages) -> None:
     while `status`, `session_id`, `started_at`, `finished_at` and the stage's
     proofs stay exactly as they were. A new ordinal is inserted.
 
+    A stage whose GATE moved — `verify_kind` or `verify_spec`, not its title or
+    its prose — is re-stamped with `verify_set_at`, which retires the proofs it
+    already holds without deleting one of them. Otherwise a stage declaring
+    `command · echo ok`, verified green, and then re-parsed into
+    `command · ./full-acceptance.sh` closes on the cheap receipt: the board
+    shows a green proof, the heavy script never ran, and the record is a lie of
+    exactly the kind this table exists to prevent. The old proof stays visible
+    as the history of the old gate; it simply stops answering for the new one.
+
+    A stage already `done` stays done. Reopening finished work every time the
+    markdown is touched would make the reconcile unusable, and the record is
+    still honest: the retired proof is visibly older than the declaration, and
+    any further attempt to close that stage refuses. What is not claimed is
+    that a done stage was proved against its current wording.
+
     Only a stage whose ordinal is past the new end AND is still `pending` is
     deleted. A stage that already ran is history: the user edits the markdown
     constantly, and a re-parse that dropped a finished stage would erase the
@@ -171,18 +186,26 @@ def set_stages(plan_id: str, parsed_stages) -> None:
     now = _now()
     with store.get_store().conn() as db:
         for s in incoming:
-            changed = db.execute(
-                "UPDATE stages SET title = ?, body = ?, verify_kind = ?,"
-                " verify_spec = ?, updated_at = ? WHERE plan_id = ? AND ordinal = ?",
-                (s["title"], s["body"], s["verify_kind"], s["verify_spec"], now,
-                 plan_id, s["ordinal"])).rowcount
-            if not changed:
+            prior = db.execute(
+                "SELECT verify_kind, verify_spec, verify_set_at FROM stages"
+                " WHERE plan_id = ? AND ordinal = ?",
+                (plan_id, s["ordinal"])).fetchone()
+            if prior is None:
                 db.execute(
                     "INSERT INTO stages (id, plan_id, ordinal, title, body, status,"
-                    " verify_kind, verify_spec, updated_at)"
-                    " VALUES (?,?,?,?,?,'pending',?,?,?)",
+                    " verify_kind, verify_spec, updated_at, verify_set_at)"
+                    " VALUES (?,?,?,?,?,'pending',?,?,?,?)",
                     (str(uuid.uuid4()), plan_id, s["ordinal"], s["title"],
-                     s["body"], s["verify_kind"], s["verify_spec"], now))
+                     s["body"], s["verify_kind"], s["verify_spec"], now, now))
+                continue
+            moved = (prior["verify_kind"] != s["verify_kind"]
+                     or prior["verify_spec"] != s["verify_spec"])
+            db.execute(
+                "UPDATE stages SET title = ?, body = ?, verify_kind = ?,"
+                " verify_spec = ?, updated_at = ?, verify_set_at = ?"
+                " WHERE plan_id = ? AND ordinal = ?",
+                (s["title"], s["body"], s["verify_kind"], s["verify_spec"], now,
+                 now if moved else prior["verify_set_at"], plan_id, s["ordinal"]))
         dropped = [r["id"] for r in db.execute(
             "SELECT id FROM stages WHERE plan_id = ? AND ordinal > ?"
             " AND status = 'pending'", (plan_id, last)).fetchall()]
@@ -248,29 +271,37 @@ def stage_done(stage_id: str) -> None:
     """Close a stage — or refuse, and write nothing at all.
 
     The refusal is the enforcement: a stage that declared any `verify_kind` other
-    than `none` closes only once some `stage_proofs` row for it has `ok = 1`. The
-    read and the write share one transaction so a proof cannot land between them.
+    than `none` closes only once some `stage_proofs` row for it has `ok = 1` AND
+    was filed against the declaration in force now — `created_at >=
+    verify_set_at`. A proof older than the gate it is being counted against is
+    evidence about the previous gate, and counting it is how a re-parse turns a
+    cheap green receipt into a closed heavy stage. The read and the write share
+    one transaction so a proof cannot land between them.
     """
     with store.get_store().conn() as db:
         row = db.execute(
-            "SELECT id, ordinal, title, verify_kind, verify_spec FROM stages"
-            " WHERE id = ?", (stage_id,)).fetchone()
+            "SELECT id, ordinal, title, verify_kind, verify_spec, verify_set_at"
+            " FROM stages WHERE id = ?", (stage_id,)).fetchone()
         if row is None:
             raise ValueError(f"no such stage: {stage_id!r}")
         kind = row["verify_kind"] or "none"
         if kind != "none":
             passed = db.execute(
-                "SELECT 1 FROM stage_proofs WHERE stage_id = ? AND ok = 1 LIMIT 1",
-                (stage_id,)).fetchone()
+                "SELECT 1 FROM stage_proofs WHERE stage_id = ? AND ok = 1"
+                " AND created_at >= ? LIMIT 1",
+                (stage_id, row["verify_set_at"] or 0)).fetchone()
             if passed is None:
-                raise VerificationMissing(_refusal(row))
+                stale = db.execute(
+                    "SELECT 1 FROM stage_proofs WHERE stage_id = ? AND ok = 1"
+                    " LIMIT 1", (stage_id,)).fetchone() is not None
+                raise VerificationMissing(_refusal(row, stale=stale))
         now = _now()
         db.execute(
             "UPDATE stages SET status = 'done', blocked_reason = '',"
             " finished_at = ?, updated_at = ? WHERE id = ?", (now, now, stage_id))
 
 
-def _refusal(row) -> str:
+def _refusal(row, *, stale: bool = False) -> str:
     """The message a refused close leaves behind.
 
     It names the stage, what it declared, and the one command that would satisfy
@@ -290,8 +321,12 @@ def _refusal(row) -> str:
         "artifact": f"{by_hand} artifact --ok --detail <path>",
         "manual": f"{by_hand} manual --ok --detail <what the user confirmed>",
     }.get(kind, f"{by_hand} {kind} --ok --detail …")
+    # A green proof on the board beside a refusal reads as a broken gate unless
+    # the message says which of the two the proof belongs to.
+    held = ("its passing proof predates this declaration and proves the gate "
+            "this stage used to have" if stale else "has no passing proof")
     return (f"stage {row['id']} (#{row['ordinal']} {row['title']!r}) declares "
-            f"verify_kind={kind!r} spec={spec!r} and has no passing proof; "
+            f"verify_kind={kind!r} spec={spec!r} and {held}; "
             f"it stays open. To satisfy it: {remedy}.")
 
 
@@ -510,8 +545,33 @@ def _task_rows(db, stage_id: str) -> list[dict]:
 
 def proofs(stage_id: str) -> list[dict]:
     with store.get_store().conn() as db:
-        return _rows(db.execute(
-            "SELECT * FROM stage_proofs WHERE stage_id = ? ORDER BY id", (stage_id,)))
+        return _proof_rows(db, stage_id)
+
+
+def _proof_rows(db, stage_id: str) -> list[dict]:
+    return _rows(db.execute(
+        "SELECT * FROM stage_proofs WHERE stage_id = ? ORDER BY id", (stage_id,)))
+
+
+def plan_detail(plan_id: str) -> dict | None:
+    """A whole plan — stages, evidence, order of work — from one read snapshot.
+
+    `work`'s reasoning, applied to the other screen: four reads that can each
+    see a different commit will happily render proofs under a stage list taken
+    before the `set_stages` that replaced it, and the stage those proofs belong
+    to is no longer in the list. `None` for a plan that is absent or deleted, so
+    the route's 404 stays the route's decision.
+    """
+    with store.get_store().conn() as db:
+        db.execute("BEGIN")
+        row = db.execute("SELECT * FROM plans WHERE id = ? AND deleted = 0",
+                         (plan_id,)).fetchone()
+        if row is None:
+            return None
+        rows = _stage_rows(db, plan_id)
+        return {"plan": dict(row), "stages": rows,
+                "proofs": {s["id"]: _proof_rows(db, s["id"]) for s in rows},
+                "tasks": {s["id"]: _task_rows(db, s["id"]) for s in rows}}
 
 
 def list_plans(*, limit: int = 50, include_done: bool = True) -> list[dict]:

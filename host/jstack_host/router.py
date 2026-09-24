@@ -1999,13 +1999,10 @@ def get_plan(plan_id: str):
         return _unavailable("the work harness", plan=None, stages=[],
                             proofs={}, tasks={})
     from . import plans
-    row = plans.plan(plan_id)
-    if row is None:
+    detail = plans.plan_detail(plan_id)
+    if detail is None:
         raise HTTPException(status_code=404, detail=f"no such plan: {plan_id!r}")
-    rows = plans.stages(plan_id)
-    return {"available": True, "plan": row, "stages": rows,
-            "proofs": {s["id"]: plans.proofs(s["id"]) for s in rows},
-            "tasks": {s["id"]: plans.tasks(s["id"]) for s in rows}}
+    return {"available": True, **detail}
 
 
 @router.get("/plans/{plan_id}/document")

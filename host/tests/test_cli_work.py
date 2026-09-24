@@ -52,6 +52,16 @@ Nothing says how this one is proved.
 Verify: none
 """
 
+#: Complained about but writable: every kind reads, only the numbering is wrong.
+FORCEABLE_MD = """# Work harness
+
+## Stage 1 — the parser
+Verify: command · true
+
+## Stage 3 — the cli
+Verify: none
+"""
+
 
 @pytest.fixture(autouse=True)
 def work_store(tmp_path, monkeypatch):
@@ -199,17 +209,51 @@ def test_stages_come_out_of_the_markdown(tmp_path):
 
 def test_a_complained_about_plan_writes_no_stages_until_forced(tmp_path):
     """The parse problems are printed either way; the write is what is withheld."""
-    plan_id, code, _, err = _plan_with_stages(tmp_path, BROKEN_MD)
+    plan_id, code, _, err = _plan_with_stages(tmp_path, FORCEABLE_MD)
     assert code != 0
-    assert "Verify:" in err
+    assert "numbered 3" in err
     assert plans.stages(plan_id) == []
 
     path = tmp_path / "plan.md"
     code, _, forced_err = _cli("plan", "stages", plan_id,
                                "--from-file", str(path), "--force")
     assert code == 0, forced_err
-    assert "Verify:" in forced_err
+    assert "numbered 3" in forced_err
     assert len(plans.stages(plan_id)) == 2
+
+
+def test_force_cannot_conjure_a_gate_that_was_never_declared(tmp_path):
+    """What `--force` overrides is the parser's complaint, never the writer's rule.
+
+    `BROKEN_MD`'s first stage declares no `Verify:` line at all, so there is no
+    proof that could ever close it. Writing it under `--force` would put back
+    exactly the hole this harness exists to shut — a stage that reads as gated,
+    closes on nothing, and reports done. The writer refuses, and the CLI has to
+    hand that refusal over as a sentence rather than a traceback.
+    """
+    plan_id, code, _, err = _plan_with_stages(tmp_path, BROKEN_MD)
+    assert code != 0
+    assert plans.stages(plan_id) == []
+
+    path = tmp_path / "plan.md"
+    code, out, forced_err = _cli("plan", "stages", plan_id,
+                                 "--from-file", str(path), "--force")
+    assert code == 1
+    assert "not a proof kind" in forced_err
+    assert "Traceback" not in forced_err and out == ""
+    assert plans.stages(plan_id) == []
+
+
+def test_a_mistyped_stage_id_is_a_message_on_every_verb(tmp_path):
+    """Four writers refuse an unknown stage; none of them may do it by traceback."""
+    for argv in (("plan", "start", "ghost"),
+                 ("plan", "done", "ghost"),
+                 ("plan", "block", "ghost", "--reason", "because"),
+                 ("plan", "proof", "ghost", "--kind", "manual", "--ok")):
+        code, out, err = _cli(*argv)
+        assert code == 1, argv
+        assert "no such stage" in err and "ghost" in err, argv
+        assert "Traceback" not in err and out == "", argv
 
 
 def test_done_is_refused_nonzero_with_the_message_and_the_row_left_open(tmp_path):
@@ -222,8 +266,10 @@ def test_done_is_refused_nonzero_with_the_message_and_the_row_left_open(tmp_path
 
     assert code != 0
     assert stage_id in err and "no passing proof" in err
-    # The remedy travels with the refusal — its reader cannot open this file.
-    assert "run_verify" in err
+    # The remedy travels with the refusal, and as something its reader can run:
+    # an agent mid-turn is at a shell, not inside a Python session.
+    assert f"jstack-host plan verify {stage_id}" in err
+    assert "run_verify" not in err and "add_proof(" not in err
     assert "Traceback" not in err and out == ""
     row = plans.stages(plan_id)[0]
     assert row["status"] == "running" and row["finished_at"] == 0

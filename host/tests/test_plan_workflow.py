@@ -81,7 +81,8 @@ def _run_plan(title, stage_sessions, *, subagents):
 #: ids, and a comparison that dropped these columns would pass on a path that
 #: never recorded a runner at all.
 _PER_RUN = ("id", "plan_id", "stage_id", "session_id", "env", "started_at",
-            "finished_at", "updated_at", "created_at", "duration_ms")
+            "finished_at", "updated_at", "created_at", "duration_ms",
+            "verify_set_at")
 
 
 def _shape(row):
@@ -383,3 +384,46 @@ def test_the_stage_writers_refuse_an_id_that_is_not_there():
     with pytest.raises(ValueError, match="no such stage"):
         plans.stage_block("no-such-stage", "waiting on review")
     assert plans.stage("no-such-stage") is None
+
+
+def test_plan_detail_answers_from_one_snapshot_too():
+    """The detail screen gets the same promise, for the same reason.
+
+    Four reads that can each see a different commit render proofs filed against
+    a stage the list no longer contains. Same shape as the test above, with the
+    writer replacing the stage list rather than a stage's tasks — which is the
+    case that actually strands evidence.
+    """
+    plan_id = plans.open_plan("detailed", session_id="s1")
+    plans.activate(plan_id)
+    plans.set_stages(plan_id, [dict(PLAN_STAGES[0])])
+    stage_id = plans.stages(plan_id)[0]["id"]
+    plans.add_proof(stage_id, "command", True, detail="green")
+
+    read_stages = plans._stage_rows
+
+    def _another_writer_lands_mid_read(db, pid):
+        rows = read_stages(db, pid)
+        plans.set_stages(plan_id, [dict(PLAN_STAGES[0], title="renamed")])
+        return rows
+
+    plans._stage_rows = _another_writer_lands_mid_read
+    try:
+        got = plans.plan_detail(plan_id)
+    finally:
+        plans._stage_rows = read_stages
+
+    assert [s["id"] for s in got["stages"]] == [stage_id]
+    assert list(got["proofs"]) == [stage_id]
+    assert [p["detail"] for p in got["proofs"][stage_id]] == ["green"]
+    # The replacement did land — in place, on the same ordinal, which is why
+    # the row keeps its id and the proof stays attached to it.
+    after = plans.plan_detail(plan_id)
+    assert [s["title"] for s in after["stages"]] == ["renamed"]
+    assert [s["id"] for s in after["stages"]] == [stage_id]
+    assert [p["detail"] for p in after["proofs"][stage_id]] == ["green"]
+
+
+def test_plan_detail_is_none_for_an_absent_plan():
+    """The 404 stays the route's decision, so the reader must not invent a shell."""
+    assert plans.plan_detail("no-such-plan") is None

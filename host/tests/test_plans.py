@@ -246,3 +246,71 @@ def test_list_plans_can_hide_the_closed_ones():
     plans.abandon(closed)
     assert [p["id"] for p in plans.list_plans(include_done=False)] == [open_id]
     assert {p["id"] for p in plans.list_plans()} == {open_id, closed}
+
+
+def _gated(spec: str) -> list[dict]:
+    return [{"ordinal": 1, "title": "the stage", "verify_kind": "command",
+             "verify_spec": spec}]
+
+
+def test_a_rename_does_not_retire_the_proof_a_stage_already_earned():
+    """Only the GATE retires evidence. Titles and prose move constantly."""
+    plan_id = plans.open_plan("p", session_id="s1")
+    plans.set_stages(plan_id, _gated("true"))
+    stage_id = plans.stages(plan_id)[0]["id"]
+    plans.add_proof(stage_id, "command", True, detail="ran")
+
+    plans.set_stages(plan_id, [dict(_gated("true")[0], title="the stage, renamed",
+                                    body="new prose")])
+    plans.stage_done(stage_id)
+    assert plans.stage(stage_id)["status"] == "done"
+
+
+def test_a_moved_gate_retires_the_proof_without_deleting_it():
+    """The 2026-09-24 class, rebuilt by the reconcile rather than by a typo.
+
+    A stage verified green against `echo ok`, re-parsed into a heavy script,
+    would otherwise close on the cheap receipt: the board shows a passing proof,
+    the heavy script never ran, and the record says done. The proof is kept —
+    it is the true history of the gate that WAS declared — and simply stops
+    answering for the one that is.
+    """
+    plan_id = plans.open_plan("p", session_id="s1")
+    plans.set_stages(plan_id, _gated("echo ok"))
+    stage_id = plans.stages(plan_id)[0]["id"]
+    plans.add_proof(stage_id, "command", True, detail="echo ok")
+
+    plans.set_stages(plan_id, _gated("./full-acceptance.sh"))
+
+    with pytest.raises(plans.VerificationMissing) as caught:
+        plans.stage_done(stage_id)
+    # The refusal must say WHICH gate the green proof on the board belongs to.
+    assert "predates this declaration" in str(caught.value)
+    assert "./full-acceptance.sh" in str(caught.value)
+
+    assert len(plans.proofs(stage_id)) == 1
+    row = plans.stage(stage_id)
+    assert row["status"] == "pending" and row["finished_at"] == 0
+
+    plans.add_proof(stage_id, "command", True, detail="./full-acceptance.sh")
+    plans.stage_done(stage_id)
+    assert plans.stage(stage_id)["status"] == "done"
+    assert len(plans.proofs(stage_id)) == 2
+
+
+def test_stages_written_before_the_column_existed_keep_their_proofs():
+    """`verify_set_at` defaults to 0, so a migrated row retires nothing.
+
+    The column arrives by auto-migration on hosts that already hold stages and
+    proofs. Nothing is known to have moved on those rows, so counting their
+    evidence as stale would refuse closes that were always legitimate.
+    """
+    plan_id = plans.open_plan("p", session_id="s1")
+    plans.set_stages(plan_id, _gated("true"))
+    stage_id = plans.stages(plan_id)[0]["id"]
+    with store.get_store().conn() as db:
+        db.execute("UPDATE stages SET verify_set_at = 0 WHERE id = ?", (stage_id,))
+    plans.add_proof(stage_id, "command", True, detail="pre-existing")
+
+    plans.stage_done(stage_id)
+    assert plans.stage(stage_id)["status"] == "done"

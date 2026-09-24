@@ -1300,6 +1300,23 @@ def _cmd_plan_open(args) -> int:
     return 0
 
 
+def _refusal(exc: Exception) -> int:
+    """A writer's refusal, handed to the shell the way its reader needs it.
+
+    `plans` raises on a stage id that does not exist and on a proof kind
+    nothing could ever close. Both are ordinary shell outcomes — a mistyped id,
+    a mistyped `Verify:` line — not faults, and the writer already worded each
+    one for the agent mid-turn who has to act on it. Uncaught, that sentence
+    reaches them buried in a traceback that says nothing they can use, and a
+    refusal nobody can read is the shape people route around.
+
+    Exit 1, the state-refused code the rest of this family already uses; a bad
+    command line is 2 and argparse still owns it.
+    """
+    print(str(exc), file=sys.stderr)
+    return 1
+
+
 def _cmd_plan_stages(args) -> int:
     """Read a plan's markdown into stage rows — or refuse and write nothing.
 
@@ -1340,7 +1357,13 @@ def _cmd_plan_stages(args) -> int:
               file=sys.stderr)
         return 1
 
-    plans.set_stages(args.plan_id, parsed.stages)
+    try:
+        plans.set_stages(args.plan_id, parsed.stages)
+    except ValueError as exc:
+        # `--force` overrides the parser's COMPLAINTS. It cannot conjure a gate:
+        # a stage whose kind nothing can read has no proof that would ever close
+        # it, and writing it would rebuild the hole this harness exists to shut.
+        return _refusal(exc)
     for s in plans.stages(args.plan_id):
         print(f"{s['id']}  #{s['ordinal']}  {s['status']:<8} {s['title']}")
     return 0
@@ -1352,7 +1375,10 @@ def _cmd_plan_start(args) -> int:
     from . import environment, plans
     session = _ambient_session(args)
     env = {k: v for k, (v, _) in environment.resolve(session).items()} if session else {}
-    plans.stage_start(args.stage_id, session_id=session, env=env)
+    try:
+        plans.stage_start(args.stage_id, session_id=session, env=env)
+    except ValueError as exc:
+        return _refusal(exc)
     print(f"{args.stage_id}  running")
     return 0
 
@@ -1370,12 +1396,8 @@ def _cmd_plan_done(args) -> int:
     from . import plans
     try:
         plans.stage_done(args.stage_id)
-    except plans.VerificationMissing as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+    except ValueError as exc:  # VerificationMissing is one of these
+        return _refusal(exc)
     print(f"{args.stage_id}  done")
     return 0
 
@@ -1383,7 +1405,10 @@ def _cmd_plan_done(args) -> int:
 def _cmd_plan_block(args) -> int:
     _adopt(args)
     from . import plans
-    plans.stage_block(args.stage_id, args.reason)
+    try:
+        plans.stage_block(args.stage_id, args.reason)
+    except ValueError as exc:
+        return _refusal(exc)
     print(f"{args.stage_id}  blocked — {args.reason}")
     return 0
 
@@ -1394,9 +1419,12 @@ def _cmd_plan_proof(args) -> int:
     _adopt(args)
     from . import plans
     ok = bool(args.ok)
-    proof_id = plans.add_proof(args.stage_id, args.kind, ok,
-                               detail=args.detail or "", output=args.output or "",
-                               exit_code=args.exit_code)
+    try:
+        proof_id = plans.add_proof(args.stage_id, args.kind, ok,
+                                   detail=args.detail or "", output=args.output or "",
+                                   exit_code=args.exit_code)
+    except ValueError as exc:
+        return _refusal(exc)
     print(f"{'✓' if ok else '✗'} proof {proof_id}  {args.kind}  "
           f"{args.detail or ''}".rstrip())
     return 0
@@ -1671,7 +1699,9 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("plan_id")
     pl.add_argument("--from-file", required=True, dest="from_file")
     pl.add_argument("--force", action="store_true",
-                    help="write the stages even though the parse complained")
+                    help="write the stages even though the parse complained "
+                         "— a stage whose Verify: kind cannot be read is still "
+                         "refused, because nothing could ever close it")
     pl.add_argument("--state-dir", default=None)
     pl.set_defaults(fn=_cmd_plan_stages)
     pl = plans_p.add_parser("start", help="take a stage")
