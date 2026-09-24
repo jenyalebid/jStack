@@ -118,8 +118,11 @@ class ScriptedFleet:
     """One disposable fleet's answers, in the shape vm.sh and the tools give them."""
 
     def __init__(self, *, release=PRIOR, sha=PRIOR_SHA, state="current", client="70",
-                 menubar=None, plugin="0.69.3", denied_status=403, address="192.168.2.10"):
+                 menubar=None, plugin="0.69.3", denied_status=403, address="192.168.2.10",
+                 served_client="70"):
         self.release, self.sha, self.state = release, sha, state
+        #: The client the hub's feed carries in the build it last offered.
+        self.served_client = served_client
         #: What `ifconfig` answers on every guest of this fleet.
         self.address = address
         #: What the lab-flag probe answers: 4 just turned on (what an install
@@ -153,6 +156,9 @@ class ScriptedFleet:
             answer = {"ok": True}
         elif "ifconfig" in command:
             return subprocess.CompletedProcess(argv, 0, f"127.0.0.1\n{self.address}\n", "")
+        elif "latest.json" in command:
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps({"build": CANDIDATE, "client": self.served_client}), "")
         elif "candidate_test" in command:
             self.flagged.append(name)
             return subprocess.CompletedProcess(argv, 0, f"lab={self.lab_state}\n", "")
@@ -193,8 +199,10 @@ def build(runner, fleet, *, prior=None, **plan):
                          **plan}, run=fleet)
     made.prior = prior if prior is not None else SimpleNamespace(
         sha=PRIOR_SHA, ref="main", slug="main@" + PRIOR_SHA[:8])
-    # What the hub came back with when it built the ref, without building.
+    # What the hub came back with when it built the ref, without building,
+    # and the client its feed carries in that build.
     made.offered["dev"] = CANDIDATE
+    made.served["dev"] = fleet.served_client if isinstance(fleet, ScriptedFleet) else "70"
     return made
 
 
@@ -229,6 +237,29 @@ def test_a_stale_app_bundle_under_a_new_host_fails(runner, subject, tmp_path):
     result, receipt = journey_result(runner, subject, "upgrade",
                                      ScriptedFleet(client="69"), tmp_path)
     assert result == "failed" and "client is 69" in receipt["detail"]
+    assert "carries 70" in receipt["detail"]
+
+
+def test_a_served_mac_is_held_to_the_client_the_hubs_build_carries(runner, subject, tmp_path):
+    """The hub builds no client; its build carries the one its feed holds
+    (`build_source.inherited`). A leaf the hub serves lands on that client,
+    and the run's own --client, laid down only on Macs it installs by hand,
+    says nothing about it."""
+    assert subject.version("client") == "70"
+    result, receipt = journey_result(runner, subject, "upgrade",
+                                     ScriptedFleet(client="69", served_client="69"), tmp_path)
+    assert result == "passed", receipt["detail"]
+
+
+def test_a_fresh_mac_is_held_to_the_client_this_run_laid_down(runner, subject, tmp_path,
+                                                                monkeypatch):
+    """Built on the Mac itself out of the client the run carried in, so the
+    hub's client is beside the point: 70 was installed, 70 must run."""
+    monkeypatch.setattr(runner, "install_build", lambda *args, **kwargs: None)
+    fleet = ScriptedFleet(release=CANDIDATE, sha=HEAD_SHA, client="69", served_client="69")
+    result, receipt = journey_result(runner, subject, "fresh_install", fleet, tmp_path,
+                                     fresh="fresh", adopt_command="adopt")
+    assert result == "failed" and "client is 69, the build this Mac took carries 70" in receipt["detail"]
 
 
 def test_a_plugin_left_on_the_old_version_fails(runner, subject, tmp_path):
@@ -645,11 +676,27 @@ def test_the_hub_is_driven_through_the_refusal_older_code_raises(runner, subject
                 return subprocess.CompletedProcess(argv, 0, json.dumps({"release": CANDIDATE}), "")
             return super().__call__(argv, **kwargs)
 
-    scripted = Building()
+    scripted = Building(served_client="68")
     fleet = build(runner, scripted)
     assert fleet.offer(subject) == CANDIDATE
     built = next(c[3] for c in scripted.calls if "updates build" in c[3])
     assert built.startswith("JSTACK_BUILD_DESPITE_LEAVES=1 ") and "updates build --ref dev" in built
+    # The build's answer names no parts; the client it carries is read off
+    # the feed the hub now serves, and it is the hub's, not this run's.
+    assert fleet.served["dev"] == "68" and subject.version("client") == "70"
+
+
+def test_a_hub_whose_feed_does_not_serve_what_it_built_fails_the_offer(runner, subject):
+    class Elsewhere(ScriptedFleet):
+        def __call__(self, argv, **kwargs):
+            command = argv[3] if len(argv) > 3 else ""
+            if "updates build" in command:
+                return subprocess.CompletedProcess(argv, 0, json.dumps({"release": "other"}), "")
+            return super().__call__(argv, **kwargs)
+
+    fleet = build(runner, Elsewhere())
+    with pytest.raises(runner.AcceptanceFailure, match="built but serves"):
+        fleet.offer(subject)
 
 
 def test_artifact_fault_is_restored_when_refusal_probe_fails(runner):

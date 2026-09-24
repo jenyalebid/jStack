@@ -64,6 +64,16 @@ TRUST_KEY = ("f=$HOME/.local/state/jremote/updates/config.json; [ ! -f \"$f\" ] 
              + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
                  "import json,sys; print(json.load(open(sys.argv[1])).get('public_key',''))")
              + " \"$f\"")
+#: The build a hub last offered its fleet, as the hub's own feed states it:
+#: which build, and which client it carries. Read after `updates build`, whose
+#: answer names the build but not its parts.
+SERVED = ("f=$HOME/.local/state/jremote/updates/config.json; "
+          + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
+              "import json,sys; c=json.load(open(sys.argv[1])); "
+              "m=json.load(open(c['feed_dir'] + '/latest.json'))['manifest']; "
+              "print(json.dumps({'build': m['release'], "
+              "'client': str(m['components']['client']['version'])}))")
+          + " \"$f\"")
 
 
 class AcceptanceFailure(RuntimeError):
@@ -315,6 +325,12 @@ class Fleet:
         #: the hub's id for a commit and a fresh Mac's id for the same commit
         #: are not required to match; the commit is what both are held to.
         self.offered: dict[str, str] = {}
+        #: The client each offered build carries, by ref. jRemote is closed
+        #: source and built elsewhere, so a hub's build carries forward the
+        #: client its feed already holds (`build_source.inherited`): a Mac the
+        #: hub serves lands on the hub's client, whatever this run carried in
+        #: for the Macs it installs by hand.
+        self.served: dict[str, str] = {}
 
     def guests(self) -> list[Guest]:
         return [self.hub, *self.leaves, *([self.fresh] if self.fresh else [])]
@@ -429,8 +445,21 @@ class Fleet:
             raise AcceptanceFailure(
                 f"the hub did not report a build of {build.slug}: {output[-500:]}") from exc
         self.offered[build.ref] = built["release"]
+        served = self.served_now()
+        expect(served["build"] == built["release"],
+               f"the hub reports {built['release']} built but serves {served['build']}")
+        self.served[build.ref] = served["client"]
         self.build = build
         return built["release"]
+
+    def served_now(self) -> dict:
+        """What the hub's feed offers this moment: the build and its client."""
+        answer = self.hub.sh(SERVED, timeout=120).strip()
+        try:
+            served = json.loads(answer[answer.index("{"):])
+        except ValueError as exc:
+            raise AcceptanceFailure(f"the hub's feed names no build: {answer[-300:]}") from exc
+        return served
 
 
 def request_id(prefix: str) -> str:
@@ -441,11 +470,16 @@ def host_cli(arguments: str) -> str:
     return shlex.quote(GUEST_HOST_CLI) + " " + arguments
 
 
-def component_check(journey, check: str, state: dict, build: Build) -> None:
-    """Installed *and* running, for both apps and every installed plugin."""
-    if build.client_version:
-        expect(str(state["client"]) == build.version("client"),
-               f"client is {state['client']}, this run installed {build.version('client')}")
+def component_check(journey, check: str, state: dict, build: Build, *, client: str) -> None:
+    """Installed *and* running, for both apps and every installed plugin.
+
+    `client` is the jRemote this Mac is held to: the one this run carried in
+    where the Mac built for itself, the one the hub's build carries where the
+    hub served it. Empty means no client was declared for this path.
+    """
+    if client:
+        expect(str(state["client"]) == client,
+               f"client is {state['client']}, the build this Mac took carries {client}")
     # The menu bar's CFBundleVersion is the build's own date, digits only —
     # the one thing `build_hub.bundle_version` says may not be derived twice.
     # It is not knowable before a machine builds, so it is read back against
@@ -489,7 +523,8 @@ def fresh_install(journey, fleet: Fleet, build: Build) -> None:
     state = guest.installed()
     identity_check(journey, "installed_build", state, build)
     journey.observe("host_identity", {"host_id": guest.host_id(), "updater": state["updater"]})
-    component_check(journey, "app_versions", state, build)
+    # Built on the Mac itself, out of the client this run laid down first.
+    component_check(journey, "app_versions", state, build, client=build.version("client"))
     journey.observe("plugin_versions", state["plugins"])
     machine = adopt(fleet, guest)
     row = fleet.hub.row(machine)
@@ -516,7 +551,8 @@ def upgrade(journey, fleet: Fleet, build: Build) -> None:
     state = guest.installed()
     identity_check(journey, "installed_build", state, build)
     journey.observe("host_identity", {"host_id": machine, "verified": state["verified"]})
-    component_check(journey, "app_versions", state, build)
+    # Served by the hub, so held to the client the hub's build carries.
+    component_check(journey, "app_versions", state, build, client=fleet.served[build.ref])
     journey.observe("plugin_versions", state["plugins"])
 
 
