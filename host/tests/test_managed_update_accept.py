@@ -122,6 +122,11 @@ class ScriptedFleet:
         self.release, self.sha, self.state = release, sha, state
         #: What `ifconfig` answers on every guest of this fleet.
         self.address = address
+        #: What the lab-flag probe answers: 4 just turned on (what an install
+        #: leaves behind), 0 already on, 3 no host.
+        self.lab_state = "4"
+        self.flagged: list[str] = []
+        self.kicked: list[str] = []
         self.client, self.menubar, self.plugin = client, menubar, plugin
         self.denied_status = denied_status
         self.calls: list[list[str]] = []
@@ -148,6 +153,12 @@ class ScriptedFleet:
             answer = {"ok": True}
         elif "ifconfig" in command:
             return subprocess.CompletedProcess(argv, 0, f"127.0.0.1\n{self.address}\n", "")
+        elif "candidate_test" in command:
+            self.flagged.append(name)
+            return subprocess.CompletedProcess(argv, 0, f"lab={self.lab_state}\n", "")
+        elif "launchctl kickstart" in command:
+            self.kicked.append(name)
+            return subprocess.CompletedProcess(argv, 0, "", "")
         elif "probe" in command:
             answer = self.probe(name)
         elif "--path /updates/queue" in command:
@@ -406,7 +417,8 @@ def test_the_installer_is_fetched_from_the_ref_and_clones_it(runner, subject, mo
         name = "fresh"
         def sh(self, command, **kwargs):
             commands.append(command)
-            return ""
+            # What a just-installed host answers the lab-flag probe: turned on now.
+            return "lab=4" if "candidate_test" in command else ""
         def copy(self, *args):
             pass
 
@@ -940,7 +952,8 @@ class ResetGuestFleet(ScriptedFleet):
         _, action, name, *rest = argv
         if action == "cp":
             self.present.setdefault(name, set()).add(rest[1])
-        if action == "ssh" and "ifconfig" in rest[0]:
+        if action == "ssh" and ("ifconfig" in rest[0] or "candidate_test" in rest[0]
+                                or "launchctl kickstart" in rest[0]):
             return ScriptedFleet.__call__(self, argv, **kwargs)
         if action == "ssh" and rest[0].startswith("for p in"):
             self.calls.append(list(argv))
@@ -1021,3 +1034,30 @@ def test_only_the_fresh_guest_is_reset(runner):
     fleet = build(runner, scripted, fresh="fresh")
     fleet.cast(fleet.hub, fleet.leaves[0])
     assert not [argv for argv in scripted.calls if argv[1] == "reset"]
+
+
+def test_every_cast_guest_with_a_host_gets_its_lab_flag_back(runner):
+    """The hub's own install of the build it made rewrites the flag off, and
+    the guest tool then refuses every call. The cast puts it back."""
+    scripted = ResetGuestFleet()
+    fleet = build(runner, scripted, fresh="fresh")
+    fleet.cast(fleet.hub, fleet.leaves[0])
+    assert scripted.flagged == ["hub", "leaf-a"]
+    assert scripted.kicked == ["hub", "leaf-a"]
+
+
+def test_a_flag_already_on_restarts_nothing(runner):
+    scripted = ResetGuestFleet()
+    scripted.lab_state = "0"
+    fleet = build(runner, scripted, fresh="fresh")
+    fleet.cast(fleet.hub, fleet.leaves[0])
+    assert scripted.flagged == ["hub", "leaf-a"]
+    assert scripted.kicked == []
+
+
+def test_a_guest_without_a_host_is_left_alone(runner):
+    scripted = ResetGuestFleet()
+    scripted.lab_state = "3"
+    fleet = build(runner, scripted, fresh="fresh")
+    assert runner.lab_guest(fleet.fresh) is False
+    assert scripted.kicked == []

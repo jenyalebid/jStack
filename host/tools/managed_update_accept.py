@@ -373,6 +373,7 @@ class Fleet:
             if missing:
                 raise HarnessFault(f"fixture missing: {guest.name}:{missing[0]}")
             self.on_lab_network(guest)
+            lab_guest(guest)
 
     def on_lab_network(self, guest: Guest) -> None:
         """Every guest on one subnet, asked before anything leans on it.
@@ -938,17 +939,32 @@ def install_build(guest: Guest, build: Build, *, fresh: bool = False) -> None:
              f"--ref {shlex.quote(build.ref)}", timeout=3600)
     if build.client:
         guest.sh("/usr/bin/open -a /Applications/jRemote.app")
-    # The sealed provisioner writes candidate_test false unconditionally and
-    # its repair path refuses to change it — that guard is for production
-    # machines. A disposable lab guest gets the flag flipped in state, then
-    # the updater restarted so its next cycle verifies unpromoted envelopes.
-    flip = ("import json,pathlib; "
-            "p=pathlib.Path.home()/'.local/state/jremote/updates/config.json'; "
-            "c=json.loads(p.read_text()); c['candidate_test']=True; "
-            "p.write_text(json.dumps(c, indent=2))")
-    guest.sh(f"{shlex.quote(GUEST_PYTHON)} -c {shlex.quote(flip)}")
-    guest.sh("/bin/launchctl kickstart -k gui/$(id -u)/live.jstack.hub.updater")
+    lab_guest(guest)
     time.sleep(SETTLE)
+
+
+def lab_guest(guest: Guest) -> bool:
+    """Mark an installed host as the disposable lab fixture it is.
+
+    The sealed installer writes `candidate_test` false unconditionally and
+    its repair path refuses to change it — that guard is for production
+    machines, and every install here rewrites the flag off: a leaf taking the
+    build under test, the hub installing the build it just made. The guest
+    tool refuses every call while it is off, so the runner restores it after
+    each install and before each cast, then restarts the updater so its next
+    cycle verifies unpromoted envelopes. Returns whether a host was there.
+    """
+    flip = ("import json,pathlib,sys; "
+            "p=pathlib.Path.home()/'.local/state/jremote/updates/config.json'; "
+            "p.is_file() or sys.exit(3); "
+            "c=json.loads(p.read_text()); "
+            "c.get('candidate_test') is True and sys.exit(0); "
+            "c['candidate_test']=True; p.write_text(json.dumps(c, indent=2)); sys.exit(4)")
+    answer = guest.sh(f"{shlex.quote(GUEST_PYTHON)} -c {shlex.quote(flip)}; echo lab=$?").strip()
+    state = answer.rsplit("lab=", 1)[-1]
+    if state == "4":
+        guest.sh("/bin/launchctl kickstart -k gui/$(id -u)/live.jstack.hub.updater")
+    return state != "3"
 
 
 def stage_prior(fleet: Fleet, guest: Guest) -> dict:
