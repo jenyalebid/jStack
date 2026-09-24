@@ -56,6 +56,10 @@ esac
     env.update(
         PATH=f"{stub_dir}:{env['PATH']}",
         APP_INSTALL_CURL_CALLS=str(calls),
+        # app/install.sh is a step of the top-level installer, not a door; it
+        # refuses a bare run. The joiner reaches it the same way, through
+        # install.sh, which exports this.
+        JSTACK_INSTALLER="1",
     )
     result = subprocess.run(
         ["bash", str(installer), "--yes", "--tag", "mac-app-test",
