@@ -49,6 +49,20 @@ CODEX_EVENTS = ("PreToolUse", "PostToolUse", "PreCompact", "PostCompact",
 # semantics, and it belongs where the event list it edits is written.
 CODEX_ALIASES = {"Notification": "PermissionRequest", "PermissionDenied": "Interrupt"}
 
+# Claude tool names with no counterpart on Codex. A matcher is matched against
+# the tool name, so an alternative naming a tool Codex does not have widens a
+# group to nothing — `Bash|ExitPlanMode|Agent` selected two tools and claimed
+# three. Both of these are dialogs Claude's client owns: Codex asks its question
+# through the permission request, and it ends plan mode by flipping
+# `permission_mode` rather than by calling a tool.
+#
+# Only the alternatives are removed, never the group. A group whose matcher
+# names nothing else is left registered on a tool Codex will never send, which
+# costs nothing at runtime and reads in the file as though it were wired;
+# removing it is blocked by `test_managed_config_carries_every_hook_the_plugin
+# _declares`, which asserts that every declared hook translates.
+CODEX_ABSENT_TOOLS = frozenset({"AskUserQuestion", "ExitPlanMode"})
+
 # Per-hook fields Codex reads, in its spelling. PascalCase is load-bearing here
 # exactly as the event names are.
 HOOK_FIELDS = ("timeout", "statusMessage", "additionalContextLimit", "async")
@@ -69,9 +83,13 @@ def managed_hooks(manifest, plugin):
             dropped.append(event)
             continue
         for group in groups:
+            matcher = group.get("matcher") or ""
+            kept = [t for t in matcher.split("|") if t not in CODEX_ABSENT_TOOLS]
+            if matcher and kept:
+                matcher = "|".join(kept)
             lines.append(f"[[hooks.{event}]]")
-            if group.get("matcher"):
-                lines.append("matcher = " + json.dumps(group["matcher"]))
+            if matcher:
+                lines.append("matcher = " + json.dumps(matcher))
             for handler in group.get("hooks") or []:
                 if handler.get("type") != "command":
                     dropped.append(f"{event}:{handler.get('type')}")
