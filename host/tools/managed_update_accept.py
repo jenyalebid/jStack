@@ -64,6 +64,12 @@ TRUST_KEY = ("f=$HOME/.local/state/jremote/updates/config.json; [ ! -f \"$f\" ] 
              + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
                  "import json,sys; print(json.load(open(sys.argv[1])).get('public_key',''))")
              + " \"$f\"")
+#: The credential a managed Mac presents to its hub, as `attach` recorded it.
+#: Empty on a Mac that has no parent.
+DEVICE_ID = ("f=$HOME/.local/state/jremote/parent.json; [ ! -f \"$f\" ] || "
+             + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
+                 "import json,sys; print(json.load(open(sys.argv[1])).get('device_id',''))")
+             + " \"$f\"")
 #: The build a hub last offered its fleet, as the hub's own feed states it:
 #: which build, and which client it carries. Read after `updates build`, whose
 #: answer names the build but not its parts.
@@ -1073,11 +1079,45 @@ def reach(fleet: Fleet, guest: Guest) -> None:
     Mac is moved for real — before the journey starts. A guest with no host
     (the pristine one) is left as it is.
     """
-    if guest is fleet.hub or not trust_key(guest) or follows(fleet, guest):
+    if guest is fleet.hub or not trust_key(guest):
+        return
+    if revoked(fleet, guest):
+        readopt(fleet, guest)
+    if follows(fleet, guest):
         return
     target = fleet.prior or fleet.build
     expect(target is not None, "build the ref under test before casting a leaf")
     move(fleet, guest, target, guest.installed()["sha"], None)
+
+
+def revoked(fleet: Fleet, guest: Guest) -> bool:
+    """Whether the hub has revoked the credential this guest presents.
+
+    A revoked Mac heartbeats into refusals and the hub queues it nothing
+    (`machine credential is revoked; update not authorized`). The revocation
+    journey leaves its leaf exactly so, and the next journey to cast that
+    leaf would fail on the hub's refusal before it measured anything. Read
+    from both sides: the credential the Mac recorded at attach, and the hub's
+    own device list, which names every device it holds, revoked ones included.
+    """
+    device = guest.sh(DEVICE_ID).strip()
+    if not device:
+        return False
+    answer = fleet.hub.call("/devices")
+    expect(answer["status"] == 200, f"the hub would not list its devices: {answer}")
+    rows = json.loads(answer["body"])["devices"]
+    return any(row["id"] == device and row.get("revoked") for row in rows)
+
+
+def readopt(fleet: Fleet, guest: Guest) -> None:
+    """A revoked Mac is brought back the way a Mac joins: adopted again. The
+    hub never resurrects a revoked credential; adoption mints a new one and
+    binds the Mac's row to it. Nothing is reinstalled — the Mac runs fine."""
+    print(f"{guest.name}: the hub has revoked its credential; adopting it again, "
+          "as a revoked Mac is brought back", flush=True)
+    adopt(fleet, guest)
+    expect(not revoked(fleet, guest),
+           f"{guest.name} is still revoked on the hub after adoption")
 
 
 def move(fleet: Fleet, guest: Guest, target: Build, running: str, journey) -> None:

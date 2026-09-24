@@ -169,6 +169,11 @@ class ScriptedFleet:
         elif "launchctl kickstart" in command:
             self.kicked.append(name)
             return subprocess.CompletedProcess(argv, 0, "", "")
+        elif "parent.json" in command:
+            # No credential recorded: nothing for the hub to have revoked.
+            return subprocess.CompletedProcess(argv, 0, "\n", "")
+        elif "--path /devices" in command:
+            answer = {"status": 200, "body": json.dumps({"devices": []})}
         elif "probe" in command:
             answer = self.probe(name)
         elif "--path /updates/queue" in command:
@@ -612,11 +617,13 @@ class KeyedFleet(ScriptedFleet):
     from a9fe663 on does on its next heartbeat, and what no earlier leaf can.
     """
 
-    def __init__(self, *, keys, learns=True, **kwargs):
+    def __init__(self, *, keys, learns=True, revoked=(), **kwargs):
         super().__init__(**kwargs)
         self.keys, self.learns = dict(keys), learns
         self.installed: list[str] = []
         self.adopted: list[str] = []
+        #: Guests whose credential the hub has revoked; adoption mints a new one.
+        self.revoked: set[str] = set(revoked)
 
     def __call__(self, argv, **kwargs):
         _, action, name, *rest = argv
@@ -624,12 +631,23 @@ class KeyedFleet(ScriptedFleet):
         if action == "ssh" and "public_key" in command:
             self.calls.append(list(argv))
             return subprocess.CompletedProcess(argv, 0, self.keys.get(name, "") + "\n", "")
+        if action == "ssh" and "parent.json" in command:
+            self.calls.append(list(argv))
+            device = "" if name == "hub" or not self.keys.get(name) else "device-" + name
+            return subprocess.CompletedProcess(argv, 0, device + "\n", "")
+        if action == "ssh" and "--path /devices" in command:
+            self.calls.append(list(argv))
+            rows = [{"id": "device-" + guest, "revoked": guest in self.revoked}
+                    for guest in self.keys if guest != "hub"]
+            answer = {"status": 200, "body": json.dumps({"devices": rows})}
+            return subprocess.CompletedProcess(argv, 0, json.dumps(answer), "")
         if action == "ssh" and "install.sh --yes" in command:
             self.installed.append(name)
             self.keys[name] = "own-" + name
             self.release, self.sha = PRIOR, PRIOR_SHA
         if action == "ssh" and "adopt-to-hub" in command:
             self.adopted.append(name)
+            self.revoked.discard(name)
             if self.learns:
                 self.keys[name] = self.keys["hub"]
         done = super().__call__(argv, **kwargs)
@@ -699,6 +717,34 @@ def test_a_cast_leaf_the_hub_cannot_reach_is_moved_before_its_journey(
     fleet.cast(fleet.hub, fleet.leaves[1])
     fleet.cast(fleet.hub, fleet.fresh)
     assert scripted.installed == ["leaf-a"] and scripted.adopted == ["leaf-a"]
+
+
+def test_a_cast_leaf_the_hub_revoked_is_adopted_again_before_its_journey(
+        runner, subject, earlier, tmp_path, monkeypatch):
+    """The revocation journey leaves its leaf revoked on the hub, and a run
+    that casts that leaf next would queue it a job the hub refuses (409,
+    `machine credential is revoked`). It is adopted again, as a revoked Mac
+    is brought back for real: no reinstall, since the Mac runs fine."""
+    scripted, fleet, offered = _keyed(runner, monkeypatch, tmp_path, earlier, subject,
+                                      keys={"hub": "hub-key", "leaf-a": "hub-key",
+                                            "leaf-b": "hub-key"}, revoked={"leaf-b"})
+    fleet.cast(fleet.hub, fleet.leaves[1])
+    assert scripted.adopted == ["leaf-b"] and scripted.installed == []
+    assert scripted.revoked == set() and offered == []
+    # A leaf the hub still honours is left alone, and so is the hub itself.
+    fleet.cast(fleet.hub, fleet.leaves[0])
+    assert scripted.adopted == ["leaf-b"]
+
+
+def test_an_adoption_that_leaves_the_leaf_revoked_fails_by_name(
+        runner, subject, earlier, tmp_path, monkeypatch):
+    scripted, fleet, _ = _keyed(runner, monkeypatch, tmp_path, earlier, subject,
+                                keys={"hub": "hub-key", "leaf-a": "hub-key"}, revoked={"leaf-a"})
+    adopted = []
+    monkeypatch.setattr(runner, "adopt", lambda fleet, guest: adopted.append(guest.name))
+    with pytest.raises(runner.AcceptanceFailure, match="still revoked"):
+        fleet.cast(fleet.hub, fleet.leaves[0])
+    assert adopted == ["leaf-a"]
 
 
 def test_the_hub_runs_what_it_built_before_any_journey(runner, subject, tmp_path, monkeypatch):
