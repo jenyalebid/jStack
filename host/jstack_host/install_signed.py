@@ -113,7 +113,7 @@ def observations(app: Path) -> dict:
 
 def provision() -> None:
     """Called only after runtime_entry has applied the saved environment."""
-    from . import devices, hostenv, release_channel, releases
+    from . import build_source, devices, hostenv, releases
     from .update_macos import bundle_info, client_distribution
     settings = service_settings.read()
     journal = json.loads(journal_path().read_text())
@@ -149,7 +149,12 @@ def provision() -> None:
                      "client_managed": client_distribution(client, {"client_managed": False}) == "hub",
                      "feed_dir": str(releases.RELEASE_DIR.parent / "fleet")}
     if source.get("github_repo"):
-        configuration["github_repo"] = release_channel.repository(source["github_repo"])
+        configuration["github_repo"] = build_source.repository(source["github_repo"])
+    # The ref this bundle was built from, carried the way `install_updater`
+    # carries it. Dropping it walked a hub that had been moved onto a branch
+    # back to stable the moment it was reinstalled — from the branch build it
+    # had just installed, whose own identity says which line it came off.
+    configuration["channel"] = build_source.channel_ref(source)
     atomic_json(config_path, configuration)
 
 

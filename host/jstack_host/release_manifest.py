@@ -19,6 +19,11 @@ RECEIPTS = {"fresh_install", "upgrade", "fleet", "offline_catchup", "session_sur
 #: manifest built before channels existed can be read as belonging to it: the
 #: releases already published came off main, which is what this names.
 STABLE_CHANNEL = "stable"
+#: A manifest a hub built for itself from a commit, rather than one a
+#: publisher cut. It has no publication and so no acceptance evidence; the
+#: marker is inside the signed manifest so only the pinned key can grant the
+#: exemption below, and never alongside receipts.
+SOURCE_BUILD = "source-build"
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 HEX = re.compile(r"[a-f0-9]{64}\Z")
 
@@ -72,7 +77,11 @@ def validate(manifest: dict, *, promoted: bool = True) -> dict:
     if set(sources) != {"stack", "client"} or any(
             not re.fullmatch(r"[a-f0-9]{40}", str(v)) for v in sources.values()):
         raise ReleaseError("exact committed source revisions required")
-    if promoted:
+    origin = manifest.get("origin")
+    built = isinstance(origin, dict) and origin.get("kind") == SOURCE_BUILD
+    if built and manifest.get("receipts"):
+        raise ReleaseError("a source build cannot carry acceptance receipts")
+    if promoted and not built:
         receipts = manifest.get("receipts", {})
         artifact_set = hashlib.sha256(canonical(components)).hexdigest()
         for name in RECEIPTS:

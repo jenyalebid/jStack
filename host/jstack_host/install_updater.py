@@ -146,7 +146,7 @@ def bootstrap(public_key: str, *, state_dir: Path | None = None, load=True,
     configuration["dispatcher"] = str(bootstrap_dir / "jstack_host/update_dispatcher.py")
     from . import releases as app_releases
     configuration["feed_dir"] = str(app_releases.RELEASE_DIR.parent / "fleet")
-    from .release_channel import repository
+    from .build_source import repository
     origin = subprocess.run(["git", "-C", str(package), "remote", "get-url", "origin"],
                             capture_output=True, text=True)
     identity_path = package.parent / "release-identity.json"
@@ -158,8 +158,8 @@ def bootstrap(public_key: str, *, state_dir: Path | None = None, load=True,
     # way `github_repo` is. A hub switched to a branch must stay switched:
     # reinstalling the updater is routine, and dropping the choice here would
     # silently walk the machine back to stable at the next repair.
-    from .release_channel import channel_name
-    configuration["channel"] = channel_name(old_config)
+    from .build_source import channel_ref
+    configuration["channel"] = channel_ref(old_config)
     atomic_json(root / "config.json", configuration)
     logs = root / "logs"
     logs.mkdir(exist_ok=True)

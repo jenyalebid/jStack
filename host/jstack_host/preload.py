@@ -21,7 +21,9 @@ MODULES = (
     "cryptography.hazmat.primitives.asymmetric.ed25519",
     # jstack_host closure of the supervisor's tick
     "jstack_host.release_manifest",
-    "jstack_host.release_channel",
+    "jstack_host.build_source",
+    "jstack_host.build_hub",
+    "jstack_host.bundle_tools",
     "jstack_host.fleet_updates",
     "jstack_host.hostenv",
     "jstack_host.update_supervisor",
