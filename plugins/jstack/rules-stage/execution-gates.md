@@ -39,6 +39,19 @@ Verify: command · ./verify/build-from-ref.sh
 `none` is a real answer. It is how the verification bureaucracy scales with the
 severity of the change instead of taxing a one-line UI tweak.
 
+## Editing a plan after its stages exist
+
+Re-reading the markdown reconciles by stage position: an existing stage is
+updated in place and keeps its status and its proofs, so renaming one or
+rewriting its prose costs nothing.
+
+Changing a stage's `Verify:` line is different. The proofs it already holds
+were filed against the gate it used to declare, so they stop closing it — they
+stay on the record as the history of that gate, and the stage needs evidence
+for what it declares now. Tightening a gate therefore re-opens the question,
+which is the point: otherwise a stage verified against `echo ok` and re-parsed
+into a real script would close on the cheap receipt.
+
 ## Three rules, each a 2026-09-24 failure written down
 
 1. **A headline names its deliverable, never its epoch.** The merge gate died
