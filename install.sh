@@ -1413,7 +1413,6 @@ if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ] \
         die "JSTACK_SIGNING_CONFIG points at no file: $SIGNING_CONFIG
      Unset it to build a Hub signed with this machine's own key."
     fi
-    ok "build inputs — CPython 3.12 framework, clang, swiftc, tmux"
 
     if [ "$DRY_RUN" = "1" ]; then
         would "build the Hub from $REF and install it into /Applications"

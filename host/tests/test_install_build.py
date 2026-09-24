@@ -447,6 +447,12 @@ def test_install_sh_verifies_the_python_package_before_it_runs_it_as_root():
     assert CODE.count("refusing it") >= 2
 
 
+def test_install_sh_claims_the_build_inputs_check_once_because_it_runs_once():
+    """The line survived where the check used to be, so a run announced the
+    inputs twice — the second time from a block that no longer looks at them."""
+    assert CODE.count('ok "build inputs') == 1
+
+
 def test_install_sh_asks_for_the_password_in_the_foreground_not_inside_run_long():
     """`run_long` backgrounds what it runs, and a background process reading
     the terminal is stopped by SIGTTIN rather than answered — a `sudo` that
