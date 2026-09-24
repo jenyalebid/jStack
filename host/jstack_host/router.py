@@ -1841,16 +1841,19 @@ class EnvBody(BaseModel):
 
 
 def _env_rows(*, session_id: str = "", agent_id: str = "") -> list[dict]:
-    """Every setting, the value in force at this layer, and where it came from.
+    """Every setting at this layer: what is in force, whose it is, whether said.
 
     One model for both layers and for the Work view, so the client decodes one
-    thing. Every setting always appears: a key missing from the list reads to
+    thing. `announced` is the difference between a setting in play and one
+    merely armed — in force since the session opened without one trigger having
+    fired yet. Every setting always appears: a key missing from the list reads to
     the app as a feature this host does not have, which is the sentence
     `available: false` exists to say and must not be said by accident.
     """
     from . import environment
     if session_id:
         resolved = environment.resolve(session_id)
+        spoken = environment.announced(session_id)
     else:
         # Nothing sits above the agent layer but the registry, so the agent's
         # own row is the only thing that can shadow a default. A stored value
@@ -1862,10 +1865,19 @@ def _env_rows(*, session_id: str = "", agent_id: str = "") -> list[dict]:
             raw = environment.get(s.key, agent_id=agent_id)
             resolved[s.key] = ((raw, "agent") if raw in s.values
                                else (s.default, "default"))
+        # Nothing announces at the agent layer: an agent value is what the next
+        # session will inherit, not something any session has been told, and
+        # there is no session here whose markers could be read to find out.
+        # Stated as `False` rather than left out, because a key the client
+        # cannot find reads as a host too old to have the field — which is the
+        # sentence `available: false` exists to say and must not be said by
+        # accident.
+        spoken = {}
     rows = []
     for pref in environment.prefs():
         value, source = resolved[pref["key"]]
-        rows.append({**pref, "value": value, "source": source})
+        rows.append({**pref, "value": value, "source": source,
+                     "announced": spoken.get(pref["key"], False)})
     return rows
 
 

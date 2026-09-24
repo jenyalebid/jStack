@@ -10,6 +10,9 @@ cannot recover from if the host gets them wrong:
   * **`source`.** Inherited and set-here render differently and only the host
     can tell them apart; a value with the wrong provenance is a clear button
     that clears nothing, or one that is missing where it should be.
+  * **`announced`.** In force and delivered are different states — a value can
+    sit resolved for a whole session without one trigger firing — and the
+    markers that know are on disk, where only the host can read them.
   * **`mode`, stated rather than inferred.** No plan and a plan with no stages
     yet are the same two empty collections to a decoder, and they are two
     different screens.
@@ -70,7 +73,43 @@ def test_an_untouched_session_lists_every_setting_as_a_default(client):
     for s in env.SETTINGS:
         assert rows[s.key] == {"key": s.key, "label": s.label, "kind": s.kind,
                                "values": list(s.values), "default": s.default,
-                               "value": s.default, "source": "default"}
+                               "value": s.default, "source": "default",
+                               "announced": False}
+
+
+def test_both_layers_say_whether_a_setting_has_spoken(client, tmp_path,
+                                                     monkeypatch):
+    """`announced` on every row of both layers, and never true for an agent's.
+
+    The field is what separates a setting in play from one merely armed, so the
+    thing to pin is that it is always THERE: a key the client cannot find reads
+    as a host too old to have the feature, and the screen would then draw every
+    setting as if it had spoken, or none. The agent layer answers `False`
+    because nothing announces there — an agent default is what a session will
+    inherit, and no session's markers are in reach of that question.
+    """
+    monkeypatch.setenv("JSTACK_CACHE_ROOT", str(tmp_path / "cache"))
+    client.post(f"{BASE}/sessions/{SID}/env",
+                json={"key": "sim_verify", "value": "off"})
+    client.post(f"{BASE}/agents/{AGENT}/env",
+                json={"key": "sim_verify", "value": "off"})
+
+    rows = _by_key(client.get(f"{BASE}/sessions/{SID}/env").json())
+    assert all("announced" in row for row in rows.values())
+    assert rows["sim_verify"]["announced"] is False
+
+    marker = env.announce_marker(SID, "sim_verify", "off")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("0")
+    session = _by_key(client.get(f"{BASE}/sessions/{SID}/env").json())
+    assert session["sim_verify"]["announced"] is True
+
+    agent = _by_key(client.get(f"{BASE}/agents/{AGENT}/env").json())
+    assert all(row["announced"] is False for row in agent.values())
+    # The Work view serves the same rows, so the mark reaches the screen that
+    # exists to show it.
+    work = _by_key(client.get(f"{BASE}/sessions/{SID}/work").json())
+    assert work["sim_verify"]["announced"] is True
 
 
 def test_a_posted_value_comes_back_as_set_on_this_session(client):

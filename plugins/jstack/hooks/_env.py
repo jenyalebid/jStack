@@ -31,13 +31,22 @@ import attention  # noqa: E402 — sibling hook, path set above
 #: is a stale floor — worse than silence.
 KILL_SWITCH = "JSTACK_ENV_INJECT_DISABLED"
 
-DEFAULT_CACHE_ROOT = Path("/tmp/jstack-rule-cache")
-
 _rules = None
 
 
 def disabled() -> bool:
     return bool(os.environ.get(KILL_SWITCH))
+
+
+def _host_importable() -> None:
+    """Put the host package where an import can find it, checkout or install.
+
+    Only the checkout case needs the insert; where the host is installed the
+    import each caller then makes resolves from site-packages and this line is
+    inert. Both loaders below go through it so neither can be the one that
+    forgot.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "host"))
 
 
 def host_environment():
@@ -53,9 +62,24 @@ def host_environment():
         declared = attention.state_dir()
         if declared:
             os.environ["JREMOTE_STATE_DIR"] = declared
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "host"))
+    _host_importable()
     from jstack_host import environment
     return environment
+
+
+def host_markers():
+    """`jstack_host.markers` — the host's marker convention, and only that.
+
+    Not reached through `host_environment()`, which is the expensive door: that
+    one resolves the state directory and imports the store, ~30ms where this
+    costs nothing measurable, and `plan-mode-watch.py` asks for a marker path on
+    every prompt and every Stop of every session before it knows whether it
+    wants the host at all. Nothing here touches a store — a marker path is an
+    env var and a filename — so nothing here needs the state directory either.
+    """
+    _host_importable()
+    from jstack_host import markers
+    return markers
 
 
 def path_rules():
@@ -146,12 +170,27 @@ def session_dir(session_id: str) -> Path:
     One dir per session rather than one per mechanism, so that whatever
     reclaims it reclaims all of it — a second root would be a second thing to
     remember to clean, found years later full of a machine's session history.
+
+    The path is the host's answer, not one composed here: the app reads these
+    files back through `environment.announced`, so the spelling has a reader
+    outside this plugin and a second spelling of it would be a screen that
+    reports nothing while the hooks announce normally. What this adds is the
+    mkdir, which the readers must not do.
     """
-    root = os.environ.get("JSTACK_CACHE_ROOT")
-    base = Path(root).expanduser() if root else DEFAULT_CACHE_ROOT
-    path = base / path_rules()._safe_dir_name(session_id or "_unknown")
+    path = host_markers().session_cache(session_id)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def announce_marker(env, session_id: str, key: str, value: str) -> Path:
+    """One setting's marker, in a directory the write can land in.
+
+    `env` is passed rather than fetched because every caller is already holding
+    it — the hook that writes a marker has just resolved what is in force out of
+    the same module.
+    """
+    session_dir(session_id)
+    return env.announce_marker(session_id, key, value)
 
 
 def reinject_bytes() -> int:

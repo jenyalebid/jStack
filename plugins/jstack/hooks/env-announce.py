@@ -78,7 +78,6 @@ def main() -> int:
     rules = _env.path_rules()
     grown = rules._file_size(str(payload.get("transcript_path") or ""))
     threshold = _env.reinject_bytes()
-    marker_dir = _env.session_dir(session_id)
 
     lines = []
     for s in env.SETTINGS:
@@ -90,7 +89,7 @@ def main() -> int:
             continue
         if not any(fires(t, event, tool, tool_input, rules) for t in s.triggers):
             continue
-        marker = marker_dir / f"env-{rules._safe_dir_name(s.key)}-{rules._safe_dir_name(value)}.marker"
+        marker = _env.announce_marker(env, session_id, s.key, value)
         last = rules._read_marker(marker)
         if last is not None and grown - last < threshold:
             continue

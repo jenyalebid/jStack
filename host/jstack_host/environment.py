@@ -20,6 +20,11 @@ import time
 from dataclasses import dataclass
 
 from . import store
+# Re-exported and not re-implemented. A caller holding the environment asks it
+# where a setting's marker is; `markers.py` is a module of its own only so the
+# hooks can ask the same question without importing the store to get an answer
+# that is an env var and a path.
+from .markers import announce_marker, cache_root, session_cache  # noqa: F401
 
 
 @dataclass(frozen=True)
@@ -287,3 +292,29 @@ def prefs() -> list[dict]:
     """What the app's settings screen renders — the registry, as data."""
     return [{"key": s.key, "label": s.label, "kind": s.kind,
              "values": list(s.values), "default": s.default} for s in SETTINGS]
+
+
+def announced(session_id: str) -> dict[str, bool]:
+    """Per setting, whether this session has actually BEEN TOLD it.
+
+    In force and delivered are different states and only the markers tell them
+    apart: a value can sit resolved for an hour without one trigger firing, and
+    a screen that draws it as if the model had heard it is claiming something no
+    transcript would support.
+
+    Two answers are `False` on purpose. A setting resolved to its default has
+    no instruction to deliver — `instruction[default]` is `""` and no hook will
+    ever write a marker for it — so a marker found on disk for one is residue
+    from before somebody flipped it back, never a thing that was said about the
+    value in force. And the marker consulted is the one for the value in force
+    NOW: a marker the previous value left is the record of a different sentence,
+    and reading it as this value's would report the new instruction as delivered
+    in the very session that has not heard it yet.
+    """
+    resolved = resolve(session_id)
+    out: dict[str, bool] = {}
+    for s in SETTINGS:
+        value = resolved[s.key][0]
+        out[s.key] = (value != s.default
+                      and announce_marker(session_id, s.key, value).exists())
+    return out
