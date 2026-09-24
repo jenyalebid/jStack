@@ -144,7 +144,7 @@ class ScriptedFleet:
         _, action, name, *rest = argv
         command = rest[0] if rest else ""
         answer: dict = {}
-        if action in {"gui", "stop", "cp"}:
+        if action in {"gui", "stop", "cp", "reset"}:
             answer = {"ok": True}
         elif "ifconfig" in command:
             return subprocess.CompletedProcess(argv, 0, f"127.0.0.1\n{self.address}\n", "")
@@ -1003,3 +1003,21 @@ def test_a_plan_may_name_the_lab_network_it_expects(runner):
     fleet.network = "10.9.9."
     fleet.cast(fleet.hub, fleet.fresh)
     assert scripted.present["fresh"]
+
+
+def test_the_fresh_guest_is_reset_before_it_is_booted(runner):
+    """A run that died after installing on the fresh guest must not hand the
+    next run a Mac that already carries a Hub."""
+    scripted = ResetGuestFleet()
+    fleet = build(runner, scripted, fresh="fresh")
+    fleet.cast(fleet.hub, fleet.fresh)
+    actions = [(argv[1], argv[2]) for argv in scripted.calls if argv[1] in {"reset", "gui"}]
+    assert actions.index(("reset", "fresh")) < actions.index(("gui", "fresh"))
+    assert ("reset", "hub") not in actions
+
+
+def test_only_the_fresh_guest_is_reset(runner):
+    scripted = ResetGuestFleet()
+    fleet = build(runner, scripted, fresh="fresh")
+    fleet.cast(fleet.hub, fleet.leaves[0])
+    assert not [argv for argv in scripted.calls if argv[1] == "reset"]

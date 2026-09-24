@@ -189,6 +189,11 @@ class Guest:
     def stop(self) -> None:
         self.vm("stop", self.name, timeout=300)
 
+    def reset(self) -> None:
+        """Back to the base image: deleted and re-cloned, nothing of the last
+        run left on it. `vm.sh reset` refuses the base image itself."""
+        self.vm("reset", self.name, timeout=600)
+
     def tool_call(self, *argv: str, timeout: int = 600) -> dict:
         command = " ".join(shlex.quote(part) for part in [GUEST_PYTHON, GUEST_TOOL, *argv])
         output = self.sh(command, timeout=timeout)
@@ -329,6 +334,12 @@ class Fleet:
                 if guest.name not in names:
                     guest.stop()
         for guest in cast:
+            # The fresh guest is pristine by definition, not by discipline: a
+            # run that died after installing on it would otherwise hand the
+            # next one a Mac that already has a Hub, and the pristine check in
+            # install_build would fail a journey the product never reached.
+            if guest is self.fresh:
+                guest.reset()
             guest.start()
         self.prepare(*cast)
         for guest in cast:
