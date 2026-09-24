@@ -63,12 +63,6 @@ ALLOW = {
         "public installer names the independently installed client and its pairing UI",
     ("README.md", "jremote"):
         "public product overview identifies the independently installed client",
-    ("product.md", "jremote"):
-        "governing product contract names the client and its update ownership",
-    ("docs/managed-updates.md", "jremote"):
-        "release contract identifies which client distribution the Hub may update",
-    ("docs/managed-update-lab.md", "jremote"):
-        "release acceptance distinguishes the client from the Hub installation",
     ("plugins/jstack/githooks/pre-commit", "jandj"):
         "the commit-identity allowlist must name the accounts it allows; "
         "this is the public noreply address stamped on every commit anyway",

@@ -71,7 +71,7 @@ above rather than a prompt.
 
 Environment: JSTACK_REPO_URL, JSTACK_CHECKOUT, JSTACK_AGENT_ROOT override the
 defaults above. JSTACK_ROOT, if you export it, is honoured by everything the
-stack does afterwards — see docs/systems/root-derivation.md.
+stack does afterwards.
 EOF
 }
 

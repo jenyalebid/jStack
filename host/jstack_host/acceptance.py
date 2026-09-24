@@ -27,7 +27,7 @@ from . import release_manifest as releases
 from .update_supervisor import atomic_json
 
 # What each journey must observe before its receipt can say passed. These are
-# the contract's own words in `docs/managed-updates.md`, not a convenient
+# the contract's own words, not a convenient
 # subset: adding a journey to the runner never adds a way to skip one of these.
 REQUIRED: dict[str, tuple[str, ...]] = {
     "fresh_install": ("installed_release", "host_identity", "plugin_versions",
