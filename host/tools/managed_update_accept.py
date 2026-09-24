@@ -301,10 +301,6 @@ class Fleet:
         self._ids: dict[str, str] = {}
         self.build: Build | None = None
         self.prior: Build | None = None
-        #: Leaves owing a re-pin because the hub built since they last adopted.
-        #: Paid when the leaf is next booted, not at build time: a parked guest
-        #: cannot be re-adopted, and a two-slot host parks most of them.
-        self.owed: set[str] = set()
         #: What the hub's own build of a ref came out as. A build id folds in
         #: the client and the dependency set the *building* machine holds, so
         #: the hub's id for a commit and a fresh Mac's id for the same commit
@@ -342,8 +338,6 @@ class Fleet:
                 guest.reset()
             guest.start()
         self.prepare(*cast)
-        for guest in cast:
-            self.readopt(guest)
 
     def prepare(self, *guests: Guest) -> None:
         """Put back what `vm.sh reset` takes away before a journey leans on it.
@@ -404,14 +398,12 @@ class Fleet:
 
         This is the product's own door — `updates build` is the only call that
         builds — so what the leaves install is what a real hub would serve
-        them. A second build on a hub that has already adopted machines
-        rotates the key those machines pinned (#144), so the leaves are
-        re-adopted after one, and the receipt records that it happened.
+        them. The key the hub signs with reaches each leaf on its heartbeat
+        (#144); nothing here re-adopts a leaf, because a real fleet is not
+        re-adopted after every build either.
         """
         self.hub.sh(host_cli(f"updates channel {shlex.quote(build.ref)}"), timeout=120)
-        adopted = bool(self.leaves)
-        despite = "JSTACK_BUILD_DESPITE_LEAVES=1 " if adopted else ""
-        output = self.hub.sh(despite + host_cli(f"updates build --ref {shlex.quote(build.ref)}"),
+        output = self.hub.sh(host_cli(f"updates build --ref {shlex.quote(build.ref)}"),
                              timeout=3600)
         try:
             built = json.loads(output[output.index("{"):])
@@ -420,19 +412,7 @@ class Fleet:
                 f"the hub did not report a build of {build.slug}: {output[-500:]}") from exc
         self.offered[build.ref] = built["release"]
         self.build = build
-        if adopted:
-            self.owed = {leaf.name for leaf in self.leaves}
         return built["release"]
-
-    def readopt(self, guest: Guest) -> None:
-        """Re-pin a leaf on the key the hub's newest build minted (#144)."""
-        if guest.name not in self.owed:
-            return
-        expect(self.plan.get("adopt_command"),
-               "re-adopting a leaf after a hub build needs 'adopt_command' in the plan")
-        guest.sh(self.plan["adopt_command"], timeout=900)
-        self.owed.discard(guest.name)
-        time.sleep(SETTLE)
 
 
 def request_id(prefix: str) -> str:
