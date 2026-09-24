@@ -1588,3 +1588,35 @@ def test_the_locks_live_where_the_host_does():
         for name, value in saved.items():
             if value is not None:
                 os.environ[name] = value
+
+
+def test_the_child_is_handed_the_state_dir_its_parent_resolved(near_ceiling, monkeypatch):
+    """One delivery, one state dir -- and the parent's is the one that counts.
+
+    The parent arrives through `jstack-host`, which adopts the installed host's environment
+    (`cli._adopt`) and so answers with the state dir this Mac actually serves. The child is
+    started as `python -m` and runs none of that: left to resolve for itself it picked the
+    DEFAULT profile and wrote its decision, its outcome, its lock and its
+    `compacts_when_done` read into `~/.local/state/jremote` while the parent's `candidate`
+    row sat in the host's own state dir. Session 244ca668 on 2026-09-23 is the receipt --
+    two files, neither of which answers "what did the hook do to that session", and a
+    per-agent switch read from a store the app never writes.
+    """
+    from jstack_host import hostenv
+    monkeypatch.delenv("JREMOTE_STATE_DIR", raising=False)
+    seen = {}
+
+    def spy(argv, **kwargs):
+        seen["argv"], seen["env"] = argv, kwargs.get("env")
+        return None
+
+    monkeypatch.setattr(cod.subprocess, "Popen", spy)
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(json.dumps(
+        {"transcript_path": near_ceiling, "session_id": "sess-state-dir"})))
+
+    cod.main()
+
+    assert seen.get("argv"), "the parent never detached a child"
+    assert seen["env"] is not None, "the child was left to resolve the state dir itself"
+    assert seen["env"]["JREMOTE_STATE_DIR"] == str(hostenv.state_dir()), seen["env"].get(
+        "JREMOTE_STATE_DIR")

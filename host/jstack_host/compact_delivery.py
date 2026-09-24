@@ -1392,9 +1392,19 @@ def main():
     # the parent race the process it just spawned.
     handoff = {"path": path, "sid": sid, "agent": (row or {}).get("agent", ""),
                "engine": engine, "size": os.path.getsize(path)}
+    # THE CHILD DOES NOT RE-DERIVE WHERE THIS HOST KEEPS ITS STATE. `jstack-host` adopted
+    # the installed host's environment on the way in (`cli._adopt`), which is what points
+    # this process at the dashboard's state dir; a child started as `python -m` runs none of
+    # that, resolves the DEFAULT profile, and lands on `~/.local/state/jremote`. One
+    # delivery then wrote its `candidate` row in the host's state dir and its decision, its
+    # outcome, its lock and its `compacts_when_done` read in a second directory nothing
+    # serves -- so "why didn't it compact" was answerable from neither file, and the Compact
+    # When Done switch was read from a store the app never writes. Handing down the answer
+    # the parent already used cannot drift; re-resolving it in the child is what did.
     subprocess.Popen([sys.executable, "-m", __name__, "--child", json.dumps(handoff)],
                      start_new_session=True, stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     env={**os.environ, "JREMOTE_STATE_DIR": str(hostenv.state_dir())})
 
 
 def run_child(path, sid, agent, engine, size_at_stop):
