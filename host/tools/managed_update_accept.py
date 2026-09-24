@@ -1078,12 +1078,25 @@ def reach(fleet: Fleet, guest: Guest) -> None:
     when the run names none, by the one-file install and adopted — as such a
     Mac is moved for real — before the journey starts. A guest with no host
     (the pristine one) is left as it is.
+
+    A leaf that follows the hub but runs neither the earlier ref nor the ref
+    under test is what an earlier run left behind: under the build model the
+    same Macs carry from run to run, and a journey that took such a leaf as
+    it stood would measure a move from a commit this run never named. It is
+    staged onto the earlier ref, as every leaf of a real fleet starts from
+    the build it last took.
     """
     if guest is fleet.hub or not trust_key(guest):
         return
     if revoked(fleet, guest):
         readopt(fleet, guest)
     if follows(fleet, guest):
+        running = guest.installed()["sha"]
+        named = {ref.sha for ref in (fleet.prior, fleet.build) if ref is not None}
+        if fleet.prior and running not in named:
+            print(f"{guest.name} runs {running[:8]}, which this run never named: staging it "
+                  f"onto {fleet.prior.slug} first", flush=True)
+            stage_prior(fleet, guest)
         return
     target = fleet.prior or fleet.build
     expect(target is not None, "build the ref under test before casting a leaf")

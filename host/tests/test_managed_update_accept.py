@@ -215,7 +215,9 @@ def build(runner, fleet, *, prior=None, **plan):
     made.prior = prior if prior is not None else SimpleNamespace(
         sha=PRIOR_SHA, ref="main", slug="main@" + PRIOR_SHA[:8])
     # What the hub came back with when it built the ref, without building,
-    # and the client its feed carries in that build.
+    # and the client its feed carries in that build. `offer` also leaves the
+    # fleet holding the build it last offered, which `reach` reads.
+    made.build = SimpleNamespace(sha=HEAD_SHA, ref="dev", slug="dev@" + HEAD_SHA[:8])
     made.offered["dev"] = CANDIDATE
     made.served["dev"] = fleet.served_client if isinstance(fleet, ScriptedFleet) else "70"
     return made
@@ -734,6 +736,26 @@ def test_a_cast_leaf_the_hub_revoked_is_adopted_again_before_its_journey(
     # A leaf the hub still honours is left alone, and so is the hub itself.
     fleet.cast(fleet.hub, fleet.leaves[0])
     assert scripted.adopted == ["leaf-b"]
+
+
+def test_a_cast_leaf_on_a_build_this_run_never_named_is_staged_onto_the_prior(
+        runner, subject, earlier, tmp_path, monkeypatch):
+    """Run 14, acc-leaf2: the leaf followed the hub and still ran the prior of
+    an earlier run, so reach() left it there, and the fleet journey measured
+    an update from a commit this run never named — which failed on that
+    commit's own defect. A following leaf on neither the earlier ref nor the
+    ref under test is staged onto the earlier ref before its journey."""
+    scripted, fleet, offered = _keyed(runner, monkeypatch, tmp_path, earlier, subject,
+                                      keys={"hub": "hub-key", "leaf-a": "hub-key",
+                                            "leaf-b": "hub-key"})
+    scripted.release, scripted.sha = "2026-09-14-33333333-3333333333333333", "3" * 40
+    fleet.cast(fleet.hub, fleet.leaves[1])
+    assert offered == [PRIOR_SHA, HEAD_SHA], "staged by the hub, which then holds the ref under test again"
+    assert scripted.installed == [] and scripted.adopted == []
+    assert scripted.sha == PRIOR_SHA
+    # Now on the prior: cast again and it is left alone.
+    fleet.cast(fleet.hub, fleet.leaves[1])
+    assert offered == [PRIOR_SHA, HEAD_SHA]
 
 
 def test_an_adoption_that_leaves_the_leaf_revoked_fails_by_name(
