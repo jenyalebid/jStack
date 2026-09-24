@@ -32,7 +32,12 @@ def main() -> int:
         return 0
     payload = json.load(sys.stdin)
     env = _env.host_environment()
-    line = env.state_line(env.resolve(str(payload.get("session_id") or "")))
+    # The agent comes from the cwd, not from the store's session row: at
+    # SessionStart there is no row yet. Session id stays first so a value set
+    # on a session that DOES exist — a resume, a compact — still wins.
+    line = env.state_line(env.resolve(
+        str(payload.get("session_id") or ""),
+        _env.seat_agent(str(payload.get("cwd") or ""))))
     if not line:
         return 0
     _env.emit("SessionStart",

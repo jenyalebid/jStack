@@ -980,6 +980,31 @@
         "path": "tests/turn-budget.sh",
         "description": "Pipes real PreToolUse JSON through the hook in both dialects: silent under the soft cut, the warning carrying the counts and the hard cut, the hard cut denying with the wake instruction, an engaged session never policed at any count, per-kind budgets honoured, and a corrupt budget file falling back to the shipped default."
       }
+    },
+    {
+      "id": "session-environment",
+      "kind": "system",
+      "name": "Session Environment",
+      "status": "live",
+      "description": "How a session WORKS — deliver by distribute or by build, run the simulator journey or skip it, one agent or one per plan stage — said once per session or per agent and carried by three hooks instead of restated at the top of every sitting. Entry states what is in force, a flip between prompts emits the one line that moved, and a matching tool call repeats the directive once per session per value. Every rendered string comes from the host registry, so the four surfaces cannot word a setting four ways, and a value at its default renders NOTHING anywhere: a host where nobody has set anything injects not one word into any session.",
+      "code": [
+        "hooks/env-entry.py",
+        "hooks/env-delta.py",
+        "hooks/env-announce.py",
+        "hooks/_env.py",
+        "hooks/hooks.json",
+        "bin/pict",
+        "../../host/jstack_host/environment.py"
+      ],
+      "config": [],
+      "docs": [],
+      "test": {
+        "type": "script",
+        "path": "tests/env-announce.sh",
+        "description": "Drives the three real hook scripts against a store and an agent tree built for the run: an untouched environment silent at all three moments, entry carrying only the moved values in one <jstack-environment> block, the cold start reaching the agent layer for a session the index has never seen and a session value still shadowing it once indexed, one delta line per flip and silence otherwise, one announcement per value across eleven matching calls, a flip re-arming it, a .swift edit firing in an otherwise-infra session, and command patterns matched on the command line. Also pins the hooks.json ordinals and checks every tool the registry triggers on is covered by a matcher."
+      },
+      "subsystems": [],
+      "notes": "Kill switch for all three hooks: JSTACK_ENV_INJECT_DISABLED=1. Announcement dedup markers sit beside the path-rule markers in /tmp/jstack-rule-cache/<session_id>/ as env-<key>-<value>.marker — keyed on the VALUE so a mid-session flip re-arms rather than being swallowed; re-announcement only after JSTACK_RULE_REINJECT_BYTES of transcript growth. env-delta.py keeps its per-session snapshot in the same dir as environment.json. hooks.json is APPEND-ONLY: Codex keys hook trust by ordinal, so a group or hook inserted above an existing one silently stops it running. env-announce.py's PreToolUse and PostToolUse groups carry matchers rather than taking every tool, because these hooks import the host (~40ms a call) and one beside every tool call of every session may not."
     }
   ]
 }

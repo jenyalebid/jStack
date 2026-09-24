@@ -51,6 +51,14 @@ echo '{"role":"user","content":"seed"}' > "$TRANSCRIPT"
 
 export JREMOTE_STATE_DIR="$STATE"
 export JSTACK_CACHE_ROOT="$CACHE"
+
+# An agent tree of this test's own, so the cold-start case below resolves a
+# seat without asking the machine what agents it has.
+AGENTS="$TMP/agents"
+mkdir -p "$AGENTS/probeagent/chat"
+: > "$AGENTS/probeagent/CLAUDE.md"
+printf '{"agent_root": "%s"}' "$AGENTS" > "$TMP/review.json"
+export JSTACK_REVIEW_CONFIG="$TMP/review.json"
 # Far above anything this test writes: re-injection on transcript growth is the
 # path-rule mechanism and is covered there. Here it must never fire by accident,
 # or "stays silent" would be untestable.
@@ -72,6 +80,29 @@ EOF
   [[ "$out" == "ok" ]] || fail "precheck" "host not importable by $PY — every
   silence below would be a lie: $out"
   pass "precheck"
+}
+
+seed_agent() {  # seed_agent <agent_id> <key> <value|-->
+  "$PY" - "$HOST" "$1" "$2" "$3" <<'EOF' || fail "seed_agent" "store write failed"
+import sys
+sys.path.insert(0, sys.argv[1])
+from jstack_host import environment as env
+env.set_value(sys.argv[3], None if sys.argv[4] == "--" else sys.argv[4],
+              agent_id=sys.argv[2])
+EOF
+}
+
+# The row the indexer writes once a transcript has lines — the thing a cold
+# start does NOT have.
+index_session() {  # index_session <session_id> <agent_id>
+  "$PY" - "$HOST" "$1" "$2" <<'EOF' || fail "index_session" "store write failed"
+import sys
+sys.path.insert(0, sys.argv[1])
+from jstack_host import store
+with store.get_store().conn() as db:
+    db.execute("INSERT OR REPLACE INTO sessions (session_id, agent_id) VALUES (?,?)",
+               (sys.argv[2], sys.argv[3]))
+EOF
 }
 
 seed() {  # seed <session_id> <key> <value|-->
@@ -96,7 +127,9 @@ sys.stdout.write(d["hookSpecificOutput"]["additionalContext"])
 ' || fail "ctx" "hook output is not a context envelope: $raw"
 }
 
-entry()  { printf '{"hook_event_name":"SessionStart","session_id":"%s","source":"startup","transcript_path":"%s"}' "$1" "$TRANSCRIPT" | "$PY" "$ENTRY"; }
+# cwd defaults to a directory under no agent, so a case that says nothing
+# about a seat is not quietly given one.
+entry()  { printf '{"hook_event_name":"SessionStart","session_id":"%s","cwd":"%s","source":"startup","transcript_path":"%s"}' "$1" "${2:-$TMP}" "$TRANSCRIPT" | "$PY" "$ENTRY"; }
 prompt() { printf '{"hook_event_name":"UserPromptSubmit","session_id":"%s","prompt":"go on","transcript_path":"%s"}' "$1" "$TRANSCRIPT" | "$PY" "$DELTA"; }
 edited() { printf '{"hook_event_name":"PostToolUse","session_id":"%s","tool_name":"Edit","tool_input":{"file_path":"%s"},"transcript_path":"%s"}' "$1" "$2" "$TRANSCRIPT" | "$PY" "$ANNOUNCE"; }
 ran()    { printf '{"hook_event_name":"PreToolUse","session_id":"%s","tool_name":"Bash","tool_input":{"command":"%s"},"transcript_path":"%s"}' "$1" "$2" "$TRANSCRIPT" | "$PY" "$ANNOUNCE"; }
@@ -129,6 +162,33 @@ want:
 $want"
 [[ "$got" != *delivery_method* ]] || fail "entry-block" "a default was announced"
 pass "entry-block"
+
+# (2b) THE COLD START. A session id the store has never seen, which is every
+#      session at the moment its SessionStart hook runs — the indexer builds
+#      that row from a transcript, and this one has no lines yet. The agent
+#      layer is the only layer that can hold anything at this moment, so if
+#      the hook cannot reach it there is no floor at all. It reaches it
+#      through the cwd; resolving it through the session row cannot work here
+#      by construction.
+SEAT="$AGENTS/probeagent/chat"
+seed_agent probeagent use_subagents on
+got="$(ctx "$(entry cold-$$ "$SEAT")")"
+[[ "$got" == *"use_subagents=on"* ]] || fail "cold-start-floor" "an unindexed session got no agent layer: '$got'"
+[[ -z "$(entry cold-$$ "$TMP")" ]] || fail "cold-start-floor" "a cwd under no agent still resolved one"
+pass "cold-start-floor"
+
+# (2c) …and the resume path does not regress for it. Once the row exists, a
+#      value set ON THE SESSION still shadows the agent's for that key, which
+#      is the whole point of passing the session id first.
+S=resume-$$
+index_session "$S" probeagent
+seed_agent probeagent delivery_method distribute
+seed "$S" delivery_method build
+got="$(ctx "$(entry $S "$SEAT")")"
+[[ "$got" == *"delivery_method=build"* ]] || fail "resume-precedence" "the agent layer shadowed the session: $got"
+[[ "$got" == *"use_subagents=on"* ]] || fail "resume-precedence" "the agent layer was dropped entirely: $got"
+seed_agent probeagent delivery_method --
+pass "resume-precedence"
 
 # (3) A flip between prompts is one line; the prompt after it is silent. The
 #     first prompt of a session never deltas — entry has just said it.

@@ -22,6 +22,7 @@ import os
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import attention  # noqa: E402 — sibling hook, path set above
 
@@ -75,6 +76,56 @@ def path_rules():
         spec.loader.exec_module(module)
         _rules = module
     return _rules
+
+
+def review_config() -> dict:
+    """The host's review config, read where session-start-inject.py reads it.
+
+    Only `agent_root` is wanted, and only so the seat this resolves is the seat
+    the timeline injector resolves from the same cwd: two SessionStart hooks
+    naming different agents for one directory would put an agent's settings and
+    an agent's history in the same block under different owners.
+    """
+    path = Path(os.environ.get(
+        "JSTACK_REVIEW_CONFIG",
+        str(Path.home() / ".claude" / "jstack" / "review.json"))).expanduser()
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def seat_agent(cwd: str) -> str:
+    """The agent id owning `cwd`, in the casing the store's `agent_id` holds.
+
+    THE AGENT LAYER IS UNREACHABLE WITHOUT THIS. `resolve` discovers the agent
+    by looking the session up in `sessions`, and the indexer builds that row
+    from a transcript — which at SessionStart has no lines written yet. So a
+    cold start resolves no agent, every setting falls back to its default, and
+    `state_line` is empty precisely for the settings entry exists to carry: an
+    agent-level value is the only kind that CAN be in force before a session
+    runs, since nobody can set a session value on a session that does not
+    exist. Passing it explicitly is what makes entry a floor instead of a
+    resume feature.
+
+    `root.py` answers it because that file is stdlib-only by its own contract,
+    imports nothing from the package, and holds the single definition of what
+    an agent is — the one `session-start-inject.py` already defers to.
+    """
+    if not cwd:
+        return ""
+    import root  # noqa: PLC0415 — sibling, and only this path needs it
+    import repo_seat  # noqa: PLC0415
+    cfg = review_config()
+    base = root.agents_dir(cfg)
+    agent, _ = root.seat_of(Path(cwd), cfg, base)
+    if not agent:
+        # An IDE fixes cwd to the checkout, which is nowhere under the agents
+        # dir; the registry is the only thing that knows who owns a repo.
+        agent, _ = repo_seat.seat_for(
+            Path(cwd), base, repo_seat.registry_path_for(cfg, base))
+    return (agent or "").lower()
 
 
 def moved(env, session_id: str) -> dict[str, str]:
