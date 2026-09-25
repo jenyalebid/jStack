@@ -11,7 +11,7 @@
 # The ref under test is baked in (JSTACK_VERIFY_REF, default dev): `vm term`
 # carries none of this shell's environment, and a clone of `main` carries no
 # harness. The Hub is installed from that ref, so the CLI, the API and the
-# hooks all read the one store its embed marker declares.
+# hooks all read the one store that Hub serves.
 . "$(dirname "$0")/../../lib/common.sh"
 
 guest_from "${JSTACK_VERIFY_AUTHED_BASE:-jstack-base-authed}" vfy-plugin-plan-gate

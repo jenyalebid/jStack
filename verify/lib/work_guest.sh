@@ -21,8 +21,9 @@ export PATH="$HOME/.local/bin:$PATH"
 # Every switch that would make a journey prove the opposite of its claim, and
 # every override that would steer the hooks somewhere other than where they
 # look on their own. `claude` inherits this shell, so unsetting here is the
-# whole guarantee: the hooks must find the Hub's store through its embed
-# marker and write markers where the host reads them.
+# whole guarantee: the hooks must find the Hub's store on their own — the embed
+# marker when a server mounts the host, the host's default when the Hub stands
+# alone — and write markers where the host reads them.
 unset JSTACK_PLAN_GATE_DISABLED JSTACK_ENV_INJECT_DISABLED JREMOTE_STATE_DIR \
       JSTACK_CACHE_ROOT JSTACK_RULE_REINJECT_BYTES JSTACK_TASKS_DIR
 MARKS=/tmp/jstack-rule-cache   # markers.DEFAULT_CACHE_ROOT, with the override unset
@@ -37,9 +38,27 @@ hub_at_ref() {
     (cd ~/jStack && git log -1 --format='  head: %h %s')
     [ -f "$SEAT/CLAUDE.md" ] || bail "the installer made no Alpha seat at $SEAT"
 
-    STATE="$(python3 -c 'import json,pathlib;print(json.load(open(pathlib.Path.home()/".local/state/jremote/embedded.json"))["state_dir"])' 2>/dev/null)"
-    [ -n "$STATE" ] || bail "no embed marker — nothing a hook runs can find the Hub's store"
-    say "OK the Hub declares its state directory: $STATE"
+    # The store a hook will read, resolved the way a hook resolves it
+    # (attention.state_dir, then _env.host_environment): the embed marker when
+    # another server mounts the host, else the host's own default. A sealed Hub
+    # installed the README way is not embedded in anything and writes no
+    # marker — `embed.declare()` refuses to on a standalone profile — so the
+    # marker alone is not the test. What the Hub serves is in its service
+    # settings; the gate is that both name one directory.
+    HOOK_STATE="$(python3 - <<'PY'
+import json, pathlib
+home = pathlib.Path.home()
+try:
+    declared = json.load(open(home / ".local/state/jremote/embedded.json")).get("state_dir") or ""
+except (OSError, ValueError):
+    declared = ""
+print(declared or home / ".local/state/jremote")
+PY
+)"
+    STATE="$(python3 -c 'import json,pathlib;print(json.load(open(pathlib.Path.home()/".local/state/jremote/service-settings.json"))["environment"]["JREMOTE_STATE_DIR"])' 2>/dev/null)"
+    [ -n "$STATE" ] || bail "no service settings — the Hub does not say which store it serves"
+    [ "$HOOK_STATE" = "$STATE" ] || bail "the hooks would read $HOOK_STATE but the Hub serves $STATE"
+    say "OK the hooks read the store the Hub serves: $STATE"
     export JSTACK_TOKEN="$(jstack-host token 2>/dev/null)"
     [ -n "$JSTACK_TOKEN" ] || bail "jstack-host token printed nothing"
     probe api GET /host >/dev/null || bail "the Hub's API refused its own token"
