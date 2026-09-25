@@ -1,7 +1,7 @@
 #!/bin/bash
 # WHAT: a real session plans the demo project, the gate refuses what the work has not earned, closes on what it has, and every plan hook leaves its mark
 # TIME: ~40m
-# GUEST: derived from $JSTACK_VERIFY_AUTHED_BASE (a guest with Claude Code signed in)
+# GUEST: derived from $JSTACK_VERIFY_AUTHED_BASE, signed in with the lab token (#140)
 #
 # The project is verify/fixtures/plan-demo: two stages whose Verify: lines run
 # its tests, stubs that fail them, and a stage 2 gate that also re-runs stage
@@ -20,6 +20,7 @@ LIB="$(dirname "$0")/../../lib"
 vm cp "$GUEST" "$LIB/work_probe.py" /Users/admin/work_probe.py >/dev/null
 vm cp "$GUEST" "$LIB/work_guest.sh" /Users/admin/work_guest.sh >/dev/null
 vm cp "$GUEST" "$(dirname "$0")/../../fixtures/plan-demo" /Users/admin/plan-demo >/dev/null
+guest_signin
 
 cat > "$RECEIPTS/payload.sh" <<EOF
 #!/bin/bash

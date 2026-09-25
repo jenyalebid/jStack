@@ -1,7 +1,7 @@
 #!/bin/bash
 # WHAT: a setting POSTed to the Hub reaches a real session — session, agent, precedence, a mid-session flip, the markers
 # TIME: ~25m
-# GUEST: derived from $JSTACK_VERIFY_AUTHED_BASE (a guest with Claude Code signed in)
+# GUEST: derived from $JSTACK_VERIFY_AUTHED_BASE, signed in with the lab token (#140)
 #
 # The environment is three typed settings the hooks inject as text. So the
 # proof of "it reached the session" is the session saying back a line only the
@@ -20,6 +20,7 @@ guest_from "${JSTACK_VERIFY_AUTHED_BASE:-jstack-base-authed}" vfy-hub-work-env
 LIB="$(dirname "$0")/../../lib"
 vm cp "$GUEST" "$LIB/work_probe.py" /Users/admin/work_probe.py >/dev/null
 vm cp "$GUEST" "$LIB/work_guest.sh" /Users/admin/work_guest.sh >/dev/null
+guest_signin
 
 cat > "$RECEIPTS/payload.sh" <<EOF
 #!/bin/bash
