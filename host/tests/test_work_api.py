@@ -22,31 +22,61 @@ having answered 400, and the token boundary these routes share with every
 other one in the router.
 """
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
 from jstack_host.server import create_app
 
 app = create_app()
-from jstack_host import auth, docfence, environment as env, plans, router, store
+from jstack_host import (auth, docfence, environment as env, hostenv, plans,
+                         router, store)
 from jstack_host.store import SessionStore
 
 BASE = "/api/jremote/v1"
 SID = "3eee625d-6976-482a-8709-b8e7ea4d6526"
 OTHER_SID = "9f1c1d2e-4a5b-4c6d-8e9f-0a1b2c3d4e5f"
+#: The id `/agents` hands out for an agent with a chat seat — what a client
+#: holds when it calls the agent env routes. The store keys on the base.
 AGENT = "ops-chat"
 
 
+def _index_agent(seat: Path) -> str:
+    """The `agent_id` the session indexer writes for a transcript under `seat`
+    — `store._fresh_state` takes it from `project_dir_to_agent` on Claude's
+    project-dir encoding, so this asks the same function with the same input."""
+    parsed = hostenv.project_dir_to_agent(str(seat).replace("/", "-"))
+    assert parsed, f"the indexer would not attribute {seat} to any agent"
+    return parsed[0]
+
+
 @pytest.fixture(autouse=True)
-def work_store(tmp_path, monkeypatch):
+def agent_tree(tmp_path, monkeypatch):
+    """`Ops` with a chat seat, under a profile rooted here — the shape `/agents`
+    scopes to `ops-chat`. Resolved, because `project_dir_to_agent` matches the
+    encoded root as a string and macOS tmp paths sit behind `/private`."""
+    root = (tmp_path / "Agents").resolve()
+    (root / "Ops" / "chat").mkdir(parents=True)
+    (root / "Ops" / "CLAUDE.md").write_text("# Ops\n")
+    (root / "Ops" / "chat" / "CLAUDE.md").write_text("# Ops · chat\n")
+    monkeypatch.setattr(hostenv, "_profile", hostenv.DefaultProfile(root))
+    return root
+
+
+@pytest.fixture(autouse=True)
+def work_store(tmp_path, monkeypatch, agent_tree):
     """A store of this test's own, through the package's own injection point —
     the same seam `test_environment` uses, which conftest's isolation defers to.
+    The session row carries what the real indexer writes for a transcript in
+    the Ops chat seat, not the roster id: a fixture holding `ops-chat` there
+    agreed with the route's own write and hid that no real session reads it.
     """
     monkeypatch.setattr(store, "_store",
                         SessionStore(db_path=tmp_path / "work.sqlite"))
     with store.get_store().conn() as db:
         db.execute("INSERT INTO sessions (session_id, agent_id) VALUES (?,?)",
-                   (SID, AGENT))
+                   (SID, _index_agent(agent_tree / "Ops" / "chat")))
 
 
 @pytest.fixture
@@ -136,6 +166,40 @@ def test_an_agent_value_reaches_the_sessions_of_that_agent(client):
     # clear and one it does not.
     row = _by_key(client.get(f"{BASE}/sessions/{SID}/env").json())["use_subagents"]
     assert (row["value"], row["source"]) == ("on", "agent")
+
+
+def test_the_roster_id_writes_the_layer_a_real_session_of_that_seat_reads(
+        client, agent_tree):
+    """The id a client actually holds — the one `/agents` served — must land
+    where both readers look: the indexed session (`resolve` walks `sessions`)
+    and the cold start (the entry hook passes the seat's agent explicitly,
+    before any row exists). Keyed on `alpha-chat` verbatim, the write answered
+    200, read back through this same route, and reached no session at all.
+    """
+    roster = client.get(f"{BASE}/agents").json()["agents"]
+    scoped = next(a["agent_id"] for a in roster if a["base"] == "ops")
+    assert scoped == "ops-chat", roster
+
+    posted = client.post(f"{BASE}/agents/{scoped}/env",
+                         json={"key": "delivery_method", "value": "testflight"})
+    assert posted.status_code == 200, posted.text
+
+    assert env.resolve(SID)["delivery_method"] == ("testflight", "agent")
+    cold = "0b7c2a44-5f0e-4d1a-9a55-6f7e3c2b1d00"
+    seat_agent = _index_agent(agent_tree / "Ops" / "chat")
+    assert env.resolve(cold, seat_agent)["delivery_method"] == ("testflight", "agent")
+    # Read back through the base id too: one row, whichever spelling asks.
+    row = _by_key(client.get(f"{BASE}/agents/ops/env").json())["delivery_method"]
+    assert (row["value"], row["source"]) == ("testflight", "agent")
+
+
+def test_an_agent_nobody_has_is_a_404_and_stores_nothing(client):
+    for method in ("get", "post"):
+        r = client.request(method.upper(), f"{BASE}/agents/nobody-chat/env",
+                           json={"key": "sim_verify", "value": "off"})
+        assert r.status_code == 404, (method, r.text)
+    with store.get_store().conn() as db:
+        assert db.execute("SELECT count(*) FROM agent_env").fetchone()[0] == 0
 
 
 def test_an_agent_layer_reads_its_own_rows_and_nothing_elses(client):

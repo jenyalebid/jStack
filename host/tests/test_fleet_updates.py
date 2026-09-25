@@ -1,4 +1,7 @@
 """Release trust, durable jobs, authority, and restart recovery contracts."""
+# NOTE — destructive install/uninstall paths: never run these for real on the home
+# machine (the production Hub). Every launchd / JStackHub / sudo boundary must be
+# stubbed; conftest fails the test if one is reached. Real proofs run in lab guests.
 import base64
 import hashlib
 import io

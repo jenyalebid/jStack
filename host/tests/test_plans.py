@@ -170,6 +170,40 @@ def test_run_verify_failing_records_the_exit_code_and_the_gate_stays_shut():
     assert plans.stages(plan_id)[0]["status"] == "running"
 
 
+def test_run_verify_grades_the_plans_repo_not_the_callers_directory(
+        tmp_path, monkeypatch):
+    """A `Verify:` line is written relative to the tree the plan was authored
+    in. The caller stands somewhere else on purpose: before this, the relative
+    check ran in the caller's directory and failed a stage whose repo passes."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "check.sh").write_text("#!/bin/sh\necho repo-green\n")
+    (repo / "check.sh").chmod(0o755)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    plan_id = plans.open_plan("verified", repo=str(repo))
+    stage_id = _only_stage(plan_id, kind="command", spec="./check.sh")
+    proof = plans.run_verify(stage_id, timeout=30)
+    assert proof["ok"] == 1, proof["output"]
+    assert "repo-green" in proof["output"]
+
+    # An explicit cwd still wins: the flag exists for a checkout moved since.
+    moved = plans.run_verify(stage_id, cwd=str(elsewhere), timeout=30)
+    assert moved["ok"] == 0
+
+
+def test_run_verify_refuses_a_repo_that_is_gone_and_files_nothing(tmp_path):
+    """Falling back to the caller's directory would grade the wrong tree and
+    file that grade as this stage's evidence."""
+    plan_id = plans.open_plan("verified", repo=str(tmp_path / "gone"))
+    stage_id = _only_stage(plan_id, kind="command", spec="true")
+    with pytest.raises(ValueError, match="not a directory"):
+        plans.run_verify(stage_id, timeout=30)
+    assert plans.proofs(stage_id) == []
+
+
 def test_run_verify_refuses_a_kind_it_cannot_run():
     """No invented proof for a kind nobody can execute."""
     plan_id = plans.open_plan("verified")

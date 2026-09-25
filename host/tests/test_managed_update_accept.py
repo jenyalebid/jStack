@@ -998,7 +998,7 @@ def test_start_returns_only_once_the_guest_api_answers(runner):
     guest, calls = _booting_guest(runner, ["up 401 27s"])
     assert guest.start() == "acc-leaf1 up at 192.168.2.54"
     assert [argv[1] for argv in calls] == ["gui", "ssh"]
-    assert "seq 1 180" in calls[1][3]
+    assert "-lt 180" in calls[1][3], "the wait does not carry the boot budget"
 
 
 def test_start_names_a_host_api_that_never_comes_up(runner):
@@ -1377,3 +1377,444 @@ def test_a_guest_without_a_host_is_left_alone(runner):
     fleet = build(runner, scripted, fresh="fresh")
     assert runner.lab_guest(fleet.fresh) is False
     assert scripted.kicked == []
+
+
+def test_a_guest_that_stops_answering_names_itself_instead_of_a_traceback(runner):
+    """`subprocess.TimeoutExpired` out of `vm.sh` ended a whole acceptance in a
+    stack trace with no guest in it — before the first receipt was written."""
+    def run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 0))
+
+    hub = runner.Guest("acc-hub", Path("/bin/vm.sh"), run=run)
+    with pytest.raises(runner.AcceptanceFailure, match="acc-hub: vm.sh ssh did not return"):
+        hub.sh("true", timeout=7)
+
+
+def test_the_api_wait_gives_the_guest_the_seconds_it_claims_to(runner):
+    """The wait loop spends a curl timeout per turn as well as its sleep, so an
+    iteration count is not a second count: counting to 180 ran the guest past
+    the ssh budget, which killed a Mac that was still coming up."""
+    seen = {}
+    def run(argv, **kwargs):
+        seen["script"], seen["timeout"] = argv[-1], kwargs["timeout"]
+        return subprocess.CompletedProcess(argv, 0, "up 200 31s", "")
+
+    guest = runner.Guest("acc-hub", Path("/bin/vm.sh"), run=run)
+    assert guest.await_api(timeout=180) == "up 200 31s"
+    assert "seq 1 180" not in seen["script"], "still counting turns instead of seconds"
+    assert "-lt 180" in seen["script"], "the deadline is not the timeout it was given"
+    assert "$(date +%s) - start" in seen["script"], "the loop does not read the clock"
+    # Room for the in-flight curl and the ssh handshake on either side of it.
+    assert seen["timeout"] >= 180 + 60
+
+
+# ── A local hub: this Mac in the hub role, both VM slots for leaves
+
+LOCAL_PLAN = {"disposable": True, "vm_tool": "/bin/vm.sh", "vm_slots": 2,
+              "hub": "localhost", "leaves": ["leaf-a", "leaf-b"]}
+
+
+def _local_main(runner, tmp_path, monkeypatch, *only):
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(LOCAL_PLAN))
+    argv = ["accept", "--ref", "dev", "--receipts", str(tmp_path / "r"), "--plan", str(plan)]
+    monkeypatch.setattr("sys.argv", argv + (["--only", *only] if only else []))
+
+
+@pytest.mark.parametrize("only,named", [
+    (("shell_flip", "off_network"), "off_network"),
+    ((), "fleet"),
+])
+def test_a_local_hub_refuses_a_destructive_journey_before_anything_boots(
+        runner, tmp_path, monkeypatch, capsys, only, named):
+    """The default run and an explicit one alike: a journey outside
+    HOST_HUB_SAFE is a refusal to start, not a skip written after the start."""
+    scripted = SlotCountingFleet()
+    monkeypatch.setattr(runner.subprocess, "run", scripted)
+    monkeypatch.setattr(runner, "Build", lambda *a, **k: pytest.fail("resolved a build first"))
+    monkeypatch.setattr(runner.LocalHub, "start", lambda self: pytest.fail("touched the hub"))
+    _local_main(runner, tmp_path, monkeypatch, *only)
+    with pytest.raises(SystemExit) as exit_code:
+        runner.main()
+    assert exit_code.value.code == 2
+    said = capsys.readouterr().err
+    assert named in said and "real machine" in said
+    assert "shell_flip would" not in said, "a safe journey was named as the offender"
+    assert not scripted.calls, "a guest was touched before the refusal"
+    assert not (tmp_path / "r").exists(), "a refusal wrote receipts"
+
+
+def test_localhost_is_never_a_leaf_or_the_pristine_guest(runner):
+    for plan in ({**LOCAL_PLAN, "hub": "acc-hub", "leaves": ["localhost"]},
+                 {**LOCAL_PLAN, "hub": "acc-hub", "fresh": "localhost"}):
+        with pytest.raises(runner.AcceptanceFailure, match="only be the hub"):
+            runner.Fleet(plan, run=SlotCountingFleet())
+
+
+def test_a_local_hub_takes_no_slot(runner, monkeypatch):
+    scripted = SlotCountingFleet()
+    fleet = runner.Fleet(LOCAL_PLAN, run=scripted)
+    assert isinstance(fleet.hub, runner.LocalHub)
+    monkeypatch.setattr(fleet.hub, "start", lambda: "localhost: answering")
+    monkeypatch.setattr(fleet, "prepare", lambda *guests: None)
+    monkeypatch.setattr(runner, "reach", lambda fleet, guest: None)
+    fleet.cast(*runner.CAST["shell_flip"](fleet))
+    assert scripted.booted == {"leaf-a", "leaf-b"} and scripted.peak == 2
+    assert not any("localhost" in call for call in scripted.calls), \
+        "vm.sh was asked to act on this Mac"
+    # A third VM still does not fit: the exemption is the local hub's alone.
+    with pytest.raises(runner.AcceptanceFailure, match="2 slots"):
+        fleet.cast(fleet.hub, *fleet.leaves, runner.Guest("leaf-c", Path("/bin/vm.sh"),
+                                                          run=scripted))
+
+
+def test_resetting_the_local_hub_raises_past_any_journey(runner):
+    touched = []
+    hub = runner.LocalHub(run=lambda *a, **k: touched.append(a))
+    with pytest.raises(runner.RealMachineRefusal, match="refusing to reset localhost"):
+        hub.reset()
+    # `Run.journey` turns an Exception into a failed receipt and carries on;
+    # this must end the run instead.
+    assert not issubclass(runner.RealMachineRefusal, Exception)
+    assert not touched
+    with pytest.raises(runner.AcceptanceFailure, match="not a VM"):
+        hub.vm("reset", "localhost")
+    with pytest.raises(runner.AcceptanceFailure, match="disposable fixtures only"):
+        hub.tool_call("revoke", "--machine", "m")
+
+
+def test_a_local_hub_off_the_commit_is_refused_and_never_updated(
+        runner, subject, tmp_path, monkeypatch, capsys):
+    scripted = SlotCountingFleet()
+    fleet = runner.Fleet(LOCAL_PLAN, run=scripted)
+    touched = []
+    hub = fleet.hub
+    monkeypatch.setattr(hub, "start", lambda: "localhost: answering")
+    monkeypatch.setattr(hub, "installed", lambda: {"sha": PRIOR_SHA, "dirty": False,
+                                                   "build": PRIOR})
+    monkeypatch.setattr(hub, "served", lambda: {"build": PRIOR, "client": "70",
+                                                "sha": PRIOR_SHA})
+    for name in ("sh", "queue", "call", "request", "copy"):
+        monkeypatch.setattr(hub, name, lambda *a, _name=name, **k: touched.append(_name))
+    monkeypatch.setattr(runner, "Fleet", lambda *a, **k: fleet)
+    monkeypatch.setattr(runner, "Build", lambda *a, **k: subject)
+    _local_main(runner, tmp_path, monkeypatch, "shell_flip")
+    with pytest.raises(SystemExit) as exit_code:
+        runner.main()
+    assert exit_code.value.code == 2
+    said = capsys.readouterr().err
+    assert PRIOR_SHA in said and "never updated" in said
+    assert not touched, f"the runner acted on this Mac: {touched}"
+    assert not scripted.calls, "a leaf was booted for a run that cannot start"
+    # And the door that would have moved it is shut on its own account.
+    with pytest.raises(runner.AcceptanceFailure, match="refusing to build"):
+        fleet.offer(subject)
+    assert not touched
+
+
+def test_a_local_hub_on_the_commit_is_held_to_it_as_it_stands(runner, subject, monkeypatch):
+    fleet = runner.Fleet(LOCAL_PLAN, run=SlotCountingFleet())
+    monkeypatch.setattr(fleet.hub, "installed", lambda: {"sha": HEAD_SHA, "dirty": False,
+                                                         "build": CANDIDATE})
+    monkeypatch.setattr(fleet.hub, "served", lambda: {"build": CANDIDATE, "client": "71",
+                                                      "sha": HEAD_SHA})
+    assert runner.local_identity(fleet, subject) == {"build": CANDIDATE, "sha": HEAD_SHA}
+    assert fleet.build is subject and fleet.served["dev"] == "71"
+    monkeypatch.setattr(fleet.hub, "installed", lambda: {"sha": HEAD_SHA, "dirty": True,
+                                                         "build": CANDIDATE})
+    with pytest.raises(runner.AcceptanceFailure, match="modified"):
+        runner.local_identity(fleet, subject)
+
+
+def test_the_local_hub_finds_the_state_dir_its_host_declares(runner, tmp_path):
+    declared = tmp_path / "dashboard-state"
+    (declared / "updates").mkdir(parents=True)
+    (declared / "updates/config.json").write_text(json.dumps({"local_url": "http://127.0.0.1:9090"}))
+    marker = tmp_path / ".local/state/jremote"
+    marker.mkdir(parents=True)
+    (marker / "embedded.json").write_text(json.dumps({"state_dir": str(declared)}))
+    assert runner.LocalHub(home=tmp_path).config()["local_url"] == "http://127.0.0.1:9090"
+    (marker / "embedded.json").unlink()
+    with pytest.raises(runner.AcceptanceFailure, match="no readable updater config"):
+        runner.LocalHub(home=tmp_path).config()
+
+
+def test_shell_flip_on_a_local_hub_drives_the_hub_s_own_route(runner, monkeypatch):
+    flips = []
+    hub = runner.LocalHub(run=lambda *a, **k: None)
+
+    def call(path, body=None, **kwargs):
+        flips.append((path, body))
+        return {"status": 200, "body": json.dumps(
+            {"allowed": body["allowed"], "steps": [{"step": "refresh", "ok": True}]})}
+
+    monkeypatch.setattr(hub, "call", call)
+    leaf_a = SimpleNamespace(name="leaf-a")
+    leaf_b = SimpleNamespace(name="leaf-b")
+    fleet = SimpleNamespace(hub=hub, leaves=[leaf_a, leaf_b],
+                            machine=lambda g: "machine-" + g.name)
+    driven = {}
+    monkeypatch.setattr(runner, "shell_alias", lambda f, m: ({}, "leaf-b-alias"))
+    monkeypatch.setattr(runner, "flip_through_lab", lambda *a: pytest.fail("used the lab"))
+
+    def pair(journey, a, b, machine_a, machine_b, alias, flip):
+        driven.update(alias=alias, on=flip(True), off=flip(False))
+
+    monkeypatch.setattr(runner, "flip_pair", pair)
+    notes = []
+    runner.shell_flip(SimpleNamespace(note=notes.append), fleet, None)
+    assert flips == [("/hosts/machine-leaf-b/shell", {"src": "machine-leaf-a", "allowed": True}),
+                     ("/hosts/machine-leaf-b/shell", {"src": "machine-leaf-a", "allowed": False})]
+    assert driven["alias"] == "leaf-b-alias"
+    assert any("real Hub on localhost" in note for note in notes), "the receipt names no hub"
+
+
+class DelegationFleet:
+    """A hub and a leaf answering the delegation journey, each defect switchable."""
+
+    def __init__(self, *, remint="proj-1", admin_status=403, after_withdrawal=403,
+                 rows=None, non_leaf_status=403, roster=()):
+        self.remint, self.admin_status = remint, admin_status
+        self.after_withdrawal, self.non_leaf_status = after_withdrawal, non_leaf_status
+        self.rows = rows if rows is not None else ["proj-1"]
+        self.roster = list(roster)
+        self.minted = 0
+        self.revoked: list[str] = []
+        self.hub = SimpleNamespace(name="localhost", call=self.hub_call, request=self.hub_request)
+        self.leaf = SimpleNamespace(name="leaf-a", request=self.leaf_request, sh=self.leaf_sh)
+        self.leaves = [self.leaf]
+
+    def machine(self, guest):
+        return "machine-leaf-a"
+
+    @staticmethod
+    def answer(status, body):
+        return {"status": status, "body": json.dumps(body)}
+
+    def hub_call(self, path, body=None, **kwargs):
+        if path == "/devices":
+            return self.answer(200, {"device": {"id": "dev-1"}, "token": "jr1.dev-1.secret"})
+        if path.endswith("/revoke"):
+            self.revoked.append(path.split("/")[2])
+            return self.answer(200, {"revoked": path.split("/")[2]})
+        raise AssertionError(path)
+
+    def hub_request(self, url, token, body=None, **kwargs):
+        if url == "/hosts/machine-leaf-a/grant":
+            self.minted += 1
+            projection = "proj-1" if self.minted == 1 else self.remint
+            return self.answer(200, {"device": {"id": projection}, "token": "jr1." + projection,
+                                     "address": "10.66.0.7", "port": 9090})
+        if url == "http://10.66.0.7:9090/api/jremote/v1/host":
+            if self.revoked:
+                return self.answer(self.after_withdrawal, {"detail": "no longer authorized"})
+            return self.answer(200, {"host_id": "machine-leaf-a"})
+        raise AssertionError(url)
+
+    def leaf_request(self, path, token, body=None, **kwargs):
+        if path == "/devices" and body is None:
+            return self.answer(200, {"devices": self.roster})
+        return self.answer(self.admin_status, {"detail": "hub menu bar"})
+
+    def leaf_sh(self, command, **kwargs):
+        if "authority_device" in command:
+            return json.dumps(self.rows)
+        if "MINT_PATH" in command:
+            return json.dumps({"held": True, "parent": "machine-hub", "status": self.non_leaf_status,
+                               "url": "http://10.66.0.1:9090/api/jremote/v1/delegate/access",
+                               "body": json.dumps({"detail": "only a managed machine"})})
+        raise AssertionError(command)
+
+
+def _delegate(runner, tmp_path, scripted):
+    run = acceptance.Run(tmp_path / "receipts", IDENTITY)
+    with run.journey("delegate_leaf") as journey:
+        runner.delegate_leaf(journey, scripted, None)
+    receipt = json.loads((tmp_path / "receipts/delegate_leaf.json").read_text())
+    return run.results["delegate_leaf"], receipt
+
+
+def test_a_projection_that_holds_every_line_passes(runner, tmp_path):
+    scripted = DelegationFleet()
+    result, receipt = _delegate(runner, tmp_path, scripted)
+    assert result == "passed", receipt["detail"]
+    assert receipt["observed"] == sorted(acceptance.REQUIRED["delegate_leaf"])
+    assert scripted.revoked == ["dev-1"], "the hub device outlived its journey"
+
+
+@pytest.mark.parametrize("defect,detail", [
+    ({"remint": "proj-2"}, "a second device"),
+    ({"rows": ["proj-1", "proj-9"]}, "not the one projection"),
+    ({"admin_status": 404}, "let mint a device"),
+    ({"admin_status": 200}, "let mint a device"),
+    ({"roster": [{"id": "legacy"}]}, "read leaf-a's device roster"),
+    ({"after_withdrawal": 200}, "still honours the projection"),
+    ({"non_leaf_status": 401}, "answered a live grant with 401"),
+])
+def test_a_projection_that_breaks_a_line_fails_by_name(runner, tmp_path, defect, detail):
+    scripted = DelegationFleet(**defect)
+    result, receipt = _delegate(runner, tmp_path, scripted)
+    assert result == "failed"
+    assert detail in receipt["detail"]
+    # Withdrawn exactly once however the journey ended: a live test device
+    # left on a hub that outlives the run is the thing the finally exists for.
+    assert scripted.revoked == ["dev-1"]
+
+
+def test_delegate_leaf_is_ordered_on_the_provisioned_adoption(runner):
+    order = list(runner.JOURNEYS)
+    assert order.index("shell_adopt") < order.index("delegate_leaf") < order.index("upgrade_shell")
+    assert "delegate_leaf" in runner.HOST_HUB_SAFE
+    fleet = SimpleNamespace(hub="hub", leaves=["a", "b"], fresh=None)
+    assert runner.CAST["delegate_leaf"](fleet) == ("hub", "a")
+
+
+def test_a_local_hub_mints_the_adoption_code_at_its_own_console(runner, monkeypatch):
+    """The lab's joiner script ssh's into the hub as admin and runs the CLI
+    there. This Mac has no jstack-host launcher and grows no authorized key for
+    a disposable VM, so joining it has to go through the console route the
+    hub's own menu bar spends — and the guest spends the code it hands back."""
+    fleet = runner.Fleet({**LOCAL_PLAN, "hub_address": "192.168.2.1",
+                          "adopt_command": "/bin/bash ~/adopt-to-hub.sh acc-hub.local"},
+                         run=SlotCountingFleet())
+    minted, ran = [], []
+    monkeypatch.setattr(fleet.hub, "config", lambda: {"local_url": "http://127.0.0.1:9090"})
+    monkeypatch.setattr(fleet.hub, "call", lambda path, body=None, **kw: minted.append((path, body))
+                        or {"status": 200, "body": json.dumps({"code": "LAB-4242"})})
+    guest = fleet.leaves[0]
+    monkeypatch.setattr(guest, "sh", lambda command, **kw: ran.append(command) or "")
+    runner.join(fleet, guest)
+    assert minted == [("/enrolment/codes",
+                       {"name": "Update lab leaf-a", "kind": "host"})], \
+        "the hub did not mint a host code at its console"
+    attach = [c for c in ran if "attach" in c]
+    assert len(attach) == 1 and "LAB-4242" in attach[0], f"the guest spent no code: {ran}"
+    assert "--parent http://192.168.2.1:9090" in attach[0], \
+        f"the guest was not pointed at this Mac's Hub: {attach[0]}"
+    assert not any("adopt-to-hub" in c for c in ran), \
+        "the lab's ssh-into-the-hub joiner ran against this Mac"
+
+
+def test_joining_a_vm_hub_still_runs_the_plan_s_joiner(runner, monkeypatch):
+    fleet = runner.Fleet({**LOCAL_PLAN, "hub": "acc-hub",
+                          "adopt_command": "/bin/bash ~/adopt-to-hub.sh acc-hub.local"},
+                         run=SlotCountingFleet())
+    ran = []
+    monkeypatch.setattr(fleet.leaves[0], "sh", lambda command, **kw: ran.append(command) or "")
+    runner.join(fleet, fleet.leaves[0])
+    assert ran == ["/bin/bash ~/adopt-to-hub.sh acc-hub.local"]
+
+
+def test_a_local_hub_without_an_address_asks_the_guest_for_its_gateway(runner, monkeypatch):
+    fleet = runner.Fleet(LOCAL_PLAN, run=SlotCountingFleet())
+    monkeypatch.setattr(fleet.hub, "config", lambda: {"local_url": "http://127.0.0.1:9091"})
+    guest = fleet.leaves[0]
+    monkeypatch.setattr(guest, "sh", lambda command, **kw: "192.168.2.1\n")
+    assert runner.hub_parent_url(fleet, guest) == "http://192.168.2.1:9091"
+
+
+class SourceBuiltFleet(KeyedFleet):
+    """A leaf whose Hub it compiled itself: the one-file installer leaves that
+    Hub alone, so an install over it moves nothing until the guest is reset."""
+
+    def __init__(self, *, sticky=False, **kwargs):
+        super().__init__(**kwargs)
+        self.source_built = {"leaf-a"}
+        self.sticky = sticky  # the install lands nothing, whatever was tried
+        self.reset_names: list[str] = []
+
+    def __call__(self, argv, **kwargs):
+        _, action, name, *rest = argv
+        command = rest[0] if rest else ""
+        if action == "reset":
+            self.reset_names.append(name)
+            self.source_built.discard(name)
+            self.keys[name] = ""
+        if action == "ssh" and "release-identity.json" in command:
+            return subprocess.CompletedProcess(
+                argv, 0, "source-build\n" if name in self.source_built else "\n", "")
+        if action == "ssh" and "jremote/host-id" in command:
+            return subprocess.CompletedProcess(argv, 0, f"machine-{name}\n", "")
+        if action == "ssh" and command.startswith("for p in"):
+            return subprocess.CompletedProcess(argv, 0, "\n", "")  # pristine, or nothing listed
+        if self.sticky and action == "ssh" and "install.sh --yes" in command:
+            self.installed.append(name)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return super().__call__(argv, **kwargs)
+
+
+def _source_built(runner, monkeypatch, tmp_path, earlier, subject, **kwargs):
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    monkeypatch.setattr(runner, "KEY_PATIENCE", 0)
+    scripted = SourceBuiltFleet(release=CANDIDATE, sha="3" * 40, **kwargs)
+    fleet = build(runner, scripted, prior=earlier,
+                  adopt_command="/bin/bash ~/adopt-to-hub.sh hub.local")
+    fleet.build = subject
+    monkeypatch.setattr(fleet, "offer", lambda b: pytest.fail("the hub built"))
+    return scripted, fleet
+
+
+def test_a_leaf_whose_hub_it_built_itself_goes_back_to_the_base_image_before_the_move(
+        runner, subject, earlier, tmp_path, monkeypatch):
+    """Run 22:21 on acc-leaf1: the leaf ran a Hub a VM hub had built and served
+    it, main's installer said "Hub already installed and answering" and left
+    it, and five journeys measured a leaf that never moved. The installer's
+    rule decides: such a guest is reset, installed fresh and adopted, and the
+    hub forgets the row the old install answered for first."""
+    scripted, fleet = _source_built(runner, monkeypatch, tmp_path, earlier, subject,
+                                    keys={"hub": "hub-key", "leaf-a": "published-key"})
+    notes = SimpleNamespace(lines=[], note=lambda text: notes.lines.append(text))
+    state = runner.stage_prior(fleet, fleet.leaves[0], journey=notes)
+    assert state["sha"] == PRIOR_SHA
+    assert scripted.reset_names == ["leaf-a"]
+    assert scripted.forgotten == ["machine-leaf-a"]
+    assert scripted.installed == ["leaf-a"] and scripted.adopted == ["leaf-a"]
+    order = [c[1] for c in scripted.calls if c[1] == "reset"
+             or (len(c) > 3 and "install.sh --yes" in c[3])]
+    assert order == ["reset", "ssh"], "reset first, then the fresh install"
+    assert any("built itself" in line and "base image" in line for line in notes.lines)
+    assert scripted.keys["leaf-a"] == "hub-key"
+
+
+def test_a_move_the_installer_declined_fails_by_name_before_adoption(
+        runner, subject, earlier, tmp_path, monkeypatch):
+    scripted, fleet = _source_built(runner, monkeypatch, tmp_path, earlier, subject,
+                                    keys={"hub": "hub-key", "leaf-a": "published-key"},
+                                    sticky=True)
+    scripted.source_built = set()  # a published Hub, installed over in place
+    with pytest.raises(runner.AcceptanceFailure, match="after the move.*left the Hub it found"):
+        runner.stage_prior(fleet, fleet.leaves[0])
+    assert scripted.installed == ["leaf-a"] and scripted.adopted == []
+
+
+def test_a_following_leaf_on_an_unnamed_commit_goes_onto_the_ref_under_test_when_a_local_hub_names_no_prior(
+        runner, subject, monkeypatch):
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    scripted = KeyedFleet(keys={"leaf-a": "hub-key"}, release=CANDIDATE, sha="3" * 40)
+    fleet = runner.Fleet(LOCAL_PLAN, run=scripted)
+    fleet.prior, fleet.build = None, subject
+    monkeypatch.setattr(fleet.hub, "trust_key", lambda: "hub-key")
+    monkeypatch.setattr(runner, "revoked", lambda f, g: False)
+    moved = []
+    monkeypatch.setattr(runner, "move", lambda f, g, target, running, journey, **kw:
+                        moved.append((g.name, target.sha, running, kw.get("why"))))
+    runner.reach(fleet, fleet.leaves[0])
+    assert moved == [("leaf-a", HEAD_SHA, "3" * 40, "which this run never named, and the hub is localhost")]
+    # On a named commit it is left alone.
+    scripted.sha = HEAD_SHA
+    runner.reach(fleet, fleet.leaves[0])
+    assert len(moved) == 1
+
+
+def test_a_leaf_with_no_host_at_all_is_installed_onto_the_run_s_ref_and_adopted(
+        runner, subject, earlier, tmp_path, monkeypatch):
+    scripted, fleet, offered = _keyed(runner, monkeypatch, tmp_path, earlier, subject,
+                                      keys={"hub": "hub-key", "leaf-a": "", "fresh": ""})
+    fleet.fresh = runner.Guest("fresh", Path("/bin/vm.sh"), run=scripted)
+    moved = []
+    monkeypatch.setattr(runner, "move", lambda f, g, target, running, journey, **kw:
+                        moved.append((g.name, target.sha)))
+    runner.reach(fleet, fleet.leaves[0])
+    runner.reach(fleet, fleet.fresh)
+    assert moved == [("leaf-a", PRIOR_SHA)], "the pristine guest alone stays empty"
+    assert offered == []

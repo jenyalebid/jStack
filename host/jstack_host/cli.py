@@ -1784,7 +1784,7 @@ def build_parser() -> argparse.ArgumentParser:
     pl = plans_p.add_parser("verify", help="run the stage's own command and record it")
     pl.add_argument("stage_id")
     pl.add_argument("--cwd", default=None,
-                    help="run it here (default: this shell's directory)")
+                    help="run it here (default: the plan's repo, else this shell's directory)")
     pl.add_argument("--state-dir", default=None)
     pl.set_defaults(fn=_cmd_plan_verify)
 

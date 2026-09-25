@@ -18,6 +18,7 @@ grows the columns); the CRUD is here, over `store.get_store().conn()`.
 """
 
 import json
+import os
 import subprocess
 import time
 import uuid
@@ -457,13 +458,27 @@ def run_verify(stage_id: str, *, cwd=None, timeout: int = 900) -> dict:
     A timeout is recorded as a failing proof rather than raised away: the check
     ran, it did not pass, and a stage whose verification hangs must not read as a
     stage nobody tried to verify.
+
+    `cwd=None` runs in the plan's own `repo`, the directory the plan was authored
+    in and the one its `Verify:` lines are written relative to. Inheriting the
+    caller's directory graded whatever tree the caller happened to stand in —
+    `./test.sh` green from one checkout and red from another for one stage. A
+    plan with no `repo` has nowhere else to run, so it inherits; a `repo` that
+    is gone raises, because running elsewhere would grade the wrong tree.
     """
     with store.get_store().conn() as db:
         row = db.execute(
-            "SELECT verify_kind, verify_spec FROM stages WHERE id = ?",
-            (stage_id,)).fetchone()
+            "SELECT s.verify_kind, s.verify_spec, COALESCE(p.repo, '') AS repo"
+            " FROM stages s LEFT JOIN plans p ON p.id = s.plan_id"
+            " WHERE s.id = ?", (stage_id,)).fetchone()
     if row is None:
         raise ValueError(f"no such stage: {stage_id!r}")
+    if cwd is None and row["repo"]:
+        cwd = row["repo"]
+        if not os.path.isdir(cwd):
+            raise ValueError(
+                f"stage {stage_id}'s plan was authored in {cwd}, which is not a "
+                "directory here — pass --cwd to say which tree to verify")
     kind = row["verify_kind"] or "none"
     if kind != "command":
         raise ValueError(

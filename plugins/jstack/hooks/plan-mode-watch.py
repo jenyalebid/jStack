@@ -28,6 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _env  # noqa: E402 — sibling module, path set above
+import _host  # noqa: E402 — stdin kept, so a re-exec can hand it over
 import _prompts  # noqa: E402
 
 KILL_SWITCH = "JSTACK_PLAN_GATE_DISABLED"
@@ -58,7 +59,7 @@ def _read(marker: Path) -> dict:
 
 
 def main() -> int:
-    payload = json.load(sys.stdin)
+    payload = json.loads(_host.read_stdin())
     if os.environ.get(KILL_SWITCH):
         return 0
     session_id = str(payload.get("session_id") or "")
@@ -78,7 +79,7 @@ def main() -> int:
     # directory from the embed marker and puts the host package on the path;
     # taking `plans` after it is one loader, not a second copy of it.
     _env.host_environment()
-    from jstack_host import plans  # noqa: PLC0415 — only once the path is set
+    plans = _host.load("plans")
 
     if planning:
         if not was.get("planning"):

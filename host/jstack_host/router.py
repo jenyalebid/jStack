@@ -1191,19 +1191,61 @@ def managed_authorize(body: ManagedAuthorizeRequest,
     return {"allowed": managed_access.may_reach(body.device_id, leaf["key"])}
 
 
+class ManagedShellRequest(BaseModel):
+    #: The presenting machine's own SSH identity and shell account. Both empty
+    #: on a pull that only reads, which is every build before this one.
+    pubkey: str = ""
+    user: str = ""
+
+
 @router.post("/managed/shell")
-def managed_shell(device_id: str = Depends(current_device)):
-    """A machine pulls its own shell set — the same compute the adoption
-    handshake answered, so a flip and a joiner run can never disagree."""
-    from . import shell_grants
-    return shell_grants.leaf_shell(_managed_leaf(device_id)["key"])
+def managed_shell(body: ManagedShellRequest | None = None,
+                  device_id: str = Depends(current_device)):
+    """A machine presents its own shell identity, then pulls its own shell set.
+
+    The pull is the same compute the adoption handshake answers, so a flip and
+    a joiner run can never disagree. The presentation is the same trust
+    adoption already spends: the credential on this request identifies the
+    machine, there is no key parameter to aim at another row, so a machine can
+    only ever set its OWN `hosts.shell_pubkey` — which is why this needs no
+    console and no second decision. Without it the identity had exactly one
+    moment (the redeem payload, #131) and a Mac adopted before that build could
+    only gain shell by being re-adopted.
+
+    Validated the same way the redeem path validates it, because these lines
+    are written verbatim into other machines' `authorized_keys`. An unchanged
+    identity is not rewritten, so a refresh on a settled machine touches no row.
+    """
+    from . import shell_access, shell_grants
+    from .store import get_store
+    key = _managed_leaf(device_id)["key"]
+    pubkey = (body.pubkey if body else "") or ""
+    user = (body.user if body else "") or ""
+    # Both halves or neither. A key with no account to reach it under is a row
+    # `hub_peers` skips anyway, and accepting the pair half-formed would let a
+    # malformed presentation blank the `shell_user` of a machine the hub can
+    # currently reach — a downgrade nobody asked for, arriving as a success.
+    if shell_access.valid_pubkey(pubkey) and shell_access.valid_user(user):
+        row = get_store().host_row(key)
+        if row is not None and (row["shell_pubkey"] != pubkey
+                                or row["shell_user"] != user):
+            if get_store().set_host_shell(key, pubkey, user):
+                # The hub can now `ssh` a machine it has been managing blind.
+                shell_grants.refresh_hub_config()
+    return shell_grants.leaf_shell(key)
 
 
 @router.post("/shell/refresh")
 def shell_refresh(device_id: str = Depends(current_device)):
-    """A poke, not a payload: the poked machine pulls its set from the parent
-    and rewrites the user-writable half. Key material never rides the poke,
-    and no root is spent — that happened once, at adoption."""
+    """A poke, not a payload: the poked machine presents its own identity and
+    pulls its set from the parent, then rewrites the user-writable half.
+
+    Presenting on the way past is what makes one poke enough to turn a machine
+    adopted before shell access existed into a shell-capable one — no
+    re-adoption, no joiner re-run. Key material never rides the poke, and no
+    root is spent here: the one root step a grant needs is graded and reported
+    by `apply_material`, never taken.
+    """
     from . import shell_access
     if not managed_access.is_leaf():
         raise HTTPException(409, "only a managed machine refreshes shell grants")
@@ -2004,12 +2046,29 @@ def set_session_env(sid: str, payload: EnvBody):
     return {"available": True, "env": _env_rows(session_id=sid)}
 
 
+def _env_agent(agent_id: str) -> str:
+    """The key the agent layer is stored under: the bare, lowercased agent name.
+
+    `/agents` hands out `alpha-chat` for an agent with a chat seat, but every
+    reader of `agent_env` asks with the bare name — the session index stores
+    `hostenv.project_dir_to_agent`'s base and the entry hook `root.seat_at`'s,
+    both lowercased. A row keyed on the scoped id was written, read back by
+    this route, and never seen by one session. An unknown agent is a 404 off
+    the same roster `/agents` is built from, not a row nothing will ever read.
+    """
+    from .hostenv import active_agents, split_id
+    base = split_id((agent_id or "").strip().lower())[0]
+    if base not in active_agents():
+        raise HTTPException(status_code=404, detail=f"unknown agent {agent_id!r}")
+    return base
+
+
 @router.get("/agents/{agent_id}/env")
 def get_agent_env(agent_id: str):
     """The agent-default layer — what every session of this agent inherits."""
     if not _probe("session_env"):
         return _unavailable("the session environment", env=[])
-    return {"available": True, "env": _env_rows(agent_id=agent_id)}
+    return {"available": True, "env": _env_rows(agent_id=_env_agent(agent_id))}
 
 
 @router.post("/agents/{agent_id}/env")
@@ -2021,8 +2080,9 @@ def set_agent_env(agent_id: str, payload: EnvBody):
         raise HTTPException(
             status_code=503,
             detail="this host has no agent environment to set")
-    _write_env(payload, agent_id=agent_id)
-    return {"available": True, "env": _env_rows(agent_id=agent_id)}
+    base = _env_agent(agent_id)
+    _write_env(payload, agent_id=base)
+    return {"available": True, "env": _env_rows(agent_id=base)}
 
 
 @router.get("/sessions/{sid}/work")

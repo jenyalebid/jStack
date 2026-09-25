@@ -1,3 +1,7 @@
+# NOTE — destructive install/uninstall paths: never run these for real on the home
+# machine (the production Hub). Every launchd / JStackHub / sudo boundary must be
+# stubbed; conftest fails the test if one is reached. Real proofs run in lab guests.
+import json
 from pathlib import Path
 
 import pytest
@@ -201,7 +205,6 @@ def test_apply_refuses_approval_race_before_stopping_anything(monkeypatch, tmp_p
 
 @pytest.mark.parametrize("status,message", [
     ("unknown", "cannot observe"), (None, "cannot observe"),
-    ("not_found", "could not be restored"),
 ])
 def test_recovery_never_registers_an_unobservable_service(monkeypatch, tmp_path, status, message):
     calls = []
@@ -350,3 +353,142 @@ def test_disabled_host_observation_reports_installed_completion_not_running_sour
     assert observed["host_source"] == {} and observed["host_running"] is False
     monkeypatch.setattr(backend, "verify", lambda _: False)
     assert not backend.observe(job)["verified"]
+
+
+# --- private capabilities and sealed roles across an update -----------------
+
+SEALED = {role: f"live.jstack.hub.{role}.plist" for role in ("host", "menu", "updater")}
+CAPABILITY = {"plist": "live.jstack.automation.dashboard.plist", "job_sha256": "aa" * 32}
+
+
+def bundle(root, services, catalog=None):
+    resources = root / "Contents/Resources"
+    resources.mkdir(parents=True)
+    (resources / "services.json").write_text(json.dumps(services))
+    if catalog is not None:
+        (resources / "automation-catalog.json").write_text(json.dumps(catalog))
+    return root
+
+
+def capability(name):
+    return {name: f"live.jstack.automation.{name}.plist"}
+
+
+def ownership(tmp_path, installed, candidate):
+    backend = update_app.AppBackend(tmp_path, {"menubar_path": str(installed)})
+    return backend._check_ownership(candidate, installed)
+
+
+def test_a_capability_the_candidate_seals_as_a_role_is_the_cutover_not_a_migration(tmp_path):
+    """The Mac this grew up on ran the scheduler as a catalogued capability. The
+    cutover (procedures: one transaction) removes it from the private catalog
+    while the bundle seals a role of the same name — the update performs that
+    move, so the catalog check must read it as the cutover and nothing else."""
+    installed = bundle(tmp_path / "installed.app", {**SEALED, **capability("dashboard"), **capability("scheduler")},
+                       {"dashboard": CAPABILITY, "scheduler": {**CAPABILITY, "plist": "live.jstack.automation.scheduler.plist"}})
+    candidate = bundle(tmp_path / "candidate.app",
+                       {**SEALED, "scheduler": "live.jstack.hub.scheduler.plist", **capability("dashboard")},
+                       {"dashboard": CAPABILITY})
+    ownership(tmp_path, installed, candidate)
+
+
+def test_any_other_private_capability_change_is_a_separate_migration(tmp_path):
+    installed = bundle(tmp_path / "installed.app", {**SEALED, **capability("dashboard"), **capability("relay")},
+                       {"dashboard": CAPABILITY, "relay": CAPABILITY})
+    dropped = bundle(tmp_path / "dropped.app", {**SEALED, **capability("dashboard")}, {"dashboard": CAPABILITY})
+    with pytest.raises(update_app.releases.ReleaseError, match="separate migration"):
+        ownership(tmp_path, installed, dropped)  # the role goes with it: ownership refuses first
+    changed = bundle(tmp_path / "changed.app", {**SEALED, **capability("dashboard"), **capability("relay")},
+                     {"dashboard": CAPABILITY, "relay": {**CAPABILITY, "job_sha256": "bb" * 32}})
+    with pytest.raises(update_app.releases.ReleaseError, match="private capabilities"):
+        ownership(tmp_path, installed, changed)
+
+
+def test_a_new_sealed_role_is_accepted_and_any_other_ownership_change_refused(tmp_path):
+    """A work Mac carries no private catalog; the one-hub release seals a
+    scheduler role its predecessor did not. That is the update, not a migration.
+    A role the candidate drops, or a name it adds without sealing, still is."""
+    installed = bundle(tmp_path / "installed.app", SEALED)
+    grown = bundle(tmp_path / "grown.app", {**SEALED, "scheduler": "live.jstack.hub.scheduler.plist"})
+    ownership(tmp_path, installed, grown)
+    shrunk = bundle(tmp_path / "shrunk.app", {role: SEALED[role] for role in ("host", "updater")})
+    with pytest.raises(update_app.releases.ReleaseError, match="service ownership"):
+        ownership(tmp_path, installed, shrunk)
+    unsealed = bundle(tmp_path / "unsealed.app", {**SEALED, **capability("relay")}, {"relay": CAPABILITY})
+    with pytest.raises(update_app.releases.ReleaseError, match="service ownership"):
+        ownership(tmp_path, installed, unsealed)
+
+
+
+def test_a_sealed_role_the_bundle_never_registered_is_registered_on_restore(monkeypatch, tmp_path):
+    """Live on the home Mac, 22:10: the cutover stopped the catalogued scheduler,
+    swapped the bundle, and restore asked SMAppService about the sealed role —
+    which answers not_found for a plist never registered under this bundle. The
+    old rule read that as 'the bundle dropped it' and left :9091 dead."""
+    app = bundle(tmp_path / "Hub.app", {**SEALED, "scheduler": "live.jstack.hub.scheduler.plist"})
+    calls = []
+
+    def control(app, action, role=None):
+        calls.append((action, role))
+        return {"scheduler": "not_found"} if action == "status" else {"status": "enabled"}
+
+    monkeypatch.setattr(update_app, "control", control)
+    backend = update_app.AppBackend(tmp_path, {})
+    backend._restore_services(app, {"host": "not_registered", "menu": "not_registered", "scheduler": "enabled"})
+    assert calls == [("status", None), ("register", "scheduler")]
+
+
+def test_a_capability_the_bundle_no_longer_carries_is_not_guessed_at(monkeypatch, tmp_path):
+    app = bundle(tmp_path / "Hub.app", {**SEALED, **capability("dashboard")}, {"dashboard": CAPABILITY})
+    calls = []
+
+    def control(app, action, role=None):
+        calls.append((action, role))
+        return {"relay": "not_found"}
+
+    monkeypatch.setattr(update_app, "control", control)
+    backend = update_app.AppBackend(tmp_path, {})
+    with pytest.raises(ValueError, match="could not be restored"):
+        backend._restore_services(app, {"host": "not_registered", "menu": "not_registered", "relay": "enabled"})
+    assert calls == [("status", None)]
+
+
+def test_a_failed_restore_still_registers_every_service_after_it_and_names_them_all(monkeypatch, tmp_path):
+    """Live on the home Mac, 22:10: the scheduler's restore raised and the loop
+    ended there. session-stall sorts right after it, stayed unregistered through
+    the hand recovery, and the next update snapshotted it as not_registered."""
+    app = bundle(tmp_path / "Hub.app", {**SEALED, **capability("session-stall"), **capability("wda")},
+                 {"session-stall": CAPABILITY, "wda": CAPABILITY})
+    calls = []
+
+    def control(app, action, role=None):
+        calls.append((action, role))
+        if action == "status":
+            return {"scheduler": "not_found", "session-stall": "not_registered", "wda": "not_registered"}
+        return {"status": "enabled"}
+
+    monkeypatch.setattr(update_app, "control", control)
+    backend = update_app.AppBackend(tmp_path, {})
+    with pytest.raises(ValueError, match="scheduler service could not be restored") as raised:
+        backend._restore_services(app, {"host": "not_registered", "menu": "not_registered",
+                                        "scheduler": "enabled", "session-stall": "enabled",
+                                        "wda": "enabled"})
+    assert "session-stall" not in str(raised.value) and "wda" not in str(raised.value)
+    assert [c for c in calls if c[0] == "register"] == [("register", "session-stall"), ("register", "wda")]
+
+
+def test_every_failed_restore_is_named_once_at_the_end(monkeypatch, tmp_path):
+    app = bundle(tmp_path / "Hub.app", {**SEALED, **capability("session-stall")}, {"session-stall": CAPABILITY})
+
+    def control(app, action, role=None):
+        if action == "status":
+            return {"relay": "not_found", "session-stall": "not_registered"}
+        return {"status": "not_found"}
+
+    monkeypatch.setattr(update_app, "control", control)
+    backend = update_app.AppBackend(tmp_path, {})
+    with pytest.raises(ValueError) as raised:
+        backend._restore_services(app, {"host": "not_registered", "menu": "not_registered",
+                                        "relay": "enabled", "session-stall": "enabled"})
+    assert str(raised.value) == ("relay service could not be restored; "
+                                 "session-stall service could not be restored")

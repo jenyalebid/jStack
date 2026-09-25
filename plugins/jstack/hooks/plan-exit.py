@@ -31,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _env  # noqa: E402 — sibling module, path set above
+import _host  # noqa: E402 — stdin kept, so a re-exec can hand it over
 import _prompts  # noqa: E402
 
 KILL_SWITCH = "JSTACK_PLAN_GATE_DISABLED"
@@ -120,7 +121,7 @@ def _block_text(source: str, parsed, refused, kinds) -> str:
 
 
 def main() -> int:
-    payload = json.load(sys.stdin)
+    payload = json.loads(_host.read_stdin())
     if os.environ.get(KILL_SWITCH):
         return 0
     if payload.get("tool_name") != "ExitPlanMode":
@@ -129,7 +130,7 @@ def main() -> int:
     # `host_environment()` resolves this machine's state directory and puts the
     # host package on the path; taking the plan modules after it is one loader.
     _env.host_environment()
-    from jstack_host import plan_parse, plans  # noqa: PLC0415
+    plan_parse, plans = _host.load("plan_parse", "plans")
 
     tool_input = payload.get("tool_input") or {}
     source = _markdown(tool_input)

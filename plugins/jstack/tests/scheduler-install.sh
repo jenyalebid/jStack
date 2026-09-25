@@ -14,6 +14,13 @@
 # is --dry-run or status, and HOME is redirected into the tmpdir so even a bug
 # in the tool under test cannot reach a real ~/Library/LaunchAgents or
 # ~/.config/systemd.
+#
+# The Hub is pinned too. The tool hands the scheduler to a Hub whose sealed
+# catalog carries live.jstack.hub.scheduler.plist, and it finds that Hub at
+# /Applications — a fact of the machine running the suite, not of the tool.
+# On a Mac that runs such a Hub every standalone assertion below would read the
+# refusal instead, so JSTACK_SCHEDULER_HUB points at a bundle this test builds:
+# absent for the standalone half, sealing the role for the Hub-mode half.
 
 set -u
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
@@ -35,10 +42,12 @@ pass() { echo "ok: $1"; }
 # SCHEDULER_INSTALL_FILE pins the machine's own scheduler.json out of a
 # portability test, and SCHEDULER_API_PORT points at a port nothing serves so
 # the API probe can only report what this test controls.
+HUB_APP="$TMP/no-hub.app"
 run_tool() {
     HOME="$TMP/home" JSTACK_ROOT="$TMP/root" \
     SCHEDULER_INSTALL_FILE="$TMP/root/absent-scheduler.json" \
     SCHEDULER_API_PORT=59991 \
+    JSTACK_SCHEDULER_HUB="$HUB_APP" \
     "$PY" "$TOOL" "$@"
 }
 
@@ -291,9 +300,72 @@ else
     pass "status raised nothing"
 fi
 
+# ── Hub mode: a Hub that seals the role owns it; this tool writes nothing ─────
+# The bundle is built here, so the refusal is proved on a machine that has no
+# Hub and the standalone half stays provable on a machine that has one.
+
+HUB_APP="$TMP/hub.app"
+mkdir -p "$HUB_APP/Contents/Resources"
+printf '{"scheduler": "live.jstack.hub.scheduler.plist"}\n' > "$HUB_APP/Contents/Resources/services.json"
+
+out7=$(run_tool install --dry-run 2>&1)
+rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out7" | grep -q "live.jstack.hub.scheduler"; then
+    pass "install refuses on a Hub that seals the role, and names the sealed service"
+else
+    fail "install on a Hub machine (rc=$rc): $(printf '%s' "$out7" | head -2)"
+fi
+if printf '%s' "$out7" | grep -q "would write:"; then
+    fail "install on a Hub machine still offered to write a definition"
+else
+    pass "install on a Hub machine offers no definition of its own"
+fi
+if [ -z "$(find "$TMP/home" -name "*$DEF_LABEL*" 2>/dev/null)" ]; then
+    pass "install on a Hub machine wrote nothing under HOME"
+else
+    fail "install on a Hub machine wrote a definition under HOME"
+fi
+
+out8=$(run_tool install --dry-run --label handrolled.test 2>&1)
+rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out8" | grep -q "live.jstack.hub.scheduler"; then
+    pass "install refuses on a Hub machine whatever --label says"
+else
+    fail "install --label on a Hub machine (rc=$rc): $(printf '%s' "$out8" | head -2)"
+fi
+
+out9=$(run_tool uninstall --dry-run 2>&1)
+rc=$?
+if [ $rc -eq 0 ] && printf '%s' "$out9" | grep -q "would run: .*JStackHub unregister scheduler"; then
+    pass "uninstall --dry-run on a Hub machine names the Hub's own unregister verb"
+else
+    fail "uninstall --dry-run on a Hub machine (rc=$rc): $(printf '%s' "$out9" | tail -2)"
+fi
+if printf '%s' "$out9" | grep -q "would remove:"; then
+    fail "uninstall --dry-run on a Hub machine offered to remove a file with no legacy plist present"
+else
+    pass "uninstall --dry-run on a Hub machine removes no file when no legacy plist exists"
+fi
+if [ -d "$HUB_APP/Contents/Resources" ] && [ -f "$HUB_APP/Contents/Resources/services.json" ]; then
+    pass "the Hub bundle is untouched"
+else
+    fail "the Hub bundle was modified"
+fi
+
+# A Hub built before the scheduler became a role seals no such plist and owns
+# nothing: the standalone path stays open on that machine.
+printf '{"scheduler": "live.jstack.automation.scheduler.plist"}\n' > "$HUB_APP/Contents/Resources/services.json"
+out10=$(run_tool install --dry-run 2>&1)
+rc=$?
+if [ $rc -eq 0 ] && printf '%s' "$out10" | grep -q "^would write: $TMP/home/"; then
+    pass "a Hub sealing a catalogued job under the scheduler key owns nothing here"
+else
+    fail "a Hub with a catalogued scheduler job blocked the standalone install (rc=$rc): $(printf '%s' "$out10" | head -2)"
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
-    echo "PASS — the service installer generates a valid, root-derived, checkout-free definition and touches nothing under --dry-run"
+    echo "PASS — the service installer generates a valid, root-derived, checkout-free definition, touches nothing under --dry-run, and yields to a Hub that seals the role"
     exit 0
 fi
 echo "$fails check(s) failed"

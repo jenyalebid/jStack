@@ -31,6 +31,11 @@ MODULES = (
     "jstack_host.update_app",
     "jstack_host.update_plugins",
     "jstack_host.app_services",
+    # Reached only at the end of `update_app.apply`, for the scheduler cutover —
+    # which is after the bundle under this process has already been replaced, so
+    # a lazy import there would be a read against a path that no longer exists.
+    "jstack_host.install_signed",
+    "jstack_host.install_updater",
     "jstack_host.install_host",
     "jstack_host.service_settings",
     "jstack_host.sourcestamp",

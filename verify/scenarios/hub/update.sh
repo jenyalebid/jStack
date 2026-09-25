@@ -1,12 +1,15 @@
 #!/bin/bash
-# WHAT: the managed update journeys — eight receipts from managed_update_accept over a ref
+# WHAT: the managed update journeys — twelve receipts from managed_update_accept over a ref
 # TIME: ~60m
 # GUEST: managed by the lab tool (disposable)
 #
 # This scenario delegates to the existing lab: host/tools/managed_update_accept.py
-# drives fresh install, upgrade, fleet, interruption, offline catch-up and
-# revocation against a branch and writes its own receipts. It exists in the
-# catalog so an update question is one command, not a re-derived campaign.
+# drives fresh install, upgrade, fleet, interruption, offline catch-up,
+# off-network, revocation and the four shell-access journeys — adoption, the
+# leaf-to-leaf flip, the promotion of a Mac that predates shell access, and
+# detach — against a branch, and writes its own receipts, one per journey. It
+# exists in the catalog so an update question is one command, not a re-derived
+# campaign.
 #
 # The subject is a commit. The guests clone the ref from the public repo and
 # build the Hub themselves, so nothing is staged here but the Mac app, which

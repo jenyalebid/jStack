@@ -18,8 +18,13 @@ from typing import NamedTuple
 
 from .update_macos import command
 
+#: macOS groups background items by the app that REGISTERED them, never by the
+#: binary that runs, so every role here shares the Hub's one Login Items row —
+#: while a plist in ~/Library/LaunchAgents was registered by no app and earns a
+#: row named after its interpreter. The scheduler was that second row.
 ROLES = {"host": ("JStackRuntime", "host"),
          "updater": ("JStackRuntime", "updater"),
+         "scheduler": ("JStackRuntime", "scheduler"),
          "menu": ("JStackHostBar",)}
 MAGICS = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
 
@@ -31,6 +36,41 @@ def service_plist(role: str) -> dict:
             "ProgramArguments": [binary, *arguments],
             "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
             "AssociatedBundleIdentifiers": ["live.jstack.hub"]}
+
+
+def refuse_reserved(manifest: dict):
+    """A capability may not carry the name of a service this bundle seals.
+
+    Two definitions for one daemon is two Login Items rows and two processes
+    racing its port, which is the defect the scheduler role exists to delete.
+    The message names the way out because a private catalog written before the
+    role existed has a legitimate entry under that name — on the machine that
+    cuts the releases, where a bare "reserved identifier" stops the build with
+    nothing to act on.
+    """
+    for reserved in ROLES:
+        if reserved not in manifest:
+            continue
+        raise ValueError(
+            f"{reserved} is a sealed Hub service and cannot also be a catalogued capability. "
+            f"Remove the {reserved!r} entry from the private catalog; the daemon is declared "
+            f"to the installer with --scheduler-root instead.")
+
+
+def seal_services(definitions: Path, bundle_id: str) -> dict:
+    """Write each role's sealed plist; return the catalog `services.json` gets.
+
+    One loop over ROLES, because the two used to be written out separately and
+    a role added to one was a plist nothing registered or a catalog entry with
+    no definition behind it.
+    """
+    services = {}
+    for role in ROLES:
+        definition = service_plist(role)
+        definition["AssociatedBundleIdentifiers"] = [bundle_id]
+        (definitions / f"live.jstack.hub.{role}.plist").write_bytes(plistlib.dumps(definition))
+        services[role] = f"live.jstack.hub.{role}.plist"
+    return services
 
 
 def bundle_version(identity: dict, version: str) -> str:
@@ -419,18 +459,11 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
     shutil.copy2(python_license, resources / "Licenses/Python-license.html")
     definitions = contents / "Library/LaunchAgents"
     definitions.mkdir(parents=True)
-    services = {}
-    for role in ("host", "menu", "updater"):
-        definition = service_plist(role)
-        definition["AssociatedBundleIdentifiers"] = [bundle_id]
-        (definitions / f"live.jstack.hub.{role}.plist").write_bytes(plistlib.dumps(definition))
-        services[role] = f"live.jstack.hub.{role}.plist"
+    services = seal_services(definitions, bundle_id)
     if catalog is not None:
         from .service_catalog import definitions as catalog_definitions
         jobs, manifest = catalog_definitions(catalog)
-        for reserved in ("host", "menu", "updater"):
-            if reserved in manifest:
-                raise ValueError(f"{reserved} is a reserved capability identifier")
+        refuse_reserved(manifest)
         for name, definition in jobs.items():
             definition["AssociatedBundleIdentifiers"] = [bundle_id]
             (definitions / name).write_bytes(plistlib.dumps(definition))

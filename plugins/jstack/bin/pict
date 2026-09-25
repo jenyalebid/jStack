@@ -1008,7 +1008,6 @@ def gather_environment(directory: Path, sources: list[Source]) -> None:
     root = Path(cfg.get("agent_root") or "~/Agents").expanduser()
     agent, _ = resolve_seat(directory, root, cfg)
     sys.path.insert(0, str(PLUGIN_BIN.parent / "hooks"))
-    sys.path.insert(0, str(PLUGIN_BIN.parents[2] / "host"))
     try:
         # The embed marker first, or the store resolves to a directory that is
         # nobody's Hub — read from the wrong settings and a fresh sqlite file
@@ -1019,7 +1018,8 @@ def gather_environment(directory: Path, sources: list[Source]) -> None:
             if not declared:
                 return
             os.environ["JREMOTE_STATE_DIR"] = declared
-        from jstack_host import environment  # noqa: PLC0415 — optional host
+        import _host  # noqa: PLC0415 — the hooks' resolver: a cache copy has no host beside it
+        environment = _host.load("environment", reexec=False)
         line = environment.state_line(environment.resolve("", agent or ""))
     except Exception:
         return

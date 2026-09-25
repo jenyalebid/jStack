@@ -67,9 +67,8 @@ def test_a_lan_address_is_reachable_from_off_the_host(api, host_identity):
 def test_health_needs_no_token_and_names_the_host(api):
     """The one route that must answer before a token exists — it is how the
     app decides whether a machine hosts anything at all (`LanProbe`)."""
-    import httpx
-    r = httpx.get(f"{BASE_URL}/api/health", timeout=10.0)
-    assert r.status_code == 200
+    r = api.raw("GET", "/api/health", timeout=10.0)
+    assert r.status_code == 200, f"{r.status_code}: {r.text[:200]}"
     body = r.json()
     assert body.get("service") == "jremote-host" or "dashboard" in body, (
         f"LanProbe.isHostDashboard would read this host as an impostor: {body}")

@@ -29,6 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _env  # noqa: E402 — sibling module, path set above
+import _host  # noqa: E402 — stdin kept, so a re-exec can hand it over
 
 KILL_SWITCH = "JSTACK_PLAN_GATE_DISABLED"
 
@@ -108,7 +109,7 @@ def _codex_steps(tool_input: dict) -> list[dict]:
 
 
 def main() -> int:
-    payload = json.load(sys.stdin)
+    payload = json.loads(_host.read_stdin())
     if os.environ.get(KILL_SWITCH):
         return 0
     tool = str(payload.get("tool_name") or "").split(".")[-1]
@@ -121,7 +122,7 @@ def main() -> int:
     # `host_environment()` resolves this machine's state directory and puts the
     # host package on the path; taking `plans` after it is one loader.
     _env.host_environment()
-    from jstack_host import plans  # noqa: PLC0415
+    plans = _host.load("plans")
 
     plan = plans.open_plan_for_session(session_id)
     if plan is None:

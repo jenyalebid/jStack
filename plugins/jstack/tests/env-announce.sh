@@ -130,10 +130,10 @@ sys.stdout.write(d["hookSpecificOutput"]["additionalContext"])
 # cwd defaults to a directory under no agent, so a case that says nothing
 # about a seat is not quietly given one.
 entry()  { printf '{"hook_event_name":"SessionStart","session_id":"%s","cwd":"%s","source":"startup","transcript_path":"%s"}' "$1" "${2:-$TMP}" "$TRANSCRIPT" | "$PY" "$ENTRY"; }
-prompt() { printf '{"hook_event_name":"UserPromptSubmit","session_id":"%s","prompt":"go on","transcript_path":"%s"}' "$1" "$TRANSCRIPT" | "$PY" "$DELTA"; }
-edited() { printf '{"hook_event_name":"PostToolUse","session_id":"%s","tool_name":"Edit","tool_input":{"file_path":"%s"},"transcript_path":"%s"}' "$1" "$2" "$TRANSCRIPT" | "$PY" "$ANNOUNCE"; }
-ran()    { printf '{"hook_event_name":"PreToolUse","session_id":"%s","tool_name":"Bash","tool_input":{"command":"%s"},"transcript_path":"%s"}' "$1" "$2" "$TRANSCRIPT" | "$PY" "$ANNOUNCE"; }
-stopped(){ printf '{"hook_event_name":"Stop","session_id":"%s","transcript_path":"%s"}' "$1" "$TRANSCRIPT" | "$PY" "$ANNOUNCE"; }
+prompt() { printf '{"hook_event_name":"UserPromptSubmit","session_id":"%s","cwd":"%s","prompt":"go on","transcript_path":"%s"}' "$1" "${2:-$TMP}" "$TRANSCRIPT" | "$PY" "$DELTA"; }
+edited() { printf '{"hook_event_name":"PostToolUse","session_id":"%s","cwd":"%s","tool_name":"Edit","tool_input":{"file_path":"%s"},"transcript_path":"%s"}' "$1" "${3:-$TMP}" "$2" "$TRANSCRIPT" | "$PY" "$ANNOUNCE"; }
+ran()    { printf '{"hook_event_name":"PreToolUse","session_id":"%s","cwd":"%s","tool_name":"Bash","tool_input":{"command":"%s"},"transcript_path":"%s"}' "$1" "$TMP" "$2" "$TRANSCRIPT" | "$PY" "$ANNOUNCE"; }
+stopped(){ printf '{"hook_event_name":"Stop","session_id":"%s","cwd":"%s","transcript_path":"%s"}' "$1" "${2:-$TMP}" "$TRANSCRIPT" | "$PY" "$ANNOUNCE"; }
 
 precheck
 
@@ -199,6 +199,23 @@ got="$(ctx "$(prompt $S)")"
 [[ "$got" == "SIM VERIFY TURNED OFF" ]] || fail "delta-flip" "got: $got"
 [[ -z "$(prompt $S)" ]] || fail "delta-settled" "an unchanged prompt spoke"
 pass "delta-one-line"
+
+# (3b) THE LATE HOOKS REACH THE AGENT TOO. The same unindexed session as the
+#      cold start, one prompt later: an agent value flipped between prompts is
+#      a delta, and the value in force is reinforced at its trigger. Resolved
+#      by session id alone, both read an unindexed session as all-defaults —
+#      entry stated the agent's floor and nothing after it ever moved.
+S=late-$$
+[[ -z "$(prompt $S "$SEAT")" ]] || fail "late-agent-delta" "the first prompt deltaed"
+seed_agent probeagent sim_verify off
+got="$(ctx "$(prompt $S "$SEAT")")"
+[[ "$got" == "SIM VERIFY TURNED OFF" ]] || fail "late-agent-delta" "an agent flip under an unindexed session was not said: '$got'"
+got="$(ctx "$(edited $S /work/ui/View.swift "$SEAT")")"
+[[ "$got" == *"sim_verify=off"* ]] || fail "late-agent-announce" "an agent value under an unindexed session was not reinforced: '$got'"
+[[ -z "$(edited late-other-$$ /work/ui/View.swift)" ]] \
+  || fail "late-agent-announce" "a session under no seat heard the agent's value"
+seed_agent probeagent sim_verify --
+pass "late-hooks-reach-the-agent"
 
 # (4) Announced once, then silent however long the session runs.
 S=once-$$

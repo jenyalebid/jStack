@@ -25,12 +25,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _env  # noqa: E402 — sibling module, path set above
+import _host  # noqa: E402 — stdin kept, so a re-exec can hand it over
 
 
 def main() -> int:
     if _env.disabled():
         return 0
-    payload = json.load(sys.stdin)
+    payload = json.loads(_host.read_stdin())
     env = _env.host_environment()
     # The agent comes from the cwd, not from the store's session row: at
     # SessionStart there is no row yet. Session id stays first so a value set

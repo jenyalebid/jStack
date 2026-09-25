@@ -184,6 +184,29 @@ class AppBackend(MacBackend):
                 or any(value not in OBSERVABLE for value in statuses.values())):
             raise releases.ReleaseError("cannot observe current app service approvals")
 
+    def _check_ownership(self, candidate: Path, installed: Path):
+        """What may change between the installed bundle and the candidate.
+
+        A sealed role the candidate adds is the update itself: `apply` ends by
+        adopting the scheduler, which is how a machine gains that role. A private
+        capability that vanishes from the catalog while the candidate seals a
+        role of the same name is the same cutover seen from the machine whose
+        scheduler was catalogued — the one this grew up on — and the snapshot
+        carries it: the capability is stopped under its old label and the role
+        registered under its new one. Every other change to the catalog, and
+        any role the candidate drops, is a separate migration.
+        """
+        from .app_services import sealed_roles
+        sealed = set(sealed_roles(candidate))
+        installed_roles, candidate_roles = set(self._definitions(installed)), set(self._definitions(candidate))
+        if installed_roles - candidate_roles or (candidate_roles - installed_roles) - sealed:
+            raise releases.ReleaseError("changing service ownership requires a separate migration")
+        before = json.loads(self._automation_catalog(installed))
+        after = json.loads(self._automation_catalog(candidate))
+        cutover = {name for name in before if name in sealed and name not in after}
+        if {name: job for name, job in before.items() if name not in cutover} != after:
+            raise releases.ReleaseError("changing private capabilities requires a separate migration")
+
     def stage(self, manifest: dict, directory: Path) -> dict:
         from . import update_plugins
         stage = Path(tempfile.mkdtemp(prefix="app-stage-", dir=directory))
@@ -194,7 +217,6 @@ class AppBackend(MacBackend):
         statuses = self._statuses(app)
         self._validate_statuses(statuses)
         installed_catalog = self._automation_catalog(app)
-        installed_roles = set(self._definitions(app))
         apps = {}
         built_here = self.built_here(manifest)
         for kind in ("menubar", "client"):
@@ -226,10 +248,7 @@ class AppBackend(MacBackend):
                         identity.get("release") != manifest["release"] or
                         identity.get("package_sha256") != fingerprint(packages / "jstack_host")):
                     raise releases.ReleaseError("signed app source identity differs from release")
-                if self._automation_catalog(candidate) != installed_catalog:
-                    raise releases.ReleaseError("changing private capabilities requires a separate migration")
-                if set(self._definitions(candidate)) != installed_roles:
-                    raise releases.ReleaseError("changing service ownership requires a separate migration")
+                self._check_ownership(candidate, app)
             target = Path(self.config[kind + "_path"])
             if not os.access(target.parent, os.W_OK):
                 raise releases.ReleaseError("app destination is not writable")
@@ -257,22 +276,44 @@ class AppBackend(MacBackend):
                 raise releases.ReleaseError(f"{role} service has not stopped")
 
     def _restore_services(self, app: Path, statuses: dict):
+        """Register every service the snapshot had enabled, then fail once.
+
+        One failure does not stop the loop. Live on the home Mac, 22:10: the
+        scheduler's restore raised, the loop ended there, and session-stall —
+        the next name in order — stayed unregistered through the hand
+        recovery and the following update, which snapshotted it as
+        not_registered and kept it that way. Every service after the failed
+        one is a service this Mac depends on; the error names all of them.
+        """
         self._validate_statuses(statuses)
+        failed = []
         for role in sorted(statuses, key=lambda role: (role != "host", role != "menu", role)):
             if statuses[role] != "enabled":
                 continue
             current = control(app, "status")[role]
             if current not in OBSERVABLE:
-                raise releases.ReleaseError(f"cannot observe {role} service approval during recovery")
+                failed.append(f"cannot observe {role} service approval during recovery")
+                continue
             if current == "requires_approval":
                 continue  # A later user denial takes precedence over the snapshot.
             if current == "not_found":
-                # The restored bundle no longer seals this definition; a
-                # register call cannot succeed and must not be guessed at.
-                raise releases.ReleaseError(f"{role} service could not be restored")
+                # SMAppService answers not_found for a plist this bundle has
+                # never registered, exactly as for one it does not carry. For
+                # a role the bundle seals that is the cutover — the capability
+                # was stopped under its old label and the role has yet to be
+                # registered under its new one — so register, and let a plist
+                # that truly is not there fail the register call below. For a
+                # catalogued capability it means the bundle dropped it, and a
+                # register call must not be guessed at.
+                from .app_services import sealed_roles
+                if role not in sealed_roles(app):
+                    failed.append(f"{role} service could not be restored")
+                    continue
             result = control(app, "register", role)
             if result["status"] not in {"enabled", "requires_approval"}:
-                raise releases.ReleaseError(f"{role} service could not be restored")
+                failed.append(f"{role} service could not be restored")
+        if failed:
+            raise releases.ReleaseError("; ".join(failed))
 
     def apply(self, job: dict):
         from . import update_plugins
@@ -300,9 +341,20 @@ class AppBackend(MacBackend):
                 os.replace(target, backup)
             os.replace(incoming, target)
         self._restore_services(app, transaction["services"])
+        # A role this bundle seals that the previous one did not is absent from
+        # the snapshot, so `_restore_services` cannot bring it up — and for the
+        # scheduler the machine is also still running the LaunchAgent that
+        # preceded it, on the same port. Adopting is what makes an update
+        # finish the move instead of leaving both copies installed.
         client = transaction["apps"].get("client")
         if client and client["was_running"]:
             command(["/usr/bin/open", "-a", client["target"]])
+        # Last, and allowed to raise. A half-finished cutover is two jobs racing
+        # one port or none serving it, which is not an update anyone should read
+        # as done — but the window the user is looking at comes back first, so a
+        # scheduler fault costs them a diagnosis and not their app.
+        from .install_signed import adopt_scheduler
+        adopt_scheduler(app)
 
     def settle(self, job: dict) -> dict:
         """Close a failed transaction: nothing restored, nothing retained.

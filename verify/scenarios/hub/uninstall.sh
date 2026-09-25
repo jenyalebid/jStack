@@ -23,6 +23,12 @@ curl -fsSL https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh \
 echo "== verdict =="
 launchctl list | grep -qi jstack && echo "FAIL a jstack launchd job survived" \
     || echo "OK no jstack launchd jobs left"
+# Nothing may be left that would keep a Login Items row: the Hub's own services
+# went with its bundle, and the uninstall sweeps a pre-Hub scheduler LaunchAgent
+# because a plist registered by no app outlives every bundle removal.
+ls ~/Library/LaunchAgents 2>/dev/null | grep -qi jstack \
+    && echo "FAIL a jstack plist survived in ~/Library/LaunchAgents" \
+    || echo "OK no jstack plist left in ~/Library/LaunchAgents"
 pgrep -f JStackHostBar >/dev/null && echo "FAIL menu bar still running" || echo "OK menu bar gone"
 [ -d "/Applications/jStack Hub.app" ] && echo "FAIL Hub.app still installed" || echo "OK Hub.app gone"
 [ -d "$JSTACK_ROOT" ] && echo "OK root tree kept ($JSTACK_ROOT)" || echo "FAIL root tree deleted"
