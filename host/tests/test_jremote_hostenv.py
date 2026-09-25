@@ -450,3 +450,129 @@ def test_no_marker_is_no_opinion_and_a_fresh_host_mints(monkeypatch, tmp_path):
     monkeypatch.delenv("JREMOTE_HOST_ID", raising=False)
 
     assert hostenv.host_id(), "a host with no rival could not name itself"
+
+
+# ── the timeline store: one database, or the loop forks ──
+#
+# The failure these cover, observed on a machine rooted at ~/Alpine: the plugin
+# wrote {JSTACK_ROOT}/Logs/Timeline/timeline.db and this package read
+# $HOME/Logs/Timeline/timeline.db. Both sides succeeded. Sessions logged, the
+# Timeline tab and the doctor showed an empty store, and an empty store is a
+# legitimate state — so nothing anywhere reported a fault.
+
+def _no_timeline_env(monkeypatch):
+    for key in ("JSTACK_TIMELINE_DIR", "JSTACK_LOGS_DIR", "JSTACK_ROOT",
+                "JREMOTE_INSTANCE_ROOT"):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_timeline_db_follows_jstack_root(monkeypatch, tmp_path):
+    """The whole defect in one line: a declared root moves the timeline."""
+    _no_timeline_env(monkeypatch)
+    monkeypatch.setattr(hostenv, "HOME", tmp_path / "home")
+    monkeypatch.setenv("JSTACK_ROOT", str(tmp_path / "Alpine"))
+    assert hostenv.timeline_db() == tmp_path / "Alpine" / "Logs" / "Timeline" / "timeline.db"
+
+
+def test_timeline_db_overrides_are_the_plugins(monkeypatch, tmp_path):
+    """Same chain as `root.py::timeline_dir()` — its own override first, then
+    the logs dir's. A host that honoured only one of them still disagreed with
+    the writer on a machine that had moved the other."""
+    _no_timeline_env(monkeypatch)
+    monkeypatch.setattr(hostenv, "HOME", tmp_path / "home")
+    monkeypatch.setenv("JSTACK_ROOT", str(tmp_path / "Alpine"))
+    monkeypatch.setenv("JSTACK_LOGS_DIR", str(tmp_path / "elsewhere"))
+    assert hostenv.timeline_db() == tmp_path / "elsewhere" / "Timeline" / "timeline.db"
+    monkeypatch.setenv("JSTACK_TIMELINE_DIR", str(tmp_path / "exact"))
+    assert hostenv.timeline_db() == tmp_path / "exact" / "timeline.db"
+
+
+def test_timeline_db_reads_the_root_marker_without_a_shell(monkeypatch, tmp_path):
+    """The sealed Hub's case: SMAppService gives it `HOME` and nothing else, and
+    the service environment allowlist admits no timeline override — so the one
+    override this used to honour was the one that could not be set on it."""
+    _no_timeline_env(monkeypatch)
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(hostenv, "HOME", fake_home)
+    assert hostenv.stack_root() == fake_home
+    hostenv.write_stack_root(tmp_path / "Alpine")
+    assert hostenv.stack_root_marker() == fake_home / ".config" / "jstack" / "root"
+    assert hostenv.stack_root() == tmp_path / "Alpine"
+    assert hostenv.timeline_db() == tmp_path / "Alpine" / "Logs" / "Timeline" / "timeline.db"
+
+
+def test_stack_root_migrates_from_the_agents_marker(monkeypatch, tmp_path):
+    """A machine installed before the root marker existed has only the agents
+    one. Where it names an `Agents` directory — the layout every installer
+    writes — its parent is the root, and reading it is what repairs such a host
+    without a reinstall. Anything else is left alone: a derived guess would be
+    worse than the honest `$HOME`."""
+    _no_timeline_env(monkeypatch)
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(hostenv, "HOME", fake_home)
+    hostenv.write_instance_root(tmp_path / "Alpine" / "Agents")
+    assert hostenv.stack_root() == tmp_path / "Alpine"
+    hostenv.write_instance_root(tmp_path / "somewhere" / "workspaces")
+    assert hostenv.stack_root() == fake_home
+
+
+def test_stack_root_env_beats_every_marker(monkeypatch, tmp_path):
+    """A live `$JSTACK_ROOT` is this shell's answer and outranks both files."""
+    _no_timeline_env(monkeypatch)
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(hostenv, "HOME", fake_home)
+    hostenv.write_stack_root(tmp_path / "old")
+    hostenv.write_instance_root(tmp_path / "older" / "Agents")
+    monkeypatch.setenv("JSTACK_ROOT", str(tmp_path / "current"))
+    assert hostenv.stack_root() == tmp_path / "current"
+
+
+def test_timeline_db_without_a_declared_root_stays_in_home(monkeypatch, tmp_path):
+    """The unchanged answer for the install that declares nothing: root is
+    `$HOME`, so the store is `~/Logs/Timeline` and the two sides agree there."""
+    _no_timeline_env(monkeypatch)
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(hostenv, "HOME", fake_home)
+    assert hostenv.timeline_db() == fake_home / "Logs" / "Timeline" / "timeline.db"
+
+
+def _plugin_root_module():
+    """`plugins/jstack/root.py`, loaded by path — the plugin is not importable
+    as a package from here, and the point of this is to compare the two files
+    rather than to share code between them."""
+    import importlib.util
+    from pathlib import Path as _Path
+    path = _Path(__file__).resolve().parents[2] / "plugins" / "jstack" / "root.py"
+    spec = importlib.util.spec_from_file_location("_parity_root", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_host_and_plugin_resolve_the_same_timeline(monkeypatch, tmp_path):
+    """The parity that matters more than either derivation on its own.
+
+    `root.py` is the plugin's single answer and this package cannot import it,
+    so `_jstack_timeline_db()` restates the chain. A restatement that drifts is
+    exactly the bug: the host and the writer succeed against different files
+    and nothing fails. This pins them together — if one side gains a step, this
+    test names the other.
+    """
+    plugin_root = _plugin_root_module()
+    _no_timeline_env(monkeypatch)
+    monkeypatch.setattr(hostenv, "HOME", tmp_path / "home")
+    monkeypatch.setattr(plugin_root.Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+    for env in ({"JSTACK_ROOT": str(tmp_path / "Alpine")},
+                {"JSTACK_ROOT": str(tmp_path / "Alpine"),
+                 "JSTACK_LOGS_DIR": str(tmp_path / "logs")},
+                {"JSTACK_TIMELINE_DIR": str(tmp_path / "tl")},
+                {}):
+        _no_timeline_env(monkeypatch)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        assert hostenv.timeline_db() == plugin_root.timeline_dir() / "timeline.db", env

@@ -178,6 +178,31 @@ declared_root() {
     return 1
 }
 
+# The root the LAST INSTALL recorded, if any — the second witness.
+#
+# WHY THIS EXISTS. `declared_root` reads the shell profile, and the profile is
+# a file anything may rewrite: an uninstall --purge strips the declaration, an
+# editor or a dotfile manager can drop it, and a re-install that then reads no
+# root offers $HOME as the default. That is the same orphaning `declared_root`
+# was written to prevent, arriving through a door it does not watch — observed
+# on a machine rooted at ~/Alpine whose declaration vanished mid-session and
+# whose next login shell resolved every jStack directory to $HOME.
+#
+# So the root is asserted twice: in the profile, where a shell reads it, and in
+# a marker under ~/.config, where the sealed Hub reads it. Losing one of them
+# is now a repairable state instead of a silent re-root — the caller that finds
+# this answer re-declares it in the profile.
+#
+# Keep the path in step with hostenv.stack_root_marker().
+recorded_root() {
+    local f="$HOME/.config/jstack/root" line=""
+    [ -f "$f" ] || return 1
+    line="$(head -n 1 "$f" 2>/dev/null)"
+    line="${line/#\~/$HOME}"
+    case "$line" in /*) printf '%s\n' "$line"; return 0 ;; esac
+    return 1
+}
+
 # Everything that changes the machine goes through here, so --dry-run is a
 # property of the script rather than a flag each step remembers to check.
 run() {
@@ -371,6 +396,11 @@ uninstall() {
     # 6. the profile lines the installer appended: the `# jstack` PATH line
     #    always, the root declaration only on --purge (it names a tree that
     #    survives an --uninstall).
+    #
+    #    Read before the strip, because step 7 names the tree that was left
+    #    behind and by then there is nothing left to read it from — on a purge
+    #    that note has never printed.
+    local LEFT_ROOT; LEFT_ROOT="$(declared_root 2>/dev/null || recorded_root 2>/dev/null || true)"
     if [ -f "$PROFILE" ]; then
         if [ "$DRY_RUN" = "1" ]; then
             would "strip the '# jstack' PATH line from $PROFILE"
@@ -390,9 +420,17 @@ uninstall() {
         fi
     fi
 
+    #    The markers go with the declaration, and only with it: they are the
+    #    same assertion written where a shell-less service can read it, so a
+    #    purge that left them would hand the next install a root it was just
+    #    told to forget.
+    if [ -n "$purge" ]; then
+        run rm -f "$HOME/.config/jstack/root" "$HOME/.config/jstack/instance_root"
+    fi
+
     # 7. your data is yours, not ours to delete — name what was left behind.
-    if declared_root >/dev/null 2>&1; then
-        note "your JSTACK_ROOT tree at $(declared_root) was left in place"
+    if [ -n "$LEFT_ROOT" ]; then
+        note "your JSTACK_ROOT tree at $LEFT_ROOT was left in place"
     fi
     [ -d "$AGENT_ROOT" ] && note "agent workspaces under $AGENT_ROOT were left in place — remove by hand if you want them gone"
 
@@ -546,6 +584,24 @@ elif JSTACK_ROOT="$(declared_root)"; then
     # $JSTACK_ROOT above and never reaches here.
     ok "root already declared on this machine — $JSTACK_ROOT"
     note "re-run with --root DIR to move it"
+    RECORDED="$(recorded_root 2>/dev/null || true)"
+    if [ -n "$RECORDED" ] && [ "$RECORDED" != "$JSTACK_ROOT" ]; then
+        # Two witnesses, two answers: one of the two trees is already orphaned
+        # and this installer cannot tell which one holds the live agents. It
+        # follows the profile — that is what a shell resolves — and says so,
+        # because a silent pick here is how a tree stops being written to
+        # without anyone noticing.
+        warn "the recorded root disagrees with the profile: $RECORDED vs $JSTACK_ROOT"
+        note "following the profile; re-run with --root DIR to settle it"
+    fi
+elif JSTACK_ROOT="$(recorded_root)"; then
+    # The profile lost its declaration but the last install recorded the root.
+    # Believing the marker is the whole point of writing it: the alternative is
+    # defaulting to $HOME and orphaning agents, logs and credentials that are
+    # sitting on disk, findable, under a root this script was just told.
+    DECLARE_ROOT=1
+    warn "no JSTACK_ROOT in your shell profile — restoring the recorded root"
+    ok "root recorded by the last install — $JSTACK_ROOT"
 else
     # Re-asked until it is absolute, rather than accepted and repaired.
     #
@@ -609,10 +665,20 @@ esac
 # Support, which is TCC-gated and pops a dialog on any non-owning reader),
 # keyed off HOME alone, exactly like hostenv.instance_root_marker() — keep the
 # two paths in step.
+#
+# The root itself is recorded beside it, and for the same reason: the sealed
+# Hub derives Logs, Config and State from it, and with no shell to read it had
+# been resolving them under $HOME — so `log_event` wrote the timeline to the
+# declared root while the Timeline tab and the doctor read an empty store in
+# the home directory. Two files, not one: --agent-root may legitimately put
+# agents outside the root, so neither answer can be derived from the other.
+# Keep both paths in step with hostenv.{instance_root,stack_root}_marker().
 if [ "$DRY_RUN" != "1" ]; then
     MARKER="$HOME/.config/jstack/instance_root"
     mkdir -p "$(dirname "$MARKER")" && printf '%s\n' "$AGENT_ROOT" > "$MARKER" \
         && ok "recorded agent root for the host — $AGENT_ROOT"
+    printf '%s\n' "$JSTACK_ROOT" > "$HOME/.config/jstack/root" \
+        && ok "recorded install root for the host — $JSTACK_ROOT"
 fi
 
 # The second and last question — and only when there is something to answer.
@@ -987,6 +1053,33 @@ if command -v codex >/dev/null 2>&1; then
     step "Codex plugin and shared skills"
     run python3 "$CHECKOUT/host/tools/codex_setup.py" --workspace "$AGENT_ROOT" \
         || warn "Codex setup failed — see the error above"
+fi
+
+# ── 5.5 the injector's config ───────────────────────────────────────────────
+#
+# The SessionStart injector is opt-in by design — no `timeline_inject` key
+# means no seat reads its own history back — and until now NOTHING wrote that
+# key: not this installer, not a shipped default, not a doctor check. So every
+# fresh install closed the WRITE half of the running-memory loop and left the
+# READ half off, with no error anywhere. Sessions logged into a timeline that
+# no session ever opened, and the only symptom was an agent that had forgotten
+# the last conversation. A default is the whole fix.
+#
+# Written only when the file is ABSENT, and never merged into one that exists:
+# this file is the user's, and a machine that deliberately narrowed which seats
+# inject must not have a catch-all put back under it on every update.
+step "Session history injection"
+
+REVIEW_CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/jstack/review.json"
+if [ -f "$REVIEW_CFG" ]; then
+    ok "$REVIEW_CFG already exists — left alone"
+    note "jstack-doctor grades whether your seats inject — see its injection check"
+elif [ "$DRY_RUN" = "1" ]; then
+    would "write $REVIEW_CFG with timeline_inject {\"*/*\": 10}"
+else
+    mkdir -p "$(dirname "$REVIEW_CFG")"
+    printf '%s\n' '{' '  "timeline_inject": {' '    "*/*": 10' '  }' '}' > "$REVIEW_CFG" \
+        && ok "every seat injects its last 10 sessions — $REVIEW_CFG"
 fi
 
 # ── 6. bin on PATH ──────────────────────────────────────────────────────────

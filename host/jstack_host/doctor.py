@@ -160,7 +160,35 @@ def check_registry() -> dict:
     return _check("registry", OK, f"{path} — {len(reg)} entries")
 
 
+def _writer_db(binary: Path) -> Path | None:
+    """Where `log_event` says it writes, or None when it cannot be asked.
+
+    An older plugin has no `where` subcommand and exits 2 on it; that is a
+    missing probe, not a disagreement, and must not be graded as either.
+    """
+    try:
+        out = subprocess.run([str(binary), "where"], capture_output=True,
+                             text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    line = out.stdout.strip()
+    return Path(line) if out.returncode == 0 and line.startswith("/") else None
+
+
 def check_timeline() -> dict:
+    """The host and the writer must name the SAME database.
+
+    This used to report only the path the host derived, and grade a missing
+    store `ok` — correct, since an empty timeline is a legitimate state on a
+    fresh machine. On an install rooted outside `$HOME` that made it a check
+    that lies: the host derived `~/Logs/Timeline`, `log_event` wrote the
+    declared root's, and the doctor printed "no store yet" beside a populated
+    database while the host process itself had the root in its environment.
+
+    So the writer is asked, and the two answers are compared. A split is a
+    FAIL — the running-memory loop is writing and reading different files, and
+    nothing downstream of it can notice.
+    """
     from . import timeline
     db = hostenv.timeline_db()
     binary = timeline.log_event_bin()
@@ -168,10 +196,21 @@ def check_timeline() -> dict:
         return _check("timeline", WARN, "jStack's log_event not installed",
                       "install the jStack plugin — the Timeline tab and tags "
                       "read its store")
+    writes = _writer_db(binary)
+    if writes is not None and writes != db:
+        return _check("timeline", FAIL,
+                      f"log_event writes {writes}, this host reads {db}",
+                      "the two must be one file — declare JSTACK_ROOT where "
+                      "the host can see it (re-run install.sh, which records "
+                      "it for the sealed services) or set JSTACK_TIMELINE_DIR")
     if not db.exists():
         return _check("timeline", OK, f"log_event at {binary}, no store yet at "
                       f"{db} — the first session that logs an entry creates it")
-    return _check("timeline", OK, f"{db}")
+    if writes is None:
+        return _check("timeline", OK, f"{db}",
+                      "this log_event predates `log_event where`, so the "
+                      "writer's own path could not be cross-checked")
+    return _check("timeline", OK, f"{db} — log_event agrees")
 
 
 def check_transcripts() -> dict:

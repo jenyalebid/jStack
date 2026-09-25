@@ -456,11 +456,27 @@ def _resolve_nested(root: Path, mode: str) -> str | None:
 
 
 def _jstack_timeline_db() -> Path:
-    """jStack's timeline store. `JSTACK_TIMELINE_DIR` is the plugin's own
-    override; the default is where `log_event` writes on every machine."""
-    root = os.environ.get("JSTACK_TIMELINE_DIR", "").strip() \
-        or str(HOME / "Logs" / "Timeline")
-    return Path(root).expanduser() / "timeline.db"
+    """jStack's timeline store — the one file `log_event` writes.
+
+    The chain is `plugins/jstack/root.py::timeline_dir()`, restated here
+    because the host package cannot import the plugin: the timeline's own
+    override, then the logs dir's, then the install root. Every step must stay
+    in step with that file.
+
+    It used to stop at `$HOME/Logs/Timeline` and call that "where log_event
+    writes on every machine", which is true only where the root IS $HOME. On an
+    install rooted elsewhere the plugin wrote `{JSTACK_ROOT}/Logs/Timeline` and
+    this read an empty `$HOME` store: sessions logged correctly, the Timeline
+    tab, the tag picker and the doctor showed nothing, and an empty store is a
+    legitimate state — so nothing anywhere reported a fault. The running-memory
+    loop wrote to one database and read from another.
+    """
+    timeline = os.environ.get("JSTACK_TIMELINE_DIR", "").strip()
+    if timeline:
+        return Path(timeline).expanduser() / "timeline.db"
+    logs = os.environ.get("JSTACK_LOGS_DIR", "").strip()
+    base = Path(logs).expanduser() if logs else stack_root() / "Logs"
+    return base / "Timeline" / "timeline.db"
 
 
 _PRUNED_TREES = {"build", ".build", "SourcePackages", "node_modules",
@@ -581,6 +597,58 @@ def write_instance_root(root: Path) -> Path:
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(str(Path(root).expanduser()) + "\n")
     return marker
+
+
+def stack_root_marker() -> Path:
+    """Where the install root is recorded, beside `instance_root_marker()`.
+
+    Same reasoning, same directory, written by the same installer step — see
+    that function for why `~/.config` and why keyed off `HOME` alone. Two
+    markers rather than one because the two answers are genuinely independent:
+    `--agent-root` may put agents outside the root, and deriving either from
+    the other would make a supported layout resolve one of them wrong.
+    """
+    return HOME / ".config" / "jstack" / "root"
+
+
+def write_stack_root(root: Path) -> Path:
+    """Record the install root so a launchd-spawned host resolves it without a
+    shell. Called by the installer, which knows it from `$JSTACK_ROOT`."""
+    marker = stack_root_marker()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(str(Path(root).expanduser()) + "\n")
+    return marker
+
+
+def stack_root() -> Path:
+    """The install root — `$JSTACK_ROOT`, else the install-time marker, else
+    `$HOME`. The host's answer to `plugins/jstack/root.py::root()`.
+
+    The middle step is the sealed Hub's, which launches through SMAppService
+    with `HOME` and nothing else: no login shell, so no `$JSTACK_ROOT`, and the
+    service environment allowlist (`macos/runtime_entry.py`) admits no override
+    of its own. Without a marker it fell through to `$HOME` and every derived
+    directory went with it.
+
+    The last fallback before `$HOME` reads the *agents* marker, and only when
+    it names an `Agents` directory — the layout every installer writes. It is a
+    migration read, not a derivation: a machine installed before this marker
+    existed has no root recorded, and one witness that can only be right or
+    absent beats resolving its logs to a directory nothing writes.
+    """
+    env = os.environ.get("JSTACK_ROOT", "").strip()
+    if env:
+        return Path(env).expanduser()
+    try:
+        text = stack_root_marker().read_text().strip()
+    except OSError:
+        text = ""
+    if text:
+        return Path(text).expanduser()
+    agents = _marker_root()
+    if agents is not None and agents.name == "Agents":
+        return agents.parent
+    return HOME
 
 
 def instance_root() -> Path:

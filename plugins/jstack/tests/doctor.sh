@@ -363,6 +363,51 @@ else
     fail "exit $rc is not the worst grade among the checks ($worst)"
 fi
 
+# ── injection: the READ half of the loop is graded, not assumed ────────────
+# `review` proves sessions resolve to an agent and log. Nothing proved anything
+# reads them back: `timeline_inject` is opt-in, no repo file ever wrote it, and
+# a machine ran from bring-up to discovery writing a timeline no session opened.
+# The states that must be distinguishable are: no config file, a config with no
+# key, a key that matches no seat here, and a working catch-all.
+
+CFG="$TMP/home/.claude/jstack/review.json"
+mkdir -p "$(dirname "$CFG")"
+
+run_doctor --json > "$TMP/inj-none.json" 2>/dev/null
+g=$(grade_of "$TMP/inj-none.json" injection)
+[ "$g" = "warn" ] || fail "no review.json should warn on injection, got '$g'"
+[ "$g" = "warn" ] && pass "no config at all: the seat reads nothing, and it is said"
+
+printf '{}\n' > "$CFG"
+run_doctor --json > "$TMP/inj-empty.json" 2>/dev/null
+g=$(grade_of "$TMP/inj-empty.json" injection)
+[ "$g" = "warn" ] || fail "a config with no timeline_inject should warn, got '$g'"
+[ "$g" = "warn" ] && pass "a config that declares no timeline_inject is named"
+
+printf '{"timeline_inject": {"nobody/chat": 5}}\n' > "$CFG"
+run_doctor --json > "$TMP/inj-miss.json" 2>/dev/null
+g=$(grade_of "$TMP/inj-miss.json" injection)
+[ "$g" = "warn" ] || fail "a key matching no seat should warn, got '$g'"
+[ "$g" = "warn" ] && pass "a timeline_inject that matches no seat here is a warning"
+
+printf '{"timeline_inject": {"*/*": 10}}\n' > "$CFG"
+run_doctor --json > "$TMP/inj-ok.json" 2>/dev/null
+g=$(grade_of "$TMP/inj-ok.json" injection)
+[ "$g" = "ok" ] || fail "a catch-all over a real agent should grade ok, got '$g'"
+[ "$g" = "ok" ] && pass "a catch-all injects every seat, and the count is named"
+
+if grep -q "testbed/chat" "$TMP/inj-ok.json"; then
+    pass "the injecting seat is named, not just counted"
+else
+    fail "graded ok without naming which seats inject"
+fi
+
+JSTACK_TIMELINE_INJECT_DISABLED=1 run_doctor --json > "$TMP/inj-off.json" 2>/dev/null
+g=$(grade_of "$TMP/inj-off.json" injection)
+[ "$g" = "warn" ] || fail "the kill switch should warn, got '$g'"
+[ "$g" = "warn" ] && pass "the kill switch is reported, not silently obeyed"
+rm -f "$CFG"
+
 # ── a check that raises FAILS; it does not disappear ───────────────────────
 # Proven by breaking a seam the doctor reads rather than by patching the tool:
 # a root that resolves inside the shipping checkout makes root.py raise, and

@@ -762,6 +762,28 @@ print(m.timeline_dir())
   && pass "unconfigured, the derived answer is the pre-root ~/Logs/Timeline" \
   || fail "derivation moved an unconfigured install ($LEGACY)"
 
+# 53. `where` is the writer answering for itself — the probe every OTHER reader
+#     of this store needs. Each of them derives the path a second time, and a
+#     derivation that disagrees is invisible: both sides succeed, against
+#     different files. The host read an empty ~/Logs/Timeline for weeks while
+#     sessions logged into the declared root's store, and nothing could have
+#     caught it except asking the writer. It must agree with timeline_dir()...
+WHERE=$(env -u JSTACK_TIMELINE_DIR JSTACK_ROOT="$TMP/oneroot" \
+  JSTACK_REVIEW_CONFIG="$TMP/no-such-review.json" "$PLUGIN_ROOT/bin/log_event" where)
+[[ "$WHERE" == "$TMP/oneroot/Logs/Timeline/timeline.db" ]] \
+  && pass "log_event where names the db this writer resolves" \
+  || fail "where disagrees with the writer's own timeline_dir ($WHERE)"
+
+# 53b. …and it must not CREATE what it was asked about. A probe that makes the
+#      directory has answered its own question, and the caller comparing two
+#      paths would then be comparing one it just caused to exist.
+rm -rf "$TMP/probeonly"
+env -u JSTACK_TIMELINE_DIR JSTACK_ROOT="$TMP/probeonly" \
+  JSTACK_REVIEW_CONFIG="$TMP/no-such-review.json" "$PLUGIN_ROOT/bin/log_event" where >/dev/null
+[[ ! -e "$TMP/probeonly" ]] \
+  && pass "where creates nothing — it reports, it does not provision" \
+  || fail "where created $TMP/probeonly"
+
 echo
 if [[ $fails -gt 0 ]]; then
   echo "log-event: $fails FAILED" >&2

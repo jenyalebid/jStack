@@ -285,3 +285,58 @@ def test_a_machine_with_no_user_settings_has_nothing_to_double(machine, monkeypa
     monkeypatch.setenv("HOME", str(machine / "bare"))
     r = doctor.check_hook_owners()
     assert r["grade"] == doctor.OK
+
+
+# ── the timeline check must not report agreement it cannot observe ──
+
+def _fake_log_event(tmp_path, prints: str) -> Path:
+    binary = tmp_path / "log_event"
+    binary.write_text("#!/bin/sh\n" + prints + "\n")
+    binary.chmod(0o755)
+    return binary
+
+
+def test_a_split_timeline_is_a_failure_not_a_fresh_install(machine, monkeypatch, tmp_path):
+    """The defect this check exists for, from a machine rooted at ~/Alpine.
+
+    The host derived `$HOME/Logs/Timeline` and `log_event` wrote the declared
+    root's. Both sides worked. The doctor printed "no store yet — the first
+    session that logs an entry creates it" beside a populated database, because
+    an empty store IS a legitimate state and it had no second opinion to weigh
+    it against. Now it asks the writer, and a disagreement is a fail.
+    """
+    from jstack_host import timeline as tl
+    writer_db = tmp_path / "Alpine" / "Logs" / "Timeline" / "timeline.db"
+    binary = _fake_log_event(tmp_path, f"echo {writer_db}")
+    monkeypatch.setattr(tl, "log_event_bin", lambda: binary)
+    monkeypatch.setattr(hostenv, "timeline_db", lambda: tmp_path / "home" / "Logs" / "Timeline" / "timeline.db")
+    result = doctor.check_timeline()
+    assert result["grade"] == doctor.FAIL
+    assert str(writer_db) in result["detail"] and "this host reads" in result["detail"]
+
+
+def test_an_agreeing_timeline_says_so(machine, monkeypatch, tmp_path):
+    from jstack_host import timeline as tl
+    db = tmp_path / "Logs" / "Timeline" / "timeline.db"
+    db.parent.mkdir(parents=True)
+    db.write_text("")
+    binary = _fake_log_event(tmp_path, f"echo {db}")
+    monkeypatch.setattr(tl, "log_event_bin", lambda: binary)
+    monkeypatch.setattr(hostenv, "timeline_db", lambda: db)
+    result = doctor.check_timeline()
+    assert result["grade"] == doctor.OK and "log_event agrees" in result["detail"]
+
+
+def test_an_unaskable_writer_is_not_graded_as_agreement(machine, monkeypatch, tmp_path):
+    """An older plugin has no `where` and exits 2 on it. That is a missing
+    probe, not a disagreement — and equally not a cross-check that passed."""
+    from jstack_host import timeline as tl
+    db = tmp_path / "Logs" / "Timeline" / "timeline.db"
+    db.parent.mkdir(parents=True)
+    db.write_text("")
+    binary = _fake_log_event(tmp_path, "echo 'usage: log_event ...' >&2; exit 2")
+    monkeypatch.setattr(tl, "log_event_bin", lambda: binary)
+    monkeypatch.setattr(hostenv, "timeline_db", lambda: db)
+    result = doctor.check_timeline()
+    assert result["grade"] == doctor.OK
+    assert "could not be cross-checked" in result["hint"]
