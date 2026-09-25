@@ -241,6 +241,20 @@ def check_timeline() -> dict:
                       "normal until the first `log_event`, which creates it")
     try:
         with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if "entries" not in tables:
+                # `msg` shares this file and creates only its own `messages`
+                # table, so a Mac whose first timeline write is a message —
+                # which a fresh install's own agent session does — has a db
+                # with no `entries` in it. That is a store waiting for its
+                # first event, not a broken one: log_event's schema is CREATE
+                # TABLE IF NOT EXISTS and adds it to the file as it stands.
+                # Graded FAIL, it told every reader of a fresh install that
+                # their timeline was unreadable.
+                return _check("timeline", OK,
+                              f"{db} — no entries yet ({', '.join(sorted(tables)) or 'empty'})",
+                              "normal until the first `log_event`")
             rows = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
     except sqlite3.Error as e:
         return _check("timeline", FAIL, f"{db} is not a readable timeline: {e}",
