@@ -582,6 +582,11 @@ ARTIFACTS = [
 
 PROMPT = {"type": "user", "message": {"role": "user", "content": "actually hold on"}}
 
+#: The row the box writes the instant it takes our `/compact` — and, in a real session, the
+#: ONLY thing written between the send and the boundary. Every entry in `ARTIFACTS` is
+#: flushed after the boundary line, whatever its own timestamp claims.
+SENT = {"type": "user", "message": {"role": "user", "content": "/compact"}}
+
 #: The session answering — an assistant line with WORDS in it. `turn_of` reads a turn off
 #: the text, so this is the only assistant shape that counts as the session having spoken.
 REPLY = {"type": "assistant", "message": {"id": "m9", "content": [
@@ -1285,6 +1290,61 @@ def test_the_artifacts_it_writes_are_the_proof_it_is_still_running(near_ceiling)
     assert cod.resume_scan(near_ceiling, offset, "claude") == ("landed", 4)
     append(near_ceiling, PROMPT)
     assert cod.resume_scan(near_ceiling, offset, "claude") == ("taken", 4)
+
+
+def test_the_command_we_typed_is_a_sign_of_life(near_ceiling):
+    """b2e6524a, 2026-09-24, and the reason the budget restart has never once fired.
+
+    `ARTIFACTS` is what the previous fix counted, and a real client writes ALL of it after
+    the boundary: in that session's transcript the caveat and the echoed command carry
+    00:20:32 timestamps and sit BELOW the 00:22:49 boundary line in the file. So between
+    the send and the boundary the only row on disk is the submitted command — and it was
+    skipped, because `turn_of` reads it as a user turn like anything a person types.
+    `signs` stayed 0 for every compaction ever run and `BOUNDARY_WAIT_SECS` was a flat
+    budget from the send: 17:16:07 sent into a busy pane, 17:20:32 taken, 17:21:08
+    `sent/no-boundary`, 17:22:49 the boundary, on a compaction that worked.
+    """
+    offset = append(near_ceiling, SENT)
+    assert cod.resume_scan(near_ceiling, offset, "claude") == ("waiting", 1), \
+        "the only row a running compaction writes has to count as one"
+    append(near_ceiling, BOUNDARY, ARTIFACTS[0])
+    assert cod.resume_scan(near_ceiling, offset, "claude") == ("landed", 2)
+    append(near_ceiling, PROMPT)
+    assert cod.resume_scan(near_ceiling, offset, "claude") == ("taken", 2), \
+        "a real turn after the boundary still ends it"
+
+
+def test_a_queued_send_does_not_eat_the_boundary_budget(near_ceiling, nudged, monkeypatch):
+    """The whole failure, driven through the real scanner — no stubbed `resume_scan`.
+
+    The test that was supposed to cover this monkeypatched the counter to rise on its own,
+    so it passed against a function that in production returned 0 forever. Here the rows
+    are written to a real file and the count comes off them, and the pane holds the command
+    QUEUED for three times the flat window before taking it.
+    """
+    appended = []
+    monkeypatch.setattr(cod, "pane",
+                        lambda name: QUEUED_PANE if not appended else screen())
+    monkeypatch.setattr(cod, "BOUNDARY_WAIT_SECS", 0.4)
+    monkeypatch.setattr(cod, "MAX_BOUNDARY_WAIT_SECS", 30)
+    monkeypatch.setattr(cod, "POLL_SECS", 0.05)
+    offset = os.path.getsize(near_ceiling)
+    start = time.time()
+    real_scan = cod.resume_scan
+
+    def scan(path, off, engine="claude"):
+        elapsed = time.time() - start
+        if elapsed > 1.2 and not appended:
+            append(near_ceiling, SENT)      # the box finally takes it, past the window
+            appended.append(1)
+        elif elapsed > 1.6 and len(appended) == 1:
+            append(near_ceiling, BOUNDARY)  # and the compaction finishes
+            appended.append(1)
+        return real_scan(path, off, engine)
+
+    monkeypatch.setattr(cod, "resume_scan", scan)
+    assert cod.wait_and_continue("jr-x", near_ceiling, offset, True) == "continued"
+    assert nudged == ["jr-x"]
 
 
 def test_a_slow_compaction_still_gets_its_continue(near_ceiling, nudged, monkeypatch):

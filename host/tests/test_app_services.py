@@ -168,3 +168,68 @@ def test_old_removal_journal_is_not_silently_abandoned(installed, complete_insta
     with pytest.raises(ValueError, match="earlier removal journal"):
         install_host.uninstall(all_services=True, out=io.StringIO())
     assert not path.exists() and calls == []
+
+
+def _status_out(monkeypatch, installed, *, loaded, records=None):
+    """`jstack-host status` with launchd and the record store both stubbed.
+
+    `loaded` maps a role to what launchd would say about it, which is the whole point:
+    the record and launchd are two different sources and the command exists to notice
+    when they disagree.
+    """
+    records = records or {"host": "enabled", "menu": "enabled"}
+    monkeypatch.setattr(app_services, "control", lambda *args: dict(records))
+    monkeypatch.setattr(install_host, "is_loaded",
+                        lambda label: loaded[label.rsplit(".", 1)[-1]])
+    monkeypatch.setattr(install_host, "health", lambda port: {"service": "jremote-host"})
+    monkeypatch.setattr(install_host, "api_answers", lambda port: True)
+    out = io.StringIO()
+    code = app_services.status(installed, port=None, out=out)
+    return code, out.getvalue()
+
+
+def test_a_role_registered_but_absent_from_launchd_is_reported(monkeypatch, installed):
+    """The 2026-09-24 fault, twice in one day: the menu's record said `enabled` while
+    launchd held no such job and there was no menu bar item on the screen. This command
+    printed a clean `menu enabled` over it both times, so the Hub vouched for a service
+    the user could see was gone — a probe reporting state it never observed."""
+    code, text = _status_out(monkeypatch, installed,
+                             loaded={"host": True, "menu": False})
+    assert "record only" in text
+    assert code == 1
+
+
+def test_the_disagreement_names_the_repair(monkeypatch, installed):
+    """A stale `enabled` record is also what makes a plain `register` do nothing, so the
+    line has to say the record must be dropped first or the reader retries the no-op."""
+    _, text = _status_out(monkeypatch, installed, loaded={"host": True, "menu": False})
+    assert "unregister then register" in text
+
+
+def test_the_host_is_cross_examined_too_not_just_the_menu(monkeypatch, installed):
+    """The old code asked launchd about the host alone, for the `loaded` line, and never
+    compared it with the host's own record."""
+    code, text = _status_out(monkeypatch, installed,
+                             loaded={"host": False, "menu": True})
+    assert "record only" in text.split("menu")[0]
+    assert code == 1
+
+
+def test_agreement_stays_quiet_and_green(monkeypatch, installed):
+    """Every role loaded is the normal case and must print exactly what it printed
+    before — a status that shouts on a healthy machine is one nobody reads."""
+    code, text = _status_out(monkeypatch, installed,
+                             loaded={"host": True, "menu": True})
+    assert "record only" not in text
+    assert "host       enabled" in text and "menu       enabled" in text
+    assert code == 0
+
+
+def test_a_role_that_is_not_enabled_is_not_called_stale(monkeypatch, installed):
+    """`not_registered` already agrees with launchd holding nothing. Flagging it would
+    turn every deliberately-off capability into a permanent red."""
+    code, text = _status_out(monkeypatch, installed,
+                             loaded={"host": True, "menu": False},
+                             records={"host": "enabled", "menu": "not_registered"})
+    assert "record only" not in text
+    assert code == 0
