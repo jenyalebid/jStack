@@ -1667,3 +1667,47 @@ def test_delegate_leaf_is_ordered_on_the_provisioned_adoption(runner):
     assert "delegate_leaf" in runner.HOST_HUB_SAFE
     fleet = SimpleNamespace(hub="hub", leaves=["a", "b"], fresh=None)
     assert runner.CAST["delegate_leaf"](fleet) == ("hub", "a")
+
+
+def test_a_local_hub_mints_the_adoption_code_at_its_own_console(runner, monkeypatch):
+    """The lab's joiner script ssh's into the hub as admin and runs the CLI
+    there. This Mac has no jstack-host launcher and grows no authorized key for
+    a disposable VM, so joining it has to go through the console route the
+    hub's own menu bar spends — and the guest spends the code it hands back."""
+    fleet = runner.Fleet({**LOCAL_PLAN, "hub_address": "192.168.2.1",
+                          "adopt_command": "/bin/bash ~/adopt-to-hub.sh acc-hub.local"},
+                         run=SlotCountingFleet())
+    minted, ran = [], []
+    monkeypatch.setattr(fleet.hub, "config", lambda: {"local_url": "http://127.0.0.1:9090"})
+    monkeypatch.setattr(fleet.hub, "call", lambda path, body=None, **kw: minted.append((path, body))
+                        or {"status": 200, "body": json.dumps({"code": "LAB-4242"})})
+    guest = fleet.leaves[0]
+    monkeypatch.setattr(guest, "sh", lambda command, **kw: ran.append(command) or "")
+    runner.join(fleet, guest)
+    assert minted == [("/enrolment/codes",
+                       {"name": "Update lab leaf-a", "kind": "host"})], \
+        "the hub did not mint a host code at its console"
+    attach = [c for c in ran if "attach" in c]
+    assert len(attach) == 1 and "LAB-4242" in attach[0], f"the guest spent no code: {ran}"
+    assert "--parent http://192.168.2.1:9090" in attach[0], \
+        f"the guest was not pointed at this Mac's Hub: {attach[0]}"
+    assert not any("adopt-to-hub" in c for c in ran), \
+        "the lab's ssh-into-the-hub joiner ran against this Mac"
+
+
+def test_joining_a_vm_hub_still_runs_the_plan_s_joiner(runner, monkeypatch):
+    fleet = runner.Fleet({**LOCAL_PLAN, "hub": "acc-hub",
+                          "adopt_command": "/bin/bash ~/adopt-to-hub.sh acc-hub.local"},
+                         run=SlotCountingFleet())
+    ran = []
+    monkeypatch.setattr(fleet.leaves[0], "sh", lambda command, **kw: ran.append(command) or "")
+    runner.join(fleet, fleet.leaves[0])
+    assert ran == ["/bin/bash ~/adopt-to-hub.sh acc-hub.local"]
+
+
+def test_a_local_hub_without_an_address_asks_the_guest_for_its_gateway(runner, monkeypatch):
+    fleet = runner.Fleet(LOCAL_PLAN, run=SlotCountingFleet())
+    monkeypatch.setattr(fleet.hub, "config", lambda: {"local_url": "http://127.0.0.1:9091"})
+    guest = fleet.leaves[0]
+    monkeypatch.setattr(guest, "sh", lambda command, **kw: "192.168.2.1\n")
+    assert runner.hub_parent_url(fleet, guest) == "http://192.168.2.1:9091"

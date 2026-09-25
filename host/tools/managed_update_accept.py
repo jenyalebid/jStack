@@ -1283,7 +1283,7 @@ def shell_alias(fleet: Fleet, machine: str) -> tuple[dict, str]:
     return row, (peer_name(row["name"]) or machine)
 
 
-def shell_adopt(journey, fleet: Fleet, candidate: Candidate) -> None:
+def shell_adopt(journey, fleet: Fleet, candidate: Build) -> None:
     """Adoption itself granted the hub shell; prove the material is live, then
     prove a joiner re-run changes none of it."""
     guest = fleet.leaves[0]
@@ -1311,10 +1311,9 @@ def shell_adopt(journey, fleet: Fleet, candidate: Candidate) -> None:
     expect("ABSENT" in dropin,
            f"adoption laid a sudoers drop-in: {dropin.strip()[-300:]}")
     journey.observe("no_standing_root", {"dropin": "absent"})
-    expect(fleet.plan.get("adopt_command"), "a joiner re-run needs 'adopt_command' in the plan")
     before = authorized_block(guest)
     pubkey_before = guest.sh(f"/bin/cat {SHELL_KEY}.pub").strip()
-    guest.sh(fleet.plan["adopt_command"], timeout=900)
+    join(fleet, guest)
     time.sleep(SETTLE)
     after = authorized_block(guest)
     expect(after == before, f"the joiner re-run changed the authorized block: "
@@ -1348,7 +1347,7 @@ def upgrade_shell(journey, fleet: Fleet, candidate: Build) -> None:
     from jstack_host.enrolment import peer_name
     guest = fleet.leaves[0]
     expect(fleet.prior is not None, "this run names no earlier ref to promote from")
-    expect(fleet.plan.get("adopt_command"),
+    expect(isinstance(fleet.hub, LocalHub) or fleet.plan.get("adopt_command"),
            "manufacturing a pre-shell adoption needs 'adopt_command' in the plan")
     stage_prior(fleet, guest, journey=journey)
     before = guest.installed()
@@ -1500,7 +1499,7 @@ def lab_teardown(fleet: Fleet, server, adopted: list[Guest]) -> list[str]:
     return failures
 
 
-def shell_flip(journey, fleet: Fleet, candidate: Candidate) -> None:
+def shell_flip(journey, fleet: Fleet, candidate: Build) -> None:
     """Leaf→leaf: a grant flipped on, used, flipped off and refused.
 
     With a local hub the flip is the real Hub's own console route,
@@ -1707,7 +1706,7 @@ def hub_grant(fleet: Fleet, machine: str, token: str) -> dict:
     return granted
 
 
-def delegate_leaf(journey, fleet: Fleet, candidate: Candidate) -> None:
+def delegate_leaf(journey, fleet: Fleet, candidate: Build) -> None:
     """A hub device projected onto a leaf through the leaf's adoption grant.
 
     Proved on the machines: the projection answers on the leaf, re-asking
@@ -1801,7 +1800,7 @@ def delegate_leaf(journey, fleet: Fleet, candidate: Candidate) -> None:
                 journey.note(f"could not withdraw hub device {owner}: {exc}")
 
 
-def shell_detach(journey, fleet: Fleet, candidate: Candidate) -> None:
+def shell_detach(journey, fleet: Fleet, candidate: Build) -> None:
     """Runs last: detach is terminal for its leaf, and `sandbox.py reset`
     re-provisions the fleet after a full run. leaves[0], never leaves[-1] —
     that leaf's credential died in the revocation journey, and detach has to
@@ -2124,11 +2123,60 @@ def update_to_build(fleet: Fleet, guest: Guest, machine: str, build: Build) -> d
             "job": "already current"}
 
 
+def local_mint(fleet: Fleet, guest: Guest) -> str:
+    """An adoption code minted at this Mac's own console.
+
+    The lab's joiner script ssh's into the hub as `admin` and runs the CLI
+    there. This Mac is not a guest: it has no `jstack-host` launcher at all
+    (its host is embedded in the dashboard) and it is not growing an
+    authorized key for a disposable VM. The console route is the one the hub's
+    own menu bar spends, and `LocalHub.call` already presents the internal
+    token over loopback, which is what makes the caller the console.
+    """
+    answer = fleet.hub.call("/enrolment/codes",
+                            {"name": f"Update lab {guest.name}", "kind": "host"})
+    expect(answer["status"] == 200, f"{LOCAL_HUB} would not mint an adoption code: "
+                                   f"{answer['status']} {answer['body'][:300]}")
+    code = str(json.loads(answer["body"]).get("code") or "")
+    expect(code, f"{LOCAL_HUB}'s console minted no code: {answer['body'][:300]}")
+    return code
+
+
+def hub_parent_url(fleet: Fleet, guest: Guest) -> str:
+    """The address a leaf dials this Mac's Hub on — the plan's, or the gateway
+    softnet puts this Mac at, which is the same answer `reaches_local_hub`
+    already proved answers 200 from inside the guest."""
+    port = urlsplit(fleet.hub.config()["local_url"]).port or 9090
+    address = fleet.plan.get("hub_address") or guest.sh(
+        "/sbin/route -n get default | /usr/bin/awk '/gateway/{print $2}'").strip()
+    expect(address, f"{guest.name} has no route back to {LOCAL_HUB}")
+    return f"http://{address}:{port}"
+
+
+def join(fleet: Fleet, guest: Guest) -> None:
+    """Run the adoption a joining Mac runs, against whichever hub this run has.
+
+    A VM hub has the lab's one-file joiner sitting on the guest, which mints
+    over ssh and attaches. A local hub has no such script and never will, so
+    the two halves that script does happen here instead: the hub mints at its
+    console, the guest spends the code. Same product doors, same order.
+    """
+    if not isinstance(fleet.hub, LocalHub):
+        expect(fleet.plan.get("adopt_command"),
+               "pairing a Mac to a VM hub needs 'adopt_command' in the plan")
+        guest.sh(fleet.plan["adopt_command"], timeout=900)
+        return
+    code = local_mint(fleet, guest)
+    # The lab image gives admin passwordless sudo through a prompt; attach asks
+    # for root once, and priming it here keeps that ask off the guest's screen.
+    guest.sh("echo admin | sudo -S -p '' /usr/bin/true")
+    guest.sh(f"{shlex.quote(GUEST_HOST_CLI)} attach {shlex.quote(code)} "
+             f"--parent {shlex.quote(hub_parent_url(fleet, guest))}", timeout=900)
+
+
 def adopt(fleet: Fleet, guest: Guest) -> str:
-    """Pair a freshly installed Mac to the fixture hub, the way the lab does."""
-    expect(fleet.plan.get("adopt_command"),
-           "pairing a fresh Mac needs 'adopt_command' in the plan")
-    guest.sh(fleet.plan["adopt_command"], timeout=900)
+    """Pair a freshly installed Mac to this run's hub, the way the lab does."""
+    join(fleet, guest)
     time.sleep(SETTLE)
     machine = guest.host_id()
     fleet._ids[guest.name] = machine
