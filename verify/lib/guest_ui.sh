@@ -47,16 +47,19 @@ tell application "System Events"
         delay 1
         set AppleScript's text item delimiters to ", "
         log "file menu: " & ((name of every menu item of menu "File" of menu bar 1) as text)
-        set parent to menu item "New Chat" of menu "File" of menu bar 1
-        click parent
+        -- `parent` is a property every AppleScript object already has, so
+        -- `set parent to ...` inside a `tell process` tries to reparent the
+        -- process and fails with -10006. The name has to be the item's own.
+        set newChat to menu item "New Chat" of menu "File" of menu bar 1
+        click newChat
         delay 1
-        set rows to name of every menu item of menu "New Chat" of parent
+        set rows to name of every menu item of menu "New Chat" of newChat
         log "new chat: " & (rows as text)
         if (count of rows) is 0 then
             key code 53
             error "New Chat offers no agent"
         end if
-        click menu item 1 of menu "New Chat" of parent
+        click menu item 1 of menu "New Chat" of newChat
         return item 1 of rows
     end tell
 end tell

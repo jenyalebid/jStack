@@ -139,7 +139,15 @@ GHOSTS="$(printf '%s\n' "$WINDOWS" | grep -cx 'Thread' || true)"
     && say "OK the install left no empty shell on screen" \
     || echo "FAIL the install left $GHOSTS empty 'Thread' window(s) — the blank windows on a fresh Mac"
 
-CHATS="$(printf '%s\n' "$WINDOWS" | grep -v '^$' | grep -vx 'Thread' | grep -vx 'Home' | wc -l | tr -d ' ')"
+# A session window is titled by the agent, never by the app: `LiveChatTitle`
+# sets it to the record's preview and falls back to `agent.name`, so the
+# install's own session reads "Jarvis" until its first reply lands. The app's
+# own windows are the rest, and they have to be named to be excluded — an
+# earlier version counted any title that was not "Thread" and passed on the
+# board window alone, with no session on screen at all. A title this list
+# misses shows up as the FAIL printing the window list.
+CHROME='Thread|Home|Hubs|Instances|Documents|Settings'
+CHATS="$(printf '%s\n' "$WINDOWS" | grep -v '^$' | grep -cvxE "$CHROME" || true)"
 [ "$CHATS" -ge 1 ] \
     && say "OK the install's own session is on screen as a window of its own" \
     || echo "FAIL the install opened no session window — welcome went nowhere"
