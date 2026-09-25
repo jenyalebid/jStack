@@ -333,6 +333,69 @@ def check_hooks() -> dict:
     return _check("hooks", OK, f"{len(commands)} hook commands, all present and executable")
 
 
+def _host_resolver():
+    """`hooks/_host.py`, by path — the resolver the hooks themselves import."""
+    import importlib.util  # noqa: PLC0415
+    spec = importlib.util.spec_from_file_location(
+        "_jstack_doctor_host", PLUGIN_ROOT / "hooks" / "_host.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_host() -> dict:
+    """Can the INSTALLED plugin's hooks reach the host, and run it?
+
+    `hooks` proves the scripts are there; this proves they can do anything.
+    Nine hooks import the host package and exit 0 when they cannot, so a
+    machine whose installed copy finds no host has its plan, environment,
+    attention, context-ceiling and codex-carry hooks silently switched off —
+    which is every installed machine before `_host.py` existed, since the
+    cache copy has no `host/` beside it. Resolved from the ledger's
+    `installPath` with the resolver the hooks import, so this grades the copy
+    Claude Code runs, not the copy the doctor happens to be.
+    """
+    marketplace, record = _installed_jstack()
+    if not marketplace:
+        return _check("host", OK, "jstack is not installed from a marketplace — "
+                      "no installed copy whose hooks need a host")
+    resolver = _host_resolver()
+    install = Path(record.get("installPath") or PLUGIN_ROOT)
+    checkout = resolver.find_checkout(install)
+    try:
+        recorded = resolver.reason_path().read_text().strip()
+    except OSError:
+        recorded = ""
+    last = f"; last failed load: {recorded}" if recorded else ""
+    if checkout is None:
+        return _check("host", FAIL,
+                      f"the installed plugin at {install} reaches no host checkout — "
+                      "every host-importing hook exits silently" + last,
+                      f"register the marketplace at a checkout: `claude plugin "
+                      f"marketplace add <checkout>` (the `{marketplace}` entry in "
+                      "~/.claude/plugins/known_marketplaces.json)")
+    floor = resolver.requires_python(checkout)
+    venv = checkout / resolver.VENV_PYTHON
+    if not venv.is_file():
+        # The hooks run `python3` off the spawn PATH, and without the venv
+        # there is nothing to re-exec under when that one is too old.
+        py = _which("python3")
+        raw = _version([py, "--version"]).split()[-1] if py else ""
+        have = tuple(int(p) for p in raw.split(".")[:len(floor)] if p.isdigit())
+        if floor and (not have or have < floor):
+            return _check("host", FAIL,
+                          f"host at {checkout / 'host'}, but python3 on the spawn "
+                          f"path is {raw or 'absent'} and the host needs "
+                          f">={'.'.join(map(str, floor))}, with no {venv} to "
+                          "re-exec under" + last,
+                          f"create the venv: python3.11+ -m venv {venv.parent.parent}")
+    if recorded:
+        return _check("host", WARN, f"host at {checkout / 'host'}{last}",
+                      "the line clears on the next successful load; if it "
+                      "persists, run the named hook by hand")
+    return _check("host", OK, f"installed hooks reach the host at {checkout / 'host'}")
+
+
 def _load_engine(path: Path):
     """Import an extensionless bin/ script as a module.
 
@@ -759,6 +822,7 @@ def check_versions() -> dict:
 
 CHECKS = (check_python, check_claude, check_git, check_dateutil, check_root,
           check_agents, check_timeline, check_rules, check_commands, check_hooks,
+          check_host,
           check_bin, check_config, check_review, check_scheduler,
           check_marketplace_source, check_versions)
 

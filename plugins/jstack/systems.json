@@ -951,6 +951,21 @@
       }
     },
     {
+      "id": "host-loader",
+      "kind": "hook",
+      "name": "Host Loader",
+      "status": "live",
+      "description": "The one place a hook finds the host package. parents[3] of a hook is the repo only in a checkout; Claude Code and Codex run an installed plugin from their plugin cache, where that path holds nothing, so every host-importing hook exited 0 having done nothing on every installed machine while the suites, run from a checkout, passed. _host.py resolves the checkout beside the plugin or through the directory marketplace it was installed from, records a failed load in one line jstack-doctor's host check reads, and re-execs once under the checkout venv when the PATH python is below the host's floor, stdin handed over.",
+      "code": [
+        "hooks/_host.py"
+      ],
+      "test": {
+        "type": "script",
+        "path": "tests/host-resolve.sh",
+        "description": "Copies the plugin into a cache layout under a redirected HOME and proves resolution through known_marketplaces.json and Codex config.toml, refusal of a directory with no host package, the one-line failure receipt and its removal on success, that context-ceiling run from the cache copy speaks only once a marketplace names a checkout, and that a below-floor interpreter re-execs exactly once."
+      }
+    },
+    {
       "id": "context-ceiling",
       "kind": "hook",
       "name": "Context Ceiling",

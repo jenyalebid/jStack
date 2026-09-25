@@ -25,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import attention  # noqa: E402 — sibling hook, path set above
+import _host  # noqa: E402 — the one place the host is found
 
 #: One switch for all three moments. Whatever a person mutes, they mute
 #: because the injection is in their way, and a floor without its corrections
@@ -36,17 +37,6 @@ _rules = None
 
 def disabled() -> bool:
     return bool(os.environ.get(KILL_SWITCH))
-
-
-def _host_importable() -> None:
-    """Put the host package where an import can find it, checkout or install.
-
-    Only the checkout case needs the insert; where the host is installed the
-    import each caller then makes resolves from site-packages and this line is
-    inert. Both loaders below go through it so neither can be the one that
-    forgot.
-    """
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "host"))
 
 
 def host_environment():
@@ -62,9 +52,7 @@ def host_environment():
         declared = attention.state_dir()
         if declared:
             os.environ["JREMOTE_STATE_DIR"] = declared
-    _host_importable()
-    from jstack_host import environment
-    return environment
+    return _host.load("environment")
 
 
 def host_markers():
@@ -77,9 +65,7 @@ def host_markers():
     wants the host at all. Nothing here touches a store — a marker path is an
     env var and a filename — so nothing here needs the state directory either.
     """
-    _host_importable()
-    from jstack_host import markers
-    return markers
+    return _host.load("markers")
 
 
 def path_rules():
