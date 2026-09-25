@@ -238,8 +238,13 @@ while time.monotonic() < deadline:
             subprocess.run([tmux, "load-buffer", prompt_file], check=True)
             subprocess.run([tmux, "paste-buffer", "-p", "-t", target], check=True)
             time.sleep(1); keys("Enter"); sent = True; log.append("prompt sent"); time.sleep(3); continue
+        # "Yes, manually approve edits" leaves the session in manual mode, so
+        # the status line after approval reads "manual mode on", never "plan
+        # mode on" again (2.1.281, live 2026-09-25): the turn is over when the
+        # prompt is back under either mode line.
         if approved and not busy.search(p) and "Would you like" not in p \
-                and re.search(r"(?m)^[\s│]*[❯>]\s*(\S.*)?$", p) and "plan mode on" in p:
+                and re.search(r"(?m)^[\s│]*[❯>]\s*(\S.*)?$", p) \
+                and re.search(r"(plan|manual) mode on", p):
             done = True; log.append("turn over"); break
         time.sleep(2)
     continue

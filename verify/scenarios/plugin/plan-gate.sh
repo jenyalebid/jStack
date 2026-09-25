@@ -49,7 +49,10 @@ grep -q '^Verify: command · sh checks/stage2.sh$' "$HOME/plan-v2.md" \
     || bail "the tightened plan did not take its new gate"
 # What the gates grade must be what the fixture shipped: a session that
 # rewrote a test into a pass would otherwise read as a session that did the work.
-sums() { (cd "$PROJ" && find tests checks -type f | sort | xargs shasum) | shasum | cut -d' ' -f1; }
+# Source only: the gates themselves run unittest, and the bytecode cache it
+# leaves under tests/ read as a rewritten test on 2026-09-25 (run 025027 —
+# every source file was byte-identical to the fixture).
+sums() { (cd "$PROJ" && find tests checks -type f -not -name '*.pyc' -not -path '*/__pycache__/*' | sort | xargs shasum) | shasum | cut -d' ' -f1; }
 SUMS0="$(sums)"
 
 plan_json() { jstack-host plan show "$1" --json; }
