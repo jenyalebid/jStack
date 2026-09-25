@@ -1305,11 +1305,29 @@ def shell_alias(fleet: Fleet, machine: str) -> tuple[dict, str]:
     return row, (peer_name(row["name"]) or machine)
 
 
+def on_candidate(journey, fleet: Fleet, guest: Guest, machine: str, candidate: Build) -> None:
+    """The ssh journeys read the leaf the ref under test makes, so their leaf
+    takes the candidate first, the way any leaf takes a build: by the hub's
+    queue. A leaf already there is left alone.
+
+    Nothing else guarantees it. The interruption journey ends its leaf on the
+    earlier ref on purpose (the request after `reboot_mid_apply`'s reboot
+    installs it), and upgrade_shell, the journey that used to move leaves[0]
+    back onto the candidate, is left out of a run whose earlier ref already
+    carries shell access. Run 20260925-061935: shell_detach took apart a leaf
+    still on release/one-hub, whose detach posts a revoke the hub had already
+    done with the forget, and read `parent-revoke 401` off code this run was
+    not testing.
+    """
+    journey.observe("leaf_on_candidate", update_to_build(fleet, guest, machine, candidate))
+
+
 def shell_adopt(journey, fleet: Fleet, candidate: Build) -> None:
     """Adoption itself granted the hub shell; prove the material is live, then
     prove a joiner re-run changes none of it."""
     guest = fleet.leaves[0]
     machine = fleet.machine(guest)
+    on_candidate(journey, fleet, guest, machine, candidate)
     answer = guest.call("/host")
     expect(answer["status"] == 200, f"the leaf's /host answered {answer['status']}")
     features = json.loads(answer["body"]).get("features", {})
@@ -1839,6 +1857,7 @@ def shell_detach(journey, fleet: Fleet, candidate: Build) -> None:
     tell the parent goodbye with a live one."""
     guest = fleet.leaves[0]
     machine = fleet.machine(guest)
+    on_candidate(journey, fleet, guest, machine, candidate)
     _, alias = shell_alias(fleet, machine)
     uname = ssh_over(fleet.hub, alias, "/usr/bin/uname -a")
     expect("Darwin" in uname and "REFUSED" not in uname,

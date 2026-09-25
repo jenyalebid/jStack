@@ -1743,6 +1743,34 @@ def test_delegate_leaf_is_ordered_on_the_provisioned_adoption(runner):
     assert runner.CAST["delegate_leaf"](fleet) == ("hub", "a")
 
 
+@pytest.mark.parametrize("name,stop_at", [("shell_adopt", "Guest.call"),
+                                          ("shell_detach", "shell_alias")])
+def test_an_ssh_journey_moves_its_leaf_onto_the_candidate_before_reading_it(
+        runner, subject, tmp_path, monkeypatch, name, stop_at):
+    """Run 20260925-061935: interruption had left acc-leaf1 on the earlier
+    ref, as its reboot leg does on purpose, and no journey moved it back once
+    upgrade_shell was left out. shell_detach then took apart a leaf on
+    release/one-hub, whose detach posts a revoke the hub had already done
+    with the forget, and read `parent-revoke 401` off code the run was not
+    testing. The ssh journeys that read leaves[0] now move it onto the
+    candidate first, by the hub's queue, and record where it stands."""
+    def stop(*args, **kwargs):
+        raise runner.AcceptanceFailure("stopped after the move")
+    monkeypatch.setattr(runner.Guest if stop_at == "Guest.call" else runner,
+                        stop_at.split(".")[-1], stop)
+    scripted = ScriptedFleet()
+    result, receipt = journey_result(runner, subject, name, scripted, tmp_path)
+    assert result == "failed" and "stopped after the move" in receipt["detail"]
+    assert scripted.queued == ["machine-leaf-a"], "the leaf on the earlier ref was not moved"
+    assert receipt["observed"] == ["leaf_on_candidate"]
+
+    already = ScriptedFleet(release=CANDIDATE, sha=HEAD_SHA)
+    result, receipt = journey_result(runner, subject, name, already, tmp_path)
+    assert result == "failed" and "stopped after the move" in receipt["detail"]
+    assert already.queued == [], "a leaf already on the candidate was queued a job"
+    assert receipt["observed"] == ["leaf_on_candidate"]
+
+
 def test_a_local_hub_mints_the_adoption_code_at_its_own_console(runner, monkeypatch):
     """The lab's joiner script ssh's into the hub as admin and runs the CLI
     there. This Mac has no jstack-host launcher and grows no authorized key for
