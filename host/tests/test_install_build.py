@@ -545,3 +545,22 @@ def test_install_sh_makes_a_seat_under_every_agent_it_touches():
     # And the line the installer signs off with points at the seat, never the
     # workspace above it.
     assert re.search(r"cd \$AGENT_ROOT/\$\{AGENT_NAME:-<agent>\}/\$SEAT_NAME", INSTALL)
+
+
+def test_pairing_asks_the_disk_whether_there_is_an_app():
+    """A Mac that already has jRemote gets its app paired, not a typed code.
+
+    `APP_INSTALLED` answered "did THIS run install the app", and step 10 read
+    it as "is there an app to pair". The two differ on every Mac that already
+    had one — a `--no-app` install over an existing client, or an app step that
+    reported a problem with a working bundle still in place — and there the
+    installer printed a code for a device sitting on that same disk and never
+    opened the app. Proven on a guest 2026-09-25: the staged client was never
+    launched, so neither of the install's own `jremote://` links was ever
+    fired.
+    """
+    assert re.search(r'if \[ -d "/Applications/jRemote\.app" \]; then APP_INSTALLED=1', CODE), \
+        "install.sh no longer records an app it did not install itself"
+    # And the flag is still what the pairing steps branch on, so the line above
+    # is reaching the thing it was written for.
+    assert CODE.count("APP_INSTALLED") >= 4
