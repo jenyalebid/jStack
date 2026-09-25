@@ -410,6 +410,30 @@ def _is_compaction_artifact(entry):
          "<local-command-caveat>"))
 
 
+def _is_sent_command(entry, engine):
+    """True for the `/compact` WE typed, landing as its own turn.
+
+    THIS IS THE ONLY SIGN OF LIFE A COMPACTION EVER GIVES IN BAND, and it was the one line
+    not counted. `_is_compaction_artifact` names four rows — summary, caveat, echoed
+    command, stdout — and the client writes ALL FOUR only after the boundary: read
+    b2e6524a's transcript in file order and 748/749 carry 00:20:32 timestamps while sitting
+    below the 00:22:49 boundary line. So `signs` could never rise during a run, the restart
+    in `wait_and_continue` never fired, and BOUNDARY_WAIT_SECS was a flat budget from the
+    send no matter what its comment said.
+
+    The submitted command is different: it is written the moment the box takes it, which is
+    exactly the event the budget wanted to start from. On 2026-09-24 that send sat queued in
+    a busy pane for 4m25s (17:16:07 → 17:20:32), the child gave up at 17:21:08 with
+    `sent/no-boundary`, and the boundary landed at 17:22:49 on a compaction that had worked.
+    Counting this row makes the queue wait cost nothing: the clock starts when the
+    compaction does.
+    """
+    if engine != "claude":
+        return False
+    content = (entry.get("message") or {}).get("content")
+    return isinstance(content, str) and content.strip() == COMPACT_CMD
+
+
 def turn_of(entry, engine):
     """`(role, text)` for a line that is a real turn, else `(None, "")`.
 
@@ -652,10 +676,11 @@ def resume_scan(path, offset, engine):
 
     The state is the answer every caller wanted; `signs` is the one `wait_and_continue`
     needed and did not have. A compaction writes NOTHING to the transcript for its whole run
-    except the lines it writes about itself — the caveat, the echoed command, its stdout,
-    the summary — so those lines are the only in-band proof that the thing we typed is being
-    executed at all. Counting them turns "still nothing" into two different facts: nothing
-    has happened, or something is happening and has not finished.
+    except the lines it writes about itself, and of those the only one written BEFORE the
+    boundary is the `/compact` the box took from us — the other four (caveat, echoed
+    command, stdout, summary) are flushed after it, so counting only those gave a counter
+    that could never move. Counting the submitted command turns "still nothing" into two
+    different facts: nothing has happened, or something is happening and has not finished.
 
     `waiting` — no boundary on file yet; the compaction is still running.
     `landed`  — the boundary is written and nothing has spoken since.
@@ -673,6 +698,9 @@ def resume_scan(path, offset, engine):
         if role is None:
             if _is_compaction_artifact(entry):
                 signs += 1
+            continue
+        if not landed and _is_sent_command(entry, engine):
+            signs += 1  # our own `/compact`, taken by the box — see `_is_sent_command`
             continue
         if landed:
             return "taken", signs
@@ -1139,6 +1167,13 @@ def wait_and_continue(name, path, offset, wants_resume, has_rows=False, engine="
             # between our Enter and the work starting, the work is demonstrably happening,
             # so the budget starts again from here — see BOUNDARY_WAIT_SECS.
             signs, deadline = seen, time.time() + BOUNDARY_WAIT_SECS
+        elif signs == 0 and not pane_idle(pane(name), engine, turn_state(path, engine)):
+            # NOTHING HAS STARTED YET, so nothing is late yet. A send into a working pane
+            # QUEUES: it runs when that turn ends, which is the client's clock and not
+            # ours, and on 2026-09-24 it was 4m25s of a 5m budget. Counting the queue
+            # against the compaction is what made a busy pane fatal. The 900s ceiling
+            # still bounds it, and an Escape out of the box is caught below.
+            deadline = time.time() + BOUNDARY_WAIT_SECS
         if state == "taken":
             return "taken"
         turn = turn_state(path, engine)
