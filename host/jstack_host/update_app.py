@@ -286,9 +286,17 @@ class AppBackend(MacBackend):
             if current == "requires_approval":
                 continue  # A later user denial takes precedence over the snapshot.
             if current == "not_found":
-                # The restored bundle no longer seals this definition; a
-                # register call cannot succeed and must not be guessed at.
-                raise releases.ReleaseError(f"{role} service could not be restored")
+                # SMAppService answers not_found for a plist this bundle has
+                # never registered, exactly as for one it does not carry. For
+                # a role the bundle seals that is the cutover — the capability
+                # was stopped under its old label and the role has yet to be
+                # registered under its new one — so register, and let a plist
+                # that truly is not there fail the register call below. For a
+                # catalogued capability it means the bundle dropped it, and a
+                # register call must not be guessed at.
+                from .app_services import sealed_roles
+                if role not in sealed_roles(app):
+                    raise releases.ReleaseError(f"{role} service could not be restored")
             result = control(app, "register", role)
             if result["status"] not in {"enabled", "requires_approval"}:
                 raise releases.ReleaseError(f"{role} service could not be restored")

@@ -205,7 +205,6 @@ def test_apply_refuses_approval_race_before_stopping_anything(monkeypatch, tmp_p
 
 @pytest.mark.parametrize("status,message", [
     ("unknown", "cannot observe"), (None, "cannot observe"),
-    ("not_found", "could not be restored"),
 ])
 def test_recovery_never_registers_an_unobservable_service(monkeypatch, tmp_path, status, message):
     calls = []
@@ -418,3 +417,37 @@ def test_a_new_sealed_role_is_accepted_and_any_other_ownership_change_refused(tm
     unsealed = bundle(tmp_path / "unsealed.app", {**SEALED, **capability("relay")}, {"relay": CAPABILITY})
     with pytest.raises(update_app.releases.ReleaseError, match="service ownership"):
         ownership(tmp_path, installed, unsealed)
+
+
+
+def test_a_sealed_role_the_bundle_never_registered_is_registered_on_restore(monkeypatch, tmp_path):
+    """Live on the home Mac, 22:10: the cutover stopped the catalogued scheduler,
+    swapped the bundle, and restore asked SMAppService about the sealed role —
+    which answers not_found for a plist never registered under this bundle. The
+    old rule read that as 'the bundle dropped it' and left :9091 dead."""
+    app = bundle(tmp_path / "Hub.app", {**SEALED, "scheduler": "live.jstack.hub.scheduler.plist"})
+    calls = []
+
+    def control(app, action, role=None):
+        calls.append((action, role))
+        return {"scheduler": "not_found"} if action == "status" else {"status": "enabled"}
+
+    monkeypatch.setattr(update_app, "control", control)
+    backend = update_app.AppBackend(tmp_path, {})
+    backend._restore_services(app, {"host": "not_registered", "menu": "not_registered", "scheduler": "enabled"})
+    assert calls == [("status", None), ("register", "scheduler")]
+
+
+def test_a_capability_the_bundle_no_longer_carries_is_not_guessed_at(monkeypatch, tmp_path):
+    app = bundle(tmp_path / "Hub.app", {**SEALED, **capability("dashboard")}, {"dashboard": CAPABILITY})
+    calls = []
+
+    def control(app, action, role=None):
+        calls.append((action, role))
+        return {"relay": "not_found"}
+
+    monkeypatch.setattr(update_app, "control", control)
+    backend = update_app.AppBackend(tmp_path, {})
+    with pytest.raises(ValueError, match="could not be restored"):
+        backend._restore_services(app, {"host": "not_registered", "menu": "not_registered", "relay": "enabled"})
+    assert calls == [("status", None)]
