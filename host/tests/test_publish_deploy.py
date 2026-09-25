@@ -138,3 +138,73 @@ def test_each_deploy_run_is_its_own_request(monkeypatch):
     publish_release.deploy("r1", port=9090, timeout=1, poll=0)
     first, second = clients[0].requests[0], clients[1].requests[0]
     assert first.startswith("release-r1-") and second == "release-r1-later" and first != second
+
+
+def _client_repo(tmp_path: Path, build: int = 106) -> Path:
+    """A checkout shaped like jRemote's, with an origin to push to."""
+    import subprocess
+    origin, repo = tmp_path / "origin.git", tmp_path / "client"
+    subprocess.run(["git", "init", "--bare", "-q", str(origin)], check=True)
+    subprocess.run(["git", "clone", "-q", str(origin), str(repo)], check=True)
+    project = repo / "jRemote-Code/jRemote/jRemote.xcodeproj/project.pbxproj"
+    project.parent.mkdir(parents=True)
+    project.write_text(f"CURRENT_PROJECT_VERSION = {build};\n"
+                       "MARKETING_VERSION = 1.0;\n"
+                       f"CURRENT_PROJECT_VERSION = {build};\n")
+    (repo / "neighbour.txt").write_text("someone else's work\n")
+    git = ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "init"], check=True)
+    subprocess.run([*git, "push", "-q", "-u", "origin", "HEAD:refs/heads/main"], check=True)
+    subprocess.run(["git", "-C", str(repo), "branch", "-q",
+                    "--set-upstream-to=origin/main"], check=True)
+    return repo
+
+
+def _version(repo: Path, ref: str = "HEAD") -> str:
+    from jstack_host.update_macos import command
+    return command(["git", "-C", str(repo), "show",
+                    f"{ref}:jRemote-Code/jRemote/jRemote.xcodeproj/project.pbxproj"])
+
+
+def test_a_shipped_build_number_lands_in_the_source_it_was_cut_from(tmp_path):
+    """Without this the project keeps a number below what is on people's Macs,
+    and every Xcode build after a release stamps a downgrade."""
+    repo = _client_repo(tmp_path)
+    result = publish_release.stamp_client_build(repo, 109, "Shipped in r1.")
+    assert "109" in result and "pushed" in result
+    assert _version(repo).count("CURRENT_PROJECT_VERSION = 109;") == 2
+    assert _version(repo, "origin/main").count("CURRENT_PROJECT_VERSION = 109;") == 2
+
+
+def test_the_stamp_commits_its_own_file_and_nobody_elses(tmp_path):
+    """The checkout is shared and every session holds its own index."""
+    import subprocess
+    repo = _client_repo(tmp_path)
+    (repo / "neighbour.txt").write_text("edited by another session\n")
+    publish_release.stamp_client_build(repo, 109, "Shipped in r1.")
+    changed = subprocess.run(["git", "-C", str(repo), "show", "--name-only",
+                              "--format=", "HEAD"], capture_output=True, text=True).stdout
+    assert changed.split() == ["jRemote-Code/jRemote/jRemote.xcodeproj/project.pbxproj"]
+    assert (repo / "neighbour.txt").read_text() == "edited by another session\n"
+
+
+def test_a_number_already_reached_is_not_stamped_again(tmp_path):
+    repo = _client_repo(tmp_path, build=111)
+    assert "already carries build 111" in publish_release.stamp_client_build(repo, 109, "")
+
+
+def test_an_unstampable_project_says_so_rather_than_passing_quietly(tmp_path):
+    """Silence here is the whole defect: five builds shipped without anyone
+    seeing that the source never caught up."""
+    repo = _client_repo(tmp_path)
+    project = repo / "jRemote-Code/jRemote/jRemote.xcodeproj/project.pbxproj"
+    project.write_text(project.read_text().replace("= 106;\nMARKETING", "= 107;\nMARKETING"))
+    assert "WARNING" in publish_release.stamp_client_build(repo, 112, "")
+    assert _version(repo).count("CURRENT_PROJECT_VERSION = 106;") == 2
+    assert "WARNING" in publish_release.stamp_client_build(tmp_path / "nothing", 112, "")
+    import subprocess
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qam", "targets drift"], check=True)
+    assert "disagree" in publish_release.stamp_client_build(repo, 112, "")
+    assert "CURRENT_PROJECT_VERSION = 112;" not in _version(repo)
