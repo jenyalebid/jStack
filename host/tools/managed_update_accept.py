@@ -163,7 +163,16 @@ class Guest:
         self.name, self.tool, self._run = name, Path(tool), run
 
     def vm(self, *argv: str, timeout: int = 900) -> str:
-        done = self._run([str(self.tool), *argv], capture_output=True, text=True, timeout=timeout)
+        try:
+            done = self._run([str(self.tool), *argv],
+                             capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            # A run that blows a budget is a finding about the guest, so it has
+            # to arrive as one. Left uncaught it ends the whole acceptance in a
+            # `subprocess` traceback, before a single receipt is written and
+            # with nothing in it that names which Mac stopped answering.
+            raise AcceptanceFailure(
+                f"{self.name}: vm.sh {argv[0]} did not return within {timeout}s") from exc
         if done.returncode:
             raise AcceptanceFailure(f"{self.name}: vm.sh {argv[0]} failed: "
                                     + (done.stderr or done.stdout).strip()[-800:])
@@ -197,16 +206,22 @@ class Guest:
         in that gap reads as a dead daemon. A guest with no installed host has
         no API to wait for; a guest whose API never comes up is a real finding.
         """
+        # A deadline, not an iteration count: each turn of the loop costs the
+        # curl's own timeout as well as the sleep, so counting to `timeout`
+        # spends up to three times that long — past the ssh budget below, which
+        # then kills a guest that was still coming up and calls it dead.
         script = (
             "cfg=~/.local/state/jremote/updates/config.json; "
             "[ -f \"$cfg\" ] || { echo no-host; exit 0; }; "
             "url=$(grep -o '\"local_url\": *\"[^\"]*\"' \"$cfg\" | cut -d'\"' -f4); "
-            f"for i in $(seq 1 {int(timeout)}); do "
+            "start=$(date +%s); "
+            f"while [ $(( $(date +%s) - start )) -lt {int(timeout)} ]; do "
             "code=$(curl -s -o /dev/null -m 2 -w '%{http_code}' \"$url/api/jremote/v1/host\"); "
-            "[ \"$code\" != 000 ] && { echo \"up $code ${i}s\"; exit 0; }; sleep 1; done; "
+            "[ \"$code\" != 000 ] && { echo \"up $code $(( $(date +%s) - start ))s\"; exit 0; }; "
+            "sleep 1; done; "
             "echo down; exit 3")
         try:
-            return self.sh(script, timeout=timeout + 60).strip()
+            return self.sh(script, timeout=timeout + 120).strip()
         except AcceptanceFailure as exc:
             raise AcceptanceFailure(
                 f"{self.name}: booted, but its host API never answered within {timeout}s") from exc

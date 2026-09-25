@@ -998,7 +998,7 @@ def test_start_returns_only_once_the_guest_api_answers(runner):
     guest, calls = _booting_guest(runner, ["up 401 27s"])
     assert guest.start() == "acc-leaf1 up at 192.168.2.54"
     assert [argv[1] for argv in calls] == ["gui", "ssh"]
-    assert "seq 1 180" in calls[1][3]
+    assert "-lt 180" in calls[1][3], "the wait does not carry the boot budget"
 
 
 def test_start_names_a_host_api_that_never_comes_up(runner):
@@ -1377,3 +1377,32 @@ def test_a_guest_without_a_host_is_left_alone(runner):
     fleet = build(runner, scripted, fresh="fresh")
     assert runner.lab_guest(fleet.fresh) is False
     assert scripted.kicked == []
+
+
+def test_a_guest_that_stops_answering_names_itself_instead_of_a_traceback(runner):
+    """`subprocess.TimeoutExpired` out of `vm.sh` ended a whole acceptance in a
+    stack trace with no guest in it — before the first receipt was written."""
+    def run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 0))
+
+    hub = runner.Guest("acc-hub", Path("/bin/vm.sh"), run=run)
+    with pytest.raises(runner.AcceptanceFailure, match="acc-hub: vm.sh ssh did not return"):
+        hub.sh("true", timeout=7)
+
+
+def test_the_api_wait_gives_the_guest_the_seconds_it_claims_to(runner):
+    """The wait loop spends a curl timeout per turn as well as its sleep, so an
+    iteration count is not a second count: counting to 180 ran the guest past
+    the ssh budget, which killed a Mac that was still coming up."""
+    seen = {}
+    def run(argv, **kwargs):
+        seen["script"], seen["timeout"] = argv[-1], kwargs["timeout"]
+        return subprocess.CompletedProcess(argv, 0, "up 200 31s", "")
+
+    guest = runner.Guest("acc-hub", Path("/bin/vm.sh"), run=run)
+    assert guest.await_api(timeout=180) == "up 200 31s"
+    assert "seq 1 180" not in seen["script"], "still counting turns instead of seconds"
+    assert "-lt 180" in seen["script"], "the deadline is not the timeout it was given"
+    assert "$(date +%s) - start" in seen["script"], "the loop does not read the clock"
+    # Room for the in-flight curl and the ssh handshake on either side of it.
+    assert seen["timeout"] >= 180 + 60
