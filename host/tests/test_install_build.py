@@ -530,3 +530,18 @@ def test_homebrew_is_found_where_it_lives_not_only_on_path():
     brew = CODE.index('BREW=""')
     for caller in ('"$BREW" install wireguard-go wireguard-tools', '"$BREW" install tmux'):
         assert CODE.index(caller) > brew, f"{caller} runs before Homebrew is resolved"
+
+
+def test_install_sh_makes_a_seat_under_every_agent_it_touches():
+    """An agent with no seat is a shape the app can only approximate: it drives
+    the agent root, its pad lands there, and `board.chat_scoped_id` — which
+    looks for this exact sub-mode — never finds one. So the installer writes the
+    seat for the agent it creates AND for any seatless agent a re-run finds."""
+    assert 'SEAT_NAME="chat"' in CODE
+    assert "write_seat()" in CODE
+    # Both callers: the fresh agent, and the repair pass over existing ones.
+    assert CODE.count("write_seat ") >= 2
+    assert "root.seats(a)" in CODE
+    # And the line the installer signs off with points at the seat, never the
+    # workspace above it.
+    assert re.search(r"cd \$AGENT_ROOT/\$\{AGENT_NAME:-<agent>\}/\$SEAT_NAME", INSTALL)

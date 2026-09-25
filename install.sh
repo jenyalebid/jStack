@@ -22,6 +22,11 @@ CHECKOUT="${JSTACK_CHECKOUT:-$HOME/jStack}"
 # Hub this Mac runs is the commit at the tip of this branch, compiled here.
 REF="${JSTACK_REF:-main}"
 AGENT_ROOT="${JSTACK_AGENT_ROOT:-$HOME/Agents}"
+# The seat a new agent gets, and the one name the rest of the stack knows by
+# heart: `board._chat_scoped_id` looks for exactly this sub-mode, and an agent
+# without it is driven at its root. Not a flag — a second spelling would only
+# produce agents the app cannot represent.
+SEAT_NAME="chat"
 MIN_PY_MAJOR=3
 MIN_PY_MINOR=9
 
@@ -801,8 +806,47 @@ fi
 # The step whose absence looks like the tools being broken: with no agent, every
 # seat-aware tool succeeds against nobody. log_event writes for an agent that
 # does not exist and the session-end engine reviews nothing — no errors anywhere.
+#
+# An agent is two things on disk, and this step makes both: the agent itself
+# (`<Name>/CLAUDE.md` — who it is) and a SEAT under it (`<Name>/chat/CLAUDE.md`
+# — where a session actually opens). Shipping only the first is what this step
+# used to do, and a bare agent is a shape the rest of the stack can only
+# approximate: `board._chat_scoped_id` finds no `chat` sub-mode and falls back
+# to the agent root, so the app drives the root workspace while its chat
+# counter — which counts `chat/` sessions only — reads 0 for every session
+# sitting right there. The pad lands at the root for the same reason
+# (`{seat}/pad`), one level above every seat that comes later.
 
 step "Agent workspace"
+
+# The seat file, written for an agent directory that has no seat. Separate from
+# the identity file above it: that one says who the agent is and is read from
+# here too (Claude Code walks up), this one is the room the work happens in.
+write_seat() {
+    seat_dir="$1/$SEAT_NAME"; seat_agent="$2"
+    [ -f "$seat_dir/CLAUDE.md" ] && return 0
+    run mkdir -p "$seat_dir"
+    if [ "$DRY_RUN" = "1" ]; then
+        would "write $seat_dir/CLAUDE.md"
+        return 0
+    fi
+    cat > "$seat_dir/CLAUDE.md" <<EOF
+# $seat_agent · $SEAT_NAME
+
+The seat: where a session opens. The agent's own CLAUDE.md is one level up and
+is read here too — that file says who $seat_agent is, this one says how the
+work runs in this seat.
+
+jStack keeps this seat's shared folder at \`pad/\`, beside this file.
+
+Replace everything below.
+
+## How I work here
+
+- (conventions a session in this seat follows)
+EOF
+    ok "created $seat_dir/CLAUDE.md"
+}
 
 # Asked of root.py rather than re-derived here: an agent is a directory with a
 # CLAUDE.md, or with one immediate subdirectory that has one, and a second
@@ -816,6 +860,16 @@ fi
 
 if [ -n "$existing" ]; then
     ok "$AGENT_ROOT already holds agents"
+    # A re-run repairs the shape earlier installs left behind: an agent with no
+    # seat under it at all. Only that case. An agent that already has a seat
+    # picked its own names (`pm`, `social`) and none of them are this script's
+    # to second-guess.
+    seatless="$(JSTACK_AGENTS_DIR="$AGENT_ROOT" PYTHONPATH="$PLUGIN" "$PY" -c \
+        'import root; print(" ".join(a for a in root.agents() if not root.seats(a)))' \
+        2>/dev/null || true)"
+    for bare in $seatless; do
+        write_seat "$AGENT_ROOT/$bare" "$bare"
+    done
 else
     # root.py is the authority here and it found nothing, so the question above
     # was skipped by a probe that disagreed with it. Never build a path out of
@@ -833,7 +887,8 @@ else
 # $AGENT_NAME
 
 Who this agent is, and what it owns. jStack reads this file's EXISTENCE to
-decide that $seat is an agent workspace — the contents are yours.
+decide that $seat is an agent workspace — the contents are yours. Sessions
+open one level down, in $seat/$SEAT_NAME.
 
 Replace everything below.
 
@@ -848,6 +903,7 @@ EOF
             ok "created $seat/CLAUDE.md"
         fi
     fi
+    write_seat "$seat" "$AGENT_NAME"
 fi
 
 # ── 5. rules and bare commands ──────────────────────────────────────────────
@@ -1723,7 +1779,7 @@ cat <<EOF
 Next: open a new shell so PATH takes effect, then start a session inside an
 agent workspace —
 
-    cd $AGENT_ROOT/${AGENT_NAME:-<agent>}
+    cd $AGENT_ROOT/${AGENT_NAME:-<agent>}/$SEAT_NAME
     claude
 
 and run /jstack:work on any topic. Re-run this script any time to update;
