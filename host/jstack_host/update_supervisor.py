@@ -328,6 +328,9 @@ class Supervisor:
                         # is confirmed; exit so launchd relaunches this service
                         # from the new bundle instead of running old code on.
                         print("update: supervisor restarting from the replaced bundle", flush=True)
+                        prepare = getattr(self.backend, "prepare_restart", None)
+                        if prepare:
+                            prepare(self.current)
                         return
                     activate = getattr(self.backend, "activate_runtime", None)
                     if not once and activate and activate(self.current):

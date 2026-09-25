@@ -10,6 +10,16 @@ import shutil
 from jstack_host import install_host, update_app, update_plugins
 
 
+_REAL_SPAWNED = update_app.spawned
+
+
+@pytest.fixture(autouse=True)
+def _launchd_spawns(monkeypatch):
+    """`spawned` asks the real launchd for a pid; a unit test has no job to
+    show it. Tests of the spawn check override this."""
+    monkeypatch.setattr(update_app, "spawned", lambda label, seconds=20.0: True)
+
+
 def transaction_for(app, source, tmp_path, backup=None):
     return {"release": "same-release", "services": {}, "providers": [],
             "stack": str(tmp_path), "manifest": {"components": {"menubar": {}}},
@@ -492,3 +502,117 @@ def test_every_failed_restore_is_named_once_at_the_end(monkeypatch, tmp_path):
                                         "relay": "enabled", "session-stall": "enabled"})
     assert str(raised.value) == ("relay service could not be restored; "
                                  "session-stall service could not be restored")
+
+
+def test_a_role_launchd_refuses_to_spawn_is_reregistered_once(monkeypatch, tmp_path):
+    """Work Main, macOS 27.0, 2026-09-25 (#182): after the ad-hoc → Developer
+    ID swap every role answered `enabled` while launchd logged `spawn failed`,
+    exit 78, for half an hour. `unregister` + `register` from the new bundle
+    is what brought each one back by hand; restore does that once, then asks
+    launchd for the pid again."""
+    app = bundle(tmp_path / "Hub.app", SEALED)
+    calls, answers = [], iter([False, True])
+
+    def control(app, action, role=None):
+        calls.append((action, role))
+        return {"host": "enabled", "menu": "enabled"} if action == "status" else {"status": "enabled"}
+
+    monkeypatch.setattr(update_app, "control", control)
+    monkeypatch.setattr(update_app, "spawned", lambda label, seconds=20.0: next(answers, True))
+    backend = update_app.AppBackend(tmp_path, {})
+    backend._restore_services(app, {"host": "enabled", "menu": "enabled"})
+    assert calls == [("status", None), ("register", "host"), ("unregister", "host"), ("register", "host"),
+                     ("status", None), ("register", "menu")]
+
+
+def test_a_role_launchd_still_refuses_after_reregistration_fails_the_restore(monkeypatch, tmp_path):
+    app = bundle(tmp_path / "Hub.app", SEALED)
+    monkeypatch.setattr(update_app, "control",
+                        lambda app, action, role=None: {"menu": "enabled"} if action == "status"
+                        else {"status": "enabled"})
+    monkeypatch.setattr(update_app, "spawned", lambda label, seconds=20.0: False)
+    backend = update_app.AppBackend(tmp_path, {})
+    with pytest.raises(update_app.releases.ReleaseError, match="menu service is registered but launchd could not spawn"):
+        backend._restore_services(app, {"host": "not_registered", "menu": "enabled"})
+
+
+def test_a_role_awaiting_approval_is_not_asked_to_spawn(monkeypatch, tmp_path):
+    app = bundle(tmp_path / "Hub.app", SEALED)
+    monkeypatch.setattr(update_app, "control",
+                        lambda app, action, role=None: {"menu": "requires_approval"} if action == "status"
+                        else {"status": "requires_approval"})
+    monkeypatch.setattr(update_app, "spawned", lambda label, seconds=20.0: pytest.fail("no pid to wait for"))
+    update_app.AppBackend(tmp_path, {})._restore_services(app, {"host": "not_registered", "menu": "enabled"})
+
+
+def test_spawned_reads_a_pid_from_launchd_not_a_registration(monkeypatch):
+    import subprocess
+    spawned = _REAL_SPAWNED
+    shown = {"stdout": ""}
+    monkeypatch.setattr(install_host, "_launchctl",
+                        lambda *args: subprocess.CompletedProcess(args, 0, shown["stdout"], ""))
+    assert spawned("live.jstack.hub.menu", seconds=0) is False
+    shown["stdout"] = "live.jstack.hub.menu = {\n\tactive count = 1\n\tpid = 4242\n\tstate = running\n}"
+    assert spawned("live.jstack.hub.menu", seconds=0) is True
+    shown["stdout"] = "live.jstack.hub.menu = {\n\tstate = spawn failed\n\tlast exit code = 78\n}"
+    assert spawned("live.jstack.hub.menu", seconds=0) is False
+
+
+def _settled_job(release, sha):
+    return {"state": "current", "finalized": True, "release": release,
+            "transaction": {"apps": {"menubar": {}}},
+            "envelope": {"manifest": {"sources": {"stack": sha}}}}
+
+
+def test_restart_is_required_when_the_release_changed_on_the_same_sha(monkeypatch, tmp_path):
+    """A joiner installs a source build of the sha the hub already publishes;
+    the hub's update swaps a different bundle with the same sha. Work Main
+    kept its swapped-out updater running 35 minutes after such an update
+    (#183): the sha said nothing changed. The release id is what changed."""
+    from jstack_host import sourcestamp
+    monkeypatch.setattr(sourcestamp, "capture", lambda: {"sha": "abc"})
+    monkeypatch.setattr(update_app, "RUNNING_RELEASE", "2026-09-25-abc-source")
+    backend = update_app.AppBackend(tmp_path, {})
+    assert backend.restart_required(_settled_job("2026-09-25-abc-hub", "abc")) is True
+    assert backend.restart_required(_settled_job("2026-09-25-abc-source", "abc")) is False
+    monkeypatch.setattr(update_app, "RUNNING_RELEASE", "")
+    assert backend.restart_required(_settled_job("2026-09-25-abc-hub", "abc")) is False
+    assert backend.restart_required(_settled_job("2026-09-25-def-hub", "def")) is True
+
+
+def test_a_signing_identity_change_reregisters_the_updater_at_restart(monkeypatch, tmp_path):
+    """The updater is never in the snapshot, so nothing re-registers it; on
+    Work Main its relaunch after the ad-hoc → Developer ID swap hit the same
+    spawn refusal as every other role (#182). Judged at apply, while the old
+    bundle is still at `backup`; acted on when the supervisor exits."""
+    import subprocess
+    app, source = tmp_path / "Hub.app", tmp_path / "staged.app"
+    app.mkdir(); source.mkdir()
+    backend = prepared(monkeypatch, tmp_path, app)
+    monkeypatch.setattr(update_app, "command", lambda argv: shutil.copytree(argv[-2], argv[-1]))
+    monkeypatch.setattr(update_app, "team_identifier",
+                        lambda path: "MZ95H77RQQ" if path == app else "")
+    job = {"id": "swap", "transaction": transaction_for(app, source, tmp_path)}
+    backend.apply(job)
+    assert job["transaction"]["updater_reregister"] is True
+    launched = []
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: launched.append((argv, kw)))
+    backend.prepare_restart(job)
+    (argv, kw), = launched
+    assert argv[-1] == str(app / "Contents/MacOS/JStackHub")
+    assert "unregister updater" in argv[2] and argv[2].index("unregister updater") < argv[2].index("register updater", 5)
+    assert kw["start_new_session"] is True
+
+
+def test_an_update_that_keeps_its_signing_identity_leaves_the_updater_item_alone(monkeypatch, tmp_path):
+    import subprocess
+    app, source = tmp_path / "Hub.app", tmp_path / "staged.app"
+    app.mkdir(); source.mkdir()
+    backend = prepared(monkeypatch, tmp_path, app)
+    monkeypatch.setattr(update_app, "command", lambda argv: shutil.copytree(argv[-2], argv[-1]))
+    monkeypatch.setattr(update_app, "team_identifier", lambda path: "MZ95H77RQQ")
+    job = {"id": "same", "transaction": transaction_for(app, source, tmp_path)}
+    backend.apply(job)
+    assert job["transaction"]["updater_reregister"] is False
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: pytest.fail("no relaunch helper"))
+    backend.prepare_restart(job)
