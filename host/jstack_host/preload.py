@@ -12,7 +12,7 @@ from __future__ import annotations
 
 MODULES = (
     # standard library reached lazily inside the update paths
-    "argparse", "fcntl", "json", "os", "pathlib", "platform", "plistlib",
+    "argparse", "fcntl", "getpass", "json", "os", "pathlib", "platform", "plistlib",
     "re", "shlex", "shutil", "signal", "subprocess", "tarfile", "tempfile",
     "time", "tomllib", "resource", "uuid", "zipfile", "ssl", "hashlib", "base64",
     # third-party
@@ -31,6 +31,11 @@ MODULES = (
     "jstack_host.update_app",
     "jstack_host.update_plugins",
     "jstack_host.app_services",
+    # Reached only at the end of `update_app.apply`, for the scheduler cutover —
+    # which is after the bundle under this process has already been replaced, so
+    # a lazy import there would be a read against a path that no longer exists.
+    "jstack_host.install_signed",
+    "jstack_host.install_updater",
     "jstack_host.install_host",
     "jstack_host.service_settings",
     "jstack_host.sourcestamp",
@@ -46,6 +51,7 @@ MODULES = (
     "jstack_host.context_ceiling",
     "jstack_host.codex_hooks",
     "jstack_host.attach_parent",
+    "jstack_host.shell_access",
     "jstack_host.auth",
     "jstack_host.board_watch",
     "jstack_host.desk",

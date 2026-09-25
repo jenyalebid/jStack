@@ -45,10 +45,12 @@ def store(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_live_tunnel_and_no_alerts(monkeypatch):
+def _no_live_tunnel_and_no_alerts(monkeypatch, tmp_path):
     """This Mac ships wg_peer.py; an unguarded redemption would add a real peer
-    to the live tunnel. The tests that need a peer stub `issue` themselves."""
+    to the live tunnel. The tests that need a peer stub `issue` themselves.
+    HOME is faked too: forgetting a machine rewrites the hub's ~/.ssh/config."""
     monkeypatch.setattr(tunnel, "can_pair", lambda: False)
+    monkeypatch.setenv("HOME", str(tmp_path / "test-home"))
     sent = []
     monkeypatch.setattr("jstack_host.hostenv.security_alert", sent.append)
     return sent
@@ -78,7 +80,10 @@ def test_a_host_row_carries_no_column_a_credential_could_sit_in(store):
     store.upsert_host("host-key-aaaa", "Laptop", "10.66.0.7", 9090)
     columns = set(store.list_hosts()[0])
     assert columns == {"key", "name", "address", "port", "enrolled_at",
-                       "deleted", "updated_at", "seq", "device_id", "sees_home", "sees_leaves"}
+                       "deleted", "updated_at", "seq", "device_id", "sees_home",
+                       # Public halves only: the pubkey is the machine's to
+                       # show, the private key never left it (#131).
+                       "sees_leaves", "shell_pubkey", "shell_user"}
     assert not any(c in columns for c in ("token", "token_hash", "secret",
                                           "password", "key_hash"))
 
@@ -349,6 +354,25 @@ def test_the_whole_trip_over_http(client, store, paired, on_console):
     assert client.get("/api/jremote/v1/hosts").json()["hosts"] == []
 
 
+def test_redeeming_over_http_records_the_shell_identity(client, store, paired, on_console):
+    """The route model must carry the shell halves through to `redeem` — a
+    dropped field here loses shell access silently while the attach succeeds,
+    which is exactly what the first live shell_adopt run caught."""
+    minted = client.post("/api/jremote/v1/enrolment/codes",
+                         json={"name": "Laptop", "kind": "host"})
+    anon = TestClient(app)
+    redeemed = anon.post("/api/jremote/v1/enrolment/redeem",
+                         json={"code": minted.json()["code"],
+                               "host_key": "host-key-aaaa", "port": 9091,
+                               "ssh_pubkey": "ssh-ed25519 AAAAexampleA host-key-aaaa",
+                               "ssh_user": "admin"})
+    assert redeemed.status_code == 200
+    assert "shell" in redeemed.json()
+    row = store.host_row("host-key-aaaa")
+    assert row["shell_pubkey"] == "ssh-ed25519 AAAAexampleA host-key-aaaa"
+    assert row["shell_user"] == "admin"
+
+
 def test_the_host_registry_is_behind_the_token(client, store):
     """A tile naming every machine the user owns is a map of the estate."""
     anon = TestClient(app)
@@ -356,6 +380,36 @@ def test_the_host_registry_is_behind_the_token(client, store):
     assert anon.post("/api/jremote/v1/hosts/x/forget").status_code == 401
     assert anon.post("/api/jremote/v1/hosts/x/rename",
                      json={"name": "y"}).status_code == 401
+
+
+def test_a_machine_forgets_itself_and_only_itself_off_the_console(store):
+    """Detach's `_tell_parent` posts the forget from the mesh, not loopback:
+    the machine's own credential must be able to end its adoption, and must
+    not be able to end anybody else's."""
+    row, token = devices.mint("Update lab leaf")
+    store.upsert_host("host-key-aaaa", "Laptop", "10.66.0.7", 9090)
+    store.bind_host_device("host-key-aaaa", row["id"])
+    store.upsert_host("host-key-bbbb", "Other", "10.66.0.8", 9090)
+    leaf = TestClient(app)
+    leaf.headers.update({"Authorization": f"Bearer {token}"})
+    assert leaf.post("/api/jremote/v1/hosts/host-key-bbbb/forget").status_code == 403
+    answer = leaf.post("/api/jremote/v1/hosts/host-key-aaaa/forget")
+    assert answer.status_code == 200
+    assert store.host_row("host-key-aaaa")["deleted"]
+    # The credential goes with the tile: the machine could not revoke it
+    # afterwards (the tombstone ends its reach, and a machine credential may
+    # not disconnect), and alive it would still open the hub's /managed/ routes.
+    assert answer.json()["credential_revoked"] == row["id"]
+    assert store.device(row["id"])["revoked_at"] is not None
+    assert leaf.post("/api/jremote/v1/hosts/host-key-aaaa/forget").status_code == 401
+
+
+def test_the_console_forgetting_a_machine_keeps_its_own_credential(client, store, on_console):
+    store.upsert_host("host-key-aaaa", "Laptop", "10.66.0.7", 9090)
+    answer = client.post("/api/jremote/v1/hosts/host-key-aaaa/forget")
+    assert answer.status_code == 200
+    assert answer.json()["credential_revoked"] == ""
+    assert client.get("/api/jremote/v1/host").status_code == 200
 
 
 def test_managing_a_host_that_is_not_there_is_a_404(client, store, on_console):

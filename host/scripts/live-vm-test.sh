@@ -146,7 +146,12 @@ fi
 
 # ── install the host ──
 say "running host/install.sh in the guest"
-vssh 'bash ~/jStack/host/install.sh --yes 2>&1 | tail -25' || \
+# JSTACK_INSTALLER is what the top-level install.sh exports, and host/install.sh
+# refuses without it (79ead6e: one installer, one door). This suite is the one
+# caller that cannot come through that door — it installs the WORKING TREE it
+# just copied in, and the top-level installer clones a ref instead. So it says
+# so, rather than dying at a guard meant for a human pasting the wrong path.
+vssh 'JSTACK_INSTALLER=1 bash ~/jStack/host/install.sh --yes 2>&1 | tail -25' || \
     die "host install failed — see the output above"
 
 # ── give the guest an agent to be about ──
@@ -169,6 +174,56 @@ printf "# Testbench\n\nA seat that exists so the live suite has a subject.\n" > 
 printf "# Testbench · chat\n\nThe seat the live suite opens sessions in.\n" > ~/Agents/testbench/chat/CLAUDE.md
 printf "seeded by live-vm-test.sh\n" > ~/Agents/testbench/pad/seed.txt' \
     || die "could not seed an agent tree in the guest"
+
+# ── give the guest a plan to be about ──
+#
+# The plan routes are the one family nothing on the wire can create:
+# `plans.open_plan` has a single caller in the whole package and it is `cli.py`,
+# so a suite calling from another machine can only ever prove their 404s. The
+# guest has the CLI, so the guest authors one — like the agent tree above, this
+# is machine setup rather than behaviour under test, and what the suite asserts
+# is that the host *serves* it.
+#
+# Under `~/.claude/plans` because that is the tree `docfence.read_roots()`
+# admits a plan document out of, and markdown because the fence takes nothing
+# else — a plan seeded anywhere else would be a row whose document answers 403
+# and a `GET /plans/{id}/document` proven on the wrong branch.
+#
+# Idempotent: a guest a developer did not `--reset` keeps the plan it has rather
+# than collecting one per run.
+say "seeding a plan in the guest"
+vssh 'set -e
+HOSTBIN=~/jStack/host/.venv/bin/jstack-host
+PLAN=~/.claude/plans/live-suite-plan.md
+mkdir -p ~/.claude/plans
+cat > "$PLAN" <<"MD"
+# Live suite plan
+
+Seeded by host/scripts/live-vm-test.sh so the plan read routes answer about a
+real plan instead of only refusing an id nobody minted. Nothing runs this plan.
+
+## Stage 1 — the plan list answers
+
+Verify: none — GET /plans returns this row.
+
+## Stage 2 — the document reads through the fence
+
+Verify: none — GET /plans/{plan_id}/document serves this file text.
+MD
+if "$HOSTBIN" plan list --json | grep -q live-suite-plan; then
+    echo "a live-suite plan is already on this guest"
+    exit 0
+fi
+PID="$("$HOSTBIN" plan open "Live suite plan" --file "$PLAN" | tail -1 | tr -d "[:space:]")"
+[ -n "$PID" ] || { echo "plan open printed no id" >&2; exit 1; }
+echo "plan $PID"
+# Stages are a bonus, not the point: the two read routes are proven by the row
+# and its document. A parser that refuses this markdown is worth SAYING —
+# `plan stages` writes nothing when it complains — but it is not worth failing
+# a suite run over, and the live tests assert an empty stage list is legal.
+"$HOSTBIN" plan stages "$PID" --from-file "$PLAN" \
+    || echo "note: the parser refused the seeded plan; its row and document are still seeded" >&2' \
+    || die "could not seed a plan in the guest"
 
 # ── prove it is listening, then mint a device token the way the app does ──
 say "waiting for the host to answer"

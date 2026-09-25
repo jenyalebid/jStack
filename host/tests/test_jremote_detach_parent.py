@@ -45,11 +45,11 @@ class _Runner:
         return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
 
-def _poster(status=200, calls=None):
+def _poster(status=200, calls=None, body=None):
     def post(url, token):
         if calls is not None:
             calls.append((url, token))
-        return status, {}
+        return status, dict(body or {})
     return post
 
 
@@ -158,6 +158,24 @@ def test_it_tells_the_parent_to_forget_the_tile_then_revoke_the_credential(
     assert {t for _, t in calls} == {"jr1.dev1.secret"}
 
 
+def test_a_parent_that_revokes_the_credential_with_the_tile_is_not_asked_twice(tmp_path):
+    """Since 2dc3eee the hub ends a forgotten machine's reach and lets no
+    machine credential disconnect itself, so the revoke after the forget was
+    refused on every real hub (shell_detach, 2026-09-25). A hub that answers
+    the forget with the credential revoked has done that step."""
+    calls = []
+    _record(tmp_path / "state")
+    result = detach_parent.detach(
+        host_key="this-mac", root=tmp_path, state=tmp_path / "state", runner=_Runner(),
+        poster=_poster(200, calls, {"forgotten": "this-mac", "credential_revoked": "dev1"}),
+        sudo=False)
+    assert [u for u, _ in calls] == [
+        "http://studio.local:9090/api/jremote/v1/hosts/this-mac/forget"]
+    assert _step(result, "parent-forget")["ok"] is True
+    assert _step(result, "parent-revoke")["ok"] is True
+    assert "went with the tile" in _step(result, "parent-revoke")["note"]
+
+
 def test_a_parent_that_refuses_is_reported_with_the_manual_fix(tmp_path):
     _record(tmp_path / "state")
     result = detach_parent.detach(host_key="this-mac", root=tmp_path,
@@ -187,6 +205,26 @@ def test_it_boots_out_both_leaf_daemons_and_deletes_what_the_installer_wrote(
         assert not (tmp_path / raw.lstrip("/")).exists(), raw
     assert _step(result, "tunnel-files")["ok"] is True
     assert result["detached"] is True
+
+
+def test_an_unreadable_root_only_dir_routes_to_the_sudo_retry(tmp_path):
+    """/etc/wireguard is 700 root on a real leaf, so stat from the enrolled
+    account answers EACCES — which Path.exists() re-raises rather than
+    swallows. The first live shell_detach run crashed exactly here; an
+    unreadable path must reach the privileged removal, not the traceback."""
+    guarded = tmp_path / "etc/wireguard"
+    guarded.mkdir(parents=True)
+    (guarded / "jrleaf.conf").write_text("[Interface]\n")
+    guarded.chmod(0o000)
+    runner = _Runner()
+    try:
+        result = detach_parent.detach(root=tmp_path, state=tmp_path / "state",
+                                      runner=runner, poster=_poster(), sudo=False)
+    finally:
+        guarded.chmod(0o755)
+    assert _step(result, "tunnel-files")["ok"] is True
+    assert any("jrleaf.conf" in " ".join(map(str, argv)) and "/bin/rm" in argv
+               for argv in runner.calls)
 
 
 def test_a_daemon_that_was_already_down_is_not_a_failure(tmp_path):

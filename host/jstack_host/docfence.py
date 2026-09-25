@@ -37,8 +37,9 @@ MAX_READ_BYTES = 400_000
 def read_roots() -> tuple[Path, ...]:
     """Every directory a document may be read out of.
 
-    The `~/.claude` tree (what a session loads), this instance's agent root
-    (seats and their workspaces), `~/Systems` (the canonical docs), and every
+    The `~/.claude` tree (what a session loads, plus `plans` — the authored
+    plan a stage row points back to), this instance's agent root (seats and
+    their workspaces), `~/Systems` (the canonical docs), and every
     live marketplace checkout — derived rather than hardcoded to one path,
     because a plugin from a directory marketplace publishes its rows at the
     checkout's real location, and the fence has to admit exactly the set that
@@ -46,7 +47,7 @@ def read_roots() -> tuple[Path, ...]:
     """
     claude = HOME / ".claude"
     fixed = (claude / "rules", claude / "skills", claude / "commands",
-             claude / "plugins" / "cache", claude / "seats",
+             claude / "plugins" / "cache", claude / "seats", claude / "plans",
              hostenv.instance_root(), HOME / "Systems")
     try:
         live = tuple(plugin_paths.live_marketplace_roots().values())

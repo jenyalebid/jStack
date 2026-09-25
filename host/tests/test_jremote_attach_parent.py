@@ -128,6 +128,11 @@ def test_attach_redeems_writes_the_bundle_and_runs_the_installer(tmp_path):
     grant = payload.pop("grant_token")
     assert grant.startswith("jrg1.") and len(grant.split(".")) == 3
     assert grants.authenticate(grant) == "http://studio.local:9090"
+    # …and its shell identity, minted here — pubkey only, never the private
+    # half (#131). Shape-checked like the grant; the key is fresh per machine.
+    import getpass
+    assert payload.pop("ssh_pubkey").startswith("ssh-ed25519 ")
+    assert payload.pop("ssh_user") == getpass.getuser()
     assert payload == {"code": "ABCD-1234", "host_key": GOOD_KEY, "port": 9090}
 
     # Every leaf file landed, with the mode its job needs.

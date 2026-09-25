@@ -17,7 +17,8 @@ COMPONENTS = {"stack", "menubar", "client"}
 #: as journeys are added, renamed and retired, which is why an updater never
 #: insists on it: see `validate`.
 RECEIPTS = {"fresh_install", "upgrade", "fleet", "offline_catchup", "session_survival",
-            "interruption", "revocation", "off_network"}
+            "interruption", "revocation", "off_network",
+            "shell_adopt", "shell_flip", "upgrade_shell", "shell_detach", "delegate_leaf"}
 #: The line a hub follows when nobody chose one. Named rather than empty so a
 #: manifest built before channels existed can be read as belonging to it: the
 #: releases already published came off main, which is what this names.

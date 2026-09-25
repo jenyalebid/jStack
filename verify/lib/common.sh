@@ -38,6 +38,28 @@ guest_from() {
     vm gui "$GUEST"
 }
 
+# The lab sign-in. The authed base image's interactive Claude login expires
+# (jStack #140), and a session that cannot sign in fails every work journey on
+# its first prompt. The acceptance lab's provisioner pins a long-lived OAuth
+# token (`claude setup-token`) into its guests instead; a verify guest gets the
+# same one, the same two ways: ~/.zshenv for the login shell the
+# guest Terminal opens the payload in, launchctl setenv for Terminal itself,
+# which `open` launches through launchd. It goes in before the first
+# guest_term — Terminal reads its environment once, at launch. The token never
+# enters the payload, which is copied into the receipts, and is never printed.
+guest_signin() {
+    # The file is named by whoever runs the suite, like VM_SH: this repo holds
+    # no path into anyone's credentials.
+    local tok="${JSTACK_VERIFY_OAUTH_TOKEN_FILE:-}"
+    [ -n "$tok" ] || { echo "FAIL set JSTACK_VERIFY_OAUTH_TOKEN_FILE to a file holding a long-lived Claude Code OAuth token (#140)" >&2; exit 1; }
+    [ -s "$tok" ] || { echo "FAIL no lab sign-in token at $tok (#140)" >&2; exit 1; }
+    printf 'export CLAUDE_CODE_OAUTH_TOKEN=%q\n' "$(cat "$tok")" \
+        | vm ssh "$GUEST" 'cat >> ~/.zshenv' >/dev/null 2>&1 \
+        || { echo "FAIL could not place the lab sign-in in $GUEST" >&2; exit 1; }
+    vm ssh "$GUEST" 'source ~/.zshenv && /bin/launchctl setenv CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"' >/dev/null 2>&1 \
+        || { echo "FAIL could not hand the lab sign-in to launchd in $GUEST" >&2; exit 1; }
+}
+
 guest_payload() {  # <local-file> -> /Users/admin/<basename>, executable
     local src="$1" dst="/Users/admin/$(basename "$1")"
     vm cp "$GUEST" "$src" "$dst" >/dev/null

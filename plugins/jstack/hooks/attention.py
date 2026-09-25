@@ -44,9 +44,9 @@ def main() -> None:
         declared = state_dir()
         if declared:
             os.environ["JREMOTE_STATE_DIR"] = declared
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "host"))
-    from jstack_host import attention_hook  # noqa: E402 — after the state dir is known
-    attention_hook.main()
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import _host  # noqa: PLC0415 — sibling; finds the host from a cache copy too
+    _host.load("attention_hook").main()   # after the state dir is known
 
 
 if __name__ == "__main__":

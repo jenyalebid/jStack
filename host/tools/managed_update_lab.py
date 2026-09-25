@@ -32,6 +32,16 @@ def main():
     register.add_argument("--bootstrap", type=Path, required=True)
     register.add_argument("--relay-port", type=int,
                           help="pre-existing loopback SSH relay port for hub-to-VM HTTP")
+    enrol = commands.add_parser("enrol-shell")
+    enrol.add_argument("machine")
+    enrol.add_argument("--name", required=True)
+    enrol.add_argument("--address", required=True)
+    enrol.add_argument("--leaf-port", type=int, default=9090)
+    enrol.add_argument("--pubkey", required=True)
+    enrol.add_argument("--user", required=True)
+    enrol.add_argument("--record", type=Path, required=True)
+    remembered = commands.add_parser("remember")
+    remembered.add_argument("record", type=Path)
     commands.add_parser("inventory")
     capture = commands.add_parser("record")
     capture.add_argument("output", type=Path)
@@ -40,6 +50,10 @@ def main():
     queue.add_argument("--request", required=True)
     revoke = commands.add_parser("revoke")
     revoke.add_argument("target")
+    flip = commands.add_parser("shell-flip")
+    flip.add_argument("target")
+    flip.add_argument("--src", required=True)
+    flip.add_argument("--allowed", choices=["true", "false"], required=True)
     args = parser.parse_args()
     root = args.root.resolve()
     if "updates-lab" not in root.name or args.port == 9090:
@@ -116,12 +130,40 @@ def main():
         grant = json.loads(response)["grant"]
         grants.remember(machine, grant)
         print(json.dumps({"machine": machine, "vm": args.vm, "address": address, "fixture_adoption": True}))
+    elif args.action == "enrol-shell":
+        # An already-adopted guest joins this lab's registry with the shell
+        # identity it already minted — no key is created or moved here, the
+        # guest re-parents onto the record this writes (update-vm adopt).
+        if get_store().host_row(args.machine):
+            raise RuntimeError("fixture already registered; refusing to rotate a running adoption")
+        row, credential = devices.mint(args.name)
+        get_store().upsert_host(args.machine, args.name, args.address, port=args.leaf_port)
+        get_store().bind_host_device(args.machine, row["id"])
+        if not get_store().set_host_shell(args.machine, args.pubkey, args.user):
+            raise RuntimeError("could not record the machine's shell identity")
+        atomic_json(args.record, {
+            "machine": args.machine, "device_id": row["id"], "token": credential,
+            "parent_key": hostenv.host_id(), "parent_name": "Update lab hub",
+            "parent_address": args.hub_address, "parent_port": args.port,
+            "parent_url": f"http://{args.hub_address}:{args.port}"})
+        print(json.dumps({"machine": args.machine, "shell_user": args.user,
+                          "record": str(args.record)}))
+    elif args.action == "remember":
+        record = json.loads(args.record.read_text())
+        grants.remember(record["machine"], record["grant"])
+        print(json.dumps({"remembered": record["machine"]}))
     else:
         import httpx
         base = f"http://127.0.0.1:{args.port}/api/jremote/v1/updates"
         headers = {"Authorization": "Bearer " + token}
         if args.action in {"inventory", "record"}:
             result = httpx.get(base + "/inventory", headers=headers, timeout=20)
+        elif args.action == "shell-flip":
+            # The flip pokes both machines in the pair before answering.
+            result = httpx.post(f"http://127.0.0.1:{args.port}/api/jremote/v1/hosts/"
+                                + args.target + "/shell", headers=headers,
+                                json={"src": args.src, "allowed": args.allowed == "true"},
+                                timeout=180)
         elif args.action == "revoke":
             row = get_store().host_row(args.target)
             if row is None or not row["name"].startswith("updates-"):

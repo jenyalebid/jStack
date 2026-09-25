@@ -150,6 +150,11 @@ def _tunnel_pairing_available() -> bool:
     return tunnel.can_pair()
 
 
+def _shell_access_available() -> bool:
+    from . import shell_access
+    return bool(shell_access.public_key())
+
+
 def _usage_caps_available() -> bool:
     # The same two conditions `/usage/caps` itself answers with. Importability
     # alone said True on any machine with the package installed — while the
@@ -160,6 +165,38 @@ def _usage_caps_available() -> bool:
     return mod is not None and _has_allowance(mod)
 
 
+#: The tables each Work screen reads: the environment layers, and the plan
+#: rows. Both arrive by `store._SCHEMA` auto-migration, so what varies between
+#: hosts is not whether this package can import them but whether the store this
+#: process opens has been migrated yet.
+_ENV_TABLES = ("session_env", "agent_env")
+_WORK_TABLES = ("plans", "plan_sessions", "stages", "stage_tasks", "stage_proofs")
+
+
+def _tables_read(names) -> bool:
+    """True only once a `SELECT ... LIMIT 1` has come back from EVERY one of them.
+
+    A query and not a name in `sqlite_master`, because the question the app is
+    asking is "can this screen be drawn", and a store this process cannot open
+    — locked, unreadable, half-migrated — fails that for reasons a name lookup
+    would answer yes to. `_probe` turns any raise into False, so all of those
+    collapse to the one honest answer instead of a 500 on the screen.
+    """
+    from .store import get_store
+    with get_store().conn() as db:
+        for name in names:
+            db.execute(f"SELECT 1 FROM {name} LIMIT 1").fetchone()
+    return True
+
+
+def _session_env_available() -> bool:
+    return _tables_read(_ENV_TABLES)
+
+
+def _work_available() -> bool:
+    return _tables_read(_WORK_TABLES)
+
+
 #: Features backed by something other than an importable module, probed the way
 #: they are actually used. Tags come from jStack's `log_event` binary, so
 #: `_optional()` — which asks the import system — could only ever answer for the
@@ -167,11 +204,18 @@ def _usage_caps_available() -> bool:
 #: capability map, and each probe stays the same call the route itself makes.
 #: `tunnel_pairing` is here rather than in `_FEATURES` because the module always
 #: imports — what it needs is the hub's `wg_peer.py` beside it, which only the
-#: machine that owns the mesh has.
+#: machine that owns the mesh has. `session_env` and `work` are here for a third
+#: shape of the same problem: their modules always import too, and what a host
+#: may be missing is the migration that put their tables in the store.
+#: `shell_access` is probed off the machine's own minted identity — the fact
+#: that decides whether `ssh` into or out of here can work at all.
 _PROBED_FEATURES = {"tags": _tags_available,
                     "tunnel_pairing": _tunnel_pairing_available,
                     "usage_caps": _usage_caps_available,
-                    "file_sharing": _file_sharing_available}
+                    "file_sharing": _file_sharing_available,
+                    "session_env": _session_env_available,
+                    "work": _work_available,
+                    "shell_access": _shell_access_available}
 
 
 def _probe(name: str) -> bool:
@@ -802,6 +846,12 @@ class EnrolmentRedeemRequest(BaseModel):
     #: that grows a fresh duplicate on every reconnect. Empty from an older app,
     #: which mints a fresh row exactly as before.
     identity: str = ""
+    #: The shell half of a machine's handshake (#131): the public key of the
+    #: identity it minted on itself, and the account a granted peer shells
+    #: into. Public halves only — the private key never crosses the wire.
+    #: Empty from a device, and from a machine built before shell grants.
+    ssh_pubkey: str = ""
+    ssh_user: str = ""
 
 
 class EnrolmentRevokeRequest(BaseModel):
@@ -888,7 +938,8 @@ def redeem_enrolment_code(body: EnrolmentRedeemRequest, request: Request):
         return enrolment.redeem(body.code, client_ip,
                                 body.host_key, body.port, body.device_token,
                                 body.grant_token, body.identity,
-                                parent_port=request.url.port or enrolment.DEFAULT_PORT)
+                                parent_port=request.url.port or enrolment.DEFAULT_PORT,
+                                ssh_pubkey=body.ssh_pubkey, ssh_user=body.ssh_user)
     except enrolment.HostKeyRefused as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except enrolment.EnrolmentLockedOut as exc:
@@ -906,11 +957,17 @@ def redeem_enrolment_code(body: EnrolmentRedeemRequest, request: Request):
 # that could push a host row could invent a machine.
 
 def _serve_host(row: dict, delegated: bool = False, *, policy: bool = False) -> dict:
+    # Shell material stays off the device wire: the pubkey and account are
+    # public halves, but devices have no use for them and the console does.
     public = {k: v for k, v in row.items()
-              if k not in ("device_id", "sees_home", "sees_leaves")}
+              if k not in ("device_id", "sees_home", "sees_leaves",
+                           "shell_pubkey", "shell_user")}
     if policy:
+        from .store import get_store
         public.update(sees_home=bool(row.get("sees_home", True)),
-                      sees_leaves=bool(row.get("sees_leaves", True)))
+                      sees_leaves=bool(row.get("sees_leaves", True)),
+                      shell_user=row.get("shell_user", ""),
+                      shell_sources=get_store().shell_sources_for(row["key"]))
     return {**public, "deleted": bool(row["deleted"]), "delegated": delegated,
             "managed_access": True}
 
@@ -984,14 +1041,29 @@ def forget_host(key: str, request: Request, device_id: str = Depends(current_dev
 
     The tombstone hides it from clients and rejects its control credential,
     so cached projected credentials on the withdrawn leaf also stop working.
+
+    Console-only, with one exception: a machine's own credential may forget
+    the machine it is bound to — that is `detach` telling this hub goodbye
+    from the mesh, where there is no console to speak from.
     """
-    from . import grants
+    from . import grants, shell_grants
     from .store import get_store
-    managed_access.require_console(request)
+    own = managed_access.leaf_for_device(device_id)
+    itself = own is not None and own["key"] == key
+    if not itself:
+        managed_access.require_console(request)
     if not get_store().forget_host(key):
         raise HTTPException(status_code=404,
                             detail="unknown or already forgotten host")
-    return {"forgotten": key, "grant_dropped": grants.forget(key)}
+    # The credential goes with the tile when the machine itself is the caller.
+    # It could not revoke itself afterwards: the tombstone already ends its
+    # reach (`managed_access.authorize`), and a machine credential is not a
+    # device that may disconnect (`revoke_device`). Left alive it would still
+    # open every /managed/ route of a hub that has forgotten the machine.
+    revoked = device_id if itself and devices.revoke(device_id) else ""
+    return {"forgotten": key, "grant_dropped": grants.forget(key),
+            "shell_steps": shell_grants.machine_forgotten(key),
+            "credential_revoked": revoked}
 
 
 class HostGrantRequest(BaseModel):
@@ -1051,6 +1123,23 @@ def set_leaf_visibility(key: str, body: LeafVisibilityRequest, request: Request)
     return {"key": key, **body.model_dump()}
 
 
+class LeafShellGrantRequest(BaseModel):
+    #: The machine whose agents get (or lose) shell on `{key}` — the same
+    #: parent-held per-pair shape as sees-leaves, one pair per call.
+    src: str
+    allowed: bool
+
+
+@router.post("/hosts/{key}/shell")
+def set_host_shell_grant(key: str, body: LeafShellGrantRequest, request: Request):
+    managed_access.require_console(request)
+    from . import shell_grants
+    try:
+        return shell_grants.flip(body.src, key, body.allowed)
+    except shell_grants.ShellGrantError as exc:
+        raise HTTPException(404, str(exc))
+
+
 def _managed_leaf(device_id: str) -> dict:
     leaf = managed_access.leaf_for_device(device_id)
     if managed_access.is_leaf() or leaf is None or leaf["deleted"]:
@@ -1108,6 +1197,70 @@ def managed_authorize(body: ManagedAuthorizeRequest,
                       device_id: str = Depends(current_device)):
     leaf = _managed_leaf(device_id)
     return {"allowed": managed_access.may_reach(body.device_id, leaf["key"])}
+
+
+class ManagedShellRequest(BaseModel):
+    #: The presenting machine's own SSH identity and shell account. Both empty
+    #: on a pull that only reads, which is every build before this one.
+    pubkey: str = ""
+    user: str = ""
+
+
+@router.post("/managed/shell")
+def managed_shell(body: ManagedShellRequest | None = None,
+                  device_id: str = Depends(current_device)):
+    """A machine presents its own shell identity, then pulls its own shell set.
+
+    The pull is the same compute the adoption handshake answers, so a flip and
+    a joiner run can never disagree. The presentation is the same trust
+    adoption already spends: the credential on this request identifies the
+    machine, there is no key parameter to aim at another row, so a machine can
+    only ever set its OWN `hosts.shell_pubkey` — which is why this needs no
+    console and no second decision. Without it the identity had exactly one
+    moment (the redeem payload, #131) and a Mac adopted before that build could
+    only gain shell by being re-adopted.
+
+    Validated the same way the redeem path validates it, because these lines
+    are written verbatim into other machines' `authorized_keys`. An unchanged
+    identity is not rewritten, so a refresh on a settled machine touches no row.
+    """
+    from . import shell_access, shell_grants
+    from .store import get_store
+    key = _managed_leaf(device_id)["key"]
+    pubkey = (body.pubkey if body else "") or ""
+    user = (body.user if body else "") or ""
+    # Both halves or neither. A key with no account to reach it under is a row
+    # `hub_peers` skips anyway, and accepting the pair half-formed would let a
+    # malformed presentation blank the `shell_user` of a machine the hub can
+    # currently reach — a downgrade nobody asked for, arriving as a success.
+    if shell_access.valid_pubkey(pubkey) and shell_access.valid_user(user):
+        row = get_store().host_row(key)
+        if row is not None and (row["shell_pubkey"] != pubkey
+                                or row["shell_user"] != user):
+            if get_store().set_host_shell(key, pubkey, user):
+                # The hub can now `ssh` a machine it has been managing blind.
+                shell_grants.refresh_hub_config()
+    return shell_grants.leaf_shell(key)
+
+
+@router.post("/shell/refresh")
+def shell_refresh(device_id: str = Depends(current_device)):
+    """A poke, not a payload: the poked machine presents its own identity and
+    pulls its set from the parent, then rewrites the user-writable half.
+
+    Presenting on the way past is what makes one poke enough to turn a machine
+    adopted before shell access existed into a shell-capable one — no
+    re-adoption, no joiner re-run. Key material never rides the poke, and no
+    root is spent here: the one root step a grant needs is graded and reported
+    by `apply_material`, never taken.
+    """
+    from . import shell_access
+    if not managed_access.is_leaf():
+        raise HTTPException(409, "only a managed machine refreshes shell grants")
+    shell = managed_access.parent_shell()
+    if not shell.get("authorized"):
+        return {"steps": []}
+    return {"steps": shell_access.apply_material(shell, Path.home())}
 
 
 @router.post("/device/disconnect")
@@ -1772,6 +1925,265 @@ def session_tag_write(sid: str, payload: SessionTagBody):
                             detail=(r.stderr or r.stdout or "log_event refused").strip())
     _board_changed()
     return {"ok": True}
+
+
+# ── Work: the session environment, the plans, the stages ──
+#
+# Deliberately absent from `changes_since`: none of these tables carries a
+# `seq`, and the device-sync path is a wire contract whose `MetaSync.tableEpoch`
+# would have to be reset to grow one. Every screen here is asked for by hand.
+
+#: What the Work view keys its three states on. Explicit in the payload, not
+#: inferred, because "no plan" and "a plan with no stages yet" are the same two
+#: empty collections to a client and draw entirely different screens.
+#:
+#:   none        — this session is not on a plan
+#:   planning    — a plan is open and has no stages yet
+#:   stages      — the plan has stages; this is the working screen
+#:   unavailable — this host cannot answer, and never appears with `available: true`
+WORK_MODES = ("none", "planning", "stages", "unavailable")
+
+
+class EnvBody(BaseModel):
+    """One setting, one layer. A `null` or empty value CLEARS it.
+
+    One key per call: the picker moves one row at a time, and a batch that
+    failed halfway would leave the screen rendering a state no single call
+    produced. Clearing is a value rather than a verb of its own because the
+    control that clears is the same control that sets — it just has nothing
+    selected.
+    """
+    key: str = ""
+    value: str | None = None
+
+
+def _env_rows(*, session_id: str = "", agent_id: str = "") -> list[dict]:
+    """Every setting at this layer: what is in force, whose it is, whether said.
+
+    One model for both layers and for the Work view, so the client decodes one
+    thing. `announced` is the difference between a setting in play and one
+    merely armed — in force since the session opened without one trigger having
+    fired yet. Every setting always appears: a key missing from the list reads to
+    the app as a feature this host does not have, which is the sentence
+    `available: false` exists to say and must not be said by accident.
+    """
+    from . import environment
+    if session_id:
+        resolved = environment.resolve(session_id)
+        spoken = environment.announced(session_id)
+    else:
+        # Nothing sits above the agent layer but the registry, so the agent's
+        # own row is the only thing that can shadow a default. A stored value
+        # the registry no longer offers counts as unset, which is what
+        # `environment._layer` does for a session — the two layers must not
+        # disagree about what is in force.
+        resolved = {}
+        for s in environment.SETTINGS:
+            raw = environment.get(s.key, agent_id=agent_id)
+            resolved[s.key] = ((raw, "agent") if raw in s.values
+                               else (s.default, "default"))
+        # Nothing announces at the agent layer: an agent value is what the next
+        # session will inherit, not something any session has been told, and
+        # there is no session here whose markers could be read to find out.
+        # Stated as `False` rather than left out, because a key the client
+        # cannot find reads as a host too old to have the field — which is the
+        # sentence `available: false` exists to say and must not be said by
+        # accident.
+        spoken = {}
+    rows = []
+    for pref in environment.prefs():
+        value, source = resolved[pref["key"]]
+        rows.append({**pref, "value": value, "source": source,
+                     "announced": spoken.get(pref["key"], False)})
+    return rows
+
+
+def _write_env(payload: EnvBody, **layer) -> None:
+    """The write both POSTs share: refuse, store, repaint.
+
+    `set_value`'s ValueError is a 400 and never a 500. An unknown key and a
+    value outside the enum are the same fault — a picker that has drifted from
+    this host's registry — and the message is surfaced verbatim because it
+    already names the key and the values that would have worked.
+    """
+    from . import environment
+    key = (payload.key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="setting key required")
+    try:
+        environment.set_value(key, payload.value, **layer)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    _board_changed()
+
+
+@router.get("/sessions/{sid}/env")
+def get_session_env(sid: str):
+    """How this session runs — every setting, its value, and whose value it is.
+
+    `source` is the whole reason this is not a flat dictionary: it is what lets
+    the screen draw an inherited setting as inherited rather than as one
+    somebody set on this sitting, and the only honest basis for offering to
+    clear a row.
+
+    An unindexed session id is not an error. `resolve` answers defaults for
+    one on purpose — a session can be live before the index has caught up with
+    it, and a settings screen that 404'd there would be wrong for a few
+    seconds at exactly the moment it is first opened.
+    """
+    _check_sid(sid)
+    if not _probe("session_env"):
+        return _unavailable("the session environment", env=[])
+    return {"available": True, "env": _env_rows(session_id=sid)}
+
+
+@router.post("/sessions/{sid}/env")
+def set_session_env(sid: str, payload: EnvBody):
+    """Set or clear one setting on this session; answer the whole list back.
+
+    The stored truth rather than an echo of the request: a cleared row's new
+    value is the agent's or the registry's, and the caller neither knows it
+    nor should have to compute it to redraw itself.
+    """
+    _check_sid(sid)
+    if not _probe("session_env"):
+        raise HTTPException(
+            status_code=503,
+            detail="this host has no session environment to set")
+    _write_env(payload, session_id=sid)
+    return {"available": True, "env": _env_rows(session_id=sid)}
+
+
+def _env_agent(agent_id: str) -> str:
+    """The key the agent layer is stored under: the bare, lowercased agent name.
+
+    `/agents` hands out `alpha-chat` for an agent with a chat seat, but every
+    reader of `agent_env` asks with the bare name — the session index stores
+    `hostenv.project_dir_to_agent`'s base and the entry hook `root.seat_at`'s,
+    both lowercased. A row keyed on the scoped id was written, read back by
+    this route, and never seen by one session. An unknown agent is a 404 off
+    the same roster `/agents` is built from, not a row nothing will ever read.
+    """
+    from .hostenv import active_agents, split_id
+    base = split_id((agent_id or "").strip().lower())[0]
+    if base not in active_agents():
+        raise HTTPException(status_code=404, detail=f"unknown agent {agent_id!r}")
+    return base
+
+
+@router.get("/agents/{agent_id}/env")
+def get_agent_env(agent_id: str):
+    """The agent-default layer — what every session of this agent inherits."""
+    if not _probe("session_env"):
+        return _unavailable("the session environment", env=[])
+    return {"available": True, "env": _env_rows(agent_id=_env_agent(agent_id))}
+
+
+@router.post("/agents/{agent_id}/env")
+def set_agent_env(agent_id: str, payload: EnvBody):
+    """Move an agent's default. Every session of that agent that has not set
+    its own value reads the new one from its next resolve — including the ones
+    already running, which is the point of the layer."""
+    if not _probe("session_env"):
+        raise HTTPException(
+            status_code=503,
+            detail="this host has no agent environment to set")
+    base = _env_agent(agent_id)
+    _write_env(payload, agent_id=base)
+    return {"available": True, "env": _env_rows(agent_id=base)}
+
+
+@router.get("/sessions/{sid}/work")
+def get_session_work(sid: str):
+    """The Work view in one call: the mode, the plan, its stages and tasks, and
+    the environment the stages would be dispatched with.
+
+    One call because the alternative is three whose answers can disagree — a
+    stage list read before a re-parse beside tasks read after it renders as
+    tasks belonging to nothing. `plans.work` composes the plan side; this route
+    adds the environment rather than letting the client fetch it separately,
+    which is the same hazard one screen further out.
+
+    The environment rides along in the shape the env routes serve, so the
+    client decodes one model; and the guard covers both families because this
+    payload carries both, so a host that can answer for one and not the other
+    has nothing to say here either.
+    """
+    _check_sid(sid)
+    if not (_probe("work") and _probe("session_env")):
+        return _unavailable("the work harness", mode="unavailable", plan=None,
+                            stages=[], tasks={}, env=[])
+    from . import plans
+    state = plans.work(sid)
+    if state["plan"] is None:
+        mode = "none"
+    else:
+        mode = "stages" if state["stages"] else "planning"
+    return {"available": True, "mode": mode, "plan": state["plan"],
+            "stages": state["stages"], "tasks": state["tasks"],
+            "env": _env_rows(session_id=sid)}
+
+
+@router.get("/plans")
+def get_plans(limit: int = 50, include_done: bool = True):
+    """Every plan this host knows, most recently touched first."""
+    if not _probe("work"):
+        return _unavailable("the work harness", plans=[])
+    from . import plans
+    return {"available": True,
+            "plans": plans.list_plans(limit=limit, include_done=include_done)}
+
+
+@router.get("/plans/{plan_id}")
+def get_plan(plan_id: str):
+    """One plan, its stages, and what each stage's evidence and order of work say.
+
+    Proofs and tasks are keyed by stage rather than flattened: the screen draws
+    them under the stage they belong to, and a flat list would only make the
+    client re-group rows it was just handed.
+    """
+    if not _probe("work"):
+        return _unavailable("the work harness", plan=None, stages=[],
+                            proofs={}, tasks={})
+    from . import plans
+    detail = plans.plan_detail(plan_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"no such plan: {plan_id!r}")
+    return {"available": True, **detail}
+
+
+@router.get("/plans/{plan_id}/document")
+def get_plan_document(plan_id: str):
+    """The plan's markdown, through the same fence every other document takes.
+
+    `docfence`, not an open read of `plan_file`: this is a token-authenticated
+    read route on a machine that also stores credentials, and a path out of a
+    row is no more trustworthy than one off the wire — whatever authored the
+    plan wrote that column. `/context/file` answers the same three ways for
+    the same reasons, and asking the one module is how the two stay agreed.
+
+    A 503 rather than an `available: false` body, unlike the screens above:
+    the product of this route is a document, and there is no empty document
+    that does not read as a plan whose text is gone.
+    """
+    if not _probe("work"):
+        raise HTTPException(status_code=503,
+                            detail="this host has no plans to read a document from")
+    from . import plans
+    row = plans.plan(plan_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no such plan: {plan_id!r}")
+    if not (row.get("plan_file") or "").strip():
+        raise HTTPException(status_code=404,
+                            detail="this plan has no document on disk")
+    try:
+        return docfence.file_text(row["plan_file"])
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── File drops (phone → Mac) ──

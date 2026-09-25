@@ -1336,10 +1336,15 @@ def test_a_queued_send_does_not_eat_the_boundary_budget(near_ceiling, nudged, mo
         elapsed = time.time() - start
         if elapsed > 1.2 and not appended:
             append(near_ceiling, SENT)      # the box finally takes it, past the window
-            appended.append(1)
-        elif elapsed > 1.6 and len(appended) == 1:
+            appended.append(elapsed)
+        # Relative to the take, not to `start`: the renewed budget begins when the
+        # first sign lands, so a second absolute threshold 0.4s later leaves the
+        # boundary to arrive in the last poll before the deadline — which it does
+        # or does not depending on how loaded the machine is. Under the full suite
+        # it did not, and a flaky gate on main is a gate nobody reads.
+        elif len(appended) == 1 and elapsed > appended[0] + 0.1:
             append(near_ceiling, BOUNDARY)  # and the compaction finishes
-            appended.append(1)
+            appended.append(elapsed)
         return real_scan(path, off, engine)
 
     monkeypatch.setattr(cod, "resume_scan", scan)

@@ -139,6 +139,20 @@ def _no_live_fileshare_audit(monkeypatch):
     monkeypatch.setattr(fileshare, "audit_loop", idle)
 
 
+#: launchctl verbs that change what is loaded. `print`/`list` stay allowed.
+LAUNCHCTL_MUTATORS = {"bootout", "bootstrap", "kickstart", "load", "unload", "remove",
+                      "enable", "disable", "submit", "stop", "start"}
+
+#: This is the home machine when the production Hub is installed on it. A test
+#: that exercises a destructive install path for real (uninstall, purge,
+#: bootout, unregister) is refused here outright — the proof of such an
+#: operation runs in a lab guest (`vm.sh`), never on the Hub the fleet
+#: depends on. Mark such a test `@destructive`.
+HOME_MACHINE = Path("/Applications/jStack Hub.app").exists()
+destructive = pytest.mark.skipif(
+    HOME_MACHINE, reason="destructive install test: never runs on the home machine, only in a lab guest")
+
+
 @pytest.fixture(autouse=True)
 def _no_live_desktop_launches(monkeypatch):
     """A missing mock must fail here, never open the developer's real app."""
@@ -157,6 +171,22 @@ def _no_live_desktop_launches(monkeypatch):
             resolved = shutil.which(program, path=env.get("PATH"))
             if resolved and os.path.realpath(resolved) == "/usr/bin/open":
                 raise AssertionError("Test attempted to launch a real desktop app; mock this boundary")
+            # The same rule for the service layer. On 2026-09-24 a test that
+            # stubbed `control` but not `subprocess` ran a real `launchctl
+            # bootout` of every live.jstack.hub role on the home machine — the
+            # production Hub — and the updater, menu bar and host were gone
+            # until someone re-registered them by hand. A missing mock fails
+            # the test; it never reaches launchd, the Hub binary or sudo.
+            base = os.path.basename(os.path.realpath(resolved)) if resolved else os.path.basename(program)
+            verbs = {str(a) for a in argv[1:]}
+            if base == "launchctl" and verbs & LAUNCHCTL_MUTATORS:
+                raise AssertionError(
+                    f"Test attempted a real `launchctl {' '.join(map(str, argv[1:]))}`; mock this boundary "
+                    "— destructive service tests never run on the home machine")
+            if base in {"JStackHub", "JStackRuntime", "tccutil", "sudo"}:
+                raise AssertionError(
+                    f"Test attempted to run the real {base}; mock this boundary "
+                    "— destructive service tests never run on the home machine")
         return original(args, *positional, **kwargs)
 
     monkeypatch.setattr(subprocess, "Popen", guarded)

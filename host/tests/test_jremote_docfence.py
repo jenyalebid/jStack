@@ -133,3 +133,11 @@ def test_a_broken_marketplace_file_narrows_the_fence_rather_than_breaking_it():
     finally:
         plugin_paths.live_marketplace_roots = original
     assert roots, "a broken marketplace file emptied the fence"
+
+
+def test_the_roots_admit_the_authored_plan_directory():
+    """A stage row points back at the plan it was parsed from, and that plan is
+    authored in `~/.claude/plans/`. Left out of the fence, every plan written
+    where the engines actually write one answers 403 while its row reads fine —
+    a document route that can only serve documents nobody has."""
+    assert (Path.home() / ".claude" / "plans") in docfence.read_roots()

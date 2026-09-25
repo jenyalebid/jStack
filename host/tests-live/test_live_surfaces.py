@@ -227,6 +227,54 @@ def test_usage_spend_answers_for_a_window(api):
         assert spend.get("reason"), spend
 
 
+# ── files ──
+
+def test_the_file_share_screen_reports_observed_state_or_says_it_cannot(api,
+                                                                       host_identity):
+    """What SMB sharing actually looks like on this machine — read, never set.
+
+    The route's own docstring is the contract: observed state, and mutation
+    stays a local root action. So the live value here is that a host with
+    sharing off answers its full shape with the flags false rather than 500ing
+    out of `fileshare.FileShareError` — an unconfigured machine and a broken
+    probe are different answers and the screen has to be able to tell them
+    apart.
+
+    The flag checked against it is `ready`, not `available`: `serves_files()`
+    is `status()["ready"]`, so on any Mac that supports SMB `available` is true
+    while `file_sharing` stays false until shares are actually up. Comparing
+    the map to `available` here would be a false equivalence that fails on a
+    correct host — which is why this route is not in the `checks` table below.
+    """
+    share = api.ok("GET", "/files/share")
+    assert isinstance(share, dict), share
+
+    for key in ("available", "configured", "secure", "ready", "shares",
+                "unexpected", "security_problems", "service_enabled",
+                "guest_enabled", "account"):
+        assert key in share, f"no {key!r} in the file-share state: {share}"
+
+    for key in ("available", "configured", "secure", "ready"):
+        assert isinstance(share[key], bool), (
+            f"{key} is {share[key]!r}, not a bool — the screen branches on it")
+    for key in ("service_enabled", "guest_enabled"):
+        assert share[key] in (True, False, None), (
+            f"{key} is {share[key]!r}; it is a tri-state and None means "
+            f"unobserved, which is not the same as off")
+    for key in ("shares", "unexpected", "security_problems"):
+        assert isinstance(share[key], list), f"{key}: {share[key]!r}"
+    assert isinstance(share["account"], dict), share["account"]
+
+    if not share["available"]:
+        assert share.get("reason"), (
+            f"host says it cannot serve files and will not say why: {share}")
+        assert share["shares"] == [] and share["ready"] is False, share
+
+    assert host_identity["features"]["file_sharing"] == share["ready"], (
+        f"/host says file_sharing={host_identity['features']['file_sharing']} "
+        f"but the screen reports ready={share['ready']}")
+
+
 # ── the map against the screens ──
 
 def test_the_feature_map_agrees_with_the_routes_it_describes(api, host_identity):

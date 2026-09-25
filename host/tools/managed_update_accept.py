@@ -1,4 +1,4 @@
-"""One unattended acceptance run over disposable Macs, writing eight receipts.
+"""One unattended acceptance run over disposable Macs, one receipt per journey.
 
 The subject is a commit, not a package. Every Mac here fetches the ref under
 test from the public repo and builds the Hub itself, which is what install and
@@ -17,14 +17,18 @@ incomplete. A journey the plan cannot support — two leaves that do not exist,
 a leaf that cannot be taken off the LAN — is recorded as skipped with its reason, and a
 skip keeps promotion closed exactly like a failure.
 
-Disposable guests only. The plan names the VMs; every guest is checked for the
-fixture account and candidate-test trust before it is touched.
+Disposable guests only, with one exception: a plan whose hub is `localhost`
+drives this Mac's own Hub, is limited to HOST_HUB_SAFE, and never builds,
+updates or resets it. Every guest is checked for the fixture account and
+candidate-test trust before it is touched.
 """
 from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib
 import json
+import os
 import re
 import shlex
 import shutil
@@ -34,6 +38,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from jstack_host.acceptance import HarnessFault
 
@@ -64,12 +69,28 @@ TRUST_KEY = ("f=$HOME/.local/state/jremote/updates/config.json; [ ! -f \"$f\" ] 
              + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
                  "import json,sys; print(json.load(open(sys.argv[1])).get('public_key',''))")
              + " \"$f\"")
+#: Whether the Hub on a guest is one that machine compiled for itself. The
+#: one-file installer leaves such a Hub alone when it answers (install.sh:
+#: "moving it forward is `jstack-host updates build`"), so it cannot move
+#: that machine to another commit; it replaces a published Hub in place.
+SOURCE_BUILT = ("f='/Applications/jStack Hub.app/Contents/Resources/packages/release-identity.json'; "
+                "if [ -f \"$f\" ] && /usr/bin/grep -q "
+                "'\"kind\"[[:space:]]*:[[:space:]]*\"source-build\"' \"$f\"; "
+                "then echo source-build; fi")
+#: The machine key a host recorded for itself at install; empty with no host.
+HOST_KEY = "f=$HOME/.local/state/jremote/host-id; [ ! -f \"$f\" ] || /bin/cat \"$f\""
 #: The credential a managed Mac presents to its hub, as `attach` recorded it.
 #: Empty on a Mac that has no parent.
 DEVICE_ID = ("f=$HOME/.local/state/jremote/parent.json; [ ! -f \"$f\" ] || "
              + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
                  "import json,sys; print(json.load(open(sys.argv[1])).get('device_id',''))")
              + " \"$f\"")
+#: The hub a managed Mac dials, as `attach` recorded it. Empty on a Mac that
+#: has no parent.
+PARENT_URL = ("f=$HOME/.local/state/jremote/parent.json; [ ! -f \"$f\" ] || "
+              + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
+                  "import json,sys; print(json.load(open(sys.argv[1])).get('parent_url',''))")
+              + " \"$f\"")
 #: The build a hub last offered its fleet, as the hub's own feed states it:
 #: which build, and which client it carries. Read after `updates build`, whose
 #: answer names the build but not its parts.
@@ -80,6 +101,41 @@ SERVED = ("f=$HOME/.local/state/jremote/updates/config.json; "
               "print(json.dumps({'build': m['release'], "
               "'client': str(m['components']['client']['version'])}))")
           + " \"$f\"")
+#: One request under a bearer the runner holds rather than the machine's own
+#: token — a hub device, a projection — answered with its status, refusals
+#: included. The token rides the environment; a path is resolved against the
+#: machine's own `local_url`. Stdlib only and proxies off, so it runs the same
+#: under a guest's JStackPython and under this runner's interpreter. The body
+#: is whole, as the guest tool's `call` answer is: every caller parses what it gets.
+HTTP_AS = """\
+import json, os, pathlib, urllib.error, urllib.request
+url = os.environ['JR_URL']
+if url.startswith('/'):
+    cfg = json.loads((pathlib.Path.home() / '.local/state/jremote/updates/config.json').read_text())
+    url = cfg['local_url'] + '/api/jremote/v1' + url
+body = os.environ.get('JR_BODY') or None
+request = urllib.request.Request(
+    url, data=body.encode() if body is not None else None,
+    method='POST' if body is not None else 'GET',
+    headers={'Authorization': 'Bearer ' + os.environ['JR_TOKEN'],
+             'Content-Type': 'application/json'})
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+try:
+    with opener.open(request, timeout=float(os.environ.get('JR_TIMEOUT') or 60)) as answer:
+        status, text = answer.status, answer.read().decode(errors='replace')
+except urllib.error.HTTPError as refusal:
+    status, text = refusal.code, refusal.read().decode(errors='replace')
+print(json.dumps({'status': status, 'body': text}))
+"""
+#: The plan's name for a hub that is this Mac rather than a VM.
+LOCAL_HUB = "localhost"
+#: The journeys that may drive this Mac's own Hub. Every other journey is
+#: destructive to its hub — off_network cuts it off the network, fleet,
+#: upgrade and fresh_install drive builds onto it, revocation kills its
+#: credentials, interruption reboots — and against a local hub that is a
+#: production machine.
+HOST_HUB_SAFE = frozenset({"shell_adopt", "shell_flip", "upgrade_shell",
+                           "shell_detach", "delegate_leaf"})
 
 
 class AcceptanceFailure(RuntimeError):
@@ -163,7 +219,16 @@ class Guest:
         self.name, self.tool, self._run = name, Path(tool), run
 
     def vm(self, *argv: str, timeout: int = 900) -> str:
-        done = self._run([str(self.tool), *argv], capture_output=True, text=True, timeout=timeout)
+        try:
+            done = self._run([str(self.tool), *argv],
+                             capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            # A run that blows a budget is a finding about the guest, so it has
+            # to arrive as one. Left uncaught it ends the whole acceptance in a
+            # `subprocess` traceback, before a single receipt is written and
+            # with nothing in it that names which Mac stopped answering.
+            raise AcceptanceFailure(
+                f"{self.name}: vm.sh {argv[0]} did not return within {timeout}s") from exc
         if done.returncode:
             raise AcceptanceFailure(f"{self.name}: vm.sh {argv[0]} failed: "
                                     + (done.stderr or done.stdout).strip()[-800:])
@@ -197,16 +262,22 @@ class Guest:
         in that gap reads as a dead daemon. A guest with no installed host has
         no API to wait for; a guest whose API never comes up is a real finding.
         """
+        # A deadline, not an iteration count: each turn of the loop costs the
+        # curl's own timeout as well as the sleep, so counting to `timeout`
+        # spends up to three times that long — past the ssh budget below, which
+        # then kills a guest that was still coming up and calls it dead.
         script = (
             "cfg=~/.local/state/jremote/updates/config.json; "
             "[ -f \"$cfg\" ] || { echo no-host; exit 0; }; "
             "url=$(grep -o '\"local_url\": *\"[^\"]*\"' \"$cfg\" | cut -d'\"' -f4); "
-            f"for i in $(seq 1 {int(timeout)}); do "
+            "start=$(date +%s); "
+            f"while [ $(( $(date +%s) - start )) -lt {int(timeout)} ]; do "
             "code=$(curl -s -o /dev/null -m 2 -w '%{http_code}' \"$url/api/jremote/v1/host\"); "
-            "[ \"$code\" != 000 ] && { echo \"up $code ${i}s\"; exit 0; }; sleep 1; done; "
+            "[ \"$code\" != 000 ] && { echo \"up $code $(( $(date +%s) - start ))s\"; exit 0; }; "
+            "sleep 1; done; "
             "echo down; exit 3")
         try:
-            return self.sh(script, timeout=timeout + 60).strip()
+            return self.sh(script, timeout=timeout + 120).strip()
         except AcceptanceFailure as exc:
             raise AcceptanceFailure(
                 f"{self.name}: booted, but its host API never answered within {timeout}s") from exc
@@ -241,6 +312,20 @@ class Guest:
         if body is not None:
             argv += ["--body", json.dumps(body)]
         return self.tool_call(*argv, timeout=timeout + 60)
+
+    def request(self, url: str, token: str, body: dict | None = None, *,
+                timeout: int = 60) -> dict:
+        """One request from this guest under `token`: a path means the guest's
+        own API, a full URL reaches another machine from here."""
+        env = {"JR_URL": url, "JR_TOKEN": token, "JR_TIMEOUT": str(timeout),
+               "JR_BODY": json.dumps(body) if body is not None else ""}
+        command = (" ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
+                   + f" {shlex.quote(GUEST_PYTHON)} -c {shlex.quote(HTTP_AS)}")
+        output = self.sh(command, timeout=timeout + 60)
+        try:
+            return json.loads(output[output.index("{"):])
+        except ValueError as exc:
+            raise AcceptanceFailure(f"{self.name}: unreadable answer: {output[-400:]}") from exc
 
     def queue(self, target: str, request: str) -> dict:
         return self.tool_call("queue", "--target", target, "--request", request)
@@ -300,6 +385,178 @@ class Guest:
         raise AcceptanceFailure(f"{machine} never reached {state}; last was {last.get('state')}")
 
 
+#: The guest tool's `probe`, run here: `managed_update_vm.py` refuses any
+#: account but the fixture's `admin`, so this Mac is observed by the same
+#: product code without it.
+LOCAL_PROBE = """\
+import json
+from jstack_host import fleet_updates, hostenv
+root, config = fleet_updates.root(), fleet_updates.config()
+if config.get('service_model') == 'app':
+    from jstack_host.update_app import AppBackend as Backend
+else:
+    from jstack_host.update_macos import MacBackend as Backend
+journal = root / 'job.json'
+job = json.loads(journal.read_text()) if journal.exists() else {}
+print(json.dumps({'host_id': hostenv.host_id(), 'observed': Backend(root, config).observe(job),
+                  'job': {k: job.get(k) for k in ('id', 'state', 'detail', 'release')},
+                  'managed': bool(config.get('managed'))}))
+"""
+
+
+class RealMachineRefusal(BaseException):
+    """The runner asked a real Mac for something only a disposable guest may do.
+
+    A BaseException because `acceptance.Run.journey` turns every Exception into
+    a failed receipt and moves on to the next journey; a runner that tried to
+    reset this Mac is not a finding about the commit, and the run stops there.
+    """
+
+
+class LocalHub(Guest):
+    """This Mac's own Hub standing in the hub role, so both VM slots are leaves.
+
+    The surface is `Guest`'s, reached without vm.sh: `sh` runs here, API calls
+    go to this host's own `local_url` with the token its updater config names —
+    the pair `managed_update_vm.py` authenticates with on a guest. What only a
+    disposable Mac may do (reset, the guest tool, fault injection, `vm.sh`)
+    refuses instead of reaching the production machine.
+    """
+
+    def __init__(self, *, run=subprocess.run, home: Path | None = None):
+        self.name, self.tool, self._run = LOCAL_HUB, None, run
+        self.home = Path(home) if home else Path.home()
+
+    def state_dir(self) -> Path:
+        """Where this Mac's host keeps its state. A host embedded in another
+        server declares it in `embedded.json` (hostenv.refuse_second_identity
+        reads the same marker); here that is the dashboard's, and
+        `~/.local/state/jremote/updates` holds no updater config at all."""
+        default = self.home / ".local/state/jremote"
+        try:
+            declared = json.loads((default / "embedded.json").read_text()).get("state_dir")
+        except (OSError, ValueError):
+            declared = ""
+        return Path(declared).expanduser() if declared else default
+
+    def config(self) -> dict:
+        path = self.state_dir() / "updates/config.json"
+        try:
+            return json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            raise AcceptanceFailure(f"{self.name}: no readable updater config at {path}") from exc
+
+    def vm(self, *argv: str, timeout: int = 900) -> str:
+        raise AcceptanceFailure(f"{self.name} is this Mac, not a VM: vm.sh {argv[0]} "
+                                "has nothing to act on")
+
+    def sh(self, command: str, *, timeout: int = 600) -> str:
+        try:
+            done = self._run(["/bin/zsh", "-lc", command],
+                             capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise AcceptanceFailure(
+                f"{self.name}: zsh did not return within {timeout}s") from exc
+        if done.returncode:
+            raise AcceptanceFailure(f"{self.name}: zsh exited {done.returncode}: "
+                                    + (done.stderr or done.stdout).strip()[-800:])
+        return done.stdout
+
+    def copy(self, source: Path, destination: str) -> None:
+        self.sh(f"/bin/cp {shlex.quote(str(source))} {shlex.quote(destination)}")
+
+    def start(self) -> str:
+        """Nothing boots; the Hub this Mac already runs has to be answering."""
+        answer = self.call("/host", timeout=10)
+        if answer["status"] != 200:
+            raise AcceptanceFailure(f"{self.name}: this Mac's Hub answered /host with "
+                                    f"{answer['status']}: {answer['body'][:200]}")
+        return f"{self.name}: this Mac's own Hub, answering at {self.config()['local_url']}"
+
+    def await_api(self, timeout: int = API_BOOT) -> str:
+        return self.start()
+
+    def stop(self) -> None:
+        """This Mac occupies no VM slot and is never parked."""
+
+    def reset(self) -> None:
+        raise RealMachineRefusal(
+            f"refusing to reset {self.name}: the hub of this run is this Mac, a real "
+            "machine, and only a disposable guest is ever reset")
+
+    def tool_call(self, *argv: str, timeout: int = 600) -> dict:
+        raise AcceptanceFailure(
+            f"{self.name}: the guest tool ({argv[0] if argv else 'no action'}) operates "
+            "disposable fixtures only and is never run against this Mac")
+
+    def background(self, command: str) -> subprocess.Popen:
+        raise AcceptanceFailure(f"{self.name}: no fault is ever injected into this Mac")
+
+    def probe(self) -> dict:
+        env = {**os.environ, "JREMOTE_STATE_DIR": str(self.state_dir())}
+        try:
+            done = self._run([GUEST_PYTHON, "-c", LOCAL_PROBE], capture_output=True,
+                             text=True, timeout=180, env=env)
+        except subprocess.TimeoutExpired as exc:
+            raise AcceptanceFailure(f"{self.name}: the probe did not return within 180s") from exc
+        if done.returncode:
+            raise AcceptanceFailure(f"{self.name}: probe failed: "
+                                    + (done.stderr or done.stdout).strip()[-800:])
+        output = done.stdout
+        try:
+            return json.loads(output[output.index("{"):])
+        except ValueError as exc:
+            raise AcceptanceFailure(f"{self.name}: unreadable probe: {output[-400:]}") from exc
+
+    def request(self, url: str, token: str, body: dict | None = None, *,
+                timeout: int = 60) -> dict:
+        if url.startswith("/"):
+            url = self.config()["local_url"] + "/api/jremote/v1" + url
+        env = {**os.environ, "JR_URL": url, "JR_TOKEN": token, "JR_TIMEOUT": str(timeout),
+               "JR_BODY": json.dumps(body) if body is not None else ""}
+        try:
+            done = self._run([sys.executable, "-c", HTTP_AS], capture_output=True,
+                             text=True, timeout=timeout + 30, env=env)
+        except subprocess.TimeoutExpired as exc:
+            raise AcceptanceFailure(f"{self.name}: {url} did not answer within {timeout}s") from exc
+        if done.returncode:
+            raise AcceptanceFailure(f"{self.name}: {url} unreachable: "
+                                    + (done.stderr or done.stdout).strip()[-400:])
+        return json.loads(done.stdout[done.stdout.index("{"):])
+
+    def call(self, path: str, body: dict | None = None, *, timeout: int = 120) -> dict:
+        token = Path(self.config()["token_path"]).read_text().strip()
+        return self.request(path, token, body, timeout=timeout)
+
+    def _answered(self, what: str, answer: dict) -> dict:
+        """The guest tool's shape: anything but a success is a failure."""
+        if not 200 <= answer["status"] < 300:
+            raise AcceptanceFailure(f"{self.name}: {what}: HTTP {answer['status']}: "
+                                    f"{answer['body'][:600]}")
+        return json.loads(answer["body"])
+
+    def queue(self, target: str, request: str) -> dict:
+        return self._answered("queue", self.call(
+            "/updates/queue", {"target": target, "request_id": request}, timeout=20))
+
+    def inventory(self) -> dict:
+        return self._answered("inventory", self.call("/updates/inventory", timeout=20))
+
+    def trust_key(self) -> str:
+        return str(self.config().get("public_key") or "")
+
+    def served(self) -> dict:
+        """What this Mac's feed offers, and the commit it was built from."""
+        feed = Path(self.config()["feed_dir"]) / "latest.json"
+        try:
+            manifest = json.loads(feed.read_text())["manifest"]
+        except (OSError, ValueError, KeyError) as exc:
+            raise AcceptanceFailure(f"{self.name}: its feed names no build: {feed}") from exc
+        return {"build": manifest["release"],
+                "client": str(manifest["components"]["client"]["version"]),
+                "sha": (manifest.get("sources") or {}).get("stack", "")}
+
+
 #: The subnet the lab's guests share. `vm.sh` puts a guest there only when it
 #: boots it with softnet, so a guest that was already running when the runner
 #: arrived can be on the host's default NAT instead — reachable from this Mac,
@@ -314,11 +571,19 @@ class Fleet:
     def __init__(self, plan: dict, *, run=subprocess.run):
         tool = Path(plan["vm_tool"]).expanduser()
         self.plan = plan
-        self.hub = Guest(plan["hub"], tool, run=run)
+        if LOCAL_HUB in [*plan.get("leaves", []), plan.get("fresh")]:
+            raise AcceptanceFailure(f"{LOCAL_HUB} may only be the hub: it is this Mac, and "
+                                    "a leaf or a pristine guest is reset and reinstalled")
+        self.hub = (LocalHub(run=run) if plan["hub"] == LOCAL_HUB
+                    else Guest(plan["hub"], tool, run=run))
         self.leaves = [Guest(name, tool, run=run) for name in plan.get("leaves", [])]
         self.fresh = Guest(plan["fresh"], tool, run=run) if plan.get("fresh") else None
         self.off_lan = plan.get("off_lan")
         self.slots = int(plan.get("vm_slots") or 0)
+        #: Guests the last cast stopped to make room. A journey whose cast
+        #: leaves the hub out (the leaf-to-leaf flip on a two-slot host) has
+        #: a parked hub, and nothing before that journey may ask it anything.
+        self.parked: set[str] = set()
         self.fixtures = list(plan.get("fixtures") or [])
         self.provision = plan.get("provision")
         self.network = plan.get("lab_network") or LAB_NETWORK
@@ -357,14 +622,18 @@ class Fleet:
         booted; a plan without it keeps every guest running, as before.
         """
         cast = [guest for guest in wanted if guest is not None]
+        self.parked = set()
         if self.slots:
-            if len(cast) > self.slots:
+            # A local hub is this Mac, not a VM: it takes no slot.
+            booted = [guest for guest in cast if not isinstance(guest, LocalHub)]
+            if len(booted) > self.slots:
                 raise AcceptanceFailure(
-                    f"this journey needs {len(cast)} live guests; the host has {self.slots} slots")
+                    f"this journey needs {len(booted)} live guests; the host has {self.slots} slots")
             names = {guest.name for guest in cast}
             for guest in self.guests():
-                if guest.name not in names:
+                if guest.name not in names and not isinstance(guest, LocalHub):
                     guest.stop()
+                    self.parked.add(guest.name)
         for guest in cast:
             # The fresh guest is pristine by definition, not by discipline: a
             # run that died after installing on it would otherwise hand the
@@ -388,8 +657,14 @@ class Fleet:
         env agent) are re-laid by its `provision` host command, `{guest}`
         standing for the guest's name, when any is absent. One still absent
         after that is a harness fault: the journey never reached the product.
+
+        A local hub is none of that: it has no fixtures and is on no lab
+        subnet. What it needs instead is every cast leaf able to reach it and
+        be reached by it, asked here before a journey leans on either.
         """
         for guest in guests:
+            if isinstance(guest, LocalHub):
+                continue
             try:
                 for remote, local in GUEST_TOOLS.items():
                     guest.copy(local, remote)
@@ -407,7 +682,35 @@ class Fleet:
             if missing:
                 raise HarnessFault(f"fixture missing: {guest.name}:{missing[0]}")
             self.on_lab_network(guest)
+            if isinstance(self.hub, LocalHub):
+                self.reaches_local_hub(guest)
             lab_guest(guest)
+
+    def reaches_local_hub(self, guest: Guest) -> None:
+        """Both directions between a leaf and this Mac, each on the port it is used on.
+
+        The leaf reaches the hub's API at the plan's `hub_address`, or at its
+        own default gateway — softnet puts this Mac there, which is where the
+        lab tool already points a leaf at a hub on the host. This Mac reaches
+        the leaf's sshd at its lab address, the path a shell grant is spent on.
+        """
+        port = urlsplit(self.hub.config()["local_url"]).port or 9090
+        try:
+            address = self.plan.get("hub_address") or guest.sh(
+                "/sbin/route -n get default | /usr/bin/awk '/gateway/{print $2}'").strip()
+            code = guest.sh(f"/usr/bin/curl -s -o /dev/null -m 8 -w '%{{http_code}}' "
+                            f"http://{address}:{port}/api/health || true").strip()
+            leaf = next((a for a in guest.sh("/sbin/ifconfig | awk '/inet /{print $2}'").split()
+                         if a.startswith(self.network)), "")
+            back = self.hub.sh(f"/usr/bin/nc -z -G 5 {shlex.quote(leaf)} 22 "
+                               "&& echo open || echo closed").strip() if leaf else "closed"
+        except AcceptanceFailure as exc:
+            raise HarnessFault(f"{guest.name}: could not check its path to {LOCAL_HUB}: {exc}") from exc
+        if code != "200":
+            raise HarnessFault(f"{guest.name} cannot reach this Mac's Hub at {address}:{port} "
+                               f"(HTTP {code or '000'})")
+        if back != "open":
+            raise HarnessFault(f"this Mac cannot reach {guest.name}'s sshd at {leaf or 'no lab address'}")
 
     def on_lab_network(self, guest: Guest) -> None:
         """Every guest on one subnet, asked before anything leans on it.
@@ -447,7 +750,14 @@ class Fleet:
         carries its own hatch, the variable below; a hub past the fix ignores
         it, and this is exactly how a hub on a published release is driven
         through its first build.
+
+        Never on a local hub: `updates channel` and `updates build` would move
+        the channel and the feed this Mac serves every machine it really owns.
         """
+        if isinstance(self.hub, LocalHub):
+            raise AcceptanceFailure(
+                f"refusing to build {build.slug} on {LOCAL_HUB}: the hub is this Mac, and a "
+                "build replaces what its feed offers the fleet it really manages")
         self.hub.sh(host_cli(f"updates channel {shlex.quote(build.ref)}"), timeout=120)
         output = self.hub.sh("JSTACK_BUILD_DESPITE_LEAVES=1 "
                              + host_cli(f"updates build --ref {shlex.quote(build.ref)}"),
@@ -467,6 +777,9 @@ class Fleet:
 
     def served_now(self) -> dict:
         """What the hub's feed offers this moment: the build and its client."""
+        if isinstance(self.hub, LocalHub):
+            served = self.hub.served()
+            return {"build": served["build"], "client": served["client"]}
         answer = self.hub.sh(SERVED, timeout=120).strip()
         try:
             served = json.loads(answer[answer.index("{"):])
@@ -953,10 +1266,654 @@ def lan_address(guest: Guest) -> str:
     return address
 
 
+# ── Shell access (#131): what a grant leaves on the machines
+
+SHELL_KEY = "~/.local/state/jremote/ssh/id_jremote"
+SUDOERS_DROPIN = "/etc/sudoers.d/jremote-managed"
+AUTHORIZED_BLOCK = ("/usr/bin/awk '/^# >>> jremote managed keys >>>$/{f=1;next} "
+                    "/^# <<< jremote managed keys <<</{f=0} f' "
+                    "~/.ssh/authorized_keys 2>/dev/null; true")
+PARENT_DIGEST = ("/usr/bin/shasum -a 256 ~/.local/state/jremote/parent.json "
+                 "| /usr/bin/awk '{print $1}'")
+LAB_TOOL = Path(__file__).with_name("managed_update_lab.py")
+
+
+def authorized_block(guest: Guest) -> list[str]:
+    out = guest.sh(AUTHORIZED_BLOCK)
+    return sorted(line.strip() for line in out.splitlines() if line.strip())
+
+
+def ssh_over(guest: Guest, alias: str, command: str) -> str:
+    """Over the granted path; a refusal comes back as text, never an exception."""
+    return guest.sh(f"/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=20 "
+                    f"{shlex.quote(alias)} {shlex.quote(command)} 2>&1 || echo REFUSED-$?")
+
+
+def hub_host_row(fleet: Fleet, machine: str) -> dict:
+    answer = fleet.hub.call("/hosts")
+    expect(answer["status"] == 200, f"the hub's /hosts answered {answer['status']}")
+    for row in json.loads(answer["body"]).get("hosts", []):
+        if row.get("key") == machine:
+            return row
+    return {}
+
+
+def shell_alias(fleet: Fleet, machine: str) -> tuple[dict, str]:
+    from jstack_host.enrolment import peer_name
+    row = hub_host_row(fleet, machine)
+    expect(row.get("shell_user"), f"the hub row for {machine} names no shell account")
+    return row, (peer_name(row["name"]) or machine)
+
+
+def on_candidate(journey, fleet: Fleet, guest: Guest, machine: str, candidate: Build) -> None:
+    """The ssh journeys read the leaf the ref under test makes, so their leaf
+    takes the candidate first, the way any leaf takes a build: by the hub's
+    queue. A leaf already there is left alone.
+
+    Nothing else guarantees it. The interruption journey ends its leaf on the
+    earlier ref on purpose (the request after `reboot_mid_apply`'s reboot
+    installs it), and upgrade_shell, the journey that used to move leaves[0]
+    back onto the candidate, is left out of a run whose earlier ref already
+    carries shell access. Run 20260925-061935: shell_detach took apart a leaf
+    still on release/one-hub, whose detach posts a revoke the hub had already
+    done with the forget, and read `parent-revoke 401` off code this run was
+    not testing.
+    """
+    journey.observe("leaf_on_candidate", update_to_build(fleet, guest, machine, candidate))
+
+
+def shell_adopt(journey, fleet: Fleet, candidate: Build) -> None:
+    """Adoption itself granted the hub shell; prove the material is live, then
+    prove a joiner re-run changes none of it."""
+    guest = fleet.leaves[0]
+    machine = fleet.machine(guest)
+    on_candidate(journey, fleet, guest, machine, candidate)
+    answer = guest.call("/host")
+    expect(answer["status"] == 200, f"the leaf's /host answered {answer['status']}")
+    features = json.loads(answer["body"]).get("features", {})
+    expect(features.get("shell_access") is True,
+           f"the leaf does not report shell_access: {features}")
+    journey.observe("capability_reported", {"machine": machine, "shell_access": True})
+    row, alias = shell_alias(fleet, machine)
+    config = fleet.hub.sh("/bin/cat ~/.ssh/config 2>/dev/null; true")
+    expect(f"Host {alias}" in config, f"the hub's ssh config names no {alias}")
+    journey.observe("granted_at_adoption", {"machine": machine, "alias": alias,
+                                            "shell_user": row["shell_user"]})
+    uname = ssh_over(fleet.hub, alias, "/usr/bin/uname -a")
+    expect("Darwin" in uname and "REFUSED" not in uname,
+           f"the hub could not shell into {alias}: {uname.strip()[-300:]}")
+    journey.observe("hub_shell_answers", {"alias": alias, "uname": uname.strip()[:200]})
+    # A grant carries no standing sudo. The lab image gives admin its own
+    # passwordless sudo, so `sudo -n` proves nothing here either way — the
+    # assertable fact is that adoption laid no drop-in.
+    dropin = ssh_over(fleet.hub, alias,
+                      f"sudo -n /bin/ls {SUDOERS_DROPIN} 2>&1 || echo ABSENT")
+    expect("ABSENT" in dropin,
+           f"adoption laid a sudoers drop-in: {dropin.strip()[-300:]}")
+    journey.observe("no_standing_root", {"dropin": "absent"})
+    before = authorized_block(guest)
+    pubkey_before = guest.sh(f"/bin/cat {SHELL_KEY}.pub").strip()
+    join(fleet, guest)
+    time.sleep(SETTLE)
+    after = authorized_block(guest)
+    expect(after == before, f"the joiner re-run changed the authorized block: "
+                            f"{before} -> {after}")
+    expect(len(after) == len(set(after)), f"the joiner re-run duplicated keys: {after}")
+    expect(guest.sh(f"/bin/cat {SHELL_KEY}.pub").strip() == pubkey_before,
+           "the joiner re-run rotated the machine's identity")
+    again = ssh_over(fleet.hub, alias, "/usr/bin/uname -a")
+    expect("Darwin" in again and "REFUSED" not in again,
+           f"hub shell broke across the joiner re-run: {again.strip()[-300:]}")
+    journey.observe("joiner_rerun_idempotent", {"keys": len(after),
+                                                "identity_rotated": False,
+                                                "hub_shell": "answers"})
+
+
+def upgrade_shell(journey, fleet: Fleet, candidate: Build) -> None:
+    """A Mac already attached and running the published release gains working
+    ssh by updating — no re-adoption, no joiner run.
+
+    Before this commit the identity reached the hub in one moment only, the
+    adoption redeem payload, so a Mac adopted by an earlier build holds
+    `hosts.shell_pubkey` empty forever and every shell route is a no-op on it.
+    This journey manufactures that machine, updates it, and then proves ssh
+    works off a single poke: the hub's `/hosts` row, the hub's `~/.ssh/config`
+    and a real `uname` over the granted path.
+
+    The drop-in is checked absent because the fix must not have bought root
+    (`7e5ac3f`): a late presenter spends no root moment and reports what it
+    owes instead.
+    """
+    from jstack_host.enrolment import peer_name
+    guest = fleet.leaves[0]
+    expect(fleet.prior is not None, "this run names no earlier ref to promote from")
+    expect(isinstance(fleet.hub, LocalHub) or fleet.plan.get("adopt_command"),
+           "manufacturing a pre-shell adoption needs 'adopt_command' in the plan")
+    stage_prior(fleet, guest, journey=journey)
+    before = guest.installed()
+    expect(before["sha"] != candidate.sha,
+           "this Mac already runs the commit under test; the promotion needs the earlier one")
+    # The pre-shell machine has to be *made*, not hoped for: a fixture leaf may
+    # already carry an identity from a candidate-build adoption, and staging the
+    # prior over it leaves both halves in place. The prior's own joiner is what
+    # puts it back — an adoption by a build with no shell feature, which is how
+    # the owner's Mac got here. It is the only adoption in this journey and it
+    # runs BEFORE the update the promotion is judged on.
+    guest.sh("/bin/rm -rf ~/.local/state/jremote/ssh "
+             "~/.local/state/jremote/shell_access.json")
+    stale = fleet.machine(guest)
+    stale_alias = peer_name(hub_host_row(fleet, stale).get("name") or "") or stale
+    answer = fleet.hub.call(f"/hosts/{stale}/forget", {})
+    expect(answer["status"] == 200, f"the hub would not forget {stale}: {answer}")
+    machine = adopt(fleet, guest)
+    row_before = hub_host_row(fleet, machine)
+    expect(row_before, f"the hub does not list {machine} after the pre-shell adoption")
+    expect(not row_before.get("shell_user"),
+           f"the staged Mac already has a shell identity on the hub: "
+           f"{row_before.get('shell_user')} — there is no promotion to observe")
+    block = authorized_block(guest)
+    expect(not block, f"the pre-shell Mac already authorizes granted keys: {block}")
+    # Asserted, not assumed: forget rewrites the hub's config, so the entry the
+    # promotion is credited with gaining has to be gone here first.
+    staged_config = fleet.hub.sh("/bin/cat ~/.ssh/config 2>/dev/null; true")
+    expect(f"Host {stale_alias}" not in staged_config,
+           f"the hub's ssh config still names {stale_alias}; there is no entry to gain")
+    # The prior carries no refresh route at all, or carries one that can answer
+    # nothing; either is the pre-shell state, and which one is recorded.
+    pulled = guest.call("/shell/refresh", {})
+    expect(pulled["status"] in (200, 404, 405),
+           f"the prior's refresh route answered {pulled['status']}")
+    prior_steps = (json.loads(pulled["body"]).get("steps") or []
+                   if pulled["status"] == 200 else [])
+    expect(not prior_steps,
+           f"the prior applied shell material; it is not a pre-shell build: {prior_steps}")
+    journey.observe("pre_shell_machine",
+                    {"machine": machine, "build": before["build"], "sha": before["sha"],
+                     "shell_user": "", "authorized_block": [],
+                     "hub_config_alias": "absent",
+                     "refresh_status": pulled["status"], "refresh_steps": 0})
+    job = fleet.hub.queue(machine, request_id("upgrade-shell"))
+    journey.note(f"hub queued {job['jobs'][0]['id']} for {machine}")
+    fleet.hub.wait_for("current", machine)
+    state = guest.installed()
+    identity_check(journey, "promoted_build", state, candidate)
+    stamp_before = guest.sh(PARENT_DIGEST).strip()
+    refreshed = guest.call("/shell/refresh", {})
+    expect(refreshed["status"] == 200,
+           f"the promoted machine's refresh answered {refreshed['status']}")
+    steps = json.loads(refreshed["body"]).get("steps") or []
+    graded = {s.get("step"): s for s in steps}
+    expect(graded.get("authorized-keys", {}).get("ok") is True,
+           f"the granted keys did not land: {steps}")
+    expect(graded.get("ssh-config", {}).get("ok") is True,
+           f"the peer config did not land: {steps}")
+    journey.observe("presented_on_refresh",
+                    {"machine": machine,
+                     "steps": [{k: s.get(k) for k in ("step", "ok", "note")}
+                               for s in steps]})
+    # shell_alias fails the journey when the row still names no shell account,
+    # which is the defect's own signature: the promotion did not reach the hub.
+    row, alias = shell_alias(fleet, machine)
+    journey.observe("hub_row_gained_identity", {"machine": machine, "alias": alias,
+                                                "shell_user": row["shell_user"]})
+    config = fleet.hub.sh("/bin/cat ~/.ssh/config 2>/dev/null; true")
+    expect(f"Host {alias}" in config,
+           f"the hub's ssh config still names no {alias} after the promotion")
+    journey.observe("hub_config_named", {"alias": alias})
+    uname = ssh_over(fleet.hub, alias, "/usr/bin/uname -a")
+    expect("Darwin" in uname and "REFUSED" not in uname,
+           f"the hub could not shell into the promoted {alias}: {uname.strip()[-300:]}")
+    journey.observe("hub_shell_answers", {"alias": alias, "uname": uname.strip()[:200]})
+    dropin = ssh_over(fleet.hub, alias,
+                      f"sudo -n /bin/ls {SUDOERS_DROPIN} 2>&1 || echo ABSENT")
+    expect("ABSENT" in dropin,
+           f"the promotion laid a sudoers drop-in: {dropin.strip()[-300:]}")
+    # The lab image ships Remote Login on, so a machine that never spent the
+    # root moment still answers ssh — and must still say it owes the step.
+    root_step = graded.get("remote-login")
+    journey.observe("no_standing_root",
+                    {"dropin": "absent",
+                     "root_step_reported": bool(root_step),
+                     "root_step": {k: root_step.get(k) for k in ("step", "ok", "note")}
+                                  if root_step else None})
+    stamp_after = guest.sh(PARENT_DIGEST).strip()
+    expect(stamp_after == stamp_before,
+           f"the promotion rewrote the adoption record: {stamp_before} -> {stamp_after}")
+    journey.observe("no_readoption", {"parent_record": stamp_after,
+                                      "joiner_runs": 0, "adoptions": 0})
+
+
+def lab_call(lab_root: str, port: int, hub_address: str, *argv: str,
+             timeout: int = 300) -> dict:
+    done = subprocess.run([sys.executable, str(LAB_TOOL), "--root", lab_root,
+                           "--port", str(port), "--hub-address", hub_address, *argv],
+                          capture_output=True, text=True, timeout=timeout)
+    if done.returncode:
+        raise AcceptanceFailure(f"lab {argv[0]} failed: "
+                                + (done.stderr or done.stdout).strip()[-800:])
+    out = done.stdout
+    return json.loads(out[out.index("{"):]) if "{" in out else {}
+
+
+def await_lab(port: int, timeout: int = 90) -> None:
+    import urllib.request
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",
+                                        timeout=3) as response:
+                if response.status == 200:
+                    return
+        except OSError:
+            pass
+        time.sleep(2)
+    raise AcceptanceFailure(f"the lab hub never answered on port {port}")
+
+
+def lab_teardown(fleet: Fleet, server, adopted: list[Guest]) -> list[str]:
+    """Undo the lab re-parenting whatever happened: dev parent record back,
+    then a local refresh so each leaf re-pulls its own hub's key — without it
+    the fleet leaves this journey missing the material shell_detach reads."""
+    failures: list[str] = []
+    if server is not None:
+        server.terminate()
+        with contextlib.suppress(Exception):
+            server.wait(timeout=30)
+    # The files go back on every leaf first, while the flip's cast still has
+    # both booted: casting the hub beside one leaf on a two-slot host parks
+    # the other, and a parked Mac answers no ssh (run 20260925-033632 timed
+    # out restoring acc-leaf2 after the hub+acc-leaf1 cast had stopped it).
+    restored: list[Guest] = []
+    for guest in adopted:
+        try:
+            guest.sh("/bin/mv -f ~/.local/state/jremote/parent.previous-update-lab.json "
+                     "~/.local/state/jremote/parent.json")
+            guest.sh(f"/bin/rm -f {GUEST_HOME}/{guest.name}-lab-record.json "
+                     f"{GUEST_HOME}/{guest.name}-lab-record.grant.json")
+            restored.append(guest)
+        except AcceptanceFailure as exc:
+            failures.append(str(exc))
+    for guest in restored:
+        try:
+            fleet.cast(fleet.hub, guest)
+            refreshed = guest.call("/shell/refresh", {})
+            steps = (json.loads(refreshed["body"]).get("steps", [])
+                     if refreshed["status"] == 200 else [])
+            expect(refreshed["status"] == 200 and steps
+                   and all(step.get("ok") for step in steps),
+                   f"{guest.name} could not re-pull its hub set: {refreshed}")
+            expect(authorized_block(guest),
+                   f"{guest.name} came out of the lab with an empty authorized block")
+        except AcceptanceFailure as exc:
+            failures.append(str(exc))
+    return failures
+
+
+def shell_flip(journey, fleet: Fleet, candidate: Build) -> None:
+    """Leaf→leaf: a grant flipped on, used, flipped off and refused.
+
+    With a local hub the flip is the real Hub's own console route,
+    `/hosts/{key}/shell`, on this Mac, and both leaves stay adopted where they
+    are. An all-VM fleet cannot boot its hub beside two leaves on two slots,
+    so there the hub role runs on the host (managed_update_lab) and both
+    leaves are re-parented onto it for the flip and restored after — the
+    grant mechanics are proved, the Hub's own route is not.
+    """
+    expect(len(fleet.leaves) >= 2, "the pair needs two managed Macs")
+    if isinstance(fleet.hub, LocalHub):
+        flip_through_hub(journey, fleet)
+    else:
+        flip_through_lab(journey, fleet)
+
+
+def flip_pair(journey, leaf_a: Guest, leaf_b: Guest, machine_a: str, machine_b: str,
+              alias_b: str, flip) -> None:
+    """The flip's observations, whichever hub `flip(allowed)` drives."""
+    stamps = {g.name: g.sh(PARENT_DIGEST).strip() for g in (leaf_a, leaf_b)}
+    on = flip(True)
+    bad = [s for s in on.get("steps", []) if not s.get("ok")]
+    expect(on.get("allowed") is True and on.get("steps") and not bad,
+           f"the grant flip did not land cleanly: {bad or on}")
+    journey.observe("granted_pair", {"src": machine_a, "dst": machine_b,
+                                     "steps": on["steps"]})
+    key_a = leaf_a.sh(f"/bin/cat {SHELL_KEY}.pub").strip().split()[1]
+    expect(any(key_a in line for line in authorized_block(leaf_b)),
+           f"{leaf_b.name} did not receive {leaf_a.name}'s key")
+    config_a = leaf_a.sh("/bin/cat ~/.ssh/config 2>/dev/null; true")
+    expect(f"Host {alias_b}" in config_a,
+           f"{leaf_a.name} gained no peer entry for {alias_b}")
+    answer = ssh_over(leaf_a, alias_b, "/usr/bin/uname -a")
+    expect("Darwin" in answer and "REFUSED" not in answer,
+           f"{leaf_a.name} could not shell into {alias_b}: {answer.strip()[-300:]}")
+    journey.observe("peer_shell_answers", {"src": leaf_a.name, "alias": alias_b,
+                                           "uname": answer.strip()[:200]})
+    off = flip(False)
+    bad = [s for s in off.get("steps", []) if not s.get("ok")]
+    expect(off.get("allowed") is False and off.get("steps") and not bad,
+           f"the revoke flip did not land cleanly: {bad or off}")
+    remaining = authorized_block(leaf_b)
+    expect(not any(key_a in line for line in remaining),
+           f"{leaf_b.name} kept {leaf_a.name}'s key after the revoke")
+    journey.observe("revoked_pair", {"steps": off["steps"],
+                                     "keys_left": len(remaining)})
+    refused = ssh_over(leaf_a, alias_b, "/usr/bin/uname -a")
+    expect("REFUSED" in refused,
+           f"{leaf_a.name} still shells into {alias_b}: {refused.strip()[-300:]}")
+    journey.observe("refused_immediately", {"alias": alias_b,
+                                            "answer": refused.strip()[-300:]})
+    after = {g.name: g.sh(PARENT_DIGEST).strip() for g in (leaf_a, leaf_b)}
+    expect(after == stamps, f"a flip rewrote an adoption record: {stamps} -> {after}")
+    journey.observe("no_readoption", {"parent_records": after})
+
+
+def flip_through_hub(journey, fleet: Fleet) -> None:
+    leaf_a, leaf_b = fleet.leaves[0], fleet.leaves[1]
+    machine_a, machine_b = fleet.machine(leaf_a), fleet.machine(leaf_b)
+    route = f"/hosts/{machine_b}/shell"
+    journey.note(f"flip driven through the real Hub on {fleet.hub.name}: POST {route} "
+                 f"(src {machine_a}); no stub hub, no re-parenting")
+    # The alias the hub hands leaf_a is the one `leaf_shell` derives from the
+    # hub's own row for leaf_b, so it is read off that row, not the VM's name.
+    _, alias_b = shell_alias(fleet, machine_b)
+    granted = False
+
+    def flip(allowed: bool) -> dict:
+        nonlocal granted
+        granted = granted or allowed
+        answer = fleet.hub.call(route, {"src": machine_a, "allowed": allowed})
+        expect(answer["status"] == 200,
+               f"the hub's {route} answered {answer['status']}: {answer['body'][:300]}")
+        if not allowed:
+            granted = False
+        return json.loads(answer["body"])
+
+    try:
+        flip_pair(journey, leaf_a, leaf_b, machine_a, machine_b, alias_b, flip)
+    finally:
+        # A journey that failed between the two flips leaves a live pair on a
+        # hub that outlives the run; the revoke is sent again and said.
+        if granted:
+            try:
+                answer = fleet.hub.call(route, {"src": machine_a, "allowed": False})
+                journey.note(f"withdrew the pair after a failed flip: HTTP {answer['status']}")
+            except AcceptanceFailure as exc:
+                journey.note(f"could not withdraw the pair after a failed flip: {exc}")
+
+
+def flip_through_lab(journey, fleet: Fleet) -> None:
+    import tempfile
+    from jstack_host.enrolment import peer_name
+    leaf_a, leaf_b = fleet.leaves[0], fleet.leaves[1]
+    machine_a, machine_b = fleet.machine(leaf_a), fleet.machine(leaf_b)
+    journey.note("flip driven through the stub hub on this host (managed_update_lab); "
+                 "the real Hub's /hosts/{key}/shell did not run")
+    # The lab claims its root itself and refuses a pre-existing dir without
+    # its marker — hand it a path that does not exist yet, under our tempdir.
+    lab_root = str(Path(tempfile.mkdtemp(prefix="shell-lab-")) / "updates-lab")
+    port = int(fleet.plan.get("shell_lab_port") or 19090)
+    server, adopted, error = None, [], None
+    try:
+        hub_address = ""
+        for guest in (leaf_a, leaf_b):
+            gateway = guest.sh("/sbin/route -n get default "
+                               "| /usr/bin/awk '/gateway/{print $2}'").strip()
+            expect(gateway, f"{guest.name} has no route back to the host")
+            hub_address = gateway
+            record = Path(lab_root) / f"{guest.name}-lab-record.json"
+            lab_call(lab_root, port, gateway, "enrol-shell", fleet.machine(guest),
+                     "--name", guest.name, "--address", guest.vm("ip", guest.name).strip(),
+                     "--pubkey", guest.sh(f"/bin/cat {SHELL_KEY}.pub").strip(),
+                     "--user", guest.sh("/usr/bin/id -un").strip(),
+                     "--record", str(record))
+            guest.copy(record, f"{GUEST_HOME}/{record.name}")
+            guest.tool_call("adopt", "--record", f"{GUEST_HOME}/{record.name}")
+            adopted.append(guest)
+            grant_name = record.name[:-len(".json")] + ".grant.json"
+            issued = guest.sh("/bin/cat " + shlex.quote(f"{GUEST_HOME}/{grant_name}"))
+            grant = Path(lab_root) / grant_name
+            grant.write_text(issued[issued.index("{"):])
+            lab_call(lab_root, port, gateway, "remember", str(grant))
+        log = (Path(lab_root) / "serve.log").open("w")
+        server = subprocess.Popen([sys.executable, str(LAB_TOOL), "--root", lab_root,
+                                   "--port", str(port), "--hub-address", hub_address,
+                                   "serve"], stdout=log, stderr=subprocess.STDOUT)
+        await_lab(port)
+        flip_pair(journey, leaf_a, leaf_b, machine_a, machine_b,
+                  peer_name(leaf_b.name) or machine_b,
+                  lambda allowed: lab_call(lab_root, port, hub_address, "shell-flip",
+                                           machine_b, "--src", machine_a,
+                                           "--allowed", "true" if allowed else "false"))
+    except BaseException as exc:
+        error = exc
+    failures = lab_teardown(fleet, server, adopted)
+    if error is not None:
+        raise error
+    expect(not failures, f"the lab restore did not put the fleet back: {failures}")
+
+
+# ── Delegation: a hub device projected onto a leaf by the leaf's grant
+
+#: The projections a leaf holds for one hub device, read off its own store.
+#: `/devices` answers a leaf's every caller with an empty roster, so the store
+#: is the only place a second row for the same owner would show.
+LEAF_PROJECTIONS = """\
+import json, sqlite3, sys
+from jstack_host import store
+db = sqlite3.connect(f'file:{store.DB_PATH}?mode=ro', uri=True)
+print(json.dumps([row[0] for row in db.execute(
+    'SELECT id FROM devices WHERE authority_device=? ORDER BY id', (sys.argv[1],))]))
+"""
+#: The leaf spends the grant its hub issued it at adoption (enrolment's
+#: `leaf_grant`) on the hub's own delegation route. That grant is live on the
+#: hub, so the hub gets past authentication and answers as what it is — not a
+#: managed machine. The token is read and spent on the leaf and never leaves it.
+SPEND_PARENT_GRANT = """\
+import json, urllib.error, urllib.request
+from jstack_host import attach_parent, grants
+record = attach_parent.parent_record()
+key = record.get('parent_key', '')
+token = grants.held(key) if key else ''
+if not token:
+    print(json.dumps({'held': False, 'parent': key}))
+    raise SystemExit(0)
+base = (f"http://{record['parent_address']}:{int(record.get('parent_port') or 9090)}"
+        if record.get('parent_address') else record.get('parent_url', '').rstrip('/'))
+request = urllib.request.Request(
+    base + grants.MINT_PATH, method='POST',
+    data=json.dumps({'name': 'acceptance non-leaf probe',
+                     'owner_id': 'acceptance-non-leaf'}).encode(),
+    headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+try:
+    with opener.open(request, timeout=20) as answer:
+        status, text = answer.status, answer.read().decode(errors='replace')
+except urllib.error.HTTPError as refusal:
+    status, text = refusal.code, refusal.read().decode(errors='replace')
+print(json.dumps({'held': True, 'parent': key, 'url': base + grants.MINT_PATH,
+                  'status': status, 'body': text[:1000]}))
+"""
+
+
+def guest_json(guest: Guest, script: str, *argv: str) -> object:
+    command = " ".join(shlex.quote(part) for part in [GUEST_PYTHON, "-c", script, *argv])
+    output = guest.sh(command, timeout=120).strip()
+    try:
+        return json.loads(output.splitlines()[-1])
+    except (IndexError, ValueError) as exc:
+        raise AcceptanceFailure(f"{guest.name}: unreadable answer: {output[-400:]}") from exc
+
+
+def hub_grant(fleet: Fleet, machine: str, token: str) -> dict:
+    """What a hub device gets when it asks the hub for a leaf — the route a
+    phone taps, answered by the hub spending the leaf's grant on the leaf."""
+    answer = fleet.hub.request(f"/hosts/{machine}/grant", token, {})
+    expect(answer["status"] == 200,
+           f"the hub would not project its device onto {machine}: "
+           f"{answer['status']} {answer['body'][:300]}")
+    granted = json.loads(answer["body"])
+    expect((granted.get("device") or {}).get("id") and granted.get("token"),
+           f"the hub's grant answer carries no projection: {granted}")
+    return granted
+
+
+def delegate_leaf(journey, fleet: Fleet, candidate: Build) -> None:
+    """A hub device projected onto a leaf through the leaf's adoption grant.
+
+    Proved on the machines: the projection answers on the leaf, re-asking
+    returns the same one, it administers nothing there, it dies when the hub
+    withdraws the device it stands for, and the hub — no managed machine —
+    refuses to mint for anyone. The hub device is minted for this journey and
+    revoked by it whatever happens, so a hub that outlives the run keeps no
+    live credential of it.
+    """
+    guest = fleet.leaves[0]
+    machine = fleet.machine(guest)
+    journey.note(f"the hub is {fleet.hub.name}"
+                 + (" — this Mac's own Hub" if isinstance(fleet.hub, LocalHub) else " — a VM"))
+    minted = fleet.hub.call("/devices", {"name": "acceptance delegate " + uuid.uuid4().hex[:8]})
+    expect(minted["status"] == 200,
+           f"the hub would not mint a device at its console: {minted['status']} {minted['body'][:300]}")
+    device = json.loads(minted["body"])
+    owner, owner_token = device["device"]["id"], device["token"]
+    withdrawn = False
+    try:
+        first = hub_grant(fleet, machine, owner_token)
+        projection, token = first["device"]["id"], first["token"]
+        journey.observe("projected", {"machine": machine, "hub_device": owner,
+                                      "projection": projection,
+                                      "address": first.get("address"), "port": first.get("port")})
+        # From the hub to the address the grant answer names — where a device
+        # holding this token goes — and it has to be that leaf answering.
+        leaf_host = f"http://{first['address']}:{first['port']}/api/jremote/v1/host"
+        reached = fleet.hub.request(leaf_host, token)
+        expect(reached["status"] == 200,
+               f"the projection was refused by {guest.name}: {reached['status']} {reached['body'][:300]}")
+        answered = json.loads(reached["body"]).get("host_id")
+        expect(answered == machine, f"the projection reached {answered}, not {machine}")
+        journey.observe("projection_answers", {"url": leaf_host, "host_id": answered})
+
+        second = hub_grant(fleet, machine, owner_token)
+        expect(second["device"]["id"] == projection,
+               f"re-asking minted {second['device']['id']}, a second device beside {projection}")
+        expect(second["token"] == token, "re-asking rotated the projection's token")
+        held = guest_json(guest, LEAF_PROJECTIONS, owner)
+        expect(held == [projection],
+               f"{guest.name} holds {held} for one hub device, not the one projection")
+        journey.observe("stable_across_retries", {"projection": projection, "rows_on_leaf": held})
+
+        # From the leaf's own loopback, the one place a console gate could
+        # open. A device id nothing holds turns the gate into the only answer:
+        # 403 is the refusal, 404 would be the gate letting it through.
+        stranger = "acceptance-" + uuid.uuid4().hex[:12]
+        attempts = {"mint": ("/devices", {"name": "acceptance stray"}),
+                    "rename": (f"/devices/{stranger}/rename", {"name": "acceptance"}),
+                    "revoke": (f"/devices/{stranger}/revoke", {})}
+        refusals = {}
+        for action, (path, body) in attempts.items():
+            answer = guest.request(path, token, body)
+            expect(answer["status"] == 403,
+                   f"a projection was let {action} a device on {guest.name}: "
+                   f"{answer['status']} {answer['body'][:200]}")
+            refusals[action] = answer["status"]
+        roster = guest.request("/devices", token)
+        expect(roster["status"] == 200 and json.loads(roster["body"]).get("devices") == [],
+               f"a projection read {guest.name}'s device roster: {roster['body'][:300]}")
+        journey.observe("cannot_administer", {**refusals, "roster": 0})
+
+        revoked = fleet.hub.call(f"/devices/{owner}/revoke", {})
+        expect(revoked["status"] == 200,
+               f"the hub would not withdraw {owner}: {revoked['status']} {revoked['body'][:200]}")
+        withdrawn = True
+        after = fleet.hub.request(leaf_host, token)
+        expect(after["status"] == 403,
+               f"{guest.name} still honours the projection of a device its hub withdrew: "
+               f"{after['status']} {after['body'][:200]}")
+        journey.observe("parent_recheck", {"hub_device": owner, "before": reached["status"],
+                                           "after": after["status"],
+                                           "detail": after["body"][:200]})
+
+        spent = guest_json(guest, SPEND_PARENT_GRANT)
+        expect(spent.get("held"), f"{guest.name} holds no grant from its hub {spent.get('parent')}; "
+                                  "there is nothing to present to a non-leaf")
+        expect(spent["status"] == 403,
+               f"the hub, not a managed machine, answered a live grant with {spent['status']}: "
+               f"{spent['body'][:200]}")
+        journey.observe("non_leaf_refuses", {"url": spent["url"], "status": spent["status"],
+                                             "detail": spent["body"][:200]})
+    finally:
+        if not withdrawn:
+            try:
+                answer = fleet.hub.call(f"/devices/{owner}/revoke", {})
+                journey.note(f"withdrew hub device {owner} after a failed journey: "
+                             f"HTTP {answer['status']}")
+            except AcceptanceFailure as exc:
+                journey.note(f"could not withdraw hub device {owner}: {exc}")
+
+
+def shell_detach(journey, fleet: Fleet, candidate: Build) -> None:
+    """Runs last: detach is terminal for its leaf, and `sandbox.py reset`
+    re-provisions the fleet after a full run. leaves[0], never leaves[-1] —
+    that leaf's credential died in the revocation journey, and detach has to
+    tell the parent goodbye with a live one."""
+    guest = fleet.leaves[0]
+    machine = fleet.machine(guest)
+    on_candidate(journey, fleet, guest, machine, candidate)
+    _, alias = shell_alias(fleet, machine)
+    uname = ssh_over(fleet.hub, alias, "/usr/bin/uname -a")
+    expect("Darwin" in uname and "REFUSED" not in uname,
+           f"hub shell into {alias} was not working before detach: {uname.strip()[-300:]}")
+    journey.observe("shell_before_detach", {"alias": alias, "uname": uname.strip()[:200]})
+    out = guest.sh("~/.local/bin/jstack-host detach --json", timeout=900)
+    result = json.loads(out[out.index("{"):])
+    bad = [s for s in result.get("steps", []) if not s.get("ok")]
+    expect(result.get("detached") is True and not bad,
+           f"detach did not come apart cleanly: {bad or result}")
+    journey.observe("detach_steps", {"detached": result["detached"],
+                                     "steps": [{k: s.get(k) for k in ("step", "ok", "note")}
+                                               for s in result["steps"]]})
+    block = authorized_block(guest)
+    expect(not block, f"granted keys survived detach: {block}")
+    sudoers = guest.sh(f"sudo -n /bin/ls {SUDOERS_DROPIN} 2>&1 || echo ABSENT").strip()
+    expect("ABSENT" in sudoers, f"the sudoers drop-in survived detach: {sudoers[-200:]}")
+    identity = guest.sh(f"/bin/ls {SHELL_KEY} 2>&1 || echo ABSENT").strip()
+    expect("ABSENT" in identity, f"the machine identity survived detach: {identity[-200:]}")
+    journey.observe("material_gone", {"authorized_block": block,
+                                      "sudoers": "absent", "identity": "absent"})
+    # The lab image ships Remote Login on, so the grant recorded "already on"
+    # and detach must leave it on — which is also what keeps this very ssh
+    # channel alive to make the observation.
+    remote_login = guest.sh("sudo -n /usr/sbin/systemsetup -getremotelogin").strip()
+    expect("On" in remote_login,
+           f"Remote Login was on before the grant and is not now: {remote_login}")
+    journey.observe("remote_login_restored", {"systemsetup": remote_login[-120:]})
+    row_after = hub_host_row(fleet, machine)
+    expect(not row_after, f"the hub still lists {machine}: {row_after.get('name')}")
+    config = fleet.hub.sh("/bin/cat ~/.ssh/config 2>/dev/null; true")
+    expect(f"Host {alias}" not in config, f"the hub's ssh config still names {alias}")
+    journey.observe("hub_forgot_machine", {"machine": machine, "alias_dropped": alias})
+    refused = ssh_over(fleet.hub, alias, "/usr/bin/uname -a")
+    expect("REFUSED" in refused,
+           f"the hub can still shell into a detached machine: {refused.strip()[-300:]}")
+    journey.observe("hub_shell_refused", {"alias": alias,
+                                          "answer": refused.strip()[-300:]})
+
+
+# Two journeys are permanent for their leaf and order the tail: revocation
+# kills leaves[-1]'s credential, so everything needing a live pair runs before
+# it; shell_detach removes leaves[0] from the fleet entirely, so it runs last.
+# upgrade_shell sits between them: it withdraws leaves[0]'s row and re-adopts
+# it from the prior, so it must not run before a journey that reads the row
+# adoption left (shell_adopt), and it must leave the leaf on the candidate with
+# live shell material, which is what shell_detach then takes apart.
+# delegate_leaf spends leaves[0]'s adoption grants in both directions, so it
+# runs on the adoption the fleet was provisioned with — before upgrade_shell
+# replaces it with one made by the prior, whose grants are not under test.
 JOURNEYS = {"fresh_install": fresh_install, "upgrade": upgrade, "fleet": fleet_journey,
             "offline_catchup": offline_catchup, "session_survival": session_survival,
             "interruption": interruption, "off_network": off_network,
-            "revocation": revocation}
+            "shell_adopt": shell_adopt, "shell_flip": shell_flip,
+            "delegate_leaf": delegate_leaf, "upgrade_shell": upgrade_shell,
+            "revocation": revocation, "shell_detach": shell_detach}
 
 # The guests each journey drives; everyone else may be parked on a
 # slot-limited host. The fleet journey swaps its own leaves mid-flight.
@@ -967,7 +1924,15 @@ CAST = {"fresh_install": lambda f: (f.hub, f.fresh),
         "session_survival": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
         "interruption": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
         "revocation": lambda f: (f.hub, f.leaves[-1] if f.leaves else None),
-        "off_network": lambda f: (f.hub, f.leaves[-1] if f.leaves else None)}
+        "off_network": lambda f: (f.hub, f.leaves[-1] if f.leaves else None),
+        "shell_adopt": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
+        # Both leaves live at once. A local hub takes no slot, so it is cast
+        # and drives the flip; a VM hub cannot fit, and the lab stands in.
+        "shell_flip": lambda f: ((f.hub, *f.leaves[:2]) if isinstance(f.hub, LocalHub)
+                                 else tuple(f.leaves[:2])),
+        "delegate_leaf": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
+        "upgrade_shell": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
+        "shell_detach": lambda f: (f.hub, f.leaves[0] if f.leaves else None)}
 
 
 # ── Operations the journeys are written in terms of
@@ -1044,6 +2009,8 @@ def lab_guest(guest: Guest) -> bool:
 
 
 def trust_key(guest: Guest) -> str:
+    if isinstance(guest, LocalHub):
+        return guest.trust_key()
     return guest.sh(TRUST_KEY).strip()
 
 
@@ -1084,12 +2051,40 @@ def reach(fleet: Fleet, guest: Guest) -> None:
     same Macs carry from run to run, and a journey that took such a leaf as
     it stood would measure a move from a commit this run never named. It is
     staged onto the earlier ref, as every leaf of a real fleet starts from
-    the build it last took.
+    the build it last took. Under a local hub that names no earlier ref it
+    is moved onto the ref under test instead, since that hub serves it
+    nothing else and the shell journeys read a leaf adopted by that ref.
+
+    A leaf with no host at all is installed onto the run's ref and adopted;
+    the pristine guest alone is left empty, for the fresh install.
+
+    How a leaf is moved is the installer's own rule: a published Hub is
+    replaced in place; a Hub the machine built itself is left alone by the
+    installer, so that guest goes back to the base image first (`move`).
     """
-    if guest is fleet.hub or not trust_key(guest):
+    if guest is fleet.hub or guest is fleet.fresh:
+        return
+    if fleet.hub.name in fleet.parked:
+        # The cast left the hub out — the leaf-to-leaf flip on a two-slot
+        # host casts both leaves and hands the hub role to the lab
+        # (flip_through_lab). Everything below asks the hub something, and a
+        # parked hub is a stopped Mac: run 20260925-014140 timed out an ssh
+        # into it here and failed the flip before the lab ever stood in. The
+        # leaf is taken as it stands, and only a leaf with a host can be.
+        expect(trust_key(guest), f"{guest.name} has no host, and the hub is parked for this cast")
+        return
+    target = fleet.prior or fleet.build
+    if not trust_key(guest):
+        # A leaf with no host at all — the base image, as `vm.sh reset` leaves
+        # it — is installed onto the run's ref by the one-file install and
+        # adopted, the way a Mac joins. Only the pristine guest is left so.
+        expect(target is not None, "build the ref under test before casting a leaf")
+        move(fleet, guest, target, "nothing", None, why="which has no host at all")
         return
     if revoked(fleet, guest):
         readopt(fleet, guest)
+    elif detached(guest):
+        rejoin(fleet, guest)
     if follows(fleet, guest):
         running = guest.installed()["sha"]
         named = {ref.sha for ref in (fleet.prior, fleet.build) if ref is not None}
@@ -1097,8 +2092,14 @@ def reach(fleet: Fleet, guest: Guest) -> None:
             print(f"{guest.name} runs {running[:8]}, which this run never named: staging it "
                   f"onto {fleet.prior.slug} first", flush=True)
             stage_prior(fleet, guest)
+        elif running not in named and isinstance(fleet.hub, LocalHub):
+            # No earlier ref to stage onto, and a local hub never builds; the
+            # shell journeys read a leaf adopted by the ref under test, so
+            # that is where it goes.
+            expect(fleet.build is not None, "build the ref under test before casting a leaf")
+            move(fleet, guest, fleet.build, running, None,
+                 why=f"which this run never named, and the hub is {LOCAL_HUB}")
         return
-    target = fleet.prior or fleet.build
     expect(target is not None, "build the ref under test before casting a leaf")
     move(fleet, guest, target, guest.installed()["sha"], None)
 
@@ -1122,6 +2123,30 @@ def revoked(fleet: Fleet, guest: Guest) -> bool:
     return any(row["id"] == device and row.get("revoked") for row in rows)
 
 
+def detached(guest: Guest) -> bool:
+    """Whether this guest has a host and no parent record.
+
+    That is what `jstack-host detach` leaves behind: the host stays, the
+    parent record and the machine identity go. The shell_detach journey
+    leaves leaves[0] exactly so, and under the build model the same Macs
+    carry into the next run — whose first shell journey then reads an
+    identity detach destroyed (run 20260925-051215: shell_flip failed on
+    `cat id_jremote.pub`, no such file) before it measured anything.
+    """
+    return not guest.probe().get("adopted", True)
+
+
+def rejoin(fleet: Fleet, guest: Guest) -> None:
+    """A detached Mac is brought back the way a Mac joins: adopted again.
+    Nothing is reinstalled — the host runs fine; adoption records the parent
+    and mints the identity detach destroyed."""
+    print(f"{guest.name}: detached from its hub, no parent record; adopting it again, "
+          "as a detached Mac is brought back", flush=True)
+    adopt(fleet, guest)
+    expect(not detached(guest),
+           f"{guest.name} still records no parent after adoption")
+
+
 def readopt(fleet: Fleet, guest: Guest) -> None:
     """A revoked Mac is brought back the way a Mac joins: adopted again. The
     hub never resurrects a revoked credential; adoption mints a new one and
@@ -1133,22 +2158,56 @@ def readopt(fleet: Fleet, guest: Guest) -> None:
            f"{guest.name} is still revoked on the hub after adoption")
 
 
-def move(fleet: Fleet, guest: Guest, target: Build, running: str, journey) -> None:
+def move(fleet: Fleet, guest: Guest, target: Build, running: str, journey, *,
+         why: str = "whose updater does not trust this hub (#144)") -> None:
     """The one-file install of `target` over a Mac the hub cannot reach, then
     adoption; what that leaves must take the hub's key on its heartbeat."""
-    said = (f"{guest.name} runs {running}, whose updater does not trust this hub "
-            f"(#144): moving it onto {target.slug} by the one-file install and "
-            "adopting it, as a published Mac is moved")
-    if journey is not None:
-        journey.note(said)
+    said = (f"{guest.name} runs {running}, {why}: moving it onto {target.slug} by "
+            "the one-file install and adopting it, as a published Mac is moved")
+    say = journey.note if journey is not None else (lambda text: print(text, flush=True))
+    say(said)
+    if source_built(guest):
+        # The installer leaves a Hub the machine built itself alone, so run
+        # over it the one-file install moves nothing (run 22:21 on acc-leaf1:
+        # five journeys measured a leaf that never left 43ada1dc). A Mac that
+        # cannot move itself forward is reinstalled from scratch; the lab's
+        # from-scratch is the base image. The hub forgets the row the old
+        # install answered for first, so no row is left that no Mac answers.
+        say(f"{guest.name} runs a Hub it built itself, which the one-file installer leaves "
+            f"alone: back to the base image, then installed fresh from {target.slug}, as a "
+            "Mac that cannot move itself forward is reinstalled from scratch")
+        forget(fleet, guest)
+        guest.reset()
+        guest.start()
+        fleet.prepare(guest)
+        install_build(guest, target, fresh=True)
     else:
-        print(said, flush=True)
-    install_build(guest, target)
+        install_build(guest, target)
+    state = guest.installed()
+    expect(state["sha"] == target.sha,
+           f"{guest.name} runs {state['sha']} after the move, not {target.slug}: "
+           "the one-file install left the Hub it found")
     adopt(fleet, guest)
     expect(follows(fleet, guest),
            f"{guest.name} on {target.slug} never took the hub's key: a ref from "
            "before a9fe663 trusts only the bundle that installed it (#144), and "
            "nothing this hub serves can reach it")
+
+
+def source_built(guest: Guest) -> bool:
+    return guest.sh(SOURCE_BUILT).strip() == "source-build"
+
+
+def forget(fleet: Fleet, guest: Guest) -> None:
+    """Withdraw the hub's row for the Mac this guest was, before the guest
+    stops being it. A row the hub never held is nothing to withdraw."""
+    key = guest.sh(HOST_KEY).strip()
+    fleet._ids.pop(guest.name, None)
+    if not key:
+        return
+    answer = fleet.hub.call(f"/hosts/{key}/forget", {})
+    expect(answer["status"] in (200, 404),
+           f"the hub would not forget {guest.name} ({key}): {answer['status']} {answer['body'][:300]}")
 
 
 def stage_prior(fleet: Fleet, guest: Guest, *, journey=None) -> dict:
@@ -1169,6 +2228,11 @@ def stage_prior(fleet: Fleet, guest: Guest, *, journey=None) -> dict:
         return state
     if fleet.plan.get("stage_prior_command"):
         guest.sh(fleet.plan["stage_prior_command"], timeout=2400)
+    # A local hub never builds (Fleet.offer), so it cannot serve the prior;
+    # the leaf is moved by its own one-file install, which touches the leaf alone.
+    elif isinstance(fleet.hub, LocalHub):
+        move(fleet, guest, fleet.prior, state["sha"], journey,
+             why=f"and the hub is {LOCAL_HUB}, which never builds the prior to serve it")
     elif follows(fleet, guest):
         target = fleet.build
         expect(target is not None, "build the ref under test before staging an earlier one")
@@ -1202,11 +2266,86 @@ def update_to_build(fleet: Fleet, guest: Guest, machine: str, build: Build) -> d
             "job": "already current"}
 
 
+def local_mint(fleet: Fleet, guest: Guest) -> str:
+    """An adoption code minted at this Mac's own console.
+
+    The lab's joiner script ssh's into the hub as `admin` and runs the CLI
+    there. This Mac is not a guest: it has no `jstack-host` launcher at all
+    (its host is embedded in the dashboard) and it is not growing an
+    authorized key for a disposable VM. The console route is the one the hub's
+    own menu bar spends, and `LocalHub.call` already presents the internal
+    token over loopback, which is what makes the caller the console.
+    """
+    answer = fleet.hub.call("/enrolment/codes",
+                            {"name": f"Update lab {guest.name}", "kind": "host"})
+    expect(answer["status"] == 200, f"{LOCAL_HUB} would not mint an adoption code: "
+                                   f"{answer['status']} {answer['body'][:300]}")
+    code = str(json.loads(answer["body"]).get("code") or "")
+    expect(code, f"{LOCAL_HUB}'s console minted no code: {answer['body'][:300]}")
+    return code
+
+
+def hub_parent_url(fleet: Fleet, guest: Guest) -> str:
+    """The address a leaf dials this Mac's Hub on — the plan's, or the gateway
+    softnet puts this Mac at, which is the same answer `reaches_local_hub`
+    already proved answers 200 from inside the guest."""
+    port = urlsplit(fleet.hub.config()["local_url"]).port or 9090
+    address = fleet.plan.get("hub_address") or guest.sh(
+        "/sbin/route -n get default | /usr/bin/awk '/gateway/{print $2}'").strip()
+    expect(address, f"{guest.name} has no route back to {LOCAL_HUB}")
+    return f"http://{address}:{port}"
+
+
+#: What `jstack-host attach` prints when the redeem succeeded but the leaf's
+#: own app never spent the local pair link it was handed (`cli._hand_to_app`).
+ATTACH_APP_DECLINED = "the app on this Mac did not take that link"
+#: What it prints, before exiting 1, when the redeem succeeded but the leaf
+#: does not read as managed — a real finding, whatever the app did.
+ATTACH_NOT_MANAGED = "not reading as a managed hub"
+
+
+def join(fleet: Fleet, guest: Guest) -> None:
+    """Run the adoption a joining Mac runs, against whichever hub this run has.
+
+    A VM hub has the lab's one-file joiner sitting on the guest, which mints
+    over ssh and attaches. A local hub has no such script and never will, so
+    the two halves that script does happen here instead: the hub mints at its
+    console, the guest spends the code. Same product doors, same order.
+    """
+    if not isinstance(fleet.hub, LocalHub):
+        expect(fleet.plan.get("adopt_command"),
+               "pairing a Mac to a VM hub needs 'adopt_command' in the plan")
+        guest.sh(fleet.plan["adopt_command"], timeout=900)
+        return
+    code = local_mint(fleet, guest)
+    parent = hub_parent_url(fleet, guest)
+    # The lab image gives admin passwordless sudo through a prompt; attach asks
+    # for root once, and priming it here keeps that ask off the guest's screen.
+    guest.sh("echo admin | sudo -S -p '' /usr/bin/true")
+    # `attach` exits non-zero for two unlike reasons: the redeem failed, or it
+    # succeeded and the leaf's own app then declined the local pair link that
+    # `attach` hands it last (`cli._hand_to_app`; the app step is declinable
+    # by design and install.sh branches on it). A lab guest has no app, so its
+    # every successful adoption ends in the second. The exit status therefore
+    # decides nothing here; the transcript says which of the two it was, and
+    # what the leaf recorded as its parent says whether it is adopted.
+    report = guest.sh(f"{shlex.quote(GUEST_HOST_CLI)} attach {shlex.quote(code)} "
+                      f"--parent {shlex.quote(parent)} 2>&1; "
+                      "printf 'attach-exit=%s\\n' $?", timeout=900)
+    found = re.search(r"attach-exit=(\d+)", report)
+    status = int(found.group(1)) if found else -1
+    declined = status != 0 and ATTACH_APP_DECLINED in report and ATTACH_NOT_MANAGED not in report
+    expect(status == 0 or declined,
+           f"{guest.name}: attach to {LOCAL_HUB} exited {status}: {report.strip()[-600:]}")
+    recorded = guest.sh(PARENT_URL).strip()
+    expect(recorded == parent,
+           f"{guest.name} does not record {LOCAL_HUB} as its parent after attach: "
+           f"{recorded or 'no parent at all'}")
+
+
 def adopt(fleet: Fleet, guest: Guest) -> str:
-    """Pair a freshly installed Mac to the fixture hub, the way the lab does."""
-    expect(fleet.plan.get("adopt_command"),
-           "pairing a fresh Mac needs 'adopt_command' in the plan")
-    guest.sh(fleet.plan["adopt_command"], timeout=900)
+    """Pair a freshly installed Mac to this run's hub, the way the lab does."""
+    join(fleet, guest)
     time.sleep(SETTLE)
     machine = guest.host_id()
     fleet._ids[guest.name] = machine
@@ -1408,7 +2547,8 @@ def read_fault(process: subprocess.Popen, *, timeout: int = 1800) -> dict:
 #: Journeys that start on an earlier commit and move forward from it. Without
 #: `--prior-ref` there is nothing to move from, and that is a skip with a
 #: reason, never a journey quietly reduced to a no-op.
-NEEDS_PRIOR = {"upgrade", "offline_catchup", "session_survival", "interruption", "revocation"}
+NEEDS_PRIOR = {"upgrade", "upgrade_shell", "offline_catchup", "session_survival",
+               "interruption", "revocation"}
 
 
 def unsupported(fleet: Fleet, name: str) -> str | None:
@@ -1419,11 +2559,58 @@ def unsupported(fleet: Fleet, name: str) -> str | None:
         return "the plan names no managed Mac to take off the LAN"
     if name == "fresh_install" and fleet.fresh is None:
         return "the plan names no pristine guest"
-    if name == "fleet" and len(fleet.leaves) < 2:
+    if name in ("fleet", "shell_flip") and len(fleet.leaves) < 2:
         return "the plan names fewer than two managed Macs"
+    if name == "shell_detach" and len(fleet.leaves) < 2:
+        return "the plan's only managed Mac loses its credential to the revocation journey"
     if name != "fresh_install" and not fleet.leaves:
         return "the plan names no managed Mac"
+    if (name == "upgrade_shell" and isinstance(fleet.hub, LocalHub)
+            and fleet.build is not None and fleet.build.ref not in fleet.offered):
+        return (f"{LOCAL_HUB}'s feed does not offer {fleet.build.slug}, and a local hub "
+                "is never made to build it")
     return None
+
+
+def local_hub_refusal(fleet: Fleet, requested: list[str]) -> str | None:
+    """Why this run may not start against a local hub, or None.
+
+    A refusal, never a skip: a skip is a receipt, and writing it means the
+    run already started against a production machine that a destructive
+    journey would then have been one `--only` away from driving.
+    """
+    if not isinstance(fleet.hub, LocalHub):
+        return None
+    unsafe = [name for name in requested if name not in HOST_HUB_SAFE]
+    if not unsafe:
+        return None
+    return (f"the hub is {LOCAL_HUB}, this Mac — a real machine. Refusing to start: "
+            + ", ".join(unsafe) + " would drive a real machine's Hub destructively. A local hub runs only: "
+            + ", ".join(sorted(HOST_HUB_SAFE)))
+
+
+def local_identity(fleet: Fleet, build: Build) -> dict:
+    """The build a local hub is held to, read — never made.
+
+    A VM hub is moved onto the commit under test before any journey
+    (`update_to_build`). A local hub is this production Mac, and moving it
+    would run the candidate's updater over the Hub the real fleet depends
+    on, on the strength of a run that exists to find out whether that
+    updater is safe. So it must already run the commit, clean, or the run
+    does not start. What its feed offers is recorded when it is this commit,
+    for the journeys that queue a leaf onto it; it is never rebuilt.
+    """
+    state = fleet.hub.installed()
+    expect(state["sha"] == build.sha and not state["dirty"],
+           f"{LOCAL_HUB} runs {state['sha']}{' (modified)' if state['dirty'] else ''}, not "
+           f"{build.slug}. A local hub is never updated by this runner: move this Mac "
+           "onto the commit by its own update path, then run again")
+    fleet.build = build
+    served = fleet.hub.served()
+    if served["sha"] == build.sha:
+        fleet.offered[build.ref] = served["build"]
+        fleet.served[build.ref] = served["client"]
+    return {"build": state["build"], "sha": build.sha}
 
 
 DEFAULT_REPO = "https://github.com/jenyalebid/jStack.git"
@@ -1445,31 +2632,54 @@ def main() -> int:
     parser.add_argument("--only", nargs="+", choices=sorted(JOURNEYS),
                         help="run these journeys, retaining previous receipts for the others")
     args = parser.parse_args()
+    # The shell journeys read the host package proper (a peer name from
+    # jstack_host.enrolment), which pulls in the Hub's web dependencies. An
+    # interpreter without them ran nine journeys before shell_adopt died on
+    # the import (run 20260925-014140); it is refused before the first boot.
+    try:
+        importlib.import_module("jstack_host.enrolment")
+    except ImportError as exc:
+        parser.error(f"{sys.executable} cannot import jstack_host.enrolment ({exc}): the shell "
+                     "journeys need the host package's dependencies (host/pyproject.toml) — "
+                     "run the acceptance under an interpreter that has them")
     from jstack_host import acceptance
     plan = json.loads(args.plan.read_text())
     if plan.get("production") or not plan.get("disposable"):
         parser.error("acceptance runs only against a plan marked disposable")
+    try:
+        fleet = Fleet(plan, run=subprocess.run)
+    except AcceptanceFailure as exc:
+        parser.error(str(exc))
+    refusal = local_hub_refusal(fleet, list(args.only or JOURNEYS))
+    if refusal:
+        parser.error(refusal)
     build = Build(args.repo, args.ref, checkout=args.checkout, client=args.client)
-    fleet = Fleet(plan, run=subprocess.run)
     if args.prior_ref:
         fleet.prior = Build(args.repo, args.prior_ref, checkout=args.checkout,
                             client=args.client)
     print(f"Acceptance for {build.slug} over {plan['hub']} "
           f"and {len(fleet.leaves)} managed Macs", flush=True)
     fleet.hub.start()
+    if isinstance(fleet.hub, LocalHub):
+        try:
+            identity = local_identity(fleet, build)
+        except AcceptanceFailure as exc:
+            parser.error(str(exc))
+        print(f"{fleet.hub.name} already runs {identity['build']} ({build.slug})", flush=True)
     if not fleet.slots:
         for leaf in fleet.leaves:
             leaf.start()
-    fleet.prepare(fleet.hub)
-    # The hub builds the commit before any receipt is written: the build id it
-    # comes out with is what the fleet is offered, and a run that cannot even
-    # build has nothing to write receipts about.
-    identity = {"build": fleet.offer(build), "sha": build.sha}
-    # The hub runs what it built before it serves it. What a leaf takes on
-    # its heartbeat — the key the hub signs with — is this commit's route
-    # answering, not the route of whatever the hub ran when it built.
-    moved = update_to_build(fleet, fleet.hub, fleet.machine(fleet.hub), build)
-    print(f"{fleet.hub.name} runs {moved['build']} ({moved['job']})", flush=True)
+    if not isinstance(fleet.hub, LocalHub):
+        fleet.prepare(fleet.hub)
+        # The hub builds the commit before any receipt is written: the build id it
+        # comes out with is what the fleet is offered, and a run that cannot even
+        # build has nothing to write receipts about.
+        identity = {"build": fleet.offer(build), "sha": build.sha}
+        # The hub runs what it built before it serves it. What a leaf takes on
+        # its heartbeat — the key the hub signs with — is this commit's route
+        # answering, not the route of whatever the hub ran when it built.
+        moved = update_to_build(fleet, fleet.hub, fleet.machine(fleet.hub), build)
+        print(f"{fleet.hub.name} runs {moved['build']} ({moved['job']})", flush=True)
     run = acceptance.Run(args.receipts, identity)
     for name in JOURNEYS:
         if args.only and name not in args.only:

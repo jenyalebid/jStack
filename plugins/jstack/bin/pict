@@ -988,6 +988,48 @@ def gather_timeline(directory: Path, sources: list[Source]) -> None:
         extra=sittings_table(sittings_of(entries, log_event), tag, seat))
 
 
+def gather_environment(directory: Path, sources: list[Source]) -> None:
+    """The session-environment state line, as env-entry.py would inject it.
+
+    Rendered from the host's own `state_line`, never rebuilt here: three hooks
+    and a preview formatting the same setting four ways is the drift the host
+    module exists to prevent.
+
+    Two silences are correct and look identical from outside. A machine where
+    nothing has been moved renders no source at all, which is exactly what the
+    hook does. A machine with no host package importable renders none either —
+    pict ships to machines that have the plugin and not the Hub.
+
+    Scoped to the AGENT layer: a spawn being previewed has no session id yet,
+    so a value set on one live session is not part of what this directory
+    would get, and `resolve` with no owner at either layer can only answer
+    defaults."""
+    cfg = review_config()
+    root = Path(cfg.get("agent_root") or "~/Agents").expanduser()
+    agent, _ = resolve_seat(directory, root, cfg)
+    sys.path.insert(0, str(PLUGIN_BIN.parent / "hooks"))
+    try:
+        # The embed marker first, or the store resolves to a directory that is
+        # nobody's Hub — read from the wrong settings and a fresh sqlite file
+        # minted in it for the trouble, by a tool that only reads.
+        import attention  # noqa: PLC0415 — the hook that owns the marker
+        if not os.environ.get("JREMOTE_STATE_DIR"):
+            declared = attention.state_dir()
+            if not declared:
+                return
+            os.environ["JREMOTE_STATE_DIR"] = declared
+        import _host  # noqa: PLC0415 — the hooks' resolver: a cache copy has no host beside it
+        environment = _host.load("environment", reexec=False)
+        line = environment.state_line(environment.resolve("", agent or ""))
+    except Exception:
+        return
+    if not line:
+        return
+    add(sources, "start", f"session environment — agent `{agent}`",
+        "SessionStart hook — jstack env-entry.py (emulated read-only) — the "
+        "agent's stored settings, wrapped in <jstack-environment>", line)
+
+
 # ------------------------------------------------------------------- prompt
 
 def resolve_command(name: str, directory: Path) -> Path | None:
@@ -1521,6 +1563,9 @@ def gather(directory: Path, opts: dict, hooks: list[Hook]) -> list[Source]:
             os.environ.get("PICT_LOG_EVENT", str(PLUGIN_BIN / "log_event")))
     else:
         gather_timeline(directory, sources)
+        # Last in the start stage because env-entry.py is last in its hook
+        # group, and SessionStart contexts concatenate in that order.
+        gather_environment(directory, sources)
     gather_serves(opts["serves"], sources)
     return sources
 

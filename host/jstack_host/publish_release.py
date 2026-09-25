@@ -7,6 +7,7 @@ import copy
 import fcntl
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -53,6 +54,61 @@ def allocate_client_build(candidates: Path, minimum: int) -> int:
         number = max(previous, minimum) + 1
         atomic_json(state, {"build": number})
         return number
+
+
+def stamp_client_build(repo: Path, build: int, notes: str) -> str:
+    """Return a shipped client build number to the source it was cut from.
+
+    The managed path allocates the number here and hands it to release-mac.sh
+    as `--build-number`, which is that script's no-bump mode; the build itself
+    runs in a worktree detached at a committed sha. So nothing was ever written
+    back. The number that shipped lived in the feed manifest and in
+    build-number.json, and the project kept whatever it had: main sat at 106
+    while 107, 108 and 109 were on Macs. Every Xcode build then stamped a
+    CFBundleVersion *below* the installed release — a downgrade to the updater,
+    and a rejection from App Store Connect, since release-ios.sh reads this same
+    field as its floor and every target shares it.
+
+    Run after publication, so only a build that actually shipped claims a
+    number. Gaps left by candidates that failed acceptance are harmless; Apple
+    requires the number to rise, not to be dense.
+
+    Never fatal — the release is already live by the time this runs, and a
+    failed stamp must not read as a failed release. It is also never silent:
+    that is precisely how the drift above went five builds without being seen.
+    """
+    project = repo / "jRemote-Code/jRemote/jRemote.xcodeproj/project.pbxproj"
+    if not project.is_file():
+        return f"WARNING: no project at {project}; build {build} is not in the source"
+    text = project.read_text()
+    present = sorted({int(n) for n in re.findall(r"CURRENT_PROJECT_VERSION = (\d+);", text)})
+    if len(present) != 1:
+        return (f"WARNING: targets disagree on CURRENT_PROJECT_VERSION {present}; "
+                f"fix the project, then set it to {build} by hand")
+    if present[0] >= build:
+        return f"project already carries build {present[0]}"
+    rel = "jRemote-Code/jRemote/jRemote.xcodeproj/project.pbxproj"
+    dirty = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--", rel],
+                           capture_output=True, text=True).stdout.strip()
+    if dirty:
+        return (f"WARNING: {rel} has uncommitted changes; build {build} was NOT stamped. "
+                f"Set CURRENT_PROJECT_VERSION to {build} and commit it by hand")
+    project.write_text(re.sub(r"CURRENT_PROJECT_VERSION = \d+;",
+                              f"CURRENT_PROJECT_VERSION = {build};", text))
+    message = f"chore(release): client build {build}\n\n{notes}"
+    # Pathspec form, not the index: this checkout is shared and every session
+    # holds its own index, so a staged commit could carry someone else's file
+    # or miss this one. `commit -- <path>` takes exactly the worktree file named.
+    commit = subprocess.run(["git", "-C", str(repo), "commit", "-m", message, "--", rel],
+                            capture_output=True, text=True)
+    if commit.returncode:
+        return (f"WARNING: build {build} written to {rel} but not committed: "
+                f"{(commit.stdout + commit.stderr).strip()}")
+    sha = command(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"]).strip()
+    push = subprocess.run(["git", "-C", str(repo), "push"], capture_output=True, text=True)
+    if push.returncode:
+        return (f"build {build} stamped as {sha} but NOT pushed: {push.stderr.strip()}")
+    return f"build {build} stamped and pushed as {sha}"
 
 
 def sign_hub(stack: Path, output: Path, version: str, config: dict) -> None:
@@ -152,7 +208,6 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
     app_script = client / "jRemote-Code/jRemote/release-mac.sh"
     print("Building, signing and notarizing client candidate", flush=True)
     log_path = work / "client-build.log"
-    import re
     project = client / "jRemote-Code/jRemote/jRemote.xcodeproj/project.pbxproj"
     current = max(map(int, re.findall(r"CURRENT_PROJECT_VERSION = (\d+);", project.read_text())))
     client_build = allocate_client_build(candidates, current)
@@ -247,7 +302,8 @@ def build_of(manifest: dict) -> dict:
 
 
 def promote(candidate: Path, receipts_dir: Path, feed: Path, private_key: bytes,
-            *, local_components: str | None = None) -> dict:
+            *, local_components: str | None = None,
+            client_repo: str | Path | None = None) -> dict:
     manifest = candidate_manifest(candidate, private_key)
     # One door. Every journey is a genuine pass over these exact artifacts, or
     # this raises and names the ones that are not.
@@ -283,6 +339,12 @@ def promote(candidate: Path, receipts_dir: Path, feed: Path, private_key: bytes,
     # Single publication point. Every referenced artifact and evidence receipt
     # already exists, and the prior release directory remains untouched.
     atomic_json(feed / "latest.json", envelope)
+    # A release is not finished until its build number is in the source it was
+    # cut from. Last, because only a published build may claim one.
+    client = manifest["components"].get("client")
+    if client_repo and client:
+        print(stamp_client_build(Path(client_repo), int(client["version"]),
+                                 f"Shipped in {manifest['release']}."), flush=True)
     return envelope
 
 
@@ -389,7 +451,8 @@ def ship(config: dict, candidate: Path, receipts: Path, private_key: bytes,
     """
     qualify(config, candidate, receipts, private_key)
     envelope = promote(candidate, receipts, Path(config["feed_dir"]), private_key,
-                       local_components=config.get("local_components"))
+                       local_components=config.get("local_components"),
+                       client_repo=config.get("client_repo"))
     release = envelope["manifest"]["release"]
     result = {"promoted": release}
     github_repo = config.get("github_repo") or envelope["manifest"].get("channel", {}).get("github_repo")
@@ -471,7 +534,8 @@ def main():
                               deploy_after=args.deploy), indent=2))
     else:
         result = promote(args.candidate, args.receipts, Path(config["feed_dir"]), private,
-                         local_components=config.get("local_components"))
+                         local_components=config.get("local_components"),
+                         client_repo=config.get("client_repo"))
         print(json.dumps({"promoted": result["manifest"]["release"]}))
 
 

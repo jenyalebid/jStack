@@ -64,6 +64,19 @@ LEAF_PATHS = (
 )
 
 
+def _tunnel_conf_present(root: Path) -> bool:
+    """Whether the leaf's wireguard conf is there — where /etc/wireguard is
+    root-only, stat answers EACCES for the enrolled account, and unreadable
+    means installed, not absent."""
+    try:
+        (root / "etc/wireguard/jrleaf.conf").lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        pass
+    return True
+
+
 class DetachError(Exception):
     """Detaching could not even begin. Carries a message for the person who ran
     the command — a *step* that fails is reported, not raised."""
@@ -129,6 +142,14 @@ def _tell_parent(rec: dict, host_key: str, poster) -> list[dict]:
                      if status == 200 else
                      f"the parent did not drop the tile ({status or 'unreachable'}: "
                      f"{body.get('detail', 'no detail')}) — forget it there by hand")})
+        if status == 200 and device_id and body.get("credential_revoked") == device_id:
+            # A hub that revokes the credential with the tile has done the
+            # last step already; the revoke below would find the token dead
+            # and the reach gone, and read as a failure that is not one.
+            steps.append({"step": "parent-revoke", "ok": True,
+                          "note": "this machine's credential on the parent is "
+                                  "revoked — it went with the tile"})
+            return steps
     # Last, and deliberately: this kills the token the call above needs.
     if device_id:
         status, body = poster(
@@ -171,8 +192,17 @@ def _remove_tunnel(runner, sudo: bool, root: Path) -> list[dict]:
     removed, failed = [], []
     for raw in LEAF_PATHS:
         target = root / raw.lstrip("/")
-        if not target.exists():
+        # Not Path.exists(): a root-only parent (/etc/wireguard is 700)
+        # answers EACCES to the enrolled account, which exists() re-raises on
+        # 3.12 and folds into False on 3.14 — a crash or a silent skip.
+        # lstat splits the cases the same way on both: absent is absent,
+        # unreadable falls through to the sudo retry, the probe that can tell.
+        try:
+            target.lstat()
+        except FileNotFoundError:
             continue
+        except OSError:
+            pass
         try:
             if target.is_dir():
                 shutil.rmtree(target)
@@ -197,7 +227,7 @@ def _remove_tunnel(runner, sudo: bool, root: Path) -> list[dict]:
 def detach(*, host_key: str = "", keep_tunnel: bool = False,
            tell_parent: bool = True, sudo: bool = True,
            poster=None, runner=None, root: Path | None = None,
-           state: Path | None = None) -> dict:
+           state: Path | None = None, home: Path | None = None) -> dict:
     """Leave the parent hub, and report every step by name.
 
     Returns `{"steps": [...], "detached": bool}`. `detached` is the answer to
@@ -214,7 +244,7 @@ def detach(*, host_key: str = "", keep_tunnel: bool = False,
     from . import devices, grants
     rec = parent_record(state)
     attached = bool(rec) or any(r["revoked_at"] is None for r in grants.issued())
-    attached = attached or (root / "etc/wireguard/jrleaf.conf").exists()
+    attached = attached or _tunnel_conf_present(root)
     try:
         if attached:
             revoked, device_ids = grants._store().revoke_parent_authority()
@@ -233,6 +263,15 @@ def detach(*, host_key: str = "", keep_tunnel: bool = False,
 
     if tell_parent:
         steps.extend(_tell_parent(rec, host_key, poster))
+
+    # Shell access ends with the delegation it rode in on: the granted keys
+    # out of authorized_keys, the sudoers drop-in gone, Remote Login restored
+    # to what it was before the grant, this machine's identity destroyed.
+    from . import shell_access
+    steps.extend(shell_access.disable(
+        runner=runner, sudo=sudo, root=root, state=state,
+        authorized_keys=(Path(home) if home else Path.home())
+        / ".ssh" / "authorized_keys"))
 
     tunnel_gone = True
     if keep_tunnel:
