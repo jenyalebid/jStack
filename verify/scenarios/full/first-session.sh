@@ -18,13 +18,56 @@
 # different bugs with the same screenshot.
 . "$(dirname "$0")/../../lib/common.sh"
 
+# The client under test. Unset, the install downloads the published signed
+# release — what a person actually gets, and the right default. Set to a
+# locally built jRemote.app, that bundle is staged into /Applications first and
+# the install is told --no-app: the host still fires its own two links, at the
+# build being judged rather than at the last one shipped.
+APP="${JSTACK_VERIFY_CLIENT_APP:-}"
+STAGED=0
+if [ -n "$APP" ]; then
+    [ -d "$APP/Contents/MacOS" ] || { echo "FAIL no app bundle at $APP"; exit 1; }
+    # Refused here rather than in the guest, where it costs a full install to
+    # find out. A development-signed bundle names the Macs it may run on, and
+    # a guest is never one of them — macOS refuses it at launch and the run
+    # ends on an empty screen that reads exactly like the bug being chased.
+    # `mac.sh` already builds the other way (CODE_SIGNING_ALLOWED=NO, then
+    # `codesign --sign -` against jRemoteMac.entitlements minus the two keys a
+    # profile is what grants); that bundle is what belongs here.
+    if [ -f "$APP/Contents/embedded.provisionprofile" ]; then
+        echo "FAIL $APP is development-signed — it will not launch in a guest."
+        echo "     Build it unsigned and sign it ad-hoc; see jRemote-Code/jRemote/mac.sh."
+        exit 1
+    fi
+    # The installer hands whatever jRemote is on the disk to the Hub build as
+    # its client component, and that build refuses a bundle that cannot name
+    # the commit it came from (build_source.client_component). Only
+    # release-mac.sh stamps the key, so a bundle from mac.sh or a bare
+    # xcodebuild has to be stamped and re-signed before it is staged — the
+    # plist is inside the signature, so in that order.
+    if ! defaults read "$APP/Contents/Info" JStackSourceCommit >/dev/null 2>&1; then
+        echo "FAIL $APP records no JStackSourceCommit — the Hub build refuses it as a client."
+        echo "     PlistBuddy the 40-hex commit into Contents/Info.plist, then re-sign."
+        exit 1
+    fi
+    STAGED=1
+fi
+
 guest_fresh vfy-full-first-session
 guest_signin
 vm cp "$GUEST" "$(dirname "$0")/../../lib/guest_ui.sh" /Users/admin/guest_ui.sh >/dev/null
+if [ "$STAGED" = 1 ]; then
+    # tar, not `vm cp` on the directory: a .app is a tree of symlinks and an
+    # executable bit, and a copy that flattens either produces a bundle that
+    # launches on this Mac and not in the guest.
+    tar -C "$(dirname "$APP")" -czf "$RECEIPTS/client-app.tgz" "$(basename "$APP")"
+    vm cp "$GUEST" "$RECEIPTS/client-app.tgz" /Users/admin/client-app.tgz >/dev/null
+fi
 
 cat > "$RECEIPTS/payload.sh" <<EOF
 #!/bin/bash
 REF='${JSTACK_VERIFY_REF:-dev}'
+STAGED=$STAGED
 EOF
 
 cat >> "$RECEIPTS/payload.sh" <<'EOF'
@@ -39,13 +82,39 @@ say "== nothing installed to begin with =="
 [ -d /Applications/jRemote.app ] && bail "this guest already has jRemote — it is not the machine this journey is about"
 say "  no client, no hub, no root"
 
+INSTALL_ARGS=(--yes --ref "$REF" --agent Jarvis)
+if [ "$STAGED" = 1 ]; then
+    tar -xzf /Users/admin/client-app.tgz -C /Applications
+    [ -d /Applications/jRemote.app ] || bail "the staged client did not unpack"
+    # A bundle that arrived as a tarball carries no quarantine flag, but one
+    # that ever passed through a browser or an unzip does; stripping it here
+    # keeps a staged build from failing on a Gatekeeper sheet nobody is at the
+    # screen to dismiss.
+    xattr -dr com.apple.quarantine /Applications/jRemote.app 2>/dev/null
+    # A bundle untarred into /Applications is on the disk and not in
+    # LaunchServices' database. The install opens the app by NAME — install.sh
+    # runs `open -a jRemote` — and that asks the database, not the disk, so
+    # without this the app never launches and the run ends on an empty screen
+    # that reads exactly like the bug being chased. Registered, not launched:
+    # the condition under test is a link arriving at an app that has never run.
+    LSREG=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+    "$LSREG" -f /Applications/jRemote.app
+    say "  the client under test is a local build, staged before the install"
+    INSTALL_ARGS+=(--no-app)
+fi
+
 say "== the one command a person runs, from $REF =="
-# refs/heads/ keeps a ref with a slash in it unambiguous. The app it lands is
-# the published signed release either way — install.sh:1208 downloads it
-# rather than building from the ref — so the client under test is the one a
-# person actually gets.
+# refs/heads/ keeps a ref with a slash in it unambiguous. Absent a staged
+# build, the app this lands is the published signed release — install.sh
+# downloads it rather than building from the ref — so the default client under
+# test is the one a person actually gets.
+# The whole install goes to a file and only its last screenful to the terminal.
+# Truncating at the screen cost a run: `tail -45` cut the app and pairing steps
+# clean out, and the receipts held the same 45 lines, so the log could not say
+# whether the app had been opened at all.
 curl -fsSL "https://raw.githubusercontent.com/jenyalebid/jStack/refs/heads/$REF/install.sh" \
-    | bash -s -- --yes --ref "$REF" --agent Jarvis 2>&1 | tail -45
+    | bash -s -- "${INSTALL_ARGS[@]}" > /Users/admin/install.log 2>&1
+tail -45 /Users/admin/install.log
 
 say "== the agent the installer made =="
 [ -f "$SEAT/CLAUDE.md" ] \
@@ -113,7 +182,7 @@ EOF
 
 p="$(guest_payload "$RECEIPTS/payload.sh")"
 guest_term bash "$p"
-for f in ui-1-after-install.png ui-2-after-new-chat.png; do
+for f in ui-1-after-install.png ui-2-after-new-chat.png install.log; do
     guest_fetch "/Users/admin/$f"
 done
 finish_verdict "$RECEIPTS/term.log" DONE-FULL-FIRST-SESSION
