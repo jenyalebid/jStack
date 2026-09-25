@@ -40,15 +40,18 @@ guest_from() {
 
 # The lab sign-in. The authed base image's interactive Claude login expires
 # (jStack #140), and a session that cannot sign in fails every work journey on
-# its first prompt. The acceptance guests carry a long-lived OAuth token from
-# the credentials dir instead (git/acceptance/provision_guest.py); a verify
-# guest gets the same one, the same two ways: ~/.zshenv for the login shell the
+# its first prompt. The acceptance lab's provisioner pins a long-lived OAuth
+# token (`claude setup-token`) into its guests instead; a verify guest gets the
+# same one, the same two ways: ~/.zshenv for the login shell the
 # guest Terminal opens the payload in, launchctl setenv for Terminal itself,
 # which `open` launches through launchd. It goes in before the first
 # guest_term — Terminal reads its environment once, at launch. The token never
 # enters the payload, which is copied into the receipts, and is never printed.
 guest_signin() {
-    local tok="${JSTACK_VERIFY_OAUTH_TOKEN_FILE:-$HOME/Operations/Infrastructure/Credentials/claude_code_oauth_token}"
+    # The file is named by whoever runs the suite, like VM_SH: this repo holds
+    # no path into anyone's credentials.
+    local tok="${JSTACK_VERIFY_OAUTH_TOKEN_FILE:-}"
+    [ -n "$tok" ] || { echo "FAIL set JSTACK_VERIFY_OAUTH_TOKEN_FILE to a file holding a long-lived Claude Code OAuth token (#140)" >&2; exit 1; }
     [ -s "$tok" ] || { echo "FAIL no lab sign-in token at $tok (#140)" >&2; exit 1; }
     printf 'export CLAUDE_CODE_OAUTH_TOKEN=%q\n' "$(cat "$tok")" \
         | vm ssh "$GUEST" 'cat >> ~/.zshenv' >/dev/null 2>&1 \
