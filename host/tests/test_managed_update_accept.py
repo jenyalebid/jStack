@@ -1570,6 +1570,47 @@ def test_shell_flip_on_a_local_hub_drives_the_hub_s_own_route(runner, monkeypatc
     assert any("real Hub on localhost" in note for note in notes), "the receipt names no hub"
 
 
+class ParkedMacsAnswerNoSsh(SlotCountingFleet):
+    """A stopped guest is a stopped Mac: ssh into it times out, as it did on
+    the lab host. The shell routes answer what the teardown reads."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.timed_out: list[str] = []
+
+    def __call__(self, argv, **kwargs):
+        _, action, name, *rest = argv
+        command = rest[0] if rest else ""
+        if action == "ssh" and name not in self.booted:
+            self.calls.append(list(argv))
+            self.timed_out.append(name)
+            return subprocess.CompletedProcess(
+                argv, 255, "", f"ssh: connect to host {name} port 22: Operation timed out")
+        if action == "ssh" and "--path /shell/refresh" in command:
+            self.calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, json.dumps(
+                {"status": 200, "body": json.dumps({"steps": [{"step": "refresh", "ok": True}]})}), "")
+        if action == "ssh" and "authorized_keys" in command:
+            self.calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, "ssh-ed25519 AAAA hub\n", "")
+        return super().__call__(argv, **kwargs)
+
+
+def test_the_lab_restore_puts_files_back_on_both_leaves_before_a_cast_parks_one(runner):
+    scripted = ParkedMacsAnswerNoSsh()
+    fleet = build(runner, scripted, vm_slots=2)
+    # The flip's own cast on a two-slot host: both leaves up, the hub parked.
+    fleet.cast(*runner.CAST["shell_flip"](fleet))
+    assert fleet.hub.name in fleet.parked
+    failures = runner.lab_teardown(fleet, None, list(fleet.leaves))
+    assert failures == [], failures
+    assert scripted.timed_out == [], "the restore shelled into a parked Mac"
+    assert scripted.peak <= 2
+    refreshed = [call[2] for call in scripted.calls
+                 if call[1] == "ssh" and "--path /shell/refresh" in call[3]]
+    assert refreshed == ["leaf-a", "leaf-b"], "every leaf re-pulls its hub set beside the hub"
+
+
 class DelegationFleet:
     """A hub and a leaf answering the delegation journey, each defect switchable."""
 

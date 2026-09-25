@@ -1502,12 +1502,22 @@ def lab_teardown(fleet: Fleet, server, adopted: list[Guest]) -> list[str]:
         server.terminate()
         with contextlib.suppress(Exception):
             server.wait(timeout=30)
+    # The files go back on every leaf first, while the flip's cast still has
+    # both booted: casting the hub beside one leaf on a two-slot host parks
+    # the other, and a parked Mac answers no ssh (run 20260925-033632 timed
+    # out restoring acc-leaf2 after the hub+acc-leaf1 cast had stopped it).
+    restored: list[Guest] = []
     for guest in adopted:
         try:
             guest.sh("/bin/mv -f ~/.local/state/jremote/parent.previous-update-lab.json "
                      "~/.local/state/jremote/parent.json")
             guest.sh(f"/bin/rm -f {GUEST_HOME}/{guest.name}-lab-record.json "
                      f"{GUEST_HOME}/{guest.name}-lab-record.grant.json")
+            restored.append(guest)
+        except AcceptanceFailure as exc:
+            failures.append(str(exc))
+    for guest in restored:
+        try:
             fleet.cast(fleet.hub, guest)
             refreshed = guest.call("/shell/refresh", {})
             steps = (json.loads(refreshed["body"]).get("steps", [])
