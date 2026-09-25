@@ -165,16 +165,31 @@ STREAM
 # EnterPlanMode nor ExitPlanMode (proven on 2.1.281, 2026-09-25), so the one
 # journey that needs a plan approved runs an interactive `claude` in a tmux
 # pane, shown in the guest's own Terminal, and this drives it the way a person
-# would: the prompt pasted in, the trust dialog and the approval dialog
-# answered by keys. "Yes, and manually approve edits" is the answer, so an
-# approved session can edit nothing without a further key — the project the
-# gates grade below stays untouched by construction, not by promise.
+# would: the prompt pasted in, the approval dialog answered by keys. "Yes,
+# manually approve edits" is the answer, so an approved session can edit nothing
+# without a further key — the project the gates grade below stays untouched by
+# construction, not by promise.
+#
+# The CLI's own first-run screens (theme, security notes, the workspace trust
+# question) are settled the way the CLI documents for a driven session: its
+# own config keys (`hasCompletedOnboarding`, `projects[dir].hasTrustDialogAccepted`
+# — the CLI names the latter in its own guidance). The driver still answers
+# them by key if one appears anyway.
 # plan_session <tag> <dir> <sid> <plan-file> [resume]
 plan_session() {
     local tag="$1" dir="$2" sid="$3" plan="$4" resume="${5:-}" T="plan-$1"
     local tmux="/Applications/jStack Hub.app/Contents/MacOS/tmux"
     [ -x "$tmux" ] || tmux="$(command -v tmux)"
     [ -n "$tmux" ] || { R_SID=""; R_TEXT=""; echo "FAIL no tmux in the guest to hold an interactive session"; return; }
+    python3 - "$dir" <<'SEED'
+import json, os, sys
+f = os.path.expanduser("~/.claude.json")
+try: d = json.load(open(f))
+except Exception: d = {}
+d.setdefault("theme", "dark"); d["hasCompletedOnboarding"] = True
+d.setdefault("projects", {}).setdefault(sys.argv[1], {})["hasTrustDialogAccepted"] = True
+json.dump(d, open(f, "w"), indent=1)
+SEED
     prompt_for "$plan" > "$HOME/$tag.prompt"
     "$tmux" kill-session -t "$T" 2>/dev/null
     local flag="--session-id"; [ -n "$resume" ] && flag="--resume"
@@ -185,33 +200,49 @@ plan_session() {
     python3 - "$tmux" "$T" "$HOME/$tag.prompt" "$HOME/$tag.json" "$sid" <<'DRIVE'
 import json, re, subprocess, sys, time
 tmux, target, prompt_file, out, sid = sys.argv[1:6]
-def pane():
-    return subprocess.run([tmux, "capture-pane", "-p", "-t", target, "-S", "-80"],
+def pane():  # the visible screen only: a dismissed dialog must not linger in scrollback
+    return subprocess.run([tmux, "capture-pane", "-p", "-t", target],
                           capture_output=True, text=True).stdout
 def keys(*k):
     subprocess.run([tmux, "send-keys", "-t", target, *k], check=False)
-log, sent, approved, done = [], False, False, False
+def choose(p, want_text):
+    rows = [l for l in p.splitlines() if re.search(r"\b(Yes|No),", l)]
+    cur = next((i for i, l in enumerate(rows) if re.match(r"[\s│]*[❯>]", l)), 0)
+    want = next((i for i, l in enumerate(rows) if want_text in l), None)
+    if want is None:
+        return None
+    for _ in range(abs(want - cur)):
+        keys("Down" if want > cur else "Up"); time.sleep(0.3)
+    keys("Enter"); return rows[want].strip()
+log, sent, approved, done, first_run = [], False, False, False, 0
+busy = re.compile(r"esc to interrupt")
 deadline = time.monotonic() + 420
 while time.monotonic() < deadline:
     p = pane()
     if "session ended" in p:
         log.append("ended"); break
-    if "Do you trust the files" in p or "trust this folder" in p.lower():
-        keys("Enter"); log.append("trusted"); time.sleep(2); continue
-    if "Would you like to proceed" in p and not approved:
-        rows = [l for l in p.splitlines() if re.match(r"\s*(❯|>)?\s*\d\.\s", l)]
-        cur = next((i for i, l in enumerate(rows) if l.lstrip().startswith(("❯", ">"))), 0)
-        want = next((i for i, l in enumerate(rows) if "manually approve" in l), cur)
-        for _ in range(max(0, want - cur)): keys("Down"); time.sleep(0.3)
-        keys("Enter"); approved = True; log.append(f"approved:{rows[want].strip() if rows else '?'}")
-        time.sleep(3); continue
-    if not sent and "plan mode on" in p and "esc to interrupt" not in p:
-        subprocess.run([tmux, "load-buffer", prompt_file], check=True)
-        subprocess.run([tmux, "paste-buffer", "-p", "-t", target], check=True)
-        time.sleep(1); keys("Enter"); sent = True; log.append("prompt sent"); time.sleep(3); continue
-    if approved and "esc to interrupt" not in p and "Would you like" not in p and re.search(r"(?m)^\s*[❯>] ", p):
-        done = True; log.append("turn over"); break
-    time.sleep(2)
+    for marker in ("Choose the text style", "Security notes", "terminal setup?"):
+        if marker in p and first_run < 6:
+            keys("Enter"); first_run += 1; log.append("first-run:" + marker); time.sleep(2); break
+    else:
+        if "Quick safety check" in p or "Do you trust the files" in p:
+            keys("Enter"); log.append("trusted"); time.sleep(2); continue
+        if "Yes, I trust this folder" in p:
+            log.append("trusted:" + str(choose(p, "Yes, I trust"))); time.sleep(2); continue
+        if "Would you like to proceed" in p and not approved:
+            pick = choose(p, "manually approve")
+            if pick is None:
+                time.sleep(1); continue
+            approved = True; log.append("approved:" + pick); time.sleep(3); continue
+        if not sent and "plan mode on" in p and not busy.search(p):
+            subprocess.run([tmux, "load-buffer", prompt_file], check=True)
+            subprocess.run([tmux, "paste-buffer", "-p", "-t", target], check=True)
+            time.sleep(1); keys("Enter"); sent = True; log.append("prompt sent"); time.sleep(3); continue
+        if approved and not busy.search(p) and "Would you like" not in p \
+                and re.search(r"(?m)^[\s│]*[❯>]\s*(\S.*)?$", p) and "plan mode on" in p:
+            done = True; log.append("turn over"); break
+        time.sleep(2)
+    continue
 tail = pane()
 if not done and approved: keys("Escape"); time.sleep(1)
 keys("/exit", "Enter"); time.sleep(3)
