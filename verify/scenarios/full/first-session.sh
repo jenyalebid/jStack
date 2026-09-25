@@ -8,8 +8,8 @@
 # the app on the disk — `pair --open`, then `welcome` — at an app that has
 # never launched. Every such link makes SwiftUI stand a thread window up to
 # have somewhere to deliver it, and that shell has no chat in it; a shell the
-# app fails to take back off is a window titled exactly "Thread", which is what
-# Boss reported seeing on fresh Macs, more than one at a time.
+# app fails to take back off is a window titled exactly "Thread" — the blank
+# windows reported from fresh Macs, more than one at a time.
 #
 # So the verdict is the window list, not an API: a session window carries the
 # agent's own text, an empty shell carries the WindowGroup's declared title.
