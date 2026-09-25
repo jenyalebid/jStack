@@ -136,11 +136,93 @@ PY
 # under an id this script never looks at).
 run_claude() {  # run_claude <tag> <dir> <claude args...>
     local tag="$1" dir="$2"; shift 2
-    (cd "$dir" && claude "$@" --output-format json) > "$HOME/$tag.json" 2> "$HOME/$tag.err"
-    R_TEXT="$(probe py 'd.get("result", "")' < "$HOME/$tag.json" 2>/dev/null)"
-    R_SID="$(probe py 'd.get("session_id", "")' < "$HOME/$tag.json" 2>/dev/null)"
+    # The stream, not the final `result`: the plugin's own Stop hook blocks a
+    # print session's first stop once (stop-timeline-remind), and the turn the
+    # model spends answering the hook becomes `result`. The reply to the prompt
+    # is the first assistant text the session produced.
+    (cd "$dir" && claude "$@" --output-format stream-json --verbose) > "$HOME/$tag.json" 2> "$HOME/$tag.err"
+    eval "$(python3 - "$HOME/$tag.json" <<'STREAM'
+import json, shlex, sys
+text, sid = "", ""
+for line in open(sys.argv[1]):
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        continue
+    sid = ev.get("session_id") or sid
+    if ev.get("type") == "assistant" and not text:
+        for block in (ev.get("message") or {}).get("content") or []:
+            if block.get("type") == "text" and block.get("text", "").strip():
+                text = block["text"]; break
+print("R_TEXT=" + shlex.quote(text)); print("R_SID=" + shlex.quote(sid))
+STREAM
+)"
     printf '%s\n' "$R_TEXT" | tail -6 | sed "s/^/  $tag: /"
     [ -n "$R_SID" ] || { tail -5 "$HOME/$tag.err" | sed "s/^/  $tag stderr: /"; }
+}
+
+# A plan-mode session, for real: the print CLI (`-p`) offers neither
+# EnterPlanMode nor ExitPlanMode (proven on 2.1.281, 2026-09-25), so the one
+# journey that needs a plan approved runs an interactive `claude` in a tmux
+# pane, shown in the guest's own Terminal, and this drives it the way a person
+# would: the prompt pasted in, the trust dialog and the approval dialog
+# answered by keys. "Yes, and manually approve edits" is the answer, so an
+# approved session can edit nothing without a further key — the project the
+# gates grade below stays untouched by construction, not by promise.
+# plan_session <tag> <dir> <sid> <plan-file> [resume]
+plan_session() {
+    local tag="$1" dir="$2" sid="$3" plan="$4" resume="${5:-}" T="plan-$1"
+    local tmux="/Applications/jStack Hub.app/Contents/MacOS/tmux"
+    [ -x "$tmux" ] || tmux="$(command -v tmux)"
+    [ -n "$tmux" ] || { R_SID=""; R_TEXT=""; echo "FAIL no tmux in the guest to hold an interactive session"; return; }
+    prompt_for "$plan" > "$HOME/$tag.prompt"
+    "$tmux" kill-session -t "$T" 2>/dev/null
+    local flag="--session-id"; [ -n "$resume" ] && flag="--resume"
+    "$tmux" new-session -d -s "$T" -x 160 -y 48 -c "$dir" \
+        "claude $flag $sid --permission-mode plan; echo '-- session ended --'; sleep 5"
+    printf '#!/bin/bash\nexec "%s" attach -t %s\n' "$tmux" "$T" > "$HOME/$T.command"
+    chmod +x "$HOME/$T.command"; open -a Terminal "$HOME/$T.command" 2>/dev/null || true
+    python3 - "$tmux" "$T" "$HOME/$tag.prompt" "$HOME/$tag.json" "$sid" <<'DRIVE'
+import json, re, subprocess, sys, time
+tmux, target, prompt_file, out, sid = sys.argv[1:6]
+def pane():
+    return subprocess.run([tmux, "capture-pane", "-p", "-t", target, "-S", "-80"],
+                          capture_output=True, text=True).stdout
+def keys(*k):
+    subprocess.run([tmux, "send-keys", "-t", target, *k], check=False)
+log, sent, approved, done = [], False, False, False
+deadline = time.monotonic() + 420
+while time.monotonic() < deadline:
+    p = pane()
+    if "session ended" in p:
+        log.append("ended"); break
+    if "Do you trust the files" in p or "trust this folder" in p.lower():
+        keys("Enter"); log.append("trusted"); time.sleep(2); continue
+    if "Would you like to proceed" in p and not approved:
+        rows = [l for l in p.splitlines() if re.match(r"\s*(❯|>)?\s*\d\.\s", l)]
+        cur = next((i for i, l in enumerate(rows) if l.lstrip().startswith(("❯", ">"))), 0)
+        want = next((i for i, l in enumerate(rows) if "manually approve" in l), cur)
+        for _ in range(max(0, want - cur)): keys("Down"); time.sleep(0.3)
+        keys("Enter"); approved = True; log.append(f"approved:{rows[want].strip() if rows else '?'}")
+        time.sleep(3); continue
+    if not sent and "plan mode on" in p and "esc to interrupt" not in p:
+        subprocess.run([tmux, "load-buffer", prompt_file], check=True)
+        subprocess.run([tmux, "paste-buffer", "-p", "-t", target], check=True)
+        time.sleep(1); keys("Enter"); sent = True; log.append("prompt sent"); time.sleep(3); continue
+    if approved and "esc to interrupt" not in p and "Would you like" not in p and re.search(r"(?m)^\s*[❯>] ", p):
+        done = True; log.append("turn over"); break
+    time.sleep(2)
+tail = pane()
+if not done and approved: keys("Escape"); time.sleep(1)
+keys("/exit", "Enter"); time.sleep(3)
+json.dump({"session_id": sid, "sent": sent, "approved": approved, "done": done,
+           "steps": log, "pane": tail}, open(out, "w"), indent=1)
+print("  plan session: " + " → ".join(log))
+if not approved: print("  pane: " + " | ".join(l for l in tail.splitlines()[-12:] if l.strip()))
+DRIVE
+    "$tmux" kill-session -t "$T" 2>/dev/null
+    R_SID=""; ls "$HOME"/.claude/projects/*/"$sid".jsonl >/dev/null 2>&1 && R_SID="$sid"
+    R_TEXT="$(probe py 'd.get("pane", "")' < "$HOME/$tag.json" 2>/dev/null)"
 }
 
 # A reply with the fence and quote ceremony a model adds taken off, so an exact

@@ -11,7 +11,8 @@
 # The ref under test is baked in (JSTACK_VERIFY_REF, default dev): `vm term`
 # carries none of this shell's environment, and a clone of `main` carries no
 # harness. The Hub is installed from that ref, so the CLI, the API and the
-# hooks all read the one store that Hub serves.
+# hooks all read the one store that Hub serves. The two plan-mode sessions are
+# interactive (work_guest.sh plan_session): the print CLI has no plan-mode tools.
 . "$(dirname "$0")/../../lib/common.sh"
 
 guest_from "${JSTACK_VERIFY_AUTHED_BASE:-jstack-base-authed}" vfy-plugin-plan-gate
@@ -71,7 +72,7 @@ new_ids() {  # the plan rows that did not exist before this journey
 }
 prompt_for() {
     printf '%s\n\n%s\n' \
-        "Call the ExitPlanMode tool now, and nothing else: do not read files, do not run commands, do not ask questions. Its plan argument must be exactly the markdown below, verbatim — every line, nothing added, removed or reworded." \
+        "Put the markdown below into your plan file exactly as written — every line, nothing added, removed or reworded — then call the ExitPlanMode tool. Do not read the project, run commands, or ask questions. Once the plan is approved, do nothing further: do not implement anything, reply only PLAN APPROVED." \
         "$(cat "$1")"
 }
 set_env() {  # set_env <sid> <key> <value|"">
@@ -102,8 +103,7 @@ set_env "$SID" use_subagents on
 set_env "$SID" delivery_method "$V"
 
 echo "== a real plan-mode session authors the demo plan and approves it =="
-run_claude plan "$PROJ" --session-id "$SID" --permission-mode plan \
-    --allowedTools ExitPlanMode -p "$(prompt_for "$PROJ/plan.md")"
+plan_session plan "$PROJ" "$SID" "$PROJ/plan.md"
 same_sid
 
 set -- $(new_ids)
@@ -173,8 +173,7 @@ echo "== a green proof filed against a gate that then tightens =="
 jstack-host plan proof "$S2" --kind command --ok \
     --detail 'hand-filed against the v1 gate' >/dev/null 2>&1 \
     || echo "FAIL could not file a proof by hand"
-run_claude replan "$PROJ" --resume "$SID" --permission-mode plan \
-    --allowedTools ExitPlanMode -p "$(prompt_for "$HOME/plan-v2.md")"
+plan_session replan "$PROJ" "$SID" "$HOME/plan-v2.md" resume
 same_sid
 set -- $(new_ids)
 [ $# -eq 1 ] && [ "$1" = "$P" ] \
