@@ -397,7 +397,11 @@ def _cmd_welcome(args) -> int:
         print(f"no agent {agent_id!r} on this host — there is: {known}",
               file=sys.stderr)
         return 1
-    cwd = str(hostenv.workspace(agent_id))
+    # The seat, not the agent root — `board.chat_scoped_id` is the same fork
+    # the app's own cards take, so the first session of an install lands where
+    # every later one does instead of one level above them all.
+    from .board import chat_scoped_id
+    cwd = str(hostenv.workspace(chat_scoped_id(agent_id)))
     if not os.path.isdir(cwd):
         print(f"{agent_id}'s workspace is missing at {cwd}", file=sys.stderr)
         return 1

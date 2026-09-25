@@ -27,7 +27,7 @@ _CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 _CHAT_MODE = "chat"
 
 
-def _chat_scoped_id(base: str) -> str:
+def chat_scoped_id(base: str) -> str:
     """The agent id jRemote should use: `{base}-chat` if that sub-mode exists,
     else the base id (agents with no chat sub-mode fall back to root)."""
     return f"{base}-{_CHAT_MODE}" if _CHAT_MODE in submode_dirs(base) else base
@@ -1041,7 +1041,7 @@ def list_agents(stats=None) -> list[dict]:
 
     `slug` is the same seat spelled readably — `ops/chat`, or the bare agent
     name when there is no chat dir to scope into. Read off the id this loop just
-    built rather than parsed back out of it: `_chat_scoped_id` owns that fork,
+    built rather than parsed back out of it: `chat_scoped_id` owns that fork,
     so this asks its answer instead of taking the fork a second time."""
     from . import notify
     from . import seats as seatlib
@@ -1050,7 +1050,7 @@ def list_agents(stats=None) -> list[dict]:
     out = []
     for name, cfg in sorted(active_agents().items()):
         roles = cfg.get("roles") or []
-        agent_id = _chat_scoped_id(name)
+        agent_id = chat_scoped_id(name)
         out.append({
             "notify_muted": name in muted,
             "agent_id": agent_id,

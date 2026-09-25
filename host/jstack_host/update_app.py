@@ -28,6 +28,52 @@ def control(app: Path, action: str, role: str | None = None) -> dict:
     return json.loads(command(arguments, timeout=30))
 
 
+def team_identifier(app: Path) -> str:
+    """The Team ID a bundle is signed with; "" for ad-hoc or unsigned."""
+    proc = subprocess.run(["/usr/bin/codesign", "-dv", "--verbose=2", str(app)],
+                          capture_output=True, text=True)
+    for line in (proc.stderr or "").splitlines():
+        if line.startswith("TeamIdentifier="):
+            value = line.split("=", 1)[1].strip()
+            return "" if value == "not set" else value
+    return ""
+
+
+def spawned(label: str, seconds: float = 20.0) -> bool:
+    """launchd holds a live process for `label`.
+
+    SMAppService answering `enabled` means the item is registered, not that
+    the job runs. On Work Main (macOS 27.0, 2026-09-25) every role read
+    `enabled` while launchd sat at `spawn failed`, exit 78, for half an hour
+    (#182). Registered is not running; this asks launchd for the pid.
+    """
+    import re
+    import time
+    from .install_host import _domain, _launchctl
+    deadline = time.time() + seconds
+    while True:
+        proc = _launchctl("print", f"{_domain()}/{label}")
+        if proc.returncode == 0 and re.search(r"^\s*pid = \d+", proc.stdout or "", re.M):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(1.0)
+
+
+def _own_release() -> str:
+    """The release id of the bundle this process was started from, read once
+    at import — after a swap the path on disk names the incoming bundle, so
+    it cannot be read later."""
+    try:
+        identity = Path(__file__).resolve().parent.parent / "release-identity.json"
+        return str(json.loads(identity.read_text()).get("release") or "")
+    except (OSError, ValueError):
+        return ""
+
+
+RUNNING_RELEASE = _own_release()
+
+
 class AppBackend(MacBackend):
     def _app_running(self, kind: str, path: Path) -> list[int]:
         if kind != "menubar":
@@ -113,6 +159,12 @@ class AppBackend(MacBackend):
             return False
         if "menubar" not in job.get("transaction", {}).get("apps", {}):
             return False
+        # A joiner install is a source build of the sha the hub already
+        # publishes, so the sha alone cannot say the bundle changed: Work Main
+        # kept its swapped-out updater running for 35 minutes after a
+        # same-sha update (#183). The release id is the bundle's identity.
+        if RUNNING_RELEASE and job.get("release") and RUNNING_RELEASE != job["release"]:
+            return True
         from . import sourcestamp
         running = sourcestamp.capture().get("sha")
         released = job.get("envelope", {}).get("manifest", {}).get("sources", {}).get("stack")
@@ -312,8 +364,42 @@ class AppBackend(MacBackend):
             result = control(app, "register", role)
             if result["status"] not in {"enabled", "requires_approval"}:
                 failed.append(f"{role} service could not be restored")
+                continue
+            if result["status"] == "enabled" and not spawned(self._definitions(app)[role]):
+                # Registered under a record BTM kept for the previous bundle's
+                # identity, so launchd refuses the swapped executable (Work
+                # Main, ad-hoc → Developer ID, macOS 27.0, #182). Dropping the
+                # record and registering again from this bundle is what
+                # brought every role back by hand; do it once, then verify.
+                control(app, "unregister", role)
+                result = control(app, "register", role)
+                if result["status"] != "enabled" or not spawned(self._definitions(app)[role]):
+                    failed.append(f"{role} service is registered but launchd could not spawn it")
         if failed:
             raise releases.ReleaseError("; ".join(failed))
+
+    def prepare_restart(self, job: dict) -> None:
+        """Called by the supervisor just before it exits for relaunch.
+
+        The updater is never in the snapshot, so `_restore_services` never
+        re-registers its item. When the bundle's signing identity changed the
+        item launchd holds names the old identity, and the relaunch hits the
+        same spawn refusal as the other roles did on Work Main (#182).
+        Detached, because unregister ends this very process: the helper
+        outlives it, and `register` starts the updater from the new bundle.
+        """
+        if not job.get("transaction", {}).get("updater_reregister"):
+            return
+        hub = str(Path(self.config["menubar_path"]) / "Contents/MacOS/JStackHub")
+        subprocess.Popen(["/bin/sh", "-c", 'sleep 3; "$0" unregister updater; "$0" register updater', hub],
+                         start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _identity_changed(self, transaction: dict) -> bool:
+        record = transaction.get("apps", {}).get("menubar")
+        if not record or not record.get("existed"):
+            return False
+        return team_identifier(Path(record["backup"])) != team_identifier(Path(record["target"]))
 
     def apply(self, job: dict):
         from . import update_plugins
@@ -341,6 +427,9 @@ class AppBackend(MacBackend):
                 os.replace(target, backup)
             os.replace(incoming, target)
         self._restore_services(app, transaction["services"])
+        # Judged now, while the swapped-out bundle still sits at `backup`;
+        # acted on in `prepare_restart`, once the job is settled.
+        transaction["updater_reregister"] = self._identity_changed(transaction)
         # A role this bundle seals that the previous one did not is absent from
         # the snapshot, so `_restore_services` cannot bring it up — and for the
         # scheduler the machine is also still running the LaunchAgent that
