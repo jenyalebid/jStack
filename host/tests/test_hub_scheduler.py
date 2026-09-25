@@ -16,6 +16,8 @@ import sys
 
 import pytest
 
+from conftest import destructive
+
 from jstack_host import app_services, build_hub, install_signed, migrate_host, service_settings
 
 REPO = Path(__file__).resolve().parents[2]
@@ -88,6 +90,12 @@ def test_the_scheduler_environment_cannot_smuggle_an_import_path():
             service_settings.validate(value)
 
 
+# NEVER RUN ON THE HOME MACHINE. This test drives the real `install_signed.uninstall`,
+# which runs `launchctl bootout` on every live.jstack.hub role and unlinks
+# ~/.local/bin/jstack-host. On 2026-09-24 17:31 it did exactly that to the
+# production Hub. It is refused wherever the Hub is installed; its real proof
+# is a lab guest (verify/scenarios/hub/uninstall.sh).
+@destructive
 def test_uninstall_stops_and_boots_out_every_sealed_role(monkeypatch, tmp_path):
     app = tmp_path / "Hub.app"
     app.mkdir()
