@@ -106,8 +106,7 @@ SERVED = ("f=$HOME/.local/state/jremote/updates/config.json; "
 #: included. The token rides the environment; a path is resolved against the
 #: machine's own `local_url`. Stdlib only and proxies off, so it runs the same
 #: under a guest's JStackPython and under this runner's interpreter. The body
-#: is whole: the guest tool's 4000-character cap cuts a real Hub's `/devices`
-#: mid-JSON, and every caller here parses what it gets.
+#: is whole, as the guest tool's `call` answer is: every caller parses what it gets.
 HTTP_AS = """\
 import json, os, pathlib, urllib.error, urllib.request
 url = os.environ['JR_URL']

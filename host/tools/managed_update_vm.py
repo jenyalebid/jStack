@@ -181,13 +181,16 @@ def main():
     if args.action == "call":
         # One authenticated local request, answered with its status instead of
         # an exception: a refusal is an observation the caller needs to see.
+        # The body goes out whole: every caller parses it, and a cap cut a
+        # real Hub's /devices mid-JSON once its roster outgrew 4000 characters
+        # (run 20260925-053120, the fleet journey's readopt check).
         if not args.path or not args.path.startswith("/"):
             parser.error("call requires a local API path")
         body = json.loads(args.body) if args.body else None
         answer = httpx.request("POST" if body is not None else "GET",
                                config["local_url"] + "/api/jremote/v1" + args.path,
                                headers=headers, json=body, timeout=args.timeout)
-        print(json.dumps({"status": answer.status_code, "body": answer.text[:4000]}))
+        print(json.dumps({"status": answer.status_code, "body": answer.text}))
         return
     if args.action == "revoke":
         row = get_store().host_row(args.machine or "")
