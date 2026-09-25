@@ -13,6 +13,7 @@ import hashlib
 import importlib.util
 import json
 import subprocess
+import sys
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -1896,3 +1897,54 @@ def test_a_leaf_with_no_host_at_all_is_installed_onto_the_run_s_ref_and_adopted(
     runner.reach(fleet, fleet.fresh)
     assert moved == [("leaf-a", PRIOR_SHA)], "the pristine guest alone stays empty"
     assert offered == []
+
+
+def test_a_cast_that_parks_the_hub_asks_it_nothing(runner, subject, earlier, tmp_path, monkeypatch):
+    """Run 20260925-014140, shell_flip on a VM hub: the flip casts both leaves on
+    a two-slot host, which parks the hub, and reach() then asked that parked
+    hub for its device list — an ssh into a stopped Mac, timed out, and the
+    flip failed before the lab ever stood in for the hub."""
+    scripted, fleet, offered = _keyed(runner, monkeypatch, tmp_path, earlier, subject,
+                                      keys={"hub": "hub-key", "leaf-a": "hub-key",
+                                            "leaf-b": "hub-key"})
+    fleet.slots = 2
+    fleet.cast(*runner.CAST["shell_flip"](fleet))
+    assert [call[2] for call in scripted.calls if call[1] == "stop"] == ["hub"]
+    assert fleet.parked == {"hub"}
+    assert not any(call[1] == "ssh" and call[2] == "hub" for call in scripted.calls), \
+        "the parked hub was asked something"
+    assert offered == [] and scripted.installed == [] and scripted.adopted == []
+    # Cast again with the hub, and it is no longer parked: the other leaf is.
+    fleet.cast(fleet.hub, fleet.leaves[0])
+    assert fleet.parked == {"leaf-b"}
+    assert any(call[1] == "ssh" and call[2] == "hub" for call in scripted.calls)
+
+
+def test_a_leaf_with_no_host_cannot_be_cast_beside_a_parked_hub(
+        runner, subject, earlier, tmp_path, monkeypatch):
+    """Installing and adopting such a leaf needs the hub; with it parked the
+    journey is refused by name rather than by an ssh timeout."""
+    scripted, fleet, _ = _keyed(runner, monkeypatch, tmp_path, earlier, subject,
+                                keys={"hub": "hub-key", "leaf-a": "hub-key", "leaf-b": ""})
+    fleet.slots = 2
+    with pytest.raises(runner.AcceptanceFailure, match="leaf-b has no host, and the hub is parked"):
+        fleet.cast(*runner.CAST["shell_flip"](fleet))
+    assert scripted.installed == [] and scripted.adopted == []
+
+
+def test_an_interpreter_without_the_host_dependencies_is_refused_before_any_journey(
+        runner, tmp_path, monkeypatch, capsys):
+    """Run 20260925-014140: nine journeys in, shell_adopt imported
+    jstack_host.enrolment for a peer name and died on fastapi — the verify
+    scenario had started the runner under a bare python3. The interpreter is
+    checked before the plan is read or a guest boots."""
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"vm_tool": "/bin/vm.sh", "hub": "hub", "disposable": True}))
+    monkeypatch.setitem(sys.modules, "jstack_host.enrolment", None)
+    monkeypatch.setattr("sys.argv", ["accept", "--ref", "dev",
+                                     "--receipts", str(tmp_path / "r"), "--plan", str(plan)])
+    with pytest.raises(SystemExit) as exit_code:
+        runner.main()
+    assert exit_code.value.code == 2
+    err = capsys.readouterr().err
+    assert "jstack_host.enrolment" in err and "host/pyproject.toml" in err

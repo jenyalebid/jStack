@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib
 import json
 import os
 import re
@@ -580,6 +581,10 @@ class Fleet:
         self.fresh = Guest(plan["fresh"], tool, run=run) if plan.get("fresh") else None
         self.off_lan = plan.get("off_lan")
         self.slots = int(plan.get("vm_slots") or 0)
+        #: Guests the last cast stopped to make room. A journey whose cast
+        #: leaves the hub out (the leaf-to-leaf flip on a two-slot host) has
+        #: a parked hub, and nothing before that journey may ask it anything.
+        self.parked: set[str] = set()
         self.fixtures = list(plan.get("fixtures") or [])
         self.provision = plan.get("provision")
         self.network = plan.get("lab_network") or LAB_NETWORK
@@ -618,6 +623,7 @@ class Fleet:
         booted; a plan without it keeps every guest running, as before.
         """
         cast = [guest for guest in wanted if guest is not None]
+        self.parked = set()
         if self.slots:
             # A local hub is this Mac, not a VM: it takes no slot.
             booted = [guest for guest in cast if not isinstance(guest, LocalHub)]
@@ -626,8 +632,9 @@ class Fleet:
                     f"this journey needs {len(booted)} live guests; the host has {self.slots} slots")
             names = {guest.name for guest in cast}
             for guest in self.guests():
-                if guest.name not in names:
+                if guest.name not in names and not isinstance(guest, LocalHub):
                     guest.stop()
+                    self.parked.add(guest.name)
         for guest in cast:
             # The fresh guest is pristine by definition, not by discipline: a
             # run that died after installing on it would otherwise hand the
@@ -2029,6 +2036,15 @@ def reach(fleet: Fleet, guest: Guest) -> None:
     """
     if guest is fleet.hub or guest is fleet.fresh:
         return
+    if fleet.hub.name in fleet.parked:
+        # The cast left the hub out — the leaf-to-leaf flip on a two-slot
+        # host casts both leaves and hands the hub role to the lab
+        # (flip_through_lab). Everything below asks the hub something, and a
+        # parked hub is a stopped Mac: run 20260925-014140 timed out an ssh
+        # into it here and failed the flip before the lab ever stood in. The
+        # leaf is taken as it stands, and only a leaf with a host can be.
+        expect(trust_key(guest), f"{guest.name} has no host, and the hub is parked for this cast")
+        return
     target = fleet.prior or fleet.build
     if not trust_key(guest):
         # A leaf with no host at all — the base image, as `vm.sh reset` leaves
@@ -2562,6 +2578,16 @@ def main() -> int:
     parser.add_argument("--only", nargs="+", choices=sorted(JOURNEYS),
                         help="run these journeys, retaining previous receipts for the others")
     args = parser.parse_args()
+    # The shell journeys read the host package proper (a peer name from
+    # jstack_host.enrolment), which pulls in the Hub's web dependencies. An
+    # interpreter without them ran nine journeys before shell_adopt died on
+    # the import (run 20260925-014140); it is refused before the first boot.
+    try:
+        importlib.import_module("jstack_host.enrolment")
+    except ImportError as exc:
+        parser.error(f"{sys.executable} cannot import jstack_host.enrolment ({exc}): the shell "
+                     "journeys need the host package's dependencies (host/pyproject.toml) — "
+                     "run the acceptance under an interpreter that has them")
     from jstack_host import acceptance
     plan = json.loads(args.plan.read_text())
     if plan.get("production") or not plan.get("disposable"):
