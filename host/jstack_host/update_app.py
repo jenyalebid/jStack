@@ -276,13 +276,24 @@ class AppBackend(MacBackend):
                 raise releases.ReleaseError(f"{role} service has not stopped")
 
     def _restore_services(self, app: Path, statuses: dict):
+        """Register every service the snapshot had enabled, then fail once.
+
+        One failure does not stop the loop. Live on the home Mac, 22:10: the
+        scheduler's restore raised, the loop ended there, and session-stall —
+        the next name in order — stayed unregistered through the hand
+        recovery and the following update, which snapshotted it as
+        not_registered and kept it that way. Every service after the failed
+        one is a service this Mac depends on; the error names all of them.
+        """
         self._validate_statuses(statuses)
+        failed = []
         for role in sorted(statuses, key=lambda role: (role != "host", role != "menu", role)):
             if statuses[role] != "enabled":
                 continue
             current = control(app, "status")[role]
             if current not in OBSERVABLE:
-                raise releases.ReleaseError(f"cannot observe {role} service approval during recovery")
+                failed.append(f"cannot observe {role} service approval during recovery")
+                continue
             if current == "requires_approval":
                 continue  # A later user denial takes precedence over the snapshot.
             if current == "not_found":
@@ -296,10 +307,13 @@ class AppBackend(MacBackend):
                 # register call must not be guessed at.
                 from .app_services import sealed_roles
                 if role not in sealed_roles(app):
-                    raise releases.ReleaseError(f"{role} service could not be restored")
+                    failed.append(f"{role} service could not be restored")
+                    continue
             result = control(app, "register", role)
             if result["status"] not in {"enabled", "requires_approval"}:
-                raise releases.ReleaseError(f"{role} service could not be restored")
+                failed.append(f"{role} service could not be restored")
+        if failed:
+            raise releases.ReleaseError("; ".join(failed))
 
     def apply(self, job: dict):
         from . import update_plugins

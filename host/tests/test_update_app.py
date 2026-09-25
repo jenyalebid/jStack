@@ -451,3 +451,44 @@ def test_a_capability_the_bundle_no_longer_carries_is_not_guessed_at(monkeypatch
     with pytest.raises(ValueError, match="could not be restored"):
         backend._restore_services(app, {"host": "not_registered", "menu": "not_registered", "relay": "enabled"})
     assert calls == [("status", None)]
+
+
+def test_a_failed_restore_still_registers_every_service_after_it_and_names_them_all(monkeypatch, tmp_path):
+    """Live on the home Mac, 22:10: the scheduler's restore raised and the loop
+    ended there. session-stall sorts right after it, stayed unregistered through
+    the hand recovery, and the next update snapshotted it as not_registered."""
+    app = bundle(tmp_path / "Hub.app", {**SEALED, **capability("session-stall"), **capability("wda")},
+                 {"session-stall": CAPABILITY, "wda": CAPABILITY})
+    calls = []
+
+    def control(app, action, role=None):
+        calls.append((action, role))
+        if action == "status":
+            return {"scheduler": "not_found", "session-stall": "not_registered", "wda": "not_registered"}
+        return {"status": "enabled"}
+
+    monkeypatch.setattr(update_app, "control", control)
+    backend = update_app.AppBackend(tmp_path, {})
+    with pytest.raises(ValueError, match="scheduler service could not be restored") as raised:
+        backend._restore_services(app, {"host": "not_registered", "menu": "not_registered",
+                                        "scheduler": "enabled", "session-stall": "enabled",
+                                        "wda": "enabled"})
+    assert "session-stall" not in str(raised.value) and "wda" not in str(raised.value)
+    assert [c for c in calls if c[0] == "register"] == [("register", "session-stall"), ("register", "wda")]
+
+
+def test_every_failed_restore_is_named_once_at_the_end(monkeypatch, tmp_path):
+    app = bundle(tmp_path / "Hub.app", {**SEALED, **capability("session-stall")}, {"session-stall": CAPABILITY})
+
+    def control(app, action, role=None):
+        if action == "status":
+            return {"relay": "not_found", "session-stall": "not_registered"}
+        return {"status": "not_found"}
+
+    monkeypatch.setattr(update_app, "control", control)
+    backend = update_app.AppBackend(tmp_path, {})
+    with pytest.raises(ValueError) as raised:
+        backend._restore_services(app, {"host": "not_registered", "menu": "not_registered",
+                                        "relay": "enabled", "session-stall": "enabled"})
+    assert str(raised.value) == ("relay service could not be restored; "
+                                 "session-stall service could not be restored")
