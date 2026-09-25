@@ -168,7 +168,7 @@ check("a github-source entry is not a checkout even when installLocation is one"
 h = home("claude-othername")
 claude_ledger(h, {"claude-plugins-official": {"source": {"source": "github", "repo": "a/b"}},
                   "mine": {"source": {"source": "directory", "path": str(BARE)}},
-                  "jandj": {"source": {"source": "directory", "path": str(CHECKOUT)}}})
+                  "acme": {"source": {"source": "directory", "path": str(CHECKOUT)}}})
 check("a directory entry under another name still resolves when it ships this plugin's _host.py",
       same(find(h), CHECKOUT), f"got {find(h)}")
 
