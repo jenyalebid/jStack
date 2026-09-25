@@ -1,262 +1,299 @@
 #!/bin/bash
-# WHAT: a real plan-mode session becomes stage rows, and the gate refuses the stage it gated
-# TIME: ~18m
+# WHAT: a real session plans the demo project, the gate refuses what the work has not earned, closes on what it has, and every plan hook leaves its mark
+# TIME: ~40m
 # GUEST: derived from $JSTACK_VERIFY_AUTHED_BASE (a guest with Claude Code signed in)
+#
+# The project is verify/fixtures/plan-demo: two stages whose Verify: lines run
+# its tests, stubs that fail them, and a stage 2 gate that also re-runs stage
+# 1's. So the gate is graded on work — the untouched project must be refused at
+# both stages, and only the session's real edits can turn either green.
+#
+# The ref under test is baked in (JSTACK_VERIFY_REF, default dev): `vm term`
+# carries none of this shell's environment, and a clone of `main` carries no
+# harness. The Hub is installed from that ref, so the CLI, the API and the
+# hooks all read the one store its embed marker declares.
 . "$(dirname "$0")/../../lib/common.sh"
 
 guest_from "${JSTACK_VERIFY_AUTHED_BASE:-jstack-base-authed}" vfy-plugin-plan-gate
 
-# The ref is baked in rather than read in the guest: `vm term` carries none of
-# this shell's environment, and the work harness is not on the repo's default
-# branch — a clone of `main` would run this whole journey against a machine
-# that has no gate and report the gate working.
+LIB="$(dirname "$0")/../../lib"
+vm cp "$GUEST" "$LIB/work_probe.py" /Users/admin/work_probe.py >/dev/null
+vm cp "$GUEST" "$LIB/work_guest.sh" /Users/admin/work_guest.sh >/dev/null
+vm cp "$GUEST" "$(dirname "$0")/../../fixtures/plan-demo" /Users/admin/plan-demo >/dev/null
+
 cat > "$RECEIPTS/payload.sh" <<EOF
 #!/bin/bash
 REF='${JSTACK_VERIFY_REF:-dev}'
 EOF
 
 cat >> "$RECEIPTS/payload.sh" <<'EOF'
-set -u
-say() { printf '%s\n' "$*"; }
-# A bail still prints the sentinel: finish_verdict reads a missing marker as
-# "never reached" and stops before it prints the FAIL lines, so a run that
-# died for a nameable reason would arrive nameless.
-bail() { echo "FAIL $*"; echo DONE-PLUGIN-PLAN-GATE; exit 0; }
+DONE=DONE-PLUGIN-PLAN-GATE
+. /Users/admin/work_guest.sh
 
-# One store for both halves of the harness. The hooks resolve it through
-# _env.host_environment(), the CLI through cli._adopt(), and an explicit export
-# wins over both (adopt_installed_environment applies the plist BENEATH the
-# shell) — left implicit, a guest that ever ran an installer reads a different
-# store than the hooks write.
-export JREMOTE_STATE_DIR="$HOME/.local/state/jremote"
-# All three plan hooks share one kill switch. `claude` below inherits this
-# shell's environment, so unsetting here is the whole guarantee: a journey run
-# with either of these set proves the opposite of what it claims.
-unset JSTACK_PLAN_GATE_DISABLED JSTACK_ENV_INJECT_DISABLED
-export PATH="$HOME/.local/bin:$PATH"
-PY="$(command -v python3.12 || command -v python3.11 || command -v python3)"
+hub_at_ref
+hook_host_check
 
-echo "== the checkout under test: ref $REF =="
-# A base image that already carries a checkout gets moved onto the ref rather
-# than left where it was: `[ -d ] || clone` would skip the clone and run the
-# whole journey against whatever that image happened to hold.
-if [ -d ~/jStack/.git ]; then
-    git -C ~/jStack fetch -q --depth 1 origin "$REF" \
-        && git -C ~/jStack checkout -q FETCH_HEAD
-else
-    git clone -q --depth 1 --branch "$REF" \
-        https://github.com/jenyalebid/jStack.git ~/jStack
-fi
-[ -f ~/jStack/host/jstack_host/plans.py ] && [ -f ~/jStack/plugins/jstack/hooks/plan-exit.py ] \
-    || bail "ref $REF carries no work harness — nothing here would be under test"
-(cd ~/jStack && git log -1 --format='  head: %h %s')
-
-echo "== install the plugin =="
-claude plugin marketplace add ~/jStack >/dev/null 2>&1
-claude plugin install jstack@jStack --config "agent_root=$HOME/Agents" >/dev/null 2>&1
-claude plugin list 2>/dev/null | grep -q jstack || bail "plugin jstack@jStack not installed"
-say "OK plugin installed"
-
-# _env._host_importable() inserts <hook>/../../../host, so the hooks reach the
-# writer through the repo they ship inside. plan-exit.py fails OPEN on its own
-# exception: a plugin installed away from its host tree would let every plan
-# through silently, which is the one failure this journey must not read as a
-# pass. Diagnostic, not a verdict — the rows below are the verdict.
-find "$HOME/.claude/plugins" "$HOME/jStack" -name plan-exit.py 2>/dev/null | while read -r h; do
-    root="$(cd "$(dirname "$h")/../../.." 2>/dev/null && pwd)"
-    if [ -n "$root" ] && [ -f "$root/host/jstack_host/plans.py" ]; then
-        say "  note: hook $h reaches the writer at $root/host"
-    else
-        say "  note: hook $h has NO writer above it (root: ${root:-unresolved})"
-    fi
-done
-
-echo "== the CLI the refusal tells a session to run =="
-if ! command -v jstack-host >/dev/null 2>&1; then
-    # cli.py imports `server` at module level, so the console script needs the
-    # host's own dependencies — a --no-deps install yields a jstack-host that
-    # cannot start. No LaunchAgent and no app: this is the package's CLI only.
-    "$PY" -m venv "$HOME/.jstack-host-venv" >/dev/null 2>&1
-    "$HOME/.jstack-host-venv/bin/pip" install -q ~/jStack/host 2>&1 | tail -3
-    mkdir -p "$HOME/.local/bin"
-    ln -sf "$HOME/.jstack-host-venv/bin/jstack-host" "$HOME/.local/bin/jstack-host"
-fi
-jstack-host plan list >/dev/null 2>&1 \
-    || bail "jstack-host cannot read a plan store — the CLI half of the gate is absent"
-say "OK jstack-host answers ($(command -v jstack-host))"
+FIXTURE=/Users/admin/plan-demo
+PROJ="$HOME/plan-journey"
+[ -f "$FIXTURE/plan.md" ] && [ -f "$FIXTURE/checks/stage1.sh" ] \
+    || bail "the demo project did not reach the guest at $FIXTURE"
+rm -rf "$PROJ" && cp -R "$FIXTURE" "$PROJ"
+# The tightened plan: the same stages, stage 2's gate moved to the script that
+# also re-runs stage 1. The reconcile keys on (plan_id, ordinal), so only the
+# Verify: line may differ or stage 2 would be compared against another row.
+sed 's|^Verify: command · python3 -m unittest -q tests.test_report$|Verify: command · sh checks/stage2.sh|' \
+    "$PROJ/plan.md" > "$HOME/plan-v2.md"
+grep -q '^Verify: command · sh checks/stage2.sh$' "$HOME/plan-v2.md" \
+    || bail "the tightened plan did not take its new gate"
+# What the gates grade must be what the fixture shipped: a session that
+# rewrote a test into a pass would otherwise read as a session that did the work.
+sums() { (cd "$PROJ" && find tests checks -type f | sort | xargs shasum) | shasum | cut -d' ' -f1; }
+SUMS0="$(sums)"
 
 plan_json() { jstack-host plan show "$1" --json; }
 sfield() {  # <plan-id> <ordinal> <field>
-    plan_json "$1" | "$PY" -c 'import json,sys
+    plan_json "$1" | python3 -c 'import json,sys
 d = json.load(sys.stdin)
 o = int(sys.argv[1])
 print(next((str(s.get(sys.argv[2], "")) for s in d["stages"] if s["ordinal"] == o), ""))' "$2" "$3"
 }
-scount() { plan_json "$1" | "$PY" -c 'import json,sys; print(len(json.load(sys.stdin)["stages"]))'; }
-pstatus() { plan_json "$1" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["plan"]["status"])'; }
-plan_ids() { jstack-host plan list --json \
-    | "$PY" -c 'import json,sys; print(" ".join(p["id"] for p in json.load(sys.stdin)))'; }
-
-cat > ~/plan-blocked.md <<'IN'
-# Plan gate journey
-
-## Stage 1 — name the deliverable
-Verify: none
-A stage that declares `none` closes on assertion. It is here so the refusal
-below reads as this stage's gate and not as a plan nothing can close.
-
-## Stage 2 — prove the gate refuses
-Verify: command · false
-This gate cannot pass. That is the point of it.
-IN
-
-# Same plan, one line moved: the reconcile keys on (plan_id, ordinal), so the
-# titles must not drift or stage 2 would be compared against a different row.
-sed 's/^Verify: command · false$/Verify: command · true/' ~/plan-blocked.md > ~/plan-fixed.md
-grep -q 'command · true' ~/plan-fixed.md || bail "the corrected plan did not take the new gate"
-
+last_proof() {  # <plan-id> <ordinal> <field> — of the newest proof on that stage
+    plan_json "$1" | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+s = next((x for x in d["stages"] if x["ordinal"] == int(sys.argv[1])), {})
+p = (s.get("proofs") or [{}])[-1]
+print(str(p.get(sys.argv[2], "")))' "$2" "$3"
+}
+plan_ids() { jstack-host plan list --json | python3 -c 'import json,sys; print(" ".join(sorted(p["id"] for p in json.load(sys.stdin))))'; }
+new_ids() {  # the plan rows that did not exist before this journey
+    python3 -c 'import sys; b = set(sys.argv[1].split()); print(" ".join(x for x in sys.argv[2].split() if x not in b))' "$BEFORE" "$(plan_ids)"
+}
 prompt_for() {
     printf '%s\n\n%s\n' \
         "Call the ExitPlanMode tool now, and nothing else: do not read files, do not run commands, do not ask questions. Its plan argument must be exactly the markdown below, verbatim — every line, nothing added, removed or reworded." \
         "$(cat "$1")"
 }
+set_env() {  # set_env <sid> <key> <value|"">
+    probe api POST "/sessions/$1/env" "{\"key\": \"$2\", \"value\": \"$3\"}" >/dev/null \
+        || bail "POST /sessions/$1/env $2=$3 was refused"
+}
+same_sid() { [ "$R_SID" = "$SID" ] || bail "the engine ran as '${R_SID:-nothing}', not $SID — every row and marker below would be under an id this script is not reading"; }
+snapshot() { cat "$MARKS/$SID/environment.json" 2>/dev/null; }
+refused_as_missing() {  # <stage-id> <label>
+    out="$(jstack-host plan done "$1" 2>&1)"; rc=$?
+    say "  refusal: $out"
+    [ "$rc" != "0" ] || { echo "FAIL $2: plan done closed a stage with no passing proof"; return; }
+    case "$out" in
+        *"verify_kind='command'"*"has no passing proof"*"it stays open"*"jstack-host plan verify $1"*)
+            say "OK $2: refused, naming the gate, the missing proof and the command that would satisfy it" ;;
+        *)  echo "FAIL $2: the refusal does not name gate, proof, consequence and remedy" ;;
+    esac
+}
 
-SID="$("$PY" -c 'import uuid; print(uuid.uuid4())')"
-mkdir -p ~/plan-journey
+SID="$(uuidgen | tr 'A-Z' 'a-z')"
+BEFORE="$(plan_ids)"
+# Two settings on this session before it exists, each triggered at a plan
+# moment: use_subagents at PreToolUse ExitPlanMode, delivery_method at Stop.
+# Without them env-announce has nothing to say during a plan and cannot be
+# seen firing at all.
+V="$(python3 -c 'import random; print(random.choice(["distribute", "testflight", "build", "sim_demo"]))')"
+set_env "$SID" use_subagents on
+set_env "$SID" delivery_method "$V"
 
-echo "== a real plan-mode session authors the plan and approves it =="
-(cd ~/plan-journey && claude --session-id "$SID" --permission-mode plan \
-    --allowedTools ExitPlanMode -p "$(prompt_for ~/plan-blocked.md)" 2>&1) \
-    | tail -15 | sed 's/^/  claude: /'
+echo "== a real plan-mode session authors the demo plan and approves it =="
+run_claude plan "$PROJ" --session-id "$SID" --permission-mode plan \
+    --allowedTools ExitPlanMode -p "$(prompt_for "$PROJ/plan.md")"
+same_sid
 
-ids="$(plan_ids)"
-set -- $ids
-[ $# -eq 1 ] || bail "expected one plan row from that session, got $#: ${ids:-none}"
+set -- $(new_ids)
+[ $# -eq 1 ] || bail "expected one new plan row from this session, got $#: $*"
 P="$1"
 say "OK the plan-mode session minted one plan row ($P)"
+work_plan="$(probe api GET "/sessions/$SID/work" | probe py '(d.get("plan") or {}).get("id", "")')"
+[ "$work_plan" = "$P" ] \
+    && say "OK /sessions/{sid}/work names that row as this session's plan" \
+    || echo "FAIL /sessions/$SID/work names '${work_plan:-no plan}', not $P"
 
-n="$(scount "$P")"
-[ "$n" = "2" ] || bail "plan show reports ${n:-0} stages, not 2 — ExitPlanMode never reached the writer, or the hook fell open"
-say "OK plan show reports two stages"
+[ -f "$MARKS/$SID/plan-mode.json" ] \
+    && say "OK plan-mode-watch saw permission_mode=plan and left its marker: $(cat "$MARKS/$SID/plan-mode.json")" \
+    || echo "FAIL plan-mode-watch left no plan-mode.json under $MARKS/$SID"
+[ "$(sfield "$P" 1 verify_spec)" = "sh checks/stage1.sh" ] \
+    && [ "$(sfield "$P" 2 verify_spec)" = "python3 -m unittest -q tests.test_report" ] \
+    && [ "$(sfield "$P" 2 verify_kind)" = "command" ] \
+    && say "OK plan-exit parsed both Verify: lines into stage rows" \
+    || bail "the stage rows do not carry the plan's gates: '$(sfield "$P" 1 verify_spec)' / '$(sfield "$P" 2 verify_spec)'"
+pmeta="$(plan_json "$P" | probe py '[d["plan"]["status"], d["plan"]["title"], d["plan"]["repo"], d["plan"]["plan_file"]]')"
+say "  plan row: $pmeta"
+[ "$(plan_json "$P" | probe py 'd["plan"]["status"]')" = "active" ] \
+    && say "OK approval flipped the plan to active" \
+    || echo "FAIL the plan is not active after approval"
+[ "$(plan_json "$P" | probe py 'd["plan"]["repo"]')" = "$PROJ" ] \
+    && say "OK the plan's repo is the directory it was authored in" \
+    || echo "FAIL the plan's repo is not $PROJ — its gates would run somewhere else"
+for m in "use_subagents-on" "delivery_method-$V"; do
+    [ -f "$MARKS/$SID/env-$m.marker" ] \
+        && say "OK env-announce marked env-$m during the plan session" \
+        || echo "FAIL no env-$m.marker — env-announce did not speak at its trigger"
+done
+[ "$(snapshot | probe py 'sorted(d.items())')" = "$(printf '{"delivery_method": "%s", "use_subagents": "on"}' "$V" | probe py 'sorted(d.items())')" ] \
+    && say "OK env-delta snapshotted this session's settings: $(snapshot)" \
+    || echo "FAIL env-delta's snapshot is '$(snapshot)'"
 
-k="$(sfield "$P" 2 verify_kind)"; s="$(sfield "$P" 2 verify_spec)"
-if [ "$k" = "command" ] && [ "$s" = "false" ]; then
-    say "OK stage 2 carries the gate its Verify: line declared (command · false)"
+pf="$(plan_json "$P" | probe py 'd["plan"]["plan_file"]')"
+if [ -z "$pf" ]; then
+    echo "GAP plan document: ExitPlanMode carried no planFilePath in this engine run, so GET /plans/{id}/document has no file to serve"
+elif probe api GET "/plans/$P/document" | grep -q 'Stage 1 — count words'; then
+    say "OK GET /plans/{id}/document serves the approved markdown from $pf"
 else
-    bail "stage 2 declares '$k' · '$s', not command · false"
-fi
-if [ "$(pstatus "$P")" = "active" ]; then
-    say "OK approval flipped the plan out of planning and into active"
-else
-    echo "FAIL plan status $(pstatus "$P") after approval, not active"
+    echo "FAIL the document route does not serve $pf"
 fi
 
 S1="$(sfield "$P" 1 id)"; S2="$(sfield "$P" 2 id)"
 
-echo "== the gate: closing stage 2 without a proof =="
-# Taken first, the way a session works a stage. The status before the refused
-# close is recorded rather than assumed: the assertion is that a refusal moves
-# nothing, and pinning the literal 'running' here would fail on `plan start`
-# rather than on the gate.
-jstack-host plan start "$S2" >/dev/null 2>&1 || true
-before="$(sfield "$P" 2 status)"
-out="$(jstack-host plan done "$S2" 2>&1)"; rc=$?
-say "  refusal: $out"
-[ "$rc" = "0" ] && echo "FAIL plan done closed a stage that had no proof"
-case "$out" in
-    *"verify_kind='command'"*"has no passing proof"*"it stays open"*)
-        say "OK the refusal names the gate, the missing proof and the consequence" ;;
-    *)  echo "FAIL the refusal did not read as one — no gate/proof/consequence in it" ;;
-esac
-case "$out" in
-    *"jstack-host plan verify $S2"*)
-        say "OK the refusal hands back the one command that would satisfy it" ;;
-    *)  echo "FAIL the refusal names no remedy its reader can run" ;;
-esac
-after="$(sfield "$P" 2 status)"
-if [ "$after" = "$before" ] && [ "$after" != "done" ]; then
-    say "OK stage 2 is still open ($after) — the refused close wrote nothing"
-else
-    echo "FAIL stage 2 went $before -> $after across a refused close"
-fi
+echo "== the untouched project: both gates must refuse =="
+# From $HOME, not the project: `plan verify` is graded in the plan's repo.
+cd "$HOME"
+jstack-host plan verify "$S1" >/dev/null 2>&1 \
+    && echo "FAIL stage 1's gate passed a project nobody touched" \
+    || say "OK stage 1's gate fails on the untouched project"
+# The failure must be the test failing, not the check not being found — a
+# gate run in the wrong directory fails too, for no reason worth anything.
+last_proof "$P" 1 output | grep -q NotImplementedError \
+    && say "OK it failed on count_words' NotImplementedError — graded in the plan's repo" \
+    || echo "FAIL stage 1's failing proof is not the test's failure: $(last_proof "$P" 1 output | tail -2)"
+refused_as_missing "$S1" "stage 1, untouched"
+[ "$(sfield "$P" 1 status)" != "done" ] || echo "FAIL a refused close moved stage 1 to done"
+jstack-host plan verify "$S2" >/dev/null 2>&1 \
+    && echo "FAIL stage 2's gate passed a project nobody touched" \
+    || say "OK stage 2's gate fails on the untouched project"
+refused_as_missing "$S2" "stage 2, untouched"
 
-# The gate belongs to the stage that declared one. Without this, a writer that
-# refused every close would read exactly like a working gate.
-jstack-host plan done "$S1" >/dev/null 2>&1
-if [ "$(sfield "$P" 1 status)" = "done" ]; then
-    say "OK stage 1 (Verify: none) closes on assertion — the gate is the stage's, not the plan's"
-else
-    echo "FAIL stage 1 declared none and still did not close"
-fi
-
-jstack-host plan verify "$S2" >/dev/null 2>&1; rc=$?
-[ "$rc" != "0" ] && say "OK plan verify ran \`false\` and reported the failure" \
-    || echo "FAIL plan verify passed a stage gated on \`false\`"
-out="$(jstack-host plan done "$S2" 2>&1)"; rc=$?
-[ "$rc" != "0" ] && say "OK a FAILING proof on the record still does not close the stage" \
-    || echo "FAIL a failing proof closed the stage"
-
-# The cheap green receipt, filed by hand against the `false` gate. It is what
-# the re-parse below has to retire; without it, step 5 would only prove that a
-# stage with no proofs stays shut, which step 4 already proved.
+echo "== a green proof filed against a gate that then tightens =="
 jstack-host plan proof "$S2" --kind command --ok \
-    --detail 'hand-filed against the false gate' >/dev/null 2>&1 \
+    --detail 'hand-filed against the v1 gate' >/dev/null 2>&1 \
     || echo "FAIL could not file a proof by hand"
-
-echo "== the corrected gate, re-approved in the same session =="
-(cd ~/plan-journey && claude --resume "$SID" --permission-mode plan \
-    --allowedTools ExitPlanMode -p "$(prompt_for ~/plan-fixed.md)" 2>&1) \
-    | tail -15 | sed 's/^/  claude: /'
-
-ids="$(plan_ids)"
-set -- $ids
-[ $# -eq 1 ] \
-    && say "OK the re-approval reconciled the session's own plan row, it did not mint a second" \
-    || echo "FAIL re-approval left $# plan rows: ${ids:-none} — the reconcile needs this session's row"
-[ "$(sfield "$P" 2 id)" = "$S2" ] \
-    && say "OK stage 2 was updated in place — same row, keyed on (plan_id, ordinal)" \
-    || echo "FAIL stage 2 is a different row after the re-parse"
-[ "$(sfield "$P" 2 verify_spec)" = "true" ] \
-    && say "OK stage 2's gate moved to command · true" \
-    || echo "FAIL stage 2 still declares spec '$(sfield "$P" 2 verify_spec)'"
-
-retired="$(plan_json "$P" | "$PY" -c 'import json,sys
-d = json.load(sys.stdin)
-s = next((x for x in d["stages"] if x["ordinal"] == 2), None)
-green = [p for p in (s or {}).get("proofs", []) if p.get("ok")]
-set_at = (s or {}).get("verify_set_at") or 0
-print("yes" if green and max(p["created_at"] for p in green) < set_at else "no")')"
-[ "$retired" = "yes" ] \
-    && say "OK the hand-filed green proof now predates the declaration — verify_set_at retired it" \
-    || echo "FAIL the proof filed against the old gate still answers for the new one"
-
+run_claude replan "$PROJ" --resume "$SID" --permission-mode plan \
+    --allowedTools ExitPlanMode -p "$(prompt_for "$HOME/plan-v2.md")"
+same_sid
+set -- $(new_ids)
+[ $# -eq 1 ] && [ "$1" = "$P" ] \
+    && say "OK the re-approval reconciled this session's plan row, it did not mint a second" \
+    || echo "FAIL re-approval left these new plan rows: $*"
+[ "$(sfield "$P" 2 id)" = "$S2" ] && [ "$(sfield "$P" 2 verify_spec)" = "sh checks/stage2.sh" ] \
+    && say "OK stage 2 kept its row and its gate moved to sh checks/stage2.sh" \
+    || echo "FAIL stage 2 is '$(sfield "$P" 2 id)' declaring '$(sfield "$P" 2 verify_spec)'"
 out="$(jstack-host plan done "$S2" 2>&1)"; rc=$?
-say "  refusal: $out"
 if [ "$rc" = "0" ]; then
-    echo "FAIL a retired proof closed the stage — the tightened gate closed on the cheap receipt"
+    echo "FAIL the hand-filed proof closed the tightened stage 2"
 else
     case "$out" in
         *"proves the gate this stage used to have"*)
-            say "OK the refusal says which gate that green proof belongs to" ;;
-        *)  echo "FAIL the refusal does not distinguish a retired proof from no proof" ;;
+            say "OK the refusal says the green proof belongs to the old gate" ;;
+        *)  echo "FAIL the refusal does not tell a retired proof from no proof: $out" ;;
     esac
 fi
 
-echo "== the stage closes on evidence for what it declares now =="
+echo "== stage 1, worked by the session =="
+# Cleared between prompts, so the next prompt is a flip env-delta must record.
+set_env "$SID" use_subagents ""
+jstack-host plan start "$S1" --session "$SID" >/dev/null 2>&1 || echo "FAIL plan start refused stage 1"
+before_tasks="$(probe api GET "/sessions/$SID/work" | probe py "len(d['tasks'].get('$S1', []))")"
+[ "$before_tasks" = "0" ] || echo "FAIL stage 1 already had $before_tasks tasks before any session work"
+run_claude stage1 "$PROJ" --resume "$SID" --permission-mode acceptEdits \
+    --allowedTools "Read Edit Write Bash TaskCreate TaskUpdate TaskList" \
+    -p 'You are working stage 1 ("count words") of the approved plan, in this directory. First use the TaskCreate tool to create exactly two tasks: "implement count_words" and "run the stage 1 tests". Then implement count_words in demo/wordcount.py as its docstring says, and run `python3 -m unittest -q tests.test_wordcount` until it passes. Do not change anything under tests/ or checks/, and do not touch demo/report.py. Do the work yourself in this session. Mark both tasks completed with TaskUpdate, then reply DONE.'
+same_sid
+[ "$(sums)" = "$SUMS0" ] || bail "the session changed tests/ or checks/ — every gate below would grade a rewritten test"
+[ "$(snapshot | probe py 'sorted(d.items())')" = "$(printf '{"delivery_method": "%s"}' "$V" | probe py 'sorted(d.items())')" ] \
+    && say "OK env-delta recorded use_subagents leaving between prompts: $(snapshot)" \
+    || echo "FAIL env-delta's snapshot after the flip is '$(snapshot)'"
+
+tasks="$(probe api GET "/sessions/$SID/work" | probe py "sorted((t['subject'], t['status']) for t in d['tasks'].get('$S1', []))")"
+say "  stage 1 tasks on the Hub: $tasks"
+case "$tasks" in
+    *"implement count_words"*"run the stage 1 tests"*|*"run the stage 1 tests"*"implement count_words"*)
+        say "OK plan-tasks mirrored the session's TaskCreate calls onto the running stage" ;;
+    *)  echo "FAIL the session's tasks did not reach stage 1 — ~/.claude/tasks/$SID holds: $(ls "$HOME/.claude/tasks/$SID" 2>&1 | head -3 | tr '\n' ' ')" ;;
+esac
+stamped="$(python3 - "$HOME/.claude/tasks/$SID" "$S1" <<'PY'
+import json, pathlib, sys
+rows = [json.loads(p.read_text()) for p in pathlib.Path(sys.argv[1]).glob("*.json")]
+print(f"{sum(1 for r in rows if (r.get('metadata') or {}).get('stage_id') == sys.argv[2])}/{len(rows)}")
+PY
+)"
+case "$stamped" in
+    0/*|"") echo "FAIL no native task under ~/.claude/tasks/$SID carries stage 1's id ($stamped)" ;;
+    *)      say "OK plan-tasks wrote stage 1's id back into the native tasks ($stamped)" ;;
+esac
+
+jstack-host plan verify "$S1" >/dev/null 2>&1 \
+    && say "OK stage 1's gate passes on the session's work" \
+    || echo "FAIL stage 1's gate still fails: $(last_proof "$P" 1 output | tail -3)"
+out="$(jstack-host plan done "$S1" 2>&1)" && [ "$(sfield "$P" 1 status)" = "done" ] \
+    && say "OK stage 1 closed on its own passing proof" \
+    || echo "FAIL stage 1 did not close: $out"
 jstack-host plan verify "$S2" >/dev/null 2>&1 \
-    && say "OK plan verify passes against command · true" \
-    || echo "FAIL plan verify did not pass against \`true\`"
-out="$(jstack-host plan done "$S2" 2>&1)"; rc=$?
-if [ "$rc" = "0" ] && [ "$(sfield "$P" 2 status)" = "done" ]; then
-    say "OK stage 2 closed on its own passing proof, and plan show reports it done"
-else
-    echo "FAIL stage 2 did not close on a passing proof: $out"
-fi
+    && echo "FAIL stage 2's gate passed on stage 1's work alone" \
+    || say "OK stage 2's gate still fails — stage 1's work does not earn it"
+
+echo "== stage 2, worked by the session =="
+jstack-host plan start "$S2" --session "$SID" >/dev/null 2>&1 || echo "FAIL plan start refused stage 2"
+run_claude stage2 "$PROJ" --resume "$SID" --permission-mode acceptEdits \
+    --allowedTools "Read Edit Write Bash TaskCreate TaskUpdate TaskList" \
+    -p 'You are working stage 2 ("report the most common words") of the approved plan, in this directory. First use the TaskCreate tool to create one task: "implement top". Then implement top in demo/report.py as its docstring says, on top of count_words, and run `sh checks/stage2.sh` until it passes. Do not change anything under tests/ or checks/. Do the work yourself in this session. Mark the task completed with TaskUpdate, then reply DONE.'
+same_sid
+[ "$(sums)" = "$SUMS0" ] || bail "the session changed tests/ or checks/ — every gate below would grade a rewritten test"
+tasks2="$(probe api GET "/sessions/$SID/work" | probe py "[t['subject'] for t in d['tasks'].get('$S2', [])]")"
+case "$tasks2" in
+    *"implement top"*) say "OK plan-tasks followed the running stage: stage 2 holds $tasks2" ;;
+    *)                 echo "FAIL stage 2's task did not reach stage 2: $tasks2" ;;
+esac
+jstack-host plan verify "$S2" >/dev/null 2>&1 \
+    && say "OK stage 2's tightened gate passes on the session's work" \
+    || echo "FAIL stage 2's gate fails: $(last_proof "$P" 2 output | tail -3)"
+out="$(jstack-host plan done "$S2" 2>&1)" && [ "$(sfield "$P" 2 status)" = "done" ] \
+    && say "OK stage 2 closed on a proof filed against the gate it declares now" \
+    || echo "FAIL stage 2 did not close: $out"
+
+# Stage 2's gate re-runs stage 1's tests; put stage 1's stub back and it must
+# go red. Run by hand, not through `plan verify`, so no proof is filed.
+cp "$PROJ/demo/wordcount.py" "$HOME/wordcount.done"
+cp "$FIXTURE/demo/wordcount.py" "$PROJ/demo/wordcount.py"
+(cd "$PROJ" && sh checks/stage2.sh >/dev/null 2>&1) \
+    && echo "FAIL stage 2's gate passes with stage 1 undone — it does not depend on stage 1" \
+    || say "OK stage 2's gate fails with stage 1 undone — it depends on stage 1"
+cp "$HOME/wordcount.done" "$PROJ/demo/wordcount.py"
+
+echo "== what the Hub reports this session did =="
+work="$(probe api GET "/sessions/$SID/work")"
+printf '%s' "$work" | probe py '[d["mode"], d["plan"]["id"], [(s["ordinal"], s["status"]) for s in d["stages"]]]' | sed 's/^/  work: /'
+[ "$(printf '%s' "$work" | probe py '[d["mode"], d["plan"]["id"], [s["status"] for s in d["stages"]]]')" \
+  = "$(printf '["stages", "%s", ["done", "done"]]' "$P" | probe py 'd')" ] \
+    && say "OK /work: this session's plan, both stages done" \
+    || echo "FAIL /work does not report the plan this session finished"
+printf '%s' "$work" | probe py "json.loads(next(s['env'] for s in d['stages'] if s['id'] == '$S1') or '{}').get('delivery_method', '')" | grep -qx "$V" \
+    && say "OK stage 1's dispatch snapshot holds the session's delivery_method=$V" \
+    || echo "FAIL stage 1's dispatch snapshot does not hold delivery_method=$V"
+printf '%s' "$work" | probe py 'next(r for r in d["env"] if r["key"] == "delivery_method")' | sed 's/^/  env: /'
+printf '%s' "$work" | probe py 'next(r for r in d["env"] if r["key"] == "delivery_method")["announced"]' | grep -qx true \
+    && say "OK /work reports delivery_method announced — the host read env-announce's marker" \
+    || echo "FAIL /work does not see the marker env-announce wrote"
+detail="$(probe api GET "/plans/$P")"
+printf '%s' "$detail" | probe py 'all(any(p["ok"] and p["created_at"] >= s["verify_set_at"] for p in d["proofs"][s["id"]]) for s in d["stages"])' | grep -qx true \
+    && say "OK GET /plans/{id}: each stage holds a passing proof filed against its current gate" \
+    || echo "FAIL GET /plans/{id} does not back both closes with a current passing proof"
+probe api GET /plans | probe py "any(p['id'] == '$P' for p in d['plans'])" | grep -qx true \
+    && say "OK GET /plans lists it" || echo "FAIL GET /plans does not list $P"
+
+# What a plan-driven Claude session cannot show, said rather than skipped.
+echo "GAP record-session-files: fires on this session's Edit/Write, and by design records only Codex apply_patch — on Claude it writes nothing to observe"
+echo "GAP plan-mode-watch's Codex nudge and plan-tasks' update_plan branch: Codex paths; this journey drives Claude"
 
 jstack-host plan show "$P" 2>&1 | sed 's/^/  show: /'
-echo DONE-PLUGIN-PLAN-GATE
+echo "$DONE"
 EOF
 
 p="$(guest_payload "$RECEIPTS/payload.sh")"
 guest_term bash "$p"
+for f in plan replan stage1 stage2; do guest_fetch "/Users/admin/$f.json"; done
 finish_verdict "$RECEIPTS/term.log" DONE-PLUGIN-PLAN-GATE

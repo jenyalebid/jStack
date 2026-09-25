@@ -152,14 +152,19 @@ def seat_agent(cwd: str) -> str:
     return (agent or "").lower()
 
 
-def moved(env, session_id: str) -> dict[str, str]:
+def moved(env, session_id: str, cwd: str = "") -> dict[str, str]:
     """`{key: value}` for the settings this session holds off their default.
 
     Non-defaults only, which is both what a snapshot needs to be comparable
     (`delta_lines` reads a missing key as that key's default) and the whole
     safety property of the module: a value at its default has nothing to say.
+
+    The agent comes from `cwd` exactly as entry takes it. Resolving by session
+    id alone reaches the agent layer only once the indexer has written this
+    session's row, so an unindexed session heard its agent's value at entry
+    and then neither its change (delta) nor its reinforcement (announce).
     """
-    resolved = env.resolve(session_id)
+    resolved = env.resolve(session_id, seat_agent(cwd))
     return {s.key: resolved[s.key][0] for s in env.SETTINGS
             if s.key in resolved and resolved[s.key][0] != s.default}
 

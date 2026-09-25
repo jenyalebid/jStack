@@ -37,7 +37,7 @@ def main() -> int:
     payload = json.load(sys.stdin)
     session_id = str(payload.get("session_id") or "")
     env = _env.host_environment()
-    after = _env.moved(env, session_id)
+    after = _env.moved(env, session_id, str(payload.get("cwd") or ""))
     snapshot = _env.session_dir(session_id) / SNAPSHOT
 
     before = None

@@ -71,7 +71,7 @@ def main() -> int:
 
     env = _env.host_environment()
     session_id = str(payload.get("session_id") or "")
-    in_force = _env.moved(env, session_id)
+    in_force = _env.moved(env, session_id, str(payload.get("cwd") or ""))
     if not in_force:
         return 0
 

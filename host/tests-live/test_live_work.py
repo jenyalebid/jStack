@@ -25,6 +25,7 @@ must keep it.
 
 from __future__ import annotations
 
+import re
 import uuid
 
 import pytest
@@ -210,6 +211,100 @@ def test_the_agent_layer_is_read_written_and_restored(api, agent_id):
         "the agent's default was not put back")
 
 
+def test_an_agent_the_host_does_not_have_is_refused(api):
+    """404 on both routes. A write accepted for an agent nobody has is a row
+    no session can ever inherit — answered 200, changing nothing."""
+    ghost = f"nobody-{uuid.uuid4().hex[:6]}-chat"
+    got = api.call("GET", "/agents/{agent_id}/env", fmt={"agent_id": ghost})
+    if got.status_code == 200 and got.json().get("available") is False:
+        pytest.skip("no agent environment on this host")
+    assert got.status_code == 404, f"{got.status_code}: {got.text[:200]}"
+    put = api.post("/agents/{agent_id}/env", fmt={"agent_id": ghost},
+                   json={"key": "sim_verify", "value": "off"})
+    assert put.status_code == 404, f"{put.status_code}: {put.text[:200]}"
+
+
+def _an_indexed_session(api, agent_id) -> str:
+    """A session of `agent_id` the host's store has indexed, or skip.
+
+    From `/sessions/history` because that is the store's index, and the index
+    row is where `environment.resolve` learns a session's agent — a session
+    only visible on disk would read the agent layer as absent however right
+    the write was. The spawned session `test_live_sessions` drives is the one
+    a fresh guest has.
+    """
+    rows = api.ok("GET", "/sessions/history",
+                  **{"params": {"agent": agent_id, "q": "", "limit": 20}})
+    sids = [r.get("session_id") for r in rows.get("sessions", []) if r.get("session_id")]
+    if not sids:
+        pytest.skip(f"no indexed session of {agent_id} on this host — nothing "
+                    "real for an agent value to reach")
+    return sids[0]
+
+
+def test_an_agent_value_posted_under_the_roster_id_reaches_that_agents_session(
+        api, agent_id):
+    """Written through the agent route, observed through a real session's.
+
+    `agent_id` is what `/agents` serves (`testbench-chat` on the seeded
+    guest); the index keys that agent's sessions on the base. A write stored
+    under the scoped id answered 200, read back through its own route, and
+    was inherited by no session — which only a read from the SESSION side can
+    see, so that is the only read this test trusts.
+    """
+    sid = _an_indexed_session(api, agent_id)
+    agent_before = api.ok("GET", "/agents/{agent_id}/env", fmt={"agent_id": agent_id})
+    if not agent_before.get("available", True):
+        pytest.skip("no agent environment on this host")
+    session_rows = _rows(api.ok("GET", "/sessions/{sid}/env", fmt={"sid": sid}))
+    row = next((r for r in session_rows if r["source"] != "session"
+                and [v for v in r["values"] if v != r["value"]]), None)
+    if row is None:
+        pytest.skip(f"session {sid} pins every setting itself; no inherited "
+                    "row is left for the agent layer to move")
+    key = row["key"]
+    target = next(v for v in row["values"] if v != row["value"])
+    was = _row(agent_before, key)
+    try:
+        api.ok("POST", "/agents/{agent_id}/env", fmt={"agent_id": agent_id},
+               json={"key": key, "value": target})
+        seen = _row(api.ok("GET", "/sessions/{sid}/env", fmt={"sid": sid}), key)
+        assert (seen["value"], seen["source"]) == (target, "agent"), (
+            f"{key}={target!r} posted for {agent_id!r}; its session {sid} reads "
+            f"{seen['value']!r} from {seen['source']!r} — the write went where "
+            f"no session of that agent looks")
+        in_work = _row(api.ok("GET", "/sessions/{sid}/work", fmt={"sid": sid}), key)
+        assert (in_work["value"], in_work["source"]) == (target, "agent"), in_work
+    finally:
+        api.ok("POST", "/agents/{agent_id}/env", fmt={"agent_id": agent_id},
+               json={"key": key,
+                     "value": was["value"] if was["source"] == "agent" else None})
+
+
+def test_a_real_sessions_work_view_names_a_plan_the_plan_routes_hold(api, agent_id):
+    """The Work view of a session that exists, tied to the plan record.
+
+    A session with no plan must say `none` with nothing under it; one with a
+    plan must name a row `GET /plans/{id}` serves, with the same stages in the
+    same order — a Work screen drawing stage ids the plan screen does not
+    have is two screens describing different work.
+    """
+    sid = _an_indexed_session(api, agent_id)
+    work = api.ok("GET", "/sessions/{sid}/work", fmt={"sid": sid})
+    if not work.get("available", True):
+        pytest.skip("this host has no work harness")
+    assert work["mode"] in WORK_MODES, work
+    if work["mode"] == "none":
+        assert work["plan"] is None and work["stages"] == [] and work["tasks"] == {}, work
+        return
+    detail = api.ok("GET", "/plans/{plan_id}", fmt={"plan_id": work["plan"]["id"]})
+    assert [s["id"] for s in work["stages"]] == [s["id"] for s in detail["stages"]], (
+        f"/work and /plans/{{id}} disagree on the stages of {work['plan']['id']}")
+    assert (work["mode"] == "stages") == bool(work["stages"]), work
+    for stage_id, tasks in work["tasks"].items():
+        assert [t["id"] for t in tasks] == [t["id"] for t in detail["tasks"][stage_id]], stage_id
+
+
 # ── the Work view ──
 
 def test_the_work_view_answers_in_one_call_and_agrees_with_the_env_route(api,
@@ -332,3 +427,42 @@ def test_a_plan_this_host_holds_serves_its_stages_and_its_markdown(api):
     body = doc.json()
     assert isinstance(body, dict) and body.get("text") is not None, (
         f"the document route served no text: {str(body)[:300]}")
+
+
+#: The title `host/scripts/live-vm-test.sh` seeds its plan under.
+SEEDED_PLAN = "Live suite plan"
+_STAGE_HEADING = re.compile(r"^##\s+Stage\s+\d+\s*[—–:-]\s*(.+?)\s*$", re.MULTILINE)
+_VERIFY_KIND = re.compile(r"^Verify:\s*([A-Za-z]+)", re.MULTILINE)
+
+
+def test_the_seeded_plans_rows_are_the_stages_its_document_declares(api):
+    """The rows and the markdown they were read from, each through its own route.
+
+    The seeding step files stages with `plan stages --from-file` on the very
+    document the route serves, so every `## Stage N — title` heading and its
+    `Verify:` kind must come back as a stage row, in order. Titles and kinds
+    only, read with a pattern narrower than the parser's on purpose: the
+    seeded document is written in the one plain shape both agree on, and
+    re-implementing the parser here would test the copy.
+    """
+    listing = api.ok("GET", "/plans", **{"params": {"limit": 50}})
+    seeded = [p for p in listing.get("plans", []) if p.get("title") == SEEDED_PLAN]
+    if not seeded:
+        pytest.skip(f"no {SEEDED_PLAN!r} on this host — live-vm-test.sh seeds it")
+    plan_id = seeded[0]["id"]
+    doc = api.call("GET", "/plans/{plan_id}/document", fmt={"plan_id": plan_id})
+    assert doc.status_code == 200, (
+        f"the seeded plan's document is under ~/.claude/plans, inside the "
+        f"fence, and was refused: {doc.status_code} {doc.text[:300]}")
+    text = doc.json()["text"]
+    declared = list(zip(_STAGE_HEADING.findall(text), _VERIFY_KIND.findall(text)))
+    assert len(declared) >= 2, f"the seeded document declares {declared}"
+
+    detail = api.ok("GET", "/plans/{plan_id}", fmt={"plan_id": plan_id})
+    rows = [(s["title"], s["verify_kind"]) for s in
+            sorted(detail["stages"], key=lambda s: s["ordinal"])]
+    assert rows == [(t, k.lower()) for t, k in declared], (
+        f"the plan's rows {rows} are not the stages its document declares "
+        f"{declared}")
+    assert set(detail["proofs"]) == set(detail["tasks"]) == {s["id"] for s in detail["stages"]}, (
+        "proofs and tasks must be keyed by exactly the plan's stage ids")

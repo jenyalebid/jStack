@@ -2046,12 +2046,29 @@ def set_session_env(sid: str, payload: EnvBody):
     return {"available": True, "env": _env_rows(session_id=sid)}
 
 
+def _env_agent(agent_id: str) -> str:
+    """The key the agent layer is stored under: the bare, lowercased agent name.
+
+    `/agents` hands out `alpha-chat` for an agent with a chat seat, but every
+    reader of `agent_env` asks with the bare name — the session index stores
+    `hostenv.project_dir_to_agent`'s base and the entry hook `root.seat_at`'s,
+    both lowercased. A row keyed on the scoped id was written, read back by
+    this route, and never seen by one session. An unknown agent is a 404 off
+    the same roster `/agents` is built from, not a row nothing will ever read.
+    """
+    from .hostenv import active_agents, split_id
+    base = split_id((agent_id or "").strip().lower())[0]
+    if base not in active_agents():
+        raise HTTPException(status_code=404, detail=f"unknown agent {agent_id!r}")
+    return base
+
+
 @router.get("/agents/{agent_id}/env")
 def get_agent_env(agent_id: str):
     """The agent-default layer — what every session of this agent inherits."""
     if not _probe("session_env"):
         return _unavailable("the session environment", env=[])
-    return {"available": True, "env": _env_rows(agent_id=agent_id)}
+    return {"available": True, "env": _env_rows(agent_id=_env_agent(agent_id))}
 
 
 @router.post("/agents/{agent_id}/env")
@@ -2063,8 +2080,9 @@ def set_agent_env(agent_id: str, payload: EnvBody):
         raise HTTPException(
             status_code=503,
             detail="this host has no agent environment to set")
-    _write_env(payload, agent_id=agent_id)
-    return {"available": True, "env": _env_rows(agent_id=agent_id)}
+    base = _env_agent(agent_id)
+    _write_env(payload, agent_id=base)
+    return {"available": True, "env": _env_rows(agent_id=base)}
 
 
 @router.get("/sessions/{sid}/work")
