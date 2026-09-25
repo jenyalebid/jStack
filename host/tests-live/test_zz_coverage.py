@@ -40,7 +40,7 @@ UNCOVERED: dict[tuple[str, str], str] = {
     # thing that could be said about them. `hub/update` drives the whole
     # surface end to end on two real builds — a source build, a queued
     # release, a heartbeat, an artifact fetch and a leaf asking its hub for
-    # all of it — which is why nobody noticed the hole. Issue #171.
+    # all of it — which is why nobody noticed the hole. Issue #170.
     ("GET", "/api/jremote/v1/updates/latest"):
         "read of the release the host would move to. Proven end to end by the "
         "hub/update journey against two real builds; an unauthenticated-shape "
@@ -76,7 +76,7 @@ UNCOVERED: dict[tuple[str, str], str] = {
         "a leaf pulling release bytes through its hub. Same.",
 
     # Delegated minting. Visible to this gate only now: `grant_router` was
-    # mounted by create_app and read by nothing here. Issue #171.
+    # mounted by create_app and read by nothing here. Issue #170.
     ("POST", "/api/jremote/v1/delegate/mint"):
         "mints a device credential on behalf of a parent that holds a grant "
         "this machine issued. The caller must be that parent; a suite holding "
