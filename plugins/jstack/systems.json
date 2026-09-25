@@ -905,6 +905,22 @@
       }
     },
     {
+      "id": "compact-delivery",
+      "kind": "hook",
+      "name": "Compact Delivery",
+      "status": "live",
+      "description": "Stop hook that types `/compact` into a session that parked at the seam, waits for the boundary to land, and hands the session back its own work. It is the PRIMARY delivery path and the only one that serves a busy session: the outside sweep only ever looks at a session that has already gone QUIET, so a session that parks at a seam and keeps working is invisible to it and this hook is all it has. The engine is resolved by address, not by name — PATH first because an install outranks a guess, then the locations install.sh writes — because the name resolves through one symlink that `install.sh --uninstall` removes and nothing re-creates, and a hook that could only see the name exited 0 on every Stop for hours while the host sat installed and working. `--which` reports the resolved engine without delivering, so a health probe grades the real thing rather than re-deriving the search.",
+      "code": [
+        "hooks/stop-compact-delivery.sh",
+        "../../host/jstack_host/compact_delivery.py"
+      ],
+      "test": {
+        "type": "script",
+        "path": "tests/compact-delivery-hook.sh",
+        "description": "Runs the real hook against fake hosts planted in each install location: PATH outranks both fallbacks, a deleted ~/.local/bin symlink still reaches the checkout venv and still DELIVERS rather than exiting quiet, `--which` answers under the skip switch and never runs the engine, and a machine with no host at all stays silent and green while `--which` alone fails loudly — so an opt-out is never mistaken for an outage."
+      }
+    },
+    {
       "id": "codex-compaction-carry",
       "kind": "hook",
       "name": "Codex Compaction Carry",
