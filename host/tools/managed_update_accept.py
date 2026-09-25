@@ -84,6 +84,12 @@ DEVICE_ID = ("f=$HOME/.local/state/jremote/parent.json; [ ! -f \"$f\" ] || "
              + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
                  "import json,sys; print(json.load(open(sys.argv[1])).get('device_id',''))")
              + " \"$f\"")
+#: The hub a managed Mac dials, as `attach` recorded it. Empty on a Mac that
+#: has no parent.
+PARENT_URL = ("f=$HOME/.local/state/jremote/parent.json; [ ! -f \"$f\" ] || "
+              + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
+                  "import json,sys; print(json.load(open(sys.argv[1])).get('parent_url',''))")
+              + " \"$f\"")
 #: The build a hub last offered its fleet, as the hub's own feed states it:
 #: which build, and which client it carries. Read after `updates build`, whose
 #: answer names the build but not its parts.
@@ -2220,6 +2226,14 @@ def hub_parent_url(fleet: Fleet, guest: Guest) -> str:
     return f"http://{address}:{port}"
 
 
+#: What `jstack-host attach` prints when the redeem succeeded but the leaf's
+#: own app never spent the local pair link it was handed (`cli._hand_to_app`).
+ATTACH_APP_DECLINED = "the app on this Mac did not take that link"
+#: What it prints, before exiting 1, when the redeem succeeded but the leaf
+#: does not read as managed — a real finding, whatever the app did.
+ATTACH_NOT_MANAGED = "not reading as a managed hub"
+
+
 def join(fleet: Fleet, guest: Guest) -> None:
     """Run the adoption a joining Mac runs, against whichever hub this run has.
 
@@ -2234,11 +2248,29 @@ def join(fleet: Fleet, guest: Guest) -> None:
         guest.sh(fleet.plan["adopt_command"], timeout=900)
         return
     code = local_mint(fleet, guest)
+    parent = hub_parent_url(fleet, guest)
     # The lab image gives admin passwordless sudo through a prompt; attach asks
     # for root once, and priming it here keeps that ask off the guest's screen.
     guest.sh("echo admin | sudo -S -p '' /usr/bin/true")
-    guest.sh(f"{shlex.quote(GUEST_HOST_CLI)} attach {shlex.quote(code)} "
-             f"--parent {shlex.quote(hub_parent_url(fleet, guest))}", timeout=900)
+    # `attach` exits non-zero for two unlike reasons: the redeem failed, or it
+    # succeeded and the leaf's own app then declined the local pair link that
+    # `attach` hands it last (`cli._hand_to_app`; the app step is declinable
+    # by design and install.sh branches on it). A lab guest has no app, so its
+    # every successful adoption ends in the second. The exit status therefore
+    # decides nothing here; the transcript says which of the two it was, and
+    # what the leaf recorded as its parent says whether it is adopted.
+    report = guest.sh(f"{shlex.quote(GUEST_HOST_CLI)} attach {shlex.quote(code)} "
+                      f"--parent {shlex.quote(parent)} 2>&1; "
+                      "printf 'attach-exit=%s\\n' $?", timeout=900)
+    found = re.search(r"attach-exit=(\d+)", report)
+    status = int(found.group(1)) if found else -1
+    declined = status != 0 and ATTACH_APP_DECLINED in report and ATTACH_NOT_MANAGED not in report
+    expect(status == 0 or declined,
+           f"{guest.name}: attach to {LOCAL_HUB} exited {status}: {report.strip()[-600:]}")
+    recorded = guest.sh(PARENT_URL).strip()
+    expect(recorded == parent,
+           f"{guest.name} does not record {LOCAL_HUB} as its parent after attach: "
+           f"{recorded or 'no parent at all'}")
 
 
 def adopt(fleet: Fleet, guest: Guest) -> str:

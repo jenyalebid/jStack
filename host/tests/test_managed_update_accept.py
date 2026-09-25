@@ -1682,7 +1682,8 @@ def test_a_local_hub_mints_the_adoption_code_at_its_own_console(runner, monkeypa
     monkeypatch.setattr(fleet.hub, "call", lambda path, body=None, **kw: minted.append((path, body))
                         or {"status": 200, "body": json.dumps({"code": "LAB-4242"})})
     guest = fleet.leaves[0]
-    monkeypatch.setattr(guest, "sh", lambda command, **kw: ran.append(command) or "")
+    monkeypatch.setattr(guest, "sh", _leaf_shell(ran, attach=ATTACH_NO_APP,
+                                                 parent="http://192.168.2.1:9090"))
     runner.join(fleet, guest)
     assert minted == [("/enrolment/codes",
                        {"name": "Update lab leaf-a", "kind": "host"})], \
@@ -1693,6 +1694,83 @@ def test_a_local_hub_mints_the_adoption_code_at_its_own_console(runner, monkeypa
         f"the guest was not pointed at this Mac's Hub: {attach[0]}"
     assert not any("adopt-to-hub" in c for c in ran), \
         "the lab's ssh-into-the-hub joiner ran against this Mac"
+
+
+#: What a lab guest's `attach` prints: the redeem lands, the mode reads
+#: managed, then the local pair link finds no app and the CLI exits 1.
+ATTACH_NO_APP = ("attached acc-leaf1 to http://192.168.2.1:9090 — this Mac is a managed hub now.\n"
+                 "\nmode  managed\n      the parent hub drives this Mac\n"
+                 "the app on this Mac did not take that link — open it, then type this code into it:\n"
+                 "\n    YU5B-EHM8\n\ngood for 10 minutes.\n"
+                 "attach-exit=1\n")
+
+
+def _leaf_shell(ran, *, attach, parent):
+    """A guest shell that answers the two things join() asks of it: the
+    attach transcript, and what parent.json names afterwards."""
+    def sh(command, **kw):
+        ran.append(command)
+        if " attach " in command:
+            return attach
+        if "parent.json" in command:
+            return parent + "\n"
+        return ""
+    return sh
+
+
+def _local_fleet(runner, monkeypatch):
+    fleet = runner.Fleet({**LOCAL_PLAN, "hub_address": "192.168.2.1"}, run=SlotCountingFleet())
+    monkeypatch.setattr(fleet.hub, "config", lambda: {"local_url": "http://127.0.0.1:9090"})
+    monkeypatch.setattr(fleet.hub, "call", lambda path, body=None, **kw:
+                        {"status": 200, "body": json.dumps({"code": "LAB-4242"})})
+    return fleet
+
+
+def test_a_leaf_with_no_app_still_counts_as_adopted_when_it_records_this_hub(runner, monkeypatch):
+    """`attach` hands the leaf's own app a local pair link last and exits 1
+    when nothing spends it — on a lab guest, every time. The redeem it did
+    first is what adoption is, and the leaf's parent record is the proof."""
+    fleet = _local_fleet(runner, monkeypatch)
+    guest, ran = fleet.leaves[0], []
+    monkeypatch.setattr(guest, "sh", _leaf_shell(ran, attach=ATTACH_NO_APP,
+                                                 parent="http://192.168.2.1:9090"))
+    runner.join(fleet, guest)
+    attach = [c for c in ran if " attach " in c][0]
+    assert "attach-exit=" in attach, \
+        "join must capture attach's exit itself; vm.sh ssh raises on the app's refusal"
+    assert ran.index(attach) < ran.index([c for c in ran if "parent.json" in c][0])
+
+
+def test_a_failed_redeem_fails_the_join_by_name(runner, monkeypatch):
+    fleet = _local_fleet(runner, monkeypatch)
+    guest, ran = fleet.leaves[0], []
+    monkeypatch.setattr(guest, "sh", _leaf_shell(
+        ran, attach="that code is not one this hub minted\nattach-exit=1\n", parent=""))
+    with pytest.raises(runner.AcceptanceFailure, match="leaf-a: attach to localhost exited 1"):
+        runner.join(fleet, guest)
+
+
+def test_an_attach_that_does_not_read_as_managed_fails_even_without_an_app(runner, monkeypatch):
+    fleet = _local_fleet(runner, monkeypatch)
+    guest, ran = fleet.leaves[0], []
+    transcript = ATTACH_NO_APP.replace("attach-exit=1",
+        "The leaf installed but this machine is not reading as a managed hub yet\nattach-exit=1")
+    monkeypatch.setattr(guest, "sh", _leaf_shell(ran, attach=transcript,
+                                                 parent="http://192.168.2.1:9090"))
+    with pytest.raises(runner.AcceptanceFailure, match="exited 1"):
+        runner.join(fleet, guest)
+
+
+def test_a_leaf_recording_another_parent_is_not_adopted(runner, monkeypatch):
+    """A clean exit is not the verdict either: the leaf has to name this hub."""
+    fleet = _local_fleet(runner, monkeypatch)
+    guest, ran = fleet.leaves[0], []
+    monkeypatch.setattr(guest, "sh", _leaf_shell(
+        ran, attach="attached leaf-a to http://10.0.0.5:9090 — this Mac is a managed hub now.\n"
+                    "attach-exit=0\n", parent="http://10.0.0.5:9090"))
+    with pytest.raises(runner.AcceptanceFailure,
+                       match="does not record localhost as its parent.*10.0.0.5"):
+        runner.join(fleet, guest)
 
 
 def test_joining_a_vm_hub_still_runs_the_plan_s_joiner(runner, monkeypatch):
