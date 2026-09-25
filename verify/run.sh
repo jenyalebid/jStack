@@ -13,9 +13,10 @@
 #     verify/run.sh run hub                     a whole category
 #     verify/run.sh run plugin hub/install      any mix
 #
-# Every scenario carries `# USER: <what the person does>` — the heading it
-# implements in the product's TESTING.md, which is the map this runner is
-# read against. A scenario without one is not a journey and `check` says so.
+# Every scenario carries `# USER: <what the person does>` — the journey it
+# implements in the product's acceptance map (jRemote-Project/docs/acceptance.md),
+# which is what this runner is read against. A scenario without one is not a
+# journey and `check` says so.
 #
 # Receipts (terminal log, screenshots, verdict) land under
 # $JSTACK_VERIFY_RECEIPTS (default ~/.local/state/jstack-verify), one
