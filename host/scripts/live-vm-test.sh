@@ -146,7 +146,12 @@ fi
 
 # ── install the host ──
 say "running host/install.sh in the guest"
-vssh 'bash ~/jStack/host/install.sh --yes 2>&1 | tail -25' || \
+# JSTACK_INSTALLER is what the top-level install.sh exports, and host/install.sh
+# refuses without it (79ead6e: one installer, one door). This suite is the one
+# caller that cannot come through that door — it installs the WORKING TREE it
+# just copied in, and the top-level installer clones a ref instead. So it says
+# so, rather than dying at a guard meant for a human pasting the wrong path.
+vssh 'JSTACK_INSTALLER=1 bash ~/jStack/host/install.sh --yes 2>&1 | tail -25' || \
     die "host install failed — see the output above"
 
 # ── give the guest an agent to be about ──

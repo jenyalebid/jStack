@@ -72,9 +72,33 @@ PY
 )"
     [ -n "$PLUGIN" ] || bail "the engine records no installed jstack plugin"
     say "  the engine loads jstack from $PLUGIN"
-    local host_tree="$PLUGIN/../../host"
-    [ -f "$host_tree/jstack_host/plans.py" ] \
-        || bail "the installed plugin has no host tree above it ($host_tree) — every env and plan hook fails open"
+    # Where the host tree actually is. NOT simply above installPath: jstack is
+    # installed from a *directory* marketplace (install.sh:756), so installPath
+    # names a cache copy under ~/.claude/plugins/cache with nothing but the
+    # marketplace above it, while the files the engine executes and the host
+    # beside them are the checkout's. Requiring it above installPath bailed on
+    # every correct install, and this gate is the first thing a guest hits: it
+    # failed both work journeys before their first assertion.
+    CHECKOUT="$(python3 - <<'MARKETPLACE'
+import json, pathlib
+try:
+    settings = json.loads((pathlib.Path.home() / ".claude/settings.json").read_text())
+except (OSError, ValueError):
+    settings = {}
+for name, row in (settings.get("extraKnownMarketplaces") or {}).items():
+    source = (row or {}).get("source") or {}
+    if source.get("source") == "directory" and source.get("path"):
+        print(source["path"]); raise SystemExit
+MARKETPLACE
+)"
+    local host_tree=""
+    for tree in "$PLUGIN/../../host" "$CHECKOUT/host" "$HOME/jStack/host"; do
+        [ "$tree" = "/host" ] && continue
+        if [ -f "$tree/jstack_host/plans.py" ]; then host_tree="$tree"; break; fi
+    done
+    [ -n "$host_tree" ] \
+        || bail "no host tree beside the plugin the engine loads (tried $PLUGIN/../../host, $CHECKOUT/host, $HOME/jStack/host) — every env and plan hook fails open"
+    say "  the hooks reach the host at $host_tree"
     if out="$(python3 - "$host_tree" 2>&1 <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
