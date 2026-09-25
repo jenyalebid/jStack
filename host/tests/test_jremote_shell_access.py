@@ -52,6 +52,33 @@ class _Runner:
         return type("P", (), {"returncode": 0, "stdout": out, "stderr": ""})()
 
 
+class _Sshd(_Runner):
+    """A launchd that holds sshd or does not; bootstrap/bootout flip it, and
+    `print` answers from that state the way the real one does (stdout names
+    the service only when it is loaded)."""
+
+    def __init__(self, on: bool, *, bootstrap_fails: bool = False):
+        super().__init__()
+        self.on = on
+        self.bootstrap_fails = bootstrap_fails
+
+    def __call__(self, argv, **kw):
+        self.calls.append(argv)
+        out, err, rc = "", "", 0
+        if "bootstrap" in argv:
+            if self.bootstrap_fails:
+                err, rc = "Bootstrap failed: 5: Input/output error", 5
+            else:
+                self.on = True
+        elif "bootout" in argv:
+            self.on = False
+        elif "print" in argv:
+            out = ("system/com.openssh.sshd = {\n\tstate = running\n}\n"
+                   if self.on else "")
+            rc = 0 if self.on else 113
+        return type("P", (), {"returncode": rc, "stdout": out, "stderr": err})()
+
+
 def _mode(path):
     return stat.S_IMODE(Path(path).stat().st_mode)
 
@@ -146,10 +173,12 @@ def _step(steps, name):
 
 
 def test_enable_turns_remote_login_on_and_records_that_it_did():
-    runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
+    runner = _Sshd(on=False)
     steps = shell_access.enable(runner=runner, sudo=False)
 
-    assert any("-setremotelogin" in c and "on" in c for c in runner.calls)
+    assert any("bootstrap" in c and shell_access.SSHD_PLIST in c for c in runner.calls)
+    assert any("enable" in c and shell_access.SSHD_SERVICE in c for c in runner.calls)
+    assert runner.on is True
     assert _step(steps, "remote-login")["ok"] is True
 
     # Recorded, so disable knows whether Off is the state to restore.
@@ -159,7 +188,7 @@ def test_enable_turns_remote_login_on_and_records_that_it_did():
 def test_a_grant_lays_no_sudoers_drop_in(tmp_path):
     """A grant carries no standing sudo: shell is the enrolled account's own
     authority, root on a granted machine is asked for per use."""
-    runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
+    runner = _Sshd(on=False)
     steps = shell_access.enable(runner=runner, sudo=False)
     assert _step(steps, "sudoers") is None
     assert not (tmp_path / shell_access.SUDOERS_PATH).exists()
@@ -167,43 +196,62 @@ def test_a_grant_lays_no_sudoers_drop_in(tmp_path):
 
 
 def test_enable_leaves_remote_login_alone_when_it_was_already_on():
-    runner = _Runner(answers={"-getremotelogin": "Remote Login: On\n"})
+    runner = _Sshd(on=True)
     shell_access.enable(runner=runner, sudo=False)
 
-    assert not any("-setremotelogin" in c for c in runner.calls)
+    assert not any("bootstrap" in c or "enable" in c for c in runner.calls)
     assert shell_access.enabled_remote_login() is False
 
 
-def test_enable_runs_systemsetup_under_sudo():
-    runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
+def test_enable_runs_launchctl_under_sudo_and_never_systemsetup():
+    """systemsetup -setremotelogin refuses without Full Disk Access on the
+    calling terminal; a joiner run from a stock Terminal has none (#181)."""
+    runner = _Sshd(on=False)
     shell_access.enable(runner=runner, sudo=True)
-    settings = [c for c in runner.calls if "-setremotelogin" in c]
-    assert settings and settings[0][0] == "sudo"
+    assert all(c[0] == "sudo" and c[1] == shell_access.LAUNCHCTL for c in runner.calls)
+    assert not any("systemsetup" in " ".join(map(str, c)) for c in runner.calls)
+
+
+def test_a_failed_enable_leaves_no_record_so_the_step_stays_owed():
+    """The record used to be written whether or not sshd came up, and every
+    later refresh read it as spent while port 22 stayed shut (#181)."""
+    runner = _Sshd(on=False, bootstrap_fails=True)
+    steps = shell_access.enable(runner=runner, sudo=False)
+
+    owed = _step(steps, "remote-login")
+    assert owed["ok"] is False
+    assert "Input/output error" in owed["note"]
+    assert shell_access.root_step_spent() is False
+    later = shell_access.apply_material({"authorized": [LINE_A], "peers": []},
+                                        Path(os.environ["HOME"]))
+    assert _step(later, "remote-login")["ok"] is False
 
 
 # ── disable: detach's reverse ───────────────────────────────────────────────
 
 def test_disable_restores_remote_login_only_if_enable_turned_it_on(tmp_path):
-    runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
+    runner = _Sshd(on=False)
     shell_access.enable(runner=runner, sudo=False)
 
-    off = _Runner()
+    off = _Sshd(on=True)
     steps = shell_access.disable(runner=off, sudo=False,
                                  root=tmp_path,
                                  authorized_keys=tmp_path / "authorized_keys")
-    assert any("-setremotelogin" in c and "off" in c for c in off.calls)
+    assert any("bootout" in c for c in off.calls)
+    assert any("disable" in c and shell_access.SSHD_SERVICE in c for c in off.calls)
+    assert off.on is False
     assert _step(steps, "remote-login")["ok"] is True
 
 
 def test_disable_leaves_remote_login_up_when_it_predates_the_grant(tmp_path):
-    runner = _Runner(answers={"-getremotelogin": "Remote Login: On\n"})
+    runner = _Sshd(on=True)
     shell_access.enable(runner=runner, sudo=False)
 
-    off = _Runner()
+    off = _Sshd(on=True)
     steps = shell_access.disable(runner=off, sudo=False,
                                  root=tmp_path,
                                  authorized_keys=tmp_path / "authorized_keys")
-    assert not any("-setremotelogin" in c for c in off.calls)
+    assert not any("bootout" in c or "disable" in c for c in off.calls)
     assert "was on before" in _step(steps, "remote-login")["note"]
 
 
@@ -217,7 +265,7 @@ def test_disable_removes_the_sudoers_drop_in_the_block_and_the_identity(tmp_path
     dropin = tmp_path / shell_access.SUDOERS_PATH
     dropin.parent.mkdir(parents=True, exist_ok=True)
     dropin.write_text("alex ALL=(ALL) NOPASSWD: ALL\n")
-    runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
+    runner = _Sshd(on=False)
     shell_access.enable(runner=runner, sudo=False)
 
     steps = shell_access.disable(runner=_Runner(), sudo=False,
@@ -633,14 +681,14 @@ def test_attach_applies_the_shell_the_parent_answered(tmp_path):
     shell = {"authorized": [LINE_A],
              "peers": [{"name": "work-temp", "address": "10.66.0.21",
                         "user": "alex"}]}
-    runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
+    runner = _Sshd(on=False)
     result = _attach(tmp_path, _host_response(shell=shell), runner=runner)
 
     home = tmp_path / "home"
     assert shell_access.read_authorized_block(
         home / ".ssh" / "authorized_keys") == [LINE_A]
     assert not (tmp_path / "root" / shell_access.SUDOERS_PATH).exists()
-    assert any("-setremotelogin" in c for c in runner.calls)
+    assert any("bootstrap" in c for c in runner.calls)
     assert "Host work-temp" in (home / ".ssh" / "config").read_text()
     assert all(s["ok"] for s in result["shell_steps"])
     assert result["shell_steps"], "the steps are the report"
@@ -662,7 +710,7 @@ def test_detach_reverses_shell_access(tmp_path):
     shell_access.identity()
     ak = home / ".ssh" / "authorized_keys"
     shell_access.write_authorized_block(ak, [LINE_A])
-    runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
+    runner = _Sshd(on=False)
     shell_access.enable(runner=runner, sudo=False)
     dropin = tmp_path / shell_access.SUDOERS_PATH
     dropin.parent.mkdir(parents=True, exist_ok=True)
@@ -875,8 +923,7 @@ def test_the_outstanding_root_step_reaches_the_hub_as_a_failed_refresh(fleet):
 
 def test_a_machine_that_spent_the_root_step_owes_nothing(monkeypatch):
     from jstack_host import managed_access, router
-    shell_access.enable(runner=_Runner(answers={"-getremotelogin": "Remote Login: Off\n"}),
-                        sudo=False)
+    shell_access.enable(runner=_Sshd(on=False), sudo=False)
     assert shell_access.root_step_spent() is True
     monkeypatch.setattr(managed_access, "is_leaf", lambda: True)
     monkeypatch.setattr(managed_access, "parent_shell",
@@ -891,8 +938,7 @@ def test_a_machine_whose_grant_found_remote_login_already_on_owes_nothing():
     """`enabled_remote_login` is False here — it answers whether the grant
     turned it on — so it cannot be the predicate on its own: the record's
     existence is what says the root step was spent."""
-    shell_access.enable(runner=_Runner(answers={"-getremotelogin": "Remote Login: On\n"}),
-                        sudo=False)
+    shell_access.enable(runner=_Sshd(on=True), sudo=False)
     assert shell_access.enabled_remote_login() is False
     assert shell_access.root_step_spent() is True
     steps = shell_access.apply_material({"authorized": [LINE_A], "peers": []},
@@ -913,7 +959,7 @@ def test_the_adoption_path_still_stores_the_key_and_spends_the_root_step(tmp_pat
     """Adoption keeps its one root moment and reports every step ok — the late
     presentation added a second road in, it did not change this one."""
     shell = {"authorized": [LINE_A], "peers": []}
-    runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
+    runner = _Sshd(on=False)
     result = _attach(tmp_path, _host_response(shell=shell), runner=runner)
 
     assert _step(result["shell_steps"], "remote-login")["ok"] is True

@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User's agents reach every tool on a fresh install
 # WHAT: installed Mac, nothing hand-wired — every agent tool fires for a session that configured nothing
 # TIME: ~14m
 # GUEST: derived from $JSTACK_VERIFY_AUTHED_BASE (a guest with Claude Code signed in)

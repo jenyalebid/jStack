@@ -44,7 +44,14 @@ _SAFE_WORD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 _RECORD = "shell_access.json"
 
-SYSTEMSETUP = "/usr/sbin/systemsetup"
+LAUNCHCTL = "/bin/launchctl"
+#: Remote Login is sshd under launchd. `systemsetup -setremotelogin` is what
+#: the Settings toggle used to be scripted with, and on macOS 13+ it refuses
+#: unless the *calling terminal* holds Full Disk Access — which a joiner run
+#: from a stock Terminal never has (Work Main, 2026-09-25, #181). launchctl
+#: needs root and nothing else, and the Settings toggle reads the same state.
+SSHD_SERVICE = "system/com.openssh.sshd"
+SSHD_PLIST = "/System/Library/LaunchDaemons/ssh.plist"
 
 
 #: The exact shape of a bare authorized_keys line — type, blob, optional
@@ -271,6 +278,13 @@ def _remote_login_record(state: Path) -> bool | None:
         return None
 
 
+def _sshd_loaded(runner, prefix: list) -> bool:
+    """Whether launchd holds sshd right now — the state Remote Login shows."""
+    probe = runner(prefix + [LAUNCHCTL, "print", SSHD_SERVICE],
+                   capture_output=True, text=True)
+    return "com.openssh.sshd" in (probe.stdout or "")
+
+
 def enable(*, runner=None, sudo: bool = True,
            state: Path | None = None) -> list[dict]:
     """The joiner's root moment: Remote Login on — and nothing else.
@@ -278,29 +292,36 @@ def enable(*, runner=None, sudo: bool = True,
     Remote Login's prior state is probed first and recorded, because turning
     it on is only this grant's to undo if it was off before — a Mac whose
     owner already ran SSH keeps it on a later detach.
+
+    The record is written only when the step actually succeeded. A failed
+    attempt used to leave a record behind, and `root_step_spent` read any
+    record as "spent", so every later refresh graded the machine as done
+    while sshd stayed off (#181). No record means the step is still owed
+    and `apply_material` keeps saying so.
     """
     runner, _, state = _defaults(runner, None, state)
     prefix = ["sudo"] if sudo else []
     steps: list[dict] = []
 
-    probe = runner(prefix + [SYSTEMSETUP, "-getremotelogin"],
-                   capture_output=True, text=True)
-    already_on = "On" in (probe.stdout or "")
+    already_on = _sshd_loaded(runner, prefix)
     turned_on, ok = False, True
     if already_on:
         note = "Remote Login was already on — left as it was"
     else:
-        proc = runner(prefix + [SYSTEMSETUP, "-setremotelogin", "on"],
+        runner(prefix + [LAUNCHCTL, "enable", SSHD_SERVICE],
+               capture_output=True, text=True)
+        proc = runner(prefix + [LAUNCHCTL, "bootstrap", "system", SSHD_PLIST],
                       capture_output=True, text=True)
-        ok = proc.returncode == 0
+        ok = _sshd_loaded(runner, prefix)
         turned_on = ok
         note = ("Remote Login turned on" if ok else
-                "systemsetup could not turn Remote Login on: "
+                "launchctl could not start sshd: "
                 + ((proc.stderr or proc.stdout or "").strip() or "no output"))
     steps.append({"step": "remote-login", "ok": ok, "note": note})
-    state.mkdir(parents=True, exist_ok=True)
-    _record_path(state).write_text(
-        json.dumps({"remote_login_enabled": turned_on}))
+    if ok:
+        state.mkdir(parents=True, exist_ok=True)
+        _record_path(state).write_text(
+            json.dumps({"remote_login_enabled": turned_on}))
     return steps
 
 
@@ -315,14 +336,15 @@ def disable(*, runner=None, sudo: bool = True,
 
     record = _remote_login_record(state)
     if record:
-        # -f, because systemsetup asks for confirmation on the way off.
-        proc = runner(prefix + [SYSTEMSETUP, "-f", "-setremotelogin", "off"],
-                      capture_output=True, text=True)
-        ok = proc.returncode == 0
+        runner(prefix + [LAUNCHCTL, "bootout", SSHD_SERVICE],
+               capture_output=True, text=True)
+        runner(prefix + [LAUNCHCTL, "disable", SSHD_SERVICE],
+               capture_output=True, text=True)
+        ok = not _sshd_loaded(runner, prefix)
         steps.append({"step": "remote-login", "ok": ok,
                       "note": ("Remote Login restored to off" if ok else
-                               "systemsetup could not turn Remote Login off — "
-                               "turn it off by hand if it should be")})
+                               "launchctl could not stop sshd — "
+                               "turn Remote Login off by hand if it should be")})
     elif record is None:
         steps.append({"step": "remote-login", "ok": True,
                       "note": "no grant ever enabled it — left alone"})

@@ -6,10 +6,16 @@
 # Terminal, the real installer from the CDN, the real app. No ssh-invisible
 # probes stand in for a surface a user can see.
 #
-#     verify/run.sh list
+#     verify/run.sh list                        every journey: id, USER line, time, WHAT
+#     verify/run.sh status                      last run, verdict and ref per journey
+#     verify/run.sh check                       exit 1 if any scenario lacks its USER line
 #     verify/run.sh run hub/full-reset          one scenario
 #     verify/run.sh run hub                     a whole category
 #     verify/run.sh run plugin hub/install      any mix
+#
+# Every scenario carries `# USER: <what the person does>` — the heading it
+# implements in the product's TESTING.md, which is the map this runner is
+# read against. A scenario without one is not a journey and `check` says so.
 #
 # Receipts (terminal log, screenshots, verdict) land under
 # $JSTACK_VERIFY_RECEIPTS (default ~/.local/state/jstack-verify), one
@@ -25,14 +31,40 @@ RECEIPTS_ROOT="${JSTACK_VERIFY_RECEIPTS:-$HOME/.local/state/jstack-verify}"
 # needs it fails in common.sh with the remedy named.
 VM="${VM_SH:-$(command -v vm.sh 2>/dev/null || true)}"
 
-usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
+
+hdr() { sed -n "s/^# $1: //p" "$2" | head -1; }   # <FIELD> <file> -> the header line's value
 
 list() {
     for f in "$SCEN"/*/*.sh; do
         id="${f#"$SCEN/"}"; id="${id%.sh}"
-        what="$(sed -n 's/^# WHAT: //p' "$f" | head -1)"
-        time="$(sed -n 's/^# TIME: //p' "$f" | head -1)"
-        printf '  %-24s %-8s %s\n' "$id" "${time:--}" "${what:-}"
+        user="$(hdr USER "$f")"; what="$(hdr WHAT "$f")"; time="$(hdr TIME "$f")"
+        printf '  %-24s %-8s USER: %s\n  %-24s %-8s %s\n' "$id" "${time:--}" "${user:-MISSING}" "" "" "${what:-}"
+    done
+}
+
+check() {  # every scenario names the journey it implements
+    local bad=0
+    for f in "$SCEN"/*/*.sh; do
+        [ -n "$(hdr USER "$f")" ] || { echo "MISSING USER: ${f#"$SCEN/"}" >&2; bad=1; }
+    done
+    [ "$bad" = 0 ] && echo "verify/check: every scenario carries its USER line"
+    return $bad
+}
+
+status() {  # the record: what each journey last said, read off its receipts
+    printf '  %-24s %-16s %-6s %-10s %s\n' JOURNEY "LAST RUN" VERDICT REF USER
+    for f in "$SCEN"/*/*.sh; do
+        id="${f#"$SCEN/"}"; id="${id%.sh}"
+        last="$(ls -d "$RECEIPTS_ROOT/${id//\//-}"/*/ 2>/dev/null | sort | tail -1)"
+        if [ -n "$last" ]; then
+            when="$(basename "$last")"
+            v="$(cat "$last/verdict.txt" 2>/dev/null || echo '?')"
+            ref="$(sed -n "s/^REF='\{0,1\}\([^']*\)'\{0,1\}$/\1/p" "$last/payload.sh" 2>/dev/null | head -1)"
+        else
+            when=never; v=-; ref=-
+        fi
+        printf '  %-24s %-16s %-6s %-10s %s\n' "$id" "$when" "$v" "${ref:--}" "$(hdr USER "$f")"
     done
 }
 
@@ -44,7 +76,9 @@ resolve() {  # category or id -> scenario files
 }
 
 case "${1:-}" in
-    list) list; exit 0 ;;
+    list)   list; exit 0 ;;
+    status) status; exit 0 ;;
+    check)  check; exit $? ;;
     run)  shift ;;
     *)    usage; exit 2 ;;
 esac

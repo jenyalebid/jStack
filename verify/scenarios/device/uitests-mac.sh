@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User drives the Mac app through every journey
 # WHAT: jRemoteUITests against the Mac app inside the Xcode guest
 # TIME: ~45m
 # GUEST: derived from $JSTACK_VERIFY_XCODE_BASE (a guest with Xcode)

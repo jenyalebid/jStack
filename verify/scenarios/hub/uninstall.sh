@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User uninstalls the hub
 # WHAT: README uninstall takes services and app off but keeps state, token and root
 # TIME: ~12m
 # GUEST: pristine

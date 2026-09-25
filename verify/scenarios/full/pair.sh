@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User pairs a device by code
 # WHAT: pairing through the real UI — hub menu bar "Pair a Device", client "Add a Mac", code typed in
 # TIME: ~20m
 # GUEST: pristine

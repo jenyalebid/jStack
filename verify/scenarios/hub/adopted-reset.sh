@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User fully resets an adopted leaf
 # WHAT: README full reset on a machine that was ADOPTED as a managed leaf — the attachment must come off with everything else
 # TIME: ~15m
 # GUEST: pristine

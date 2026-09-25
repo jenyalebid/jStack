@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User installs the plugin alone
 # WHAT: plugin alone — marketplace add + install in Claude Code, no Hub, no app, no services
 # TIME: ~8m
 # GUEST: derived from $JSTACK_VERIFY_AUTHED_BASE (a guest with Claude Code signed in)

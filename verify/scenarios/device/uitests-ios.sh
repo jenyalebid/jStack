@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User drives the iOS app through every journey
 # WHAT: jRemoteUITests on an iOS simulator inside the Xcode guest — the client driven by XCUITest
 # TIME: ~45m
 # GUEST: derived from $JSTACK_VERIFY_XCODE_BASE (a guest with Xcode and simulators)

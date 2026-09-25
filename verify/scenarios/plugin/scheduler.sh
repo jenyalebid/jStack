@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User runs the plugin scheduler without a hub
 # WHAT: the plugin's scheduler becomes a healthy launchd service on a machine with no Hub
 # TIME: ~8m
 # GUEST: derived from $JSTACK_VERIFY_AUTHED_BASE (has git and a modern python; still no Hub)

@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User opens the app onto the local hub after a full reset
 # WHAT: after a full reset, the hub menu reads "· local" — never managed/offline/ghost — and jRemote opens onto this Mac
 # TIME: ~20m
 # GUEST: pristine

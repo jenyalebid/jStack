@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User adopts a Mac as a leaf
 # WHAT: two real Macs — one hub adopts the other as a LEAF; the tunnel must handshake, the leaf must go managed, and its local instance must survive
 # TIME: ~25m
 # GUEST: pristine x2 (needs both VM slots free)

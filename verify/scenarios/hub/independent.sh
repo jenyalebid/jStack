@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User stands up a standalone hub
 # WHAT: a hub that stands alone — installs, calls itself LOCAL (never "managed · offline"), serves, and can actually mint a leaf
 # TIME: ~10m
 # GUEST: pristine

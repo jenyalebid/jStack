@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User opens a session and reads a live terminal
 # WHAT: open a real session and read the terminal the APP renders — it must show a live shell, never flood "can't find terminfo database"
 # TIME: ~12m
 # GUEST: pristine

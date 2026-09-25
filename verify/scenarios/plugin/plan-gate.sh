@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User plans work and the gate holds
 # WHAT: a real session plans the demo project, the gate refuses what the work has not earned, closes on what it has, and every plan hook leaves its mark
 # TIME: ~40m
 # GUEST: derived from $JSTACK_VERIFY_AUTHED_BASE, signed in with the lab token (#140)
