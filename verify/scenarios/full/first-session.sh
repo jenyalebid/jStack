@@ -16,6 +16,12 @@
 # The app's own record of what it did with each link rides along in the
 # receipts, because "the window is missing" and "the link never arrived" are
 # different bugs with the same screenshot.
+#
+# Pictures are taken from OUTSIDE the guest. `screencapture` inside it raises
+# macOS 26's private-window-picker consent dialog, which takes the keyboard and
+# holds it: run 6 drove File ▸ New Chat under one and got -10000, run 7 got
+# -1743 on every AppleEvent after it and read no windows at all. So the run is
+# two payloads with a host-side `guest_shot` between them.
 . "$(dirname "$0")/../../lib/common.sh"
 
 # The client under test. Unset, the install downloads the published signed
@@ -71,7 +77,7 @@ STAGED=$STAGED
 EOF
 
 cat >> "$RECEIPTS/payload.sh" <<'EOF'
-DONE=DONE-FULL-FIRST-SESSION
+DONE=DONE-INSTALL
 . /Users/admin/guest_ui.sh
 export JSTACK_ROOT=/Users/admin/Desktop/Alpine
 export PATH="$HOME/.local/bin:$PATH"
@@ -130,7 +136,6 @@ say "== what the app did with the links the install handed it =="
 ui_link_trace | sed 's/^/  trace| /'
 
 say "== what is on screen after the install =="
-ui_shot ui-1-after-install
 WINDOWS="$(ui_windows jRemote)"
 printf '%s\n' "$WINDOWS" | sed 's/^/  window| /'
 
@@ -138,6 +143,15 @@ GHOSTS="$(printf '%s\n' "$WINDOWS" | grep -cx 'Thread' || true)"
 [ "$GHOSTS" = 0 ] \
     && say "OK the install left no empty shell on screen" \
     || echo "FAIL the install left $GHOSTS empty 'Thread' window(s) — the blank windows on a fresh Mac"
+
+# A window still titled "Thread" is either a shell that never got its link or a
+# thread that got one and drew nothing, and the screenshot cannot tell them
+# apart. This can: an empty shell has nothing in it at all, and a substituted
+# gate reports its own text.
+if [ "$GHOSTS" != 0 ]; then
+    say "  what is inside it:"
+    ui_window_contents jRemote Thread | head -25 | sed 's/^/  inside| /'
+fi
 
 # A session window is titled by the agent, never by the app: `LiveChatTitle`
 # sets it to the record's preview and falls back to `agent.name`, so the
@@ -165,11 +179,22 @@ else
     echo "FAIL no agent process at all — nothing spawned"
 fi
 
+echo "$DONE"
+EOF
+
+# The person's own New Chat, in a second visit to the same Terminal: the app
+# and its windows are exactly where the install left them, and the picture in
+# between is taken from out here.
+cat > "$RECEIPTS/payload-2.sh" <<'EOF'
+#!/bin/bash
+DONE=DONE-FULL-FIRST-SESSION
+. /Users/admin/guest_ui.sh
+
 say "== now the person starts one themselves: File ▸ New Chat =="
-BEFORE="$(printf '%s\n' "$WINDOWS" | grep -cv '^$' || true)"
+BEFORE_WINDOWS="$(ui_windows jRemote)"
+BEFORE="$(printf '%s\n' "$BEFORE_WINDOWS" | grep -cv '^$' || true)"
 ui_new_chat 2>&1 | sed 's/^/  menu| /'
 sleep 15
-ui_shot ui-2-after-new-chat
 AFTER_WINDOWS="$(ui_windows jRemote)"
 printf '%s\n' "$AFTER_WINDOWS" | sed 's/^/  window| /'
 AFTER="$(printf '%s\n' "$AFTER_WINDOWS" | grep -cv '^$' || true)"
@@ -190,7 +215,14 @@ EOF
 
 p="$(guest_payload "$RECEIPTS/payload.sh")"
 guest_term bash "$p"
-for f in ui-1-after-install.png ui-2-after-new-chat.png install.log; do
-    guest_fetch "/Users/admin/$f"
-done
+guest_shot ui-1-after-install
+# A run that never finished the install has nothing for the second half to
+# drive, and a menu driven against a half-installed app fails for a reason
+# that has nothing to do with the app.
+if grep -q DONE-INSTALL "$RECEIPTS/term.log"; then
+    p2="$(guest_payload "$RECEIPTS/payload-2.sh")"
+    guest_term bash "$p2"
+    guest_shot ui-2-after-new-chat
+fi
+guest_fetch /Users/admin/install.log
 finish_verdict "$RECEIPTS/term.log" DONE-FULL-FIRST-SESSION
