@@ -745,6 +745,38 @@ def test_a_cast_leaf_the_hub_revoked_is_adopted_again_before_its_journey(
     assert scripted.adopted == ["leaf-b"]
 
 
+def test_a_cast_leaf_that_detached_is_adopted_again_before_its_journey(
+        runner, subject, earlier, tmp_path, monkeypatch):
+    """Run 20260925-051215: shell_detach had taken acc-leaf1 apart the run
+    before (detach drops the parent record and the machine identity; the host
+    stays), and the rerun's shell_flip read `cat id_jremote.pub` on it — no
+    such file. A leaf with a host and no parent record is adopted again
+    before its journey, as a detached Mac is brought back: no reinstall."""
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    monkeypatch.setattr(runner, "KEY_PATIENCE", 0)
+
+    class Detached(KeyedFleet):
+        def probe(self, name):
+            answer = super().probe(name)
+            answer["adopted"] = name != "leaf-a" or name in self.adopted
+            return answer
+
+    scripted = Detached(release=CANDIDATE, sha=HEAD_SHA,
+                        keys={"hub": "hub-key", "leaf-a": "hub-key", "leaf-b": "hub-key"})
+    fleet = build(runner, scripted, prior=earlier,
+                  adopt_command="/bin/bash ~/adopt-to-hub.sh hub.local")
+    fleet.build = subject
+    offered = []
+    monkeypatch.setattr(fleet, "offer", lambda b: offered.append(b.sha))
+    fleet.cast(fleet.hub, fleet.leaves[0])
+    assert scripted.adopted == ["leaf-a"] and scripted.installed == []
+    assert offered == [], "the leaf already runs the ref under test; nothing is staged"
+    # Adopted, it is a fleet member again and left alone; so is a leaf that never detached.
+    fleet.cast(fleet.hub, fleet.leaves[0])
+    fleet.cast(fleet.hub, fleet.leaves[1])
+    assert scripted.adopted == ["leaf-a"]
+
+
 def test_a_cast_leaf_on_a_build_this_run_never_named_is_staged_onto_the_prior(
         runner, subject, earlier, tmp_path, monkeypatch):
     """Run 14, acc-leaf2: the leaf followed the hub and still ran the prior of

@@ -2065,6 +2065,8 @@ def reach(fleet: Fleet, guest: Guest) -> None:
         return
     if revoked(fleet, guest):
         readopt(fleet, guest)
+    elif detached(guest):
+        rejoin(fleet, guest)
     if follows(fleet, guest):
         running = guest.installed()["sha"]
         named = {ref.sha for ref in (fleet.prior, fleet.build) if ref is not None}
@@ -2101,6 +2103,30 @@ def revoked(fleet: Fleet, guest: Guest) -> bool:
     expect(answer["status"] == 200, f"the hub would not list its devices: {answer}")
     rows = json.loads(answer["body"])["devices"]
     return any(row["id"] == device and row.get("revoked") for row in rows)
+
+
+def detached(guest: Guest) -> bool:
+    """Whether this guest has a host and no parent record.
+
+    That is what `jstack-host detach` leaves behind: the host stays, the
+    parent record and the machine identity go. The shell_detach journey
+    leaves leaves[0] exactly so, and under the build model the same Macs
+    carry into the next run — whose first shell journey then reads an
+    identity detach destroyed (run 20260925-051215: shell_flip failed on
+    `cat id_jremote.pub`, no such file) before it measured anything.
+    """
+    return not guest.probe().get("adopted", True)
+
+
+def rejoin(fleet: Fleet, guest: Guest) -> None:
+    """A detached Mac is brought back the way a Mac joins: adopted again.
+    Nothing is reinstalled — the host runs fine; adoption records the parent
+    and mints the identity detach destroyed."""
+    print(f"{guest.name}: detached from its hub, no parent record; adopting it again, "
+          "as a detached Mac is brought back", flush=True)
+    adopt(fleet, guest)
+    expect(not detached(guest),
+           f"{guest.name} still records no parent after adoption")
 
 
 def readopt(fleet: Fleet, guest: Guest) -> None:
