@@ -554,11 +554,11 @@ def test_the_cutover_carries_the_identity_a_scheduled_job_commits_under():
             "PATH": "/usr/bin:/bin",
             "PYTHONPATH": "/srv/plugin",
             "SCHEDULER_HOME": "/srv/ops",
-            "GIT_AUTHOR_NAME": "jandj-agent",
+            "GIT_AUTHOR_NAME": "release-bot",
             "GIT_AUTHOR_EMAIL": "agent@example.invalid",
-            "GIT_COMMITTER_NAME": "jandj-agent",
+            "GIT_COMMITTER_NAME": "release-bot",
             "GIT_COMMITTER_EMAIL": "agent@example.invalid"}})
-    assert declared["environment"]["GIT_AUTHOR_NAME"] == "jandj-agent"
+    assert declared["environment"]["GIT_AUTHOR_NAME"] == "release-bot"
     assert declared["environment"]["GIT_COMMITTER_EMAIL"] == "agent@example.invalid"
     assert declared["environment"]["SCHEDULER_HOME"] == "/srv/ops"
     # Superseded, not lost: the import roots ride on the argv above.
