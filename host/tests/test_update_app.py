@@ -1,6 +1,7 @@
 # NOTE — destructive install/uninstall paths: never run these for real on the home
 # machine (the production Hub). Every launchd / JStackHub / sudo boundary must be
 # stubbed; conftest fails the test if one is reached. Real proofs run in lab guests.
+import json
 from pathlib import Path
 
 import pytest
@@ -353,3 +354,67 @@ def test_disabled_host_observation_reports_installed_completion_not_running_sour
     assert observed["host_source"] == {} and observed["host_running"] is False
     monkeypatch.setattr(backend, "verify", lambda _: False)
     assert not backend.observe(job)["verified"]
+
+
+# --- private capabilities and sealed roles across an update -----------------
+
+SEALED = {role: f"live.jstack.hub.{role}.plist" for role in ("host", "menu", "updater")}
+CAPABILITY = {"plist": "live.jstack.automation.dashboard.plist", "job_sha256": "aa" * 32}
+
+
+def bundle(root, services, catalog=None):
+    resources = root / "Contents/Resources"
+    resources.mkdir(parents=True)
+    (resources / "services.json").write_text(json.dumps(services))
+    if catalog is not None:
+        (resources / "automation-catalog.json").write_text(json.dumps(catalog))
+    return root
+
+
+def capability(name):
+    return {name: f"live.jstack.automation.{name}.plist"}
+
+
+def ownership(tmp_path, installed, candidate):
+    backend = update_app.AppBackend(tmp_path, {"menubar_path": str(installed)})
+    return backend._check_ownership(candidate, installed)
+
+
+def test_a_capability_the_candidate_seals_as_a_role_is_the_cutover_not_a_migration(tmp_path):
+    """The Mac this grew up on ran the scheduler as a catalogued capability. The
+    cutover (procedures: one transaction) removes it from the private catalog
+    while the bundle seals a role of the same name — the update performs that
+    move, so the catalog check must read it as the cutover and nothing else."""
+    installed = bundle(tmp_path / "installed.app", {**SEALED, **capability("dashboard"), **capability("scheduler")},
+                       {"dashboard": CAPABILITY, "scheduler": {**CAPABILITY, "plist": "live.jstack.automation.scheduler.plist"}})
+    candidate = bundle(tmp_path / "candidate.app",
+                       {**SEALED, "scheduler": "live.jstack.hub.scheduler.plist", **capability("dashboard")},
+                       {"dashboard": CAPABILITY})
+    ownership(tmp_path, installed, candidate)
+
+
+def test_any_other_private_capability_change_is_a_separate_migration(tmp_path):
+    installed = bundle(tmp_path / "installed.app", {**SEALED, **capability("dashboard"), **capability("relay")},
+                       {"dashboard": CAPABILITY, "relay": CAPABILITY})
+    dropped = bundle(tmp_path / "dropped.app", {**SEALED, **capability("dashboard")}, {"dashboard": CAPABILITY})
+    with pytest.raises(update_app.releases.ReleaseError, match="separate migration"):
+        ownership(tmp_path, installed, dropped)  # the role goes with it: ownership refuses first
+    changed = bundle(tmp_path / "changed.app", {**SEALED, **capability("dashboard"), **capability("relay")},
+                     {"dashboard": CAPABILITY, "relay": {**CAPABILITY, "job_sha256": "bb" * 32}})
+    with pytest.raises(update_app.releases.ReleaseError, match="private capabilities"):
+        ownership(tmp_path, installed, changed)
+
+
+def test_a_new_sealed_role_is_accepted_and_any_other_ownership_change_refused(tmp_path):
+    """A work Mac carries no private catalog; the one-hub release seals a
+    scheduler role its predecessor did not. That is the update, not a migration.
+    A role the candidate drops, or a name it adds without sealing, still is."""
+    installed = bundle(tmp_path / "installed.app", SEALED)
+    grown = bundle(tmp_path / "grown.app", {**SEALED, "scheduler": "live.jstack.hub.scheduler.plist"})
+    ownership(tmp_path, installed, grown)
+    shrunk = bundle(tmp_path / "shrunk.app", {role: SEALED[role] for role in ("host", "updater")})
+    with pytest.raises(update_app.releases.ReleaseError, match="service ownership"):
+        ownership(tmp_path, installed, shrunk)
+    unsealed = bundle(tmp_path / "unsealed.app", {**SEALED, **capability("relay")}, {"relay": CAPABILITY})
+    with pytest.raises(update_app.releases.ReleaseError, match="service ownership"):
+        ownership(tmp_path, installed, unsealed)

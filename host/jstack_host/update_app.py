@@ -184,6 +184,29 @@ class AppBackend(MacBackend):
                 or any(value not in OBSERVABLE for value in statuses.values())):
             raise releases.ReleaseError("cannot observe current app service approvals")
 
+    def _check_ownership(self, candidate: Path, installed: Path):
+        """What may change between the installed bundle and the candidate.
+
+        A sealed role the candidate adds is the update itself: `apply` ends by
+        adopting the scheduler, which is how a machine gains that role. A private
+        capability that vanishes from the catalog while the candidate seals a
+        role of the same name is the same cutover seen from the machine whose
+        scheduler was catalogued — the one this grew up on — and the snapshot
+        carries it: the capability is stopped under its old label and the role
+        registered under its new one. Every other change to the catalog, and
+        any role the candidate drops, is a separate migration.
+        """
+        from .app_services import sealed_roles
+        sealed = set(sealed_roles(candidate))
+        installed_roles, candidate_roles = set(self._definitions(installed)), set(self._definitions(candidate))
+        if installed_roles - candidate_roles or (candidate_roles - installed_roles) - sealed:
+            raise releases.ReleaseError("changing service ownership requires a separate migration")
+        before = json.loads(self._automation_catalog(installed))
+        after = json.loads(self._automation_catalog(candidate))
+        cutover = {name for name in before if name in sealed and name not in after}
+        if {name: job for name, job in before.items() if name not in cutover} != after:
+            raise releases.ReleaseError("changing private capabilities requires a separate migration")
+
     def stage(self, manifest: dict, directory: Path) -> dict:
         from . import update_plugins
         stage = Path(tempfile.mkdtemp(prefix="app-stage-", dir=directory))
@@ -194,7 +217,6 @@ class AppBackend(MacBackend):
         statuses = self._statuses(app)
         self._validate_statuses(statuses)
         installed_catalog = self._automation_catalog(app)
-        installed_roles = set(self._definitions(app))
         apps = {}
         built_here = self.built_here(manifest)
         for kind in ("menubar", "client"):
@@ -226,10 +248,7 @@ class AppBackend(MacBackend):
                         identity.get("release") != manifest["release"] or
                         identity.get("package_sha256") != fingerprint(packages / "jstack_host")):
                     raise releases.ReleaseError("signed app source identity differs from release")
-                if self._automation_catalog(candidate) != installed_catalog:
-                    raise releases.ReleaseError("changing private capabilities requires a separate migration")
-                if set(self._definitions(candidate)) != installed_roles:
-                    raise releases.ReleaseError("changing service ownership requires a separate migration")
+                self._check_ownership(candidate, app)
             target = Path(self.config[kind + "_path"])
             if not os.access(target.parent, os.W_OK):
                 raise releases.ReleaseError("app destination is not writable")
