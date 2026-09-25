@@ -44,11 +44,18 @@ def validate(value: dict) -> dict:
         # here or lost. Scoped to the families the daemon reads plus PATH: this
         # block reaches a child process by name, and a sealed service must not
         # become a way to set DYLD_* or PYTHONPATH on one.
+        #
+        # GIT_* belongs here too. The daemon's whole job is running other
+        # people's work, some of which commits, and the identity it commits
+        # under is declared — not inherited from whatever global config the
+        # machine happens to carry. It is inert to the dynamic loader, which is
+        # what this allowlist is actually defending.
         if not isinstance(environment, dict) or any(
                 not isinstance(key, str) or not isinstance(item, str) or "\x00" in item or
-                not (key.startswith(("SCHEDULER_", "JSTACK_")) or key == "PATH")
+                not (key.startswith(("SCHEDULER_", "JSTACK_", "GIT_")) or key == "PATH")
                 for key, item in environment.items()):
-            raise ValueError("the scheduler environment carries only PATH and SCHEDULER_/JSTACK_ settings")
+            raise ValueError("the scheduler environment carries only PATH and "
+                             "SCHEDULER_/JSTACK_/GIT_ settings")
     if "network_transaction" in value and (not isinstance(value["network_transaction"], str)
             or not re.fullmatch(r"[a-f0-9]{32}", value["network_transaction"])):
         raise ValueError("network_transaction must identify a reviewed transaction")

@@ -539,3 +539,60 @@ def test_a_catalogued_capability_cannot_shadow_a_sealed_role():
         assert "--scheduler-root" in str(raised.value)
         assert repr(role) in str(raised.value)
     build_hub.refuse_reserved({"worker": {}, "indexer": {}})
+
+
+def test_the_cutover_carries_the_identity_a_scheduled_job_commits_under():
+    """This machine's own legacy job declares GIT_AUTHOR_* and GIT_COMMITTER_*.
+    Dropping them moves every commit a scheduled job makes onto whatever global
+    config supplies — silently, on the one machine nobody re-checks."""
+    from jstack_host.install_signed import scheduler_declaration
+    declared = scheduler_declaration({
+        "ProgramArguments": ["/opt/py/bin/python3", "-c",
+                             "import sys, runpy; sys.path[:0] = ['/srv/plugin']; "
+                             "runpy.run_module('scheduler', run_name='__main__')"],
+        "EnvironmentVariables": {
+            "PATH": "/usr/bin:/bin",
+            "PYTHONPATH": "/srv/plugin",
+            "SCHEDULER_HOME": "/srv/ops",
+            "GIT_AUTHOR_NAME": "jandj-agent",
+            "GIT_AUTHOR_EMAIL": "agent@example.invalid",
+            "GIT_COMMITTER_NAME": "jandj-agent",
+            "GIT_COMMITTER_EMAIL": "agent@example.invalid"}})
+    assert declared["environment"]["GIT_AUTHOR_NAME"] == "jandj-agent"
+    assert declared["environment"]["GIT_COMMITTER_EMAIL"] == "agent@example.invalid"
+    assert declared["environment"]["SCHEDULER_HOME"] == "/srv/ops"
+    # Superseded, not lost: the import roots ride on the argv above.
+    assert "PYTHONPATH" not in declared["environment"]
+    assert declared["plugin_root"] == "/srv/plugin"
+
+
+def test_a_setting_the_cutover_cannot_carry_stops_it_and_says_which():
+    """Silence is the failure mode that matters here: the adoption runs inside
+    an update, so a variable that vanishes is never read by anyone again."""
+    from jstack_host.install_signed import scheduler_declaration
+    with pytest.raises(ValueError, match="AWS_PROFILE"):
+        scheduler_declaration({
+            "ProgramArguments": ["/opt/py/bin/python3", "-c",
+                                 "import sys, runpy; sys.path[:0] = ['/srv/plugin']; "
+                                 "runpy.run_module('scheduler', run_name='__main__')"],
+            "EnvironmentVariables": {"PATH": "/usr/bin", "AWS_PROFILE": "release"}})
+
+
+def test_the_sealed_service_still_refuses_to_set_a_loader_path_on_its_child():
+    """Widening the allowlist for GIT_ must not have widened it for the
+    families that decide which code a child process loads."""
+    from jstack_host import service_settings
+    base = {"python": "/opt/py/bin/python3", "plugin_root": "/srv/plugin"}
+    host = {"schema": 1, "port": 9090, "app": "/Applications/jStack Hub.app",
+            "environment": {}}
+    # `validate` normalises every reason into one refusal, so what is asserted
+    # is that the same settings minus the hostile variable are accepted below:
+    # the variable is the only difference between the two calls.
+    for hostile in ("DYLD_INSERT_LIBRARIES", "PYTHONPATH", "LD_PRELOAD", "PYTHONHOME"):
+        with pytest.raises(ValueError):
+            service_settings.validate(
+                {**host, "scheduler": {**base, "environment": {hostile: "/tmp/evil"}}})
+    ok = service_settings.validate(
+        {**host, "scheduler": {**base,
+                               "environment": {"GIT_AUTHOR_NAME": "a", "PATH": "/usr/bin"}}})
+    assert ok["scheduler"]["environment"]["GIT_AUTHOR_NAME"] == "a"

@@ -161,6 +161,12 @@ def legacy_scheduler_plist() -> Path:
     return Path.home() / "Library/LaunchAgents" / f"{LEGACY_SCHEDULER}.plist"
 
 
+#: Legacy environment the sealed role replaces rather than carries. PYTHONPATH
+#: and PYTHONHOME are superseded by the import roots on the daemon's argv; the
+#: sealed interpreter ignores them anyway.
+SUPERSEDED_ENV = frozenset({"PYTHONPATH", "PYTHONHOME"})
+
+
 def scheduler_declaration(definition: dict) -> dict:
     """The sealed service's settings, read off the LaunchAgent being retired.
 
@@ -174,6 +180,13 @@ def scheduler_declaration(definition: dict) -> dict:
     The environment is filtered rather than trusted: the legacy job carries a
     PYTHONPATH the sealed interpreter ignores anyway, and a sealed service is
     not a way to set import paths on a child process.
+
+    What it may not do is drop a setting quietly. This machine's own legacy job
+    declared GIT_AUTHOR_* and GIT_COMMITTER_*, and an earlier version of this
+    filter discarded all four without a word — which would have moved every
+    commit a scheduled job makes onto whatever identity global config happens
+    to supply, on the one machine nobody would think to check. A variable this
+    function does not recognise stops the adoption and gets named.
     """
     import ast
     argv = definition.get("ProgramArguments") or []
@@ -189,8 +202,22 @@ def scheduler_declaration(definition: dict) -> dict:
     if not roots or not all(isinstance(item, str) for item in roots):
         raise ValueError("the legacy scheduler job's import roots are unreadable")
     environment = definition.get("EnvironmentVariables") or {}
-    kept = {key: value for key, value in environment.items()
-            if isinstance(value, str) and (key == "PATH" or key.startswith(("SCHEDULER_", "JSTACK_")))}
+    kept, dropped = {}, []
+    for key, value in environment.items():
+        if not isinstance(value, str):
+            dropped.append(key)
+        elif key == "PATH" or key.startswith(("SCHEDULER_", "JSTACK_", "GIT_")):
+            kept[key] = value
+        elif key in SUPERSEDED_ENV or key.startswith(("DYLD_", "LD_")):
+            # Deliberate, and each for a stated reason: the import roots now
+            # ride on the command line (`scheduler_command`), and the loader
+            # families are what a sealed service must never hand a child.
+            continue
+        else:
+            dropped.append(key)
+    if dropped:
+        raise ValueError("the legacy scheduler job declares settings this Hub "
+                         "cannot carry across: " + ", ".join(sorted(dropped)))
     return {"python": argv[0], "plugin_root": roots[0], "environment": kept}
 
 
