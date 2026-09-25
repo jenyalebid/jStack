@@ -68,6 +68,16 @@ TRUST_KEY = ("f=$HOME/.local/state/jremote/updates/config.json; [ ! -f \"$f\" ] 
              + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
                  "import json,sys; print(json.load(open(sys.argv[1])).get('public_key',''))")
              + " \"$f\"")
+#: Whether the Hub on a guest is one that machine compiled for itself. The
+#: one-file installer leaves such a Hub alone when it answers (install.sh:
+#: "moving it forward is `jstack-host updates build`"), so it cannot move
+#: that machine to another commit; it replaces a published Hub in place.
+SOURCE_BUILT = ("f='/Applications/jStack Hub.app/Contents/Resources/packages/release-identity.json'; "
+                "if [ -f \"$f\" ] && /usr/bin/grep -q "
+                "'\"kind\"[[:space:]]*:[[:space:]]*\"source-build\"' \"$f\"; "
+                "then echo source-build; fi")
+#: The machine key a host recorded for itself at install; empty with no host.
+HOST_KEY = "f=$HOME/.local/state/jremote/host-id; [ ! -f \"$f\" ] || /bin/cat \"$f\""
 #: The credential a managed Mac presents to its hub, as `attach` recorded it.
 #: Empty on a Mac that has no parent.
 DEVICE_ID = ("f=$HOME/.local/state/jremote/parent.json; [ ! -f \"$f\" ] || "
@@ -2000,9 +2010,26 @@ def reach(fleet: Fleet, guest: Guest) -> None:
     same Macs carry from run to run, and a journey that took such a leaf as
     it stood would measure a move from a commit this run never named. It is
     staged onto the earlier ref, as every leaf of a real fleet starts from
-    the build it last took.
+    the build it last took. Under a local hub that names no earlier ref it
+    is moved onto the ref under test instead, since that hub serves it
+    nothing else and the shell journeys read a leaf adopted by that ref.
+
+    A leaf with no host at all is installed onto the run's ref and adopted;
+    the pristine guest alone is left empty, for the fresh install.
+
+    How a leaf is moved is the installer's own rule: a published Hub is
+    replaced in place; a Hub the machine built itself is left alone by the
+    installer, so that guest goes back to the base image first (`move`).
     """
-    if guest is fleet.hub or not trust_key(guest):
+    if guest is fleet.hub or guest is fleet.fresh:
+        return
+    target = fleet.prior or fleet.build
+    if not trust_key(guest):
+        # A leaf with no host at all — the base image, as `vm.sh reset` leaves
+        # it — is installed onto the run's ref by the one-file install and
+        # adopted, the way a Mac joins. Only the pristine guest is left so.
+        expect(target is not None, "build the ref under test before casting a leaf")
+        move(fleet, guest, target, "nothing", None, why="which has no host at all")
         return
     if revoked(fleet, guest):
         readopt(fleet, guest)
@@ -2013,8 +2040,14 @@ def reach(fleet: Fleet, guest: Guest) -> None:
             print(f"{guest.name} runs {running[:8]}, which this run never named: staging it "
                   f"onto {fleet.prior.slug} first", flush=True)
             stage_prior(fleet, guest)
+        elif running not in named and isinstance(fleet.hub, LocalHub):
+            # No earlier ref to stage onto, and a local hub never builds; the
+            # shell journeys read a leaf adopted by the ref under test, so
+            # that is where it goes.
+            expect(fleet.build is not None, "build the ref under test before casting a leaf")
+            move(fleet, guest, fleet.build, running, None,
+                 why=f"which this run never named, and the hub is {LOCAL_HUB}")
         return
-    target = fleet.prior or fleet.build
     expect(target is not None, "build the ref under test before casting a leaf")
     move(fleet, guest, target, guest.installed()["sha"], None)
 
@@ -2055,16 +2088,50 @@ def move(fleet: Fleet, guest: Guest, target: Build, running: str, journey, *,
     adoption; what that leaves must take the hub's key on its heartbeat."""
     said = (f"{guest.name} runs {running}, {why}: moving it onto {target.slug} by "
             "the one-file install and adopting it, as a published Mac is moved")
-    if journey is not None:
-        journey.note(said)
+    say = journey.note if journey is not None else (lambda text: print(text, flush=True))
+    say(said)
+    if source_built(guest):
+        # The installer leaves a Hub the machine built itself alone, so run
+        # over it the one-file install moves nothing (run 22:21 on acc-leaf1:
+        # five journeys measured a leaf that never left 43ada1dc). A Mac that
+        # cannot move itself forward is reinstalled from scratch; the lab's
+        # from-scratch is the base image. The hub forgets the row the old
+        # install answered for first, so no row is left that no Mac answers.
+        say(f"{guest.name} runs a Hub it built itself, which the one-file installer leaves "
+            f"alone: back to the base image, then installed fresh from {target.slug}, as a "
+            "Mac that cannot move itself forward is reinstalled from scratch")
+        forget(fleet, guest)
+        guest.reset()
+        guest.start()
+        fleet.prepare(guest)
+        install_build(guest, target, fresh=True)
     else:
-        print(said, flush=True)
-    install_build(guest, target)
+        install_build(guest, target)
+    state = guest.installed()
+    expect(state["sha"] == target.sha,
+           f"{guest.name} runs {state['sha']} after the move, not {target.slug}: "
+           "the one-file install left the Hub it found")
     adopt(fleet, guest)
     expect(follows(fleet, guest),
            f"{guest.name} on {target.slug} never took the hub's key: a ref from "
            "before a9fe663 trusts only the bundle that installed it (#144), and "
            "nothing this hub serves can reach it")
+
+
+def source_built(guest: Guest) -> bool:
+    return guest.sh(SOURCE_BUILT).strip() == "source-build"
+
+
+def forget(fleet: Fleet, guest: Guest) -> None:
+    """Withdraw the hub's row for the Mac this guest was, before the guest
+    stops being it. A row the hub never held is nothing to withdraw."""
+    key = guest.sh(HOST_KEY).strip()
+    fleet._ids.pop(guest.name, None)
+    if not key:
+        return
+    answer = fleet.hub.call(f"/hosts/{key}/forget", {})
+    expect(answer["status"] in (200, 404),
+           f"the hub would not forget {guest.name} ({key}): {answer['status']} {answer['body'][:300]}")
 
 
 def stage_prior(fleet: Fleet, guest: Guest, *, journey=None) -> dict:

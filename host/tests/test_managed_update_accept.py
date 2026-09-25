@@ -1711,3 +1711,110 @@ def test_a_local_hub_without_an_address_asks_the_guest_for_its_gateway(runner, m
     guest = fleet.leaves[0]
     monkeypatch.setattr(guest, "sh", lambda command, **kw: "192.168.2.1\n")
     assert runner.hub_parent_url(fleet, guest) == "http://192.168.2.1:9091"
+
+
+class SourceBuiltFleet(KeyedFleet):
+    """A leaf whose Hub it compiled itself: the one-file installer leaves that
+    Hub alone, so an install over it moves nothing until the guest is reset."""
+
+    def __init__(self, *, sticky=False, **kwargs):
+        super().__init__(**kwargs)
+        self.source_built = {"leaf-a"}
+        self.sticky = sticky  # the install lands nothing, whatever was tried
+        self.reset_names: list[str] = []
+
+    def __call__(self, argv, **kwargs):
+        _, action, name, *rest = argv
+        command = rest[0] if rest else ""
+        if action == "reset":
+            self.reset_names.append(name)
+            self.source_built.discard(name)
+            self.keys[name] = ""
+        if action == "ssh" and "release-identity.json" in command:
+            return subprocess.CompletedProcess(
+                argv, 0, "source-build\n" if name in self.source_built else "\n", "")
+        if action == "ssh" and "jremote/host-id" in command:
+            return subprocess.CompletedProcess(argv, 0, f"machine-{name}\n", "")
+        if action == "ssh" and command.startswith("for p in"):
+            return subprocess.CompletedProcess(argv, 0, "\n", "")  # pristine, or nothing listed
+        if self.sticky and action == "ssh" and "install.sh --yes" in command:
+            self.installed.append(name)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return super().__call__(argv, **kwargs)
+
+
+def _source_built(runner, monkeypatch, tmp_path, earlier, subject, **kwargs):
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    monkeypatch.setattr(runner, "KEY_PATIENCE", 0)
+    scripted = SourceBuiltFleet(release=CANDIDATE, sha="3" * 40, **kwargs)
+    fleet = build(runner, scripted, prior=earlier,
+                  adopt_command="/bin/bash ~/adopt-to-hub.sh hub.local")
+    fleet.build = subject
+    monkeypatch.setattr(fleet, "offer", lambda b: pytest.fail("the hub built"))
+    return scripted, fleet
+
+
+def test_a_leaf_whose_hub_it_built_itself_goes_back_to_the_base_image_before_the_move(
+        runner, subject, earlier, tmp_path, monkeypatch):
+    """Run 22:21 on acc-leaf1: the leaf ran a Hub a VM hub had built and served
+    it, main's installer said "Hub already installed and answering" and left
+    it, and five journeys measured a leaf that never moved. The installer's
+    rule decides: such a guest is reset, installed fresh and adopted, and the
+    hub forgets the row the old install answered for first."""
+    scripted, fleet = _source_built(runner, monkeypatch, tmp_path, earlier, subject,
+                                    keys={"hub": "hub-key", "leaf-a": "published-key"})
+    notes = SimpleNamespace(lines=[], note=lambda text: notes.lines.append(text))
+    state = runner.stage_prior(fleet, fleet.leaves[0], journey=notes)
+    assert state["sha"] == PRIOR_SHA
+    assert scripted.reset_names == ["leaf-a"]
+    assert scripted.forgotten == ["machine-leaf-a"]
+    assert scripted.installed == ["leaf-a"] and scripted.adopted == ["leaf-a"]
+    order = [c[1] for c in scripted.calls if c[1] == "reset"
+             or (len(c) > 3 and "install.sh --yes" in c[3])]
+    assert order == ["reset", "ssh"], "reset first, then the fresh install"
+    assert any("built itself" in line and "base image" in line for line in notes.lines)
+    assert scripted.keys["leaf-a"] == "hub-key"
+
+
+def test_a_move_the_installer_declined_fails_by_name_before_adoption(
+        runner, subject, earlier, tmp_path, monkeypatch):
+    scripted, fleet = _source_built(runner, monkeypatch, tmp_path, earlier, subject,
+                                    keys={"hub": "hub-key", "leaf-a": "published-key"},
+                                    sticky=True)
+    scripted.source_built = set()  # a published Hub, installed over in place
+    with pytest.raises(runner.AcceptanceFailure, match="after the move.*left the Hub it found"):
+        runner.stage_prior(fleet, fleet.leaves[0])
+    assert scripted.installed == ["leaf-a"] and scripted.adopted == []
+
+
+def test_a_following_leaf_on_an_unnamed_commit_goes_onto_the_ref_under_test_when_a_local_hub_names_no_prior(
+        runner, subject, monkeypatch):
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    scripted = KeyedFleet(keys={"leaf-a": "hub-key"}, release=CANDIDATE, sha="3" * 40)
+    fleet = runner.Fleet(LOCAL_PLAN, run=scripted)
+    fleet.prior, fleet.build = None, subject
+    monkeypatch.setattr(fleet.hub, "trust_key", lambda: "hub-key")
+    monkeypatch.setattr(runner, "revoked", lambda f, g: False)
+    moved = []
+    monkeypatch.setattr(runner, "move", lambda f, g, target, running, journey, **kw:
+                        moved.append((g.name, target.sha, running, kw.get("why"))))
+    runner.reach(fleet, fleet.leaves[0])
+    assert moved == [("leaf-a", HEAD_SHA, "3" * 40, "which this run never named, and the hub is localhost")]
+    # On a named commit it is left alone.
+    scripted.sha = HEAD_SHA
+    runner.reach(fleet, fleet.leaves[0])
+    assert len(moved) == 1
+
+
+def test_a_leaf_with_no_host_at_all_is_installed_onto_the_run_s_ref_and_adopted(
+        runner, subject, earlier, tmp_path, monkeypatch):
+    scripted, fleet, offered = _keyed(runner, monkeypatch, tmp_path, earlier, subject,
+                                      keys={"hub": "hub-key", "leaf-a": "", "fresh": ""})
+    fleet.fresh = runner.Guest("fresh", Path("/bin/vm.sh"), run=scripted)
+    moved = []
+    monkeypatch.setattr(runner, "move", lambda f, g, target, running, journey, **kw:
+                        moved.append((g.name, target.sha)))
+    runner.reach(fleet, fleet.leaves[0])
+    runner.reach(fleet, fleet.fresh)
+    assert moved == [("leaf-a", PRIOR_SHA)], "the pristine guest alone stays empty"
+    assert offered == []
