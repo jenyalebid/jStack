@@ -87,6 +87,18 @@ esac
 files=""
 for want in "$@"; do files="$files $(resolve "$want")"; done
 
+# Preconditions the operator names, checked before the first guest boots. A
+# scenario that signs in needs a token file, and `guest_signin` runs after
+# `guest_fresh` — so without this, the missing variable is discovered two
+# minutes into a clone, and the boot slot and the clone are both spent.
+for f in $files; do
+    grep -q '^[[:space:]]*guest_signin' "$f" || continue
+    tok="${JSTACK_VERIFY_OAUTH_TOKEN_FILE:-}"
+    [ -n "$tok" ] || { echo "FAIL ${f#"$SCEN/"} signs in: set JSTACK_VERIFY_OAUTH_TOKEN_FILE to a file holding a long-lived Claude Code OAuth token (#140)" >&2; exit 1; }
+    [ -s "$tok" ] || { echo "FAIL no lab sign-in token at $tok (#140)" >&2; exit 1; }
+    break
+done
+
 fail=0; summary=""; total=$(echo $files | wc -w); n=0
 for f in $files; do
     n=$((n + 1))
