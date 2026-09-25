@@ -197,12 +197,34 @@ def uninstall(configuration: dict, out, *, all_services: bool = False) -> int:
 
 
 def status(configuration: dict, *, port: int | None, out) -> int:
+    """What the Hub says about each role, CROSS-EXAMINED against launchd.
+
+    `control(app, "status")` reads a registration record. A record is a statement of
+    intent — it says this role is meant to be running — and on 2026-09-24 the menu's
+    record said `enabled` twice while launchd held no such job and no menu bar item
+    existed on the screen. Nothing in this command disagreed, so the Hub reported a
+    healthy menu at the exact moment the user was looking at its absence, and the only
+    way the fault was found was a person noticing an icon missing.
+
+    So every role is asked of launchd as well, not just the host. When the record and
+    launchd disagree the line says so and the command exits non-zero, because a
+    disagreement is precisely the state that needs a human: the record being `enabled`
+    is also what makes a plain `register` a no-op, so the repair is to unregister the
+    stale record first and register again.
+    """
     app = Path(configuration["app"])
     verify(app)
     observed = observe(app, configuration)
     print(f"owner      {app}", file=out)
+    stale = []
     for role in ("host", "menu"):
-        print(f"{role:10} {observed[role]}", file=out)
+        registered = observed[role]
+        if registered == "enabled" and not install_host.is_loaded(
+                specification(app, configuration, role)[2]):
+            stale.append(role)
+            registered += "  (record only — launchd holds no such job; unregister then "
+            registered += "register)"
+        print(f"{role:10} {registered}", file=out)
     loaded = install_host.is_loaded(specification(app, configuration, "host")[2])
     print(f"loaded     {'yes' if loaded else 'no'}", file=out)
     probed = configuration["port"] if port is None else port
@@ -210,4 +232,4 @@ def status(configuration: dict, *, port: int | None, out) -> int:
     healthy = (install_host.api_answers(probed) if configuration.get("host_capability") else
                bool(served and served.get("service") == "jremote-host"))
     print(f"API        {'answering' if healthy else 'not observed'} on {probed}", file=out)
-    return 0 if healthy and loaded else 1
+    return 0 if healthy and loaded and not stale else 1
