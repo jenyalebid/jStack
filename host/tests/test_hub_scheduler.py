@@ -407,7 +407,7 @@ def legacy_job(root: Path, *, python: str, plugin: str, port: str | None = None)
 
 
 def test_the_declaration_is_read_off_the_job_being_retired(home):
-    plugin = "/Users/admin/jStack/plugins/jstack"
+    plugin = str(home / "jStack/plugins/jstack")
     python = "/Applications/jStack Hub.app/Contents/MacOS/JStackPython"
     declared = install_signed.scheduler_declaration(
         plistlib.loads(legacy_job(home, python=python, plugin=plugin).read_bytes()))
