@@ -180,10 +180,11 @@ def stub(path: Path, output: str):
 
 
 def tool(*arguments, home: Path, hub: Path | None = None):
-    environment = {**os.environ, "HOME": str(home), "JSTACK_ROOT": str(home / "root")}
-    environment.pop("JSTACK_SCHEDULER_HUB", None)
-    if hub is not None:
-        environment["JSTACK_SCHEDULER_HUB"] = str(hub)
+    """`hub=None` is a Mac with no Hub, not the Hub of the Mac running the
+    suite: left unset, the tool reads /Applications, and on a Mac whose Hub
+    seals the scheduler role every Hub-less test reads the refusal instead."""
+    environment = {**os.environ, "HOME": str(home), "JSTACK_ROOT": str(home / "root"),
+                   "JSTACK_SCHEDULER_HUB": str(hub if hub is not None else home / "no-hub.app")}
     return subprocess.run([sys.executable, str(TOOL), *arguments],
                           capture_output=True, text=True, timeout=120, env=environment)
 
