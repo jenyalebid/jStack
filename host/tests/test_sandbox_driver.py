@@ -64,7 +64,7 @@ def test_a_malformed_fleet_is_refused_with_its_reason(tmp_path):
 
 def test_the_derived_configuration_builds_from_this_tree(tmp_path):
     (tmp_path / "release-config.json").write_text(json.dumps(
-        {"stack_repo": "/Users/production/jStack", "local_catalog": "/private/catalog.json",
+        {"stack_repo": "/elsewhere/jStack", "local_catalog": "/private/catalog.json",
          "private_key": "/keys/ed25519", "candidates_dir": "/builds"}))
     plan_path = plan_file(tmp_path)
     derived = sandbox.release_config(sandbox.load_plan(plan_path), plan_path)
@@ -120,7 +120,7 @@ def test_reset_without_a_recorded_candidate_says_to_build(tmp_path):
 
 def test_build_records_the_candidate_for_reset(tmp_path, monkeypatch):
     (tmp_path / "release-config.json").write_text(json.dumps(
-        {"stack_repo": "/Users/production/jStack", "candidates_dir": "/builds"}))
+        {"stack_repo": "/elsewhere/jStack", "candidates_dir": "/builds"}))
     plan_path = plan_file(tmp_path)
     plan = sandbox.load_plan(plan_path)
     candidate = candidate_dir(tmp_path)
