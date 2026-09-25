@@ -22,6 +22,9 @@ from .update_macos import atomic_bytes
 from .update_supervisor import atomic_json
 
 
+#: The legacy jobs a cutover retires. Not the sealed bundle's roles: the Hub
+#: also owns a scheduler, which no legacy installation ever had and which
+#: migration therefore neither retires nor registers.
 ROLES = ("host", "updater", "menu")
 
 
@@ -37,9 +40,21 @@ def target(settings: dict, role: str) -> tuple[Path, str, str]:
     return app_services.specification(Path(settings["app"]), settings, role)
 
 
+def owned(settings: dict) -> tuple:
+    """The sealed roles the replacement owner actually carries.
+
+    Read from the bundle's own sealed catalog rather than assumed: a Hub built
+    before the scheduler became a role seals three plists, and asking its owner
+    for a fourth raises KeyError in the middle of a cutover. Every role it does
+    carry is checked, because all of them share one configuration.
+    """
+    sealed = app_services.sealed_roles(Path(settings["app"]))
+    return tuple(role for role in (*ROLES, "scheduler") if role in sealed)
+
+
 def statuses(settings: dict) -> dict:
     return {role: control(owner, "status")[service]
-            for role in ROLES for owner, service, _ in [target(settings, role)]}
+            for role in owned(settings) for owner, service, _ in [target(settings, role)]}
 
 
 def provenance(path: Path) -> dict:

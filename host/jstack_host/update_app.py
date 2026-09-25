@@ -300,9 +300,20 @@ class AppBackend(MacBackend):
                 os.replace(target, backup)
             os.replace(incoming, target)
         self._restore_services(app, transaction["services"])
+        # A role this bundle seals that the previous one did not is absent from
+        # the snapshot, so `_restore_services` cannot bring it up — and for the
+        # scheduler the machine is also still running the LaunchAgent that
+        # preceded it, on the same port. Adopting is what makes an update
+        # finish the move instead of leaving both copies installed.
         client = transaction["apps"].get("client")
         if client and client["was_running"]:
             command(["/usr/bin/open", "-a", client["target"]])
+        # Last, and allowed to raise. A half-finished cutover is two jobs racing
+        # one port or none serving it, which is not an update anyone should read
+        # as done — but the window the user is looking at comes back first, so a
+        # scheduler fault costs them a diagnosis and not their app.
+        from .install_signed import adopt_scheduler
+        adopt_scheduler(app)
 
     def settle(self, job: dict) -> dict:
         """Close a failed transaction: nothing restored, nothing retained.

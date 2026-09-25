@@ -61,7 +61,7 @@ usage: install.sh [options]
   --agent-root DIR    where agent workspaces live (default: <root>/Agents)
   --checkout DIR      where to clone jStack (default: ~/jStack)
   --ref REF           branch to build and install (default: main)
-  --no-scheduler      don't install the scheduler daemon (no recurring wakes)
+  --no-scheduler      don't register the Hub's scheduler service (no recurring wakes)
   --no-claude         don't install Claude Code even if it is missing
   --no-host           use the client with another Hub; no local Hub or menu
   --no-menubar        install the host but not its menu bar icon
@@ -259,9 +259,10 @@ uninstall() {
         fi
         HUB_BIN="/Applications/jStack Hub.app/Contents/MacOS/JStackHub"
         if [ -x "$HUB_BIN" ]; then
-            for role in updater menu host; do "$HUB_BIN" unregister "$role" >/dev/null 2>&1 || true; done
+            for role in scheduler updater menu host; do "$HUB_BIN" unregister "$role" >/dev/null 2>&1 || true; done
         fi
         for l in live.jstack.hub.host live.jstack.hub.menu live.jstack.hub.updater \
+                 live.jstack.hub.scheduler \
                  com.jremote.host com.jremote.menubar com.jremote.updater; do
             launchctl bootout "gui/$(id -u)/$l" >/dev/null 2>&1 || true
         done
@@ -315,7 +316,21 @@ uninstall() {
         fi
     fi
 
-    # 3. the scheduler daemon.
+    # 3. the scheduler daemon. The Hub's own service went with the Hub in step 2
+    #    — it was sealed inside that bundle and registered by it. What can still
+    #    be here is the LaunchAgent an install from before that wrote: registered
+    #    by no app, so it keeps a Login Items row of its own named after its
+    #    interpreter, and keeps claiming the daemon's port. Swept directly rather
+    #    than through the tool, because the wrecked machine this path exists for
+    #    is exactly the one where the checkout is gone or will not run.
+    if [ "$(uname -s)" = "Darwin" ] && [ "$DRY_RUN" != "1" ]; then
+        LEGACY_SCHED="$HOME/Library/LaunchAgents/com.jstack.scheduler.plist"
+        if [ -f "$LEGACY_SCHED" ]; then
+            launchctl bootout "gui/$(id -u)/com.jstack.scheduler" >/dev/null 2>&1 || true
+            rm -f "$LEGACY_SCHED"
+            ok "removed the pre-Hub scheduler LaunchAgent and its Login Items row"
+        fi
+    fi
     if command -v jstack-scheduler >/dev/null 2>&1; then
         run jstack-scheduler uninstall || warn "scheduler uninstall reported a problem"
     elif [ -x "$BIN/jstack-scheduler" ]; then
@@ -1096,20 +1111,31 @@ else
     warn "no Homebrew, so WireGuard was not installed — adoption and leaf joins need 'wg' and 'wireguard-go' on PATH; install them before adopting"
 fi
 
-# Not a question. `jstack-doctor` runs at the end of this script and grades an
-# absent scheduler as a warning — so asking here hands the reader a warning they
-# chose and cannot act on. Installed by default; --no-scheduler declines it.
+# Not a question, because `jstack-doctor` runs at the end of this script and
+# grades an absent scheduler as a warning — asking here hands the reader a
+# warning they chose and cannot act on. Installed by default; --no-scheduler
+# declines it. Nothing is registered at this point either: the daemon is one of
+# the Hub's own sealed services, so what decides whether it runs is an argument
+# to the Hub's installer in the host step below.
+#
+# A machine installing no Hub has no such service to be given, and the standalone
+# LaunchAgent is legitimate there for the reason it was wrong everywhere else:
+# the second Login Items row came from a plist registered by no app while the
+# Hub's own registrar was right there. With no Hub there is no registrar and no
+# row to collapse into, so `jstack-scheduler install` is the only path and this
+# script takes it rather than leaving the reader a warning and a command.
 if [ "$WANT_SCHEDULER" = "0" ]; then
-    note "skipped by --no-scheduler — run \`jstack-scheduler install\` any time"
-elif [ "$DRY_RUN" = "1" ]; then
-    would "$BIN/jstack-scheduler install"
+    note "skipped by --no-scheduler — the Hub will register no scheduler service"
+elif [ "$WANT_HOST" = "0" ] || [ "$(uname -s)" != "Darwin" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+        would "$BIN/jstack-scheduler install"
+    elif run "$BIN/jstack-scheduler" install; then
+        ok "scheduler installed as its own service — this machine runs no Hub to own it"
+    else
+        warn "the scheduler daemon did not install; recurring wakes stay off until \`jstack-scheduler install\` succeeds — see $LAST_LOG"
+    fi
 else
-    # Deferred past the host step: on a release install the daemon runs under
-    # the signed Hub's interpreter, and that app is not on the disk yet. A
-    # bare python3 registered here would sit in Login Items as an
-    # unidentified background item — the exact thing the signed Hub removes.
-    SCHED_PENDING=1
-    note "daemon is installed after the host step chooses its interpreter"
+    note "the Hub owns the daemon; its installer registers it in the host step"
 fi
 
 # ── 8. the Mac app ──────────────────────────────────────────────────────────
@@ -1363,7 +1389,7 @@ if [ "$(uname -s)" = "Darwin" ] && [ "$WANT_HOST" != "0" ]; then
                 would "replace the ${installed_release:-published} Hub with one built from $REF"
             else
                 warn "the installed Hub is a published release${installed_release:+ ($installed_release)} and cannot build itself forward — replacing it with a build from $REF"
-                for role in host menu updater; do
+                for role in host menu updater scheduler; do
                     launchctl bootout "gui/$(id -u)/live.jstack.hub.$role" >/dev/null 2>&1 || true
                 done
                 rm -rf "/Applications/jStack Hub.app"
@@ -1373,7 +1399,7 @@ if [ "$(uname -s)" = "Darwin" ] && [ "$WANT_HOST" != "0" ]; then
             if [ "$DRY_RUN" = "1" ]; then
                 would "remove the dead Hub app, its services and state, then reinstall"
             else
-                for role in host menu updater; do
+                for role in host menu updater scheduler; do
                     launchctl bootout "gui/$(id -u)/live.jstack.hub.$role" >/dev/null 2>&1 || true
                 done
                 rm -rf "/Applications/jStack Hub.app" "$HOME/.local/state/jremote"
@@ -1484,16 +1510,38 @@ if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ] \
         # role as not_found and skip this entirely.
         HUB_BIN="/Applications/jStack Hub.app/Contents/MacOS/JStackHub"
         hub_status="$("$HUB_BIN" status 2>/dev/null || true)"
-        for role in updater menu host; do
+        for role in scheduler updater menu host; do
             case "$(printf '%s' "$hub_status" | sed -nE "s/.*\"$role\": *\"([a-z_]+)\".*/\\1/p")" in
                 enabled|requires_approval)
                     warn "a previous Hub's $role registration is still on file — unregistering it"
                     "$HUB_BIN" unregister "$role" >/dev/null 2>&1 || true ;;
             esac
         done
+        # The scheduler is a Hub service, so the Hub's installer is what needs to
+        # know which checkout the daemon runs from. Declining it here is the whole
+        # of --no-scheduler: the sealed plist ships either way, and the settings
+        # block is what decides whether the OS is ever asked to run it.
+        # Its one dependency (python-dateutil, pure python) is vendored beside the
+        # plugin: the sealed interpreter has no site-packages of its own and
+        # ignores PYTHONPATH, so the service puts vendor/ on sys.path from the
+        # command line. The repo ships the payload, so pip runs only where the
+        # probe fails — running it anyway wrote dist-info into a tracked
+        # directory, and step 2 refuses to update a checkout this script dirtied.
+        hub_install_args=(--app "/Applications/jStack Hub.app" --state-dir "$HUB_STATE")
+        if [ "$WANT_SCHEDULER" = "1" ]; then
+            VENDOR="$CHECKOUT/plugins/jstack/vendor"
+            HUB_PY="/Applications/jStack Hub.app/Contents/MacOS/JStackPython"
+            if ! "$HUB_PY" -c "import sys; sys.path.insert(0, '$VENDOR'); import dateutil" 2>/dev/null; then
+                run_long "vendoring python-dateutil beside the plugin" \
+                    "$PY" -m pip install --quiet --target "$VENDOR" python-dateutil \
+                    || warn "could not vendor python-dateutil — recurring jobs will not book; see $LAST_LOG"
+            fi
+            hub_install_args+=(--scheduler-root "$CHECKOUT/plugins/jstack"
+                               --scheduler-env "JSTACK_ROOT=$JSTACK_ROOT")
+        fi
         if run_long "running the Hub's sealed installer" \
                 "/Applications/jStack Hub.app/Contents/MacOS/JStackRuntime" install \
-                --app "/Applications/jStack Hub.app" --state-dir "$HUB_STATE"; then
+                "${hub_install_args[@]}"; then
             ok "Hub installed — $HUB_RELEASE, built here from $REF"
             HOST_INSTALLED=1
             SIGNED_HUB=1
@@ -1554,44 +1602,6 @@ else
         HOST_INSTALLED=1
     else
         warn "host install reported a problem — re-run $HOST_INSTALLER to see it"
-    fi
-fi
-
-# The deferred scheduler daemon, now that the host step has decided what is on
-# the disk. Signed install: the daemon runs under the Hub's own interpreter and
-# Login Items shows "jStack Hub", never an unidentified python3. Its one
-# dependency (python-dateutil, pure python) is vendored beside the plugin,
-# where jstack-scheduler adds it to the daemon's PYTHONPATH.
-if [ "${SCHED_PENDING:-0}" = "1" ]; then
-    step "Scheduler daemon (deferred)"
-    HUB_PY="/Applications/jStack Hub.app/Contents/MacOS/JStackPython"
-    SCHED_PY="$PY"
-    if [ "${SIGNED_HUB:-0}" = "1" ] && [ -x "$HUB_PY" ]; then
-        VENDOR="$CHECKOUT/plugins/jstack/vendor"
-        # the sealed interpreter ignores PYTHONPATH — probe via sys.path, the
-        # same way the installed daemon definition loads it. The repo ships the
-        # payload, so pip only runs where that probe fails; running it anyway
-        # wrote dist-info into a tracked directory, and step 2 refuses to
-        # update a checkout somebody — including this script — has dirtied.
-        if ! "$HUB_PY" -c "import sys; sys.path.insert(0, '$VENDOR'); import dateutil" 2>/dev/null; then
-            run_long "vendoring python-dateutil beside the plugin" \
-                "$PY" -m pip install --quiet --target "$VENDOR" python-dateutil \
-                || warn "could not vendor python-dateutil — see $LAST_LOG"
-        fi
-        if "$HUB_PY" -c "import sys; sys.path.insert(0, '$VENDOR'); import dateutil" 2>/dev/null; then
-            SCHED_PY="$HUB_PY"
-        else
-            warn "the signed interpreter cannot import dateutil — daemon stays on $PY"
-        fi
-    fi
-    if "$PY" "$BIN/jstack-scheduler" install --python "$SCHED_PY"; then
-        if [ "$SCHED_PY" = "$HUB_PY" ]; then
-            ok "daemon installed under the signed Hub — no bare python3 login item"
-        else
-            ok "daemon installed"
-        fi
-    else
-        warn "daemon install reported a problem"
     fi
 fi
 

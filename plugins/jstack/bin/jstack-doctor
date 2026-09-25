@@ -2,8 +2,9 @@
 """jstack-doctor — does this machine have a working jStack, and if not, which part?
 
 A fresh install is six steps across two surfaces: a marketplace install, plugin
-config, an agent workspace, `/jstack:install-rules`, `jstack-scheduler install`,
-and a python that can import what the daemon needs. Every one of them fails in a
+config, an agent workspace, `/jstack:install-rules`, a scheduler daemon (the
+Hub's own service where there is a Hub, `jstack-scheduler install` where there
+is not), and a python that can import what the daemon needs. Every one of them fails in a
 way that is invisible from inside a session — a PATH that resolves no `claude`,
 an `agent_root` holding nothing the resolver accepts (so every seat resolves to
 nobody and the timeline writes nothing), rules symlinked into a plugin version
@@ -452,6 +453,14 @@ def check_config() -> dict:
                                 f"timezone {sched_config.DEFAULT_TZ}")
 
 
+#: The two markers `jstack-scheduler status` prints, which is how this check
+#: learns which of the daemon's two shapes the machine runs without owning a
+#: second copy of the answer. `host/tests/test_hub_scheduler.py` reads both
+#: files and fails if either side renames its half.
+HUB_SERVICE = "live.jstack.hub.scheduler"
+LEGACY_LINE = "legacy:"
+
+
 def check_scheduler() -> dict:
     """Booking a job and running one are different facts.
 
@@ -460,6 +469,12 @@ def check_scheduler() -> dict:
     daemon, not the CLI — and separates "no daemon installed" (a warning: wakes
     are the only thing that stop working) from "installed but not answering" (a
     failure: something that was supposed to be running is not).
+
+    Which daemon depends on the machine, and `jstack-scheduler status` is what
+    knows: on a Hub the sealed service the Hub registers, otherwise the
+    LaunchAgent or unit the tool wrote. A pre-Hub LaunchAgent surviving beside a
+    Hub is the one case graded harder than the tool's own exit status — see
+    below.
     """
     tool = PLUGIN_ROOT / "bin" / "jstack-scheduler"
     try:
@@ -468,7 +483,24 @@ def check_scheduler() -> dict:
     except (OSError, subprocess.SubprocessError) as e:
         return _check("scheduler", FAIL, f"cannot run jstack-scheduler status: {e}")
     summary = "; ".join(line.strip() for line in p.stdout.splitlines() if line.strip())
+    hub = HUB_SERVICE in p.stdout
+    if hub and any(line.startswith(LEGACY_LINE) for line in p.stdout.splitlines()):
+        # Not a warning. Two definitions for one daemon is two rows in Login
+        # Items — the Hub's, and one named after whatever interpreter the old
+        # plist points at — and two processes binding the daemon's single port,
+        # where the loser dies with EADDRINUSE and stays dead. An upgraded Mac
+        # is exactly where this is found, and nothing self-corrects it.
+        return _check("scheduler", FAIL,
+                      f"a pre-Hub scheduler LaunchAgent survives beside the Hub's own "
+                      f"service — {summary}",
+                      "jstack-scheduler uninstall — it boots the legacy job out and "
+                      "removes its plist; the Hub's own service is untouched")
     if p.returncode == 3:
+        if hub:
+            return _check("scheduler", WARN,
+                          f"the Hub registers no scheduler service on this machine — {summary}",
+                          "re-run install.sh without --no-scheduler; the Hub's installer "
+                          "takes --scheduler-root and registers the service")
         # `status` prints a note here when something IS serving the API port
         # under a label this tool did not write — a machine running its own
         # hand-rolled daemon is a working machine, and dropping that line would

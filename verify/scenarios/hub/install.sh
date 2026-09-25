@@ -40,8 +40,31 @@ if ~/jStack/plugins/jstack/bin/jstack-scheduler status >/dev/null 2>&1; then
 else
     echo "FAIL scheduler status exit $?"
 fi
-grep -q "Library/Logs/jstack-scheduler" ~/Library/LaunchAgents/com.jstack.scheduler.plist 2>/dev/null \
-    && echo "OK scheduler plist uses safe log paths" || echo "FAIL plist points logs into the root"
+# Login Items & Extensions groups its rows by the app that REGISTERED each job,
+# and `parent bundle identifier` is the field it groups on — readable in the user
+# domain without root. One bundle across every jStack job IS one row, which is
+# the whole point of the scheduler being a Hub service rather than a LaunchAgent
+# of its own.
+rows_ok=1; rows_seen=0
+for l in $(launchctl list | awk '{print $3}' | grep -i jstack); do
+    rows_seen=$((rows_seen + 1))
+    if launchctl print "gui/$(id -u)/$l" 2>/dev/null \
+            | grep -q 'parent bundle identifier = live.jstack.hub'; then
+        echo "  bundle: $l -> live.jstack.hub"
+    else
+        echo "  bundle: $l -> NOT registered by the Hub"
+        rows_ok=0
+    fi
+done
+[ "$rows_seen" -gt 0 ] && [ "$rows_ok" = 1 ] \
+    && echo "OK all $rows_seen jstack jobs answer to one bundle — one Login Items row" \
+    || echo "FAIL jstack jobs are registered by more than one bundle, or none were found"
+launchctl print "gui/$(id -u)/live.jstack.hub.scheduler" 2>/dev/null | grep -q 'state = running' \
+    && echo "OK the scheduler runs as the Hub's own sealed service" \
+    || echo "FAIL live.jstack.hub.scheduler is not a running Hub service"
+ls ~/Library/LaunchAgents 2>/dev/null | grep -qi jstack \
+    && echo "FAIL a jstack plist sits in ~/Library/LaunchAgents — registered by no app, so its own row" \
+    || echo "OK no jstack plist in ~/Library/LaunchAgents"
 pgrep -f JStackHostBar >/dev/null && echo "OK menu bar running" || echo "FAIL menu bar not running"
 launchctl list | grep -i jstack | sed 's/^/  launchd: /'
 ~/jStack/plugins/jstack/bin/jstack-doctor 2>&1 | grep -i 'versions' | sed 's/^/  doctor: /'

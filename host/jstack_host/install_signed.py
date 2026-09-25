@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import time
 
@@ -51,7 +52,7 @@ def legacy_present() -> bool:
         for label in (install_host.LABEL, "com.jremote.menubar", "com.jremote.updater"))
 
 
-def install(app: Path, state: Path, *, port=9090, bind="0.0.0.0") -> dict:
+def install(app: Path, state: Path, *, port=9090, bind="0.0.0.0", scheduler: dict | None = None) -> dict:
     if os.geteuid() == 0:
         raise PermissionError("install user services as the login user")
     if not all(path.is_absolute() for path in (app, state)) or not 1 <= port <= 65535:
@@ -61,6 +62,12 @@ def install(app: Path, state: Path, *, port=9090, bind="0.0.0.0") -> dict:
     settings = {"schema": 1, "app": str(app),
                 "port": port, "bind": bind, "environment": {
                     "JREMOTE_STATE_DIR": str(state), "JREMOTE_HOST_PROFILE": "default"}}
+    if scheduler:
+        settings["scheduler"] = scheduler
+    # Refused here rather than at the service's first launch: the journal and
+    # the settings file are written below, and a block this machine cannot read
+    # back leaves an installation whose own descriptor is invalid.
+    service_settings.validate(settings)
     initial_entries = set(state.iterdir()) if state.exists() else set()
     with exclusive():
         path = journal_path()
@@ -98,7 +105,7 @@ def install(app: Path, state: Path, *, port=9090, bind="0.0.0.0") -> dict:
         if "host" not in journal["attempted"] and install_host.port_answers(port):
             raise ValueError("the requested endpoint acquired a listener during installation")
         command([str(app / "Contents/MacOS/JStackRuntime"), "provision"])
-        for role in ("host", "updater", "menu"):
+        for role in registered(settings):
             observed = control(app, "status")[role]
             if role not in journal["attempted"]:
                 if observed not in {"not_registered", "not_found"}:
@@ -111,14 +118,153 @@ def install(app: Path, state: Path, *, port=9090, bind="0.0.0.0") -> dict:
                 atomic_json(path, journal)
                 return {"state": journal["state"], "service": role, "status": observed, "journal": str(path)}
         command([str(app / "Contents/MacOS/JStackRuntime"), "verify-install"], timeout=45)
+        # A fresh install on a machine that still carries the pre-Hub
+        # LaunchAgent: the settings already declare the daemon, so what is owed
+        # is retiring the second copy.
+        adopt_scheduler(app)
         journal["state"] = "installed"
         atomic_json(path, journal)
         return {"state": "installed", "services": observations(app), "journal": str(path)}
 
 
+#: Every role a Hub bundle seals a plist for, in the order a fresh machine
+#: brings them up: the daemon that books work starts after the host it books
+#: against. `build_hub.ROLES` writes the plists; nothing here may name one that
+#: `Contents/Resources/services.json` does not carry.
+ROLES = ("host", "updater", "menu", "scheduler")
+
+
+def registered(settings: dict) -> tuple:
+    """The roles THIS installation registers, in start order.
+
+    Every Hub seals a scheduler plist; whether the OS is ever asked to run it
+    is the operator's `--no-scheduler` choice, recorded once in the settings.
+    So the sealed catalog is not the answer to "what should be enabled here",
+    and a machine that declined the daemon must not read as a failed install.
+    """
+    return tuple(role for role in ROLES if role != "scheduler" or settings.get("scheduler"))
+
+
+#: The LaunchAgent `plugins/jstack/bin/jstack-scheduler` writes on a Mac with no
+#: Hub, and the one an install from before the scheduler was a Hub role left
+#: behind. Registered by no app, so macOS gives it a Login Items row of its own
+#: named after whatever interpreter it points at.
+LEGACY_SCHEDULER = "com.jstack.scheduler"
+
+#: The daemon's control API port, mirroring `scheduler.config.API_PORT`. Not
+#: imported: that module is unsealed code in a checkout, and this runs in the
+#: signed process. `host/tests/test_hub_scheduler.py` reads both copies.
+SCHEDULER_PORT = 9091
+
+
+def legacy_scheduler_plist() -> Path:
+    return Path.home() / "Library/LaunchAgents" / f"{LEGACY_SCHEDULER}.plist"
+
+
+def scheduler_declaration(definition: dict) -> dict:
+    """The sealed service's settings, read off the LaunchAgent being retired.
+
+    Neither the interpreter nor the plugin root is re-derived. This plist is
+    what that machine resolved when it installed, and a fresh derivation would
+    move a working daemon onto a different tree — or onto an interpreter that
+    cannot import what it needs. `jstack-scheduler` writes the job as
+    [python, "-c", "import sys, runpy; sys.path[:0] = [...]; ..."], so both
+    facts are in the one string.
+
+    The environment is filtered rather than trusted: the legacy job carries a
+    PYTHONPATH the sealed interpreter ignores anyway, and a sealed service is
+    not a way to set import paths on a child process.
+    """
+    import ast
+    argv = definition.get("ProgramArguments") or []
+    if len(argv) != 3 or argv[1] != "-c" or not isinstance(argv[0], str):
+        raise ValueError("the legacy scheduler job carries no interpreter and import roots to adopt")
+    found = re.search(r"sys\.path\[:0\] = (\[[^\]]*\])", argv[2])
+    if not found:
+        raise ValueError("the legacy scheduler job declares no plugin root")
+    try:
+        roots = ast.literal_eval(found.group(1))
+    except (ValueError, SyntaxError):
+        raise ValueError("the legacy scheduler job's import roots are unreadable") from None
+    if not roots or not all(isinstance(item, str) for item in roots):
+        raise ValueError("the legacy scheduler job's import roots are unreadable")
+    environment = definition.get("EnvironmentVariables") or {}
+    kept = {key: value for key, value in environment.items()
+            if isinstance(value, str) and (key == "PATH" or key.startswith(("SCHEDULER_", "JSTACK_")))}
+    return {"python": argv[0], "plugin_root": roots[0], "environment": kept}
+
+
+def scheduler_port(declared: dict) -> int:
+    port = (declared.get("environment") or {}).get("SCHEDULER_API_PORT")
+    return int(port) if port and str(port).isdigit() else SCHEDULER_PORT
+
+
+def adopt_scheduler(app: Path) -> dict:
+    """Carry a machine off its own scheduler LaunchAgent onto the Hub's service.
+
+    Every Mac that updates into this release has the legacy agent, and nothing
+    else would ever write the settings block that registers the sealed role —
+    so the update performs the cutover rather than merely permitting it. A
+    machine with no such plist and no declaration declined the daemon and stays
+    declined; adopting one there would install a daemon nobody asked for.
+
+    The order is the correctness argument. Both copies bind the daemon's single
+    port, so the sealed role is registered and the daemon confirmed still
+    serving BEFORE the legacy job is retired; the sealed job loses that first
+    port race and KeepAlive brings it back once the port is free, which is the
+    one window this cutover has and why it ends by waiting for the port rather
+    than at the delete.
+    """
+    if "scheduler" not in app_services.sealed_roles(app):
+        return {"state": "unsealed"}
+    settings = service_settings.read()
+    if not settings or settings.get("app") != str(app):
+        return {"state": "not_installed"}
+    legacy = legacy_scheduler_plist()
+    declared = settings.get("scheduler")
+    if not declared:
+        if not legacy.exists():
+            return {"state": "declined"}
+        declared = scheduler_declaration(plistlib.loads(legacy.read_bytes()))
+        # Through validate, so an unreadable legacy job fails the cutover here
+        # rather than leaving an installation whose own descriptor is invalid.
+        settings = service_settings.validate({**settings, "scheduler": declared})
+        atomic_json(service_settings.path(), settings)
+    observed = control(app, "status")["scheduler"]
+    if observed in {"not_registered", "not_found"}:
+        observed = control(app, "register", "scheduler")["status"]
+    if observed != "enabled":
+        return {"state": "approval_required", "status": observed}
+    port = scheduler_port(declared)
+    if not legacy.exists():
+        return {"state": "adopted", "retired": None, "port": port}
+    if not install_host.port_answers(port):
+        raise ValueError("the scheduler stopped answering before its legacy job could be retired")
+    import subprocess
+    subprocess.run(["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{LEGACY_SCHEDULER}"],
+                   capture_output=True)
+    if not install_host.wait_unloaded(LEGACY_SCHEDULER, seconds=10):
+        raise ValueError("the legacy scheduler job has not stopped")
+    legacy.unlink(missing_ok=True)
+    deadline = time.monotonic() + 60
+    while not install_host.port_answers(port):
+        if time.monotonic() >= deadline:
+            raise ValueError("the Hub's scheduler service did not take the daemon's port over")
+        time.sleep(0.5)
+    return {"state": "adopted", "retired": str(legacy), "port": port}
+
+
 def observations(app: Path) -> dict:
+    """What the OS says about every sealed role, declined ones included.
+
+    Scoped to what the owner answered rather than to ROLES: an older Hub seals
+    no scheduler plist, and asking it for that role raises a KeyError in the
+    middle of uninstalling the machine that has one. Whether a role is one this
+    installation should have RUNNING is `registered`, from the settings — the
+    two questions were one, and a declined daemon read as a failed install.
+    """
     main = control(app, "status")
-    return {role: main[role] for role in ("host", "menu", "updater")}
+    return {role: main[role] for role in ROLES if role in main}
 
 
 def provision() -> None:
@@ -196,9 +342,10 @@ def verify_install() -> None:
                 if client.get(base + "/sessions/active").status_code != 401:
                     raise ValueError("host authentication gate is not enforcing credentials")
             statuses = observations(Path(settings["app"]))
-            if any(value != "enabled" for value in statuses.values()):
+            expect = registered(settings)
+            if any(statuses[role] != "enabled" for role in expect):
                 raise ValueError("service approval changed during verification")
-            for role in ("host", "menu", "updater"):
+            for role in expect:
                 live = install_host._launchctl("print", f"{install_host._domain()}/live.jstack.hub.{role}")
                 if live.returncode or not re.search(r"\bstate = running\b", live.stdout):
                     raise OSError("an installed service has not started")
@@ -224,13 +371,17 @@ def uninstall(app: Path, *, purge: bool = False) -> dict:
     """
     import shutil
     problems = []
-    for role in ("updater", "menu", "host"):
+    # The daemon that spawns work stops before the services it books against.
+    for role in ("scheduler", "updater", "menu", "host"):
         try:
             if control(app, "status").get(role) in {"enabled", "requires_approval"}:
                 control(app, "unregister", role)
         except Exception as error:
             problems.append(f"{role}: {error}")
-    for label in ("live.jstack.hub.host", "live.jstack.hub.menu", "live.jstack.hub.updater"):
+    # Derived from ROLES, not written out: a label missing from this list is a
+    # service still loaded after its bundle is gone, which the next install
+    # then refuses over. Booting out a label that never loaded costs nothing.
+    for label in (f"live.jstack.hub.{role}" for role in ROLES):
         import subprocess
         subprocess.run(["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
                        capture_output=True)
@@ -272,7 +423,26 @@ def main():
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--port", type=int, default=9090)
     parser.add_argument("--bind", default="0.0.0.0")
+    parser.add_argument("--scheduler-root", type=Path,
+                        help="the jStack plugin directory the scheduler daemon runs from; "
+                             "omitted, this Hub registers no scheduler service")
+    parser.add_argument("--scheduler-python", type=Path,
+                        help="interpreter for the scheduler daemon (default: this bundle's own)")
+    parser.add_argument("--scheduler-env", action="append", default=[], metavar="KEY=VALUE",
+                        help="a setting frozen into the scheduler service, repeatable")
     args = parser.parse_args()
-    result = install(args.app, args.state_dir, port=args.port, bind=args.bind)
+    scheduler = None
+    if args.scheduler_root is not None:
+        environment = {}
+        for item in args.scheduler_env:
+            key, separator, value = item.partition("=")
+            if not separator or not key:
+                parser.error("--scheduler-env takes KEY=VALUE")
+            environment[key] = value
+        python = args.scheduler_python or args.app / "Contents/MacOS/JStackPython"
+        scheduler = {"python": str(Path(python).absolute()),
+                     "plugin_root": str(args.scheduler_root.absolute()),
+                     "environment": environment}
+    result = install(args.app, args.state_dir, port=args.port, bind=args.bind, scheduler=scheduler)
     print(json.dumps(result))
     return 0 if result["state"] == "installed" else 1

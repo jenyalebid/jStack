@@ -11,7 +11,7 @@ sys.path.insert(0, str(resources / "packages"))
 def main():
     cli = Path(sys.argv[0]).name == "JStackCLI"
     if not cli and len(sys.argv) < 2:
-        raise SystemExit("expected host, updater, cli or self-test")
+        raise SystemExit("expected host, updater, scheduler, cli or self-test")
     role, arguments = ("cli", sys.argv[1:]) if cli else (sys.argv[1], sys.argv[2:])
     if role == "local":
         if len(arguments) != 1:
@@ -21,14 +21,14 @@ def main():
     # This runs before any host module binds state paths at import time.
     from jstack_host import service_settings
     config = service_settings.read() if role != "self-test" else {}
-    if role in ("host", "updater", "local") and config:
+    if role in ("host", "updater", "scheduler", "local") and config:
         from jstack_host import emergency_stop
         if emergency_stop.active(config):
             raise SystemExit("jStack emergency stop is active")
-    if role in ("host", "updater", "provision", "verify-install") and not config.get("environment", {}).get("JREMOTE_STATE_DIR"):
+    if role in ("host", "updater", "scheduler", "provision", "verify-install") and not config.get("environment", {}).get("JREMOTE_STATE_DIR"):
         raise SystemExit("app-owned services require explicit installation state; refusing a second identity")
     if config:
-        if role in ("host", "updater", "provision", "verify-install"):
+        if role in ("host", "updater", "scheduler", "provision", "verify-install"):
             for key in tuple(os.environ):
                 if key.startswith("JREMOTE_"):
                     del os.environ[key]
@@ -39,7 +39,7 @@ def main():
         if role == "host":
             arguments = ["--port", str(config["port"]), "--host", config.get("bind", "0.0.0.0"), *arguments]
     os.environ["PATH"] = str(resources.parent / "MacOS") + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-    if role in ("host", "updater"):
+    if role in ("host", "updater", "scheduler"):
         state = Path(os.environ.get("JREMOTE_STATE_DIR", str(Path.home() / ".local/state/jremote")))
         logs = state / "logs"
         logs.mkdir(parents=True, exist_ok=True)
@@ -68,6 +68,12 @@ def main():
             raise SystemExit("updater requires an explicitly configured state directory")
         sys.argv[1:1] = ["--state-dir", state]
         from jstack_host.update_supervisor import main as run
+    elif role == "scheduler":
+        # The daemon is a child of this process, never an import: the plugin is
+        # unsealed code in a checkout the user edits, and the signature covers
+        # what runs here.
+        from jstack_host.local_service import run_scheduler
+        return run_scheduler(logs)
     elif role == "cli":
         from jstack_host.cli import main as run
     elif role == "install":

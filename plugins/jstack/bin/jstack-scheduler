@@ -3,10 +3,7 @@
 
 On a fresh install the registry accepts a job, `list` shows it, and the hour
 passes in silence — because nothing is running to fire it. Booking is the half
-that ships with the CLI; this tool is the other half: the daemon as a per-user
-service, generated from the same resolution the daemon itself boots with, so
-"I scheduled it and nothing happened" stops being the default experience of a
-second machine.
+that ships with the CLI; this tool is the other half.
 
     jstack-scheduler install    [--dry-run] [--label L] [--python BIN] [--port N]
     jstack-scheduler uninstall  [--dry-run] [--label L]
@@ -14,20 +11,25 @@ second machine.
     jstack-scheduler restart    [--label L]
     jstack-scheduler logs       [--label L] [-n N]
 
-macOS: a per-user LaunchAgent at ~/Library/LaunchAgents/<label>.plist, loaded
-with `launchctl`. Linux: a systemd user unit at
-~/.config/systemd/user/<label>.service, managed with `systemctl --user`.
-Anything else: exit 2, printing the foreground command — `python3 -m scheduler`
-with the right environment is a complete answer, just not a supervised one.
+The daemon has two shapes, and which one a machine runs is not this tool's
+choice. Where jStack Hub is installed the daemon is one of the HUB's own sealed
+services — registered by the signed app through SMAppService, holding no plist
+of its own — so `install` refuses and the other verbs operate on that service.
+Without a Hub it is a service this tool writes and owns: on macOS a per-user
+LaunchAgent at ~/Library/LaunchAgents/<label>.plist loaded with `launchctl`, on
+Linux a systemd user unit at ~/.config/systemd/user/<label>.service. Anything
+else: exit 2, printing the foreground command — `python3 -m scheduler` with the
+right environment is a complete answer, just not a supervised one.
 
 Exit codes, documented because scripts branch on them:
 
-    0  the verb did what it says (for `status`: definition present and ours,
-       process running, API answering)
-    1  refused (a definition this tool did not write), a command failed, or
-       `status` found the service installed but not fully healthy
+    0  the verb did what it says (for `status`: the service this machine is
+       supposed to be running is running, and its API answers)
+    1  refused (the Hub owns it, or a definition this tool did not write), a
+       command failed, or `status` found it installed but not fully healthy
     2  unsupported platform, or bad usage
-    3  `status`: no definition installed under this label
+    3  `status`: nothing installed — no definition under this label, or a Hub
+       whose scheduler service this machine declined
 
 Self-contained python3 stdlib — no venv, no host imports. The plugin root goes
 on sys.path for two sibling stdlib-only modules: `root` (the one declaration
@@ -58,14 +60,23 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 import root  # noqa: E402
 from scheduler import config as sched_config  # noqa: E402
 
-# The default label is namespaced under the PRODUCT, not under any operator's
-# reverse-domain. Deliberate collision-avoidance: the machine this package grew
-# up on already runs the same daemon under a hand-rolled label of its own, and
-# a default that matched an existing label would adopt — and on the next
-# `install`, reload — a live service the moment someone tried the tool out.
-# A label this package has never shipped under can only ever name what this
-# tool itself wrote.
+# The label for the standalone service on a Mac with no Hub, and the one this
+# tool sweeps where a Hub has since taken the role over. Namespaced under the
+# PRODUCT rather than under `live.jstack.*`, which is reserved for what the
+# signed Hub registers: the two shapes must never answer to the same label, or
+# `uninstall` on one would unload the other. It is also a label this package
+# has never shipped under any other way, so a file carrying it can only be a
+# file this tool wrote.
 DEFAULT_LABEL = "com.jstack.scheduler"
+
+#: The Hub's own scheduler service, and the app that registers it. macOS groups
+#: background items by the app that REGISTERED them, never by the binary that
+#: runs, so the Hub's services share its one Login Items row while a plist in
+#: ~/Library/LaunchAgents — registered by no app — earns a row named after its
+#: interpreter. Two copies also bind the daemon's one port, and the loser dies
+#: with EADDRINUSE.
+HUB_APP = Path("/Applications/jStack Hub.app")
+HUB_LABEL = "live.jstack.hub.scheduler"
 
 # Stamped into every file this tool writes: an XML comment in a plist, a `#`
 # line in a unit — both formats ignore it. `install`, `uninstall` and
@@ -354,6 +365,201 @@ def run_all(cmds: list) -> int:
     return 0
 
 
+
+# ------------------------------------------------------------------ the Hub
+
+
+def hub_app() -> "Path|None":
+    """The Hub that owns the scheduler as one of its sealed services, or None.
+
+    Asks the bundle's sealed catalog, not just whether the app is on the disk:
+    a Hub built before the scheduler became a role seals no such plist and owns
+    nothing here, so that machine keeps the standalone service.
+
+    Matched on the PLIST NAME, because the key alone is ambiguous: a Hub built
+    with a private capability catalog may carry `"scheduler":
+    "live.jstack.automation.scheduler.plist"`, which is somebody's catalogued
+    job and not this role at all. The machine this package grew up on has
+    exactly that, and keying on the name made this tool refuse there while no
+    Hub service existed to manage instead.
+
+    JSTACK_SCHEDULER_HUB moves the location so the refusal and the Hub-mode
+    verbs can be PROVED on a machine that has no Hub — the same reason
+    JSTACK_SCHEDULER_PLATFORM exists.
+    """
+    app = Path(os.environ.get("JSTACK_SCHEDULER_HUB") or HUB_APP)
+    try:
+        catalog = json.loads((app / "Contents/Resources/services.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(catalog, dict) or catalog.get("scheduler") != f"{HUB_LABEL}.plist":
+        return None
+    return app
+
+
+def owning_hub(args) -> "Path|None":
+    """The Hub, unless the caller named a label of their own.
+
+    An explicit --label is someone managing a service they built; the Hub owns
+    the default label and nothing else.
+    """
+    return hub_app() if getattr(args, "label", DEFAULT_LABEL) == DEFAULT_LABEL else None
+
+
+def hub_role_status(hub: Path) -> str:
+    """What the Hub says about its own scheduler role, or 'unobservable'.
+
+    Asked of the app that registers it. Whether the service is declared is not
+    this tool's business to read out of the Hub's private settings, and the
+    registration state is the fact that decides what a caller can do anyway.
+    """
+    try:
+        result = _sh([str(hub / "Contents/MacOS/JStackHub"), "status"])
+        if result.returncode == 0:
+            value = json.loads(result.stdout).get("scheduler")
+            if isinstance(value, str):
+                return value
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return "unobservable"
+
+
+def hub_log(hub: Path) -> "Path|None":
+    """Where the Hub's scheduler service writes — asked of the Hub.
+
+    The bundle is the only thing that knows. A Hub installed against a state
+    directory of its own keeps its logs there, and a path reconstructed from a
+    default would report a perfectly healthy daemon as one that had never run.
+    `JStackCLI where` prints every path the host resolves, one `key value` line
+    each, which is also why nothing here needs to know that layout.
+    """
+    try:
+        result = _sh([str(hub / "Contents/MacOS/JStackCLI"), "where"])
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if key == "state" and value.strip():
+            return Path(value.strip()) / "logs" / "scheduler.log"
+    return None
+
+
+def legacy_plist() -> "Path|None":
+    """A ~/Library/LaunchAgents plist from before the Hub took the role over.
+
+    Left behind it is the whole defect coming back: a second Login Items row
+    named after its interpreter, and a second process racing the Hub's for the
+    daemon's port.
+    """
+    path = Path.home() / "Library" / "LaunchAgents" / f"{DEFAULT_LABEL}.plist"
+    return path if path.exists() else None
+
+
+def hub_process() -> "tuple[str, bool]":
+    """(human line, running?) for the Hub's scheduler service."""
+    try:
+        p = _sh(["launchctl", "print", f"gui/{os.getuid()}/{HUB_LABEL}"])
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"cannot observe ({e})", False
+    if p.returncode != 0:
+        return f"not loaded (launchd has no job {HUB_LABEL!r})", False
+    state = re.search(r"^\s*state = (\S+)", p.stdout, re.M)
+    pid = re.search(r"^\s*pid = (\d+)", p.stdout, re.M)
+    if state and state.group(1) == "running" and pid:
+        return f"running (pid {pid.group(1)})", True
+    return f"loaded but {state.group(1) if state else 'not running'}", False
+
+
+def hub_refuses_install(hub: Path) -> int:
+    print(f"error: the Hub owns the scheduler on this Mac. It runs as the sealed "
+          f"service {HUB_LABEL}, registered by {hub.name} itself, which is why "
+          f"macOS shows one background item for all of jStack instead of one per "
+          f"daemon.\n"
+          f"  to change whether it runs:  \"{hub}/Contents/MacOS/JStackHub\" "
+          f"register scheduler   (or `unregister scheduler`)\n"
+          f"  to reinstall it against a different checkout, re-run install.sh — it "
+          f"passes --scheduler-root to the Hub's own installer\n"
+          f"  status, restart and logs work here and act on that service.\n"
+          f"Writing a plist of our own would add back the second Login Items row "
+          f"and a second process racing the Hub's for the daemon's port.",
+          file=sys.stderr)
+    return 1
+
+
+def hub_status(hub: Path, port_flag) -> int:
+    role = hub_role_status(hub)
+    print(f"definition: {HUB_LABEL} — sealed inside {hub.name}, {role.replace('_', ' ')}")
+    line, running = hub_process()
+    print(f"process:    {line}")
+    port = int(port_flag or sched_config.API_PORT)
+    api_line, ok = probe_api(port)
+    print(f"api:        {api_line}")
+    stale = legacy_plist()
+    if stale is not None:
+        print(f"legacy:     {stale} survives — a second background item and a "
+              f"second claim on {port}; `jstack-scheduler uninstall` removes it")
+    if role in ("not_registered", "not_found"):
+        # Nothing installed, exactly as an absent plist means nothing installed
+        # on a Hub-less Mac: the machine declined the daemon, or the OS forgot
+        # the registration. This tool cannot tell those apart and does not
+        # pretend to.
+        return 3
+    return 0 if (role == "enabled" and running and ok and stale is None) else 1
+
+
+def hub_restart() -> int:
+    return run_all([["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{HUB_LABEL}"]])
+
+
+def hub_logs(hub: Path, lines: int) -> int:
+    path = hub_log(hub)
+    if path is None:
+        print("the Hub did not say where its services write; "
+              "`jstack-host where` is the same question asked directly",
+              file=sys.stderr)
+        return 1
+    print(f"log: {path}")
+    try:
+        with open(path, errors="replace") as fh:
+            tail = deque(fh, maxlen=lines)
+    except OSError:
+        print("  (no file yet — the Hub's scheduler service has not run)")
+        return 1
+    for line in tail:
+        sys.stdout.write("  " + line)
+    return 0
+
+
+def hub_uninstall(hub: Path, dry_run: bool) -> int:
+    """Stop the Hub's service, and sweep a legacy plist if one survived.
+
+    The sealed plist is not removed and cannot be: it lives inside the signed
+    bundle and goes with it. What ends here is the registration.
+    """
+    stale = legacy_plist()
+    cmds = [[str(hub / "Contents/MacOS/JStackHub"), "unregister", "scheduler"]]
+    if stale is not None:
+        cmds.insert(0, ["launchctl", "bootout", f"gui/{os.getuid()}/{DEFAULT_LABEL}"])
+    if dry_run:
+        for argv in cmds:
+            print("would run: " + shlex.join(argv))
+        if stale is not None:
+            print(f"would remove: {stale}")
+        return 0
+    if stale is not None:
+        # An unloaded label is not an error here: the file may never have been
+        # loaded under this login session.
+        _sh(cmds.pop(0))
+    rc = run_all(cmds)
+    if stale is not None:
+        stale.unlink(missing_ok=True)
+        print(f"removed the legacy {stale}")
+    print(f"{HUB_LABEL} unregistered; its sealed definition goes with {hub.name}")
+    return rc
+
+
 # ------------------------------------------------------------------- commands
 
 
@@ -374,6 +580,11 @@ def warn_if_no_dateutil(python: str) -> None:
 
 
 def cmd_install(args) -> int:
+    # Refused whatever --label says: any plist for THIS daemon on a Hub machine
+    # is the second background item and the second claim on its port.
+    hub = hub_app()
+    if hub is not None:
+        return hub_refuses_install(hub)
     r = resolve(args)
     if r.target is None:
         return unsupported(r)
@@ -436,6 +647,9 @@ def cmd_install(args) -> int:
 
 
 def cmd_uninstall(args) -> int:
+    hub = owning_hub(args)
+    if hub is not None:
+        return hub_uninstall(hub, args.dry_run)
     r = resolve(args)
     if r.target is None:
         # Nothing this tool could ever have installed here.
@@ -461,6 +675,9 @@ def cmd_uninstall(args) -> int:
 
 
 def cmd_restart(args) -> int:
+    hub = owning_hub(args)
+    if hub is not None:
+        return hub_restart()
     r = resolve(args)
     if r.target is None:
         return unsupported(r)
@@ -562,6 +779,9 @@ def cmd_status(args) -> int:
     """Three separate probes, reported separately: the plist existing is not
     the daemon running, and the process being up is not the API serving. Any
     one can be true without the next, and each gap names its own fix."""
+    hub = owning_hub(args)
+    if hub is not None:
+        return hub_status(hub, getattr(args, "port", None))
     r = resolve(args)
     if r.target is None:
         return unsupported(r)
@@ -593,6 +813,9 @@ def cmd_status(args) -> int:
 
 
 def cmd_logs(args) -> int:
+    hub = owning_hub(args)
+    if hub is not None:
+        return hub_logs(hub, args.n)
     r = resolve(args)
     if r.target is None:
         return unsupported(r)

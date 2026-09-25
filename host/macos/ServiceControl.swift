@@ -95,7 +95,7 @@ func main() throws {
     guard args.count == 2, let plist = services[args[1]],
           action == "register" || action == "unregister" else {
         throw NSError(domain: "jStack", code: 64, userInfo: [NSLocalizedDescriptionKey:
-            "usage: JStackHub status | settings | register|unregister host|updater|menu"])
+            "usage: JStackHub status | settings | register|unregister <role in Contents/Resources/services.json>"])
     }
     let service = appService(plist)
     if action == "register" {

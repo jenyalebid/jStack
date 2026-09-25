@@ -70,6 +70,28 @@ def specification(app: Path, configuration: dict, role: str) -> tuple[Path, str,
     return app, capability, "live.jstack.automation." + capability
 
 
+def sealed_roles(app: Path) -> tuple:
+    """The bundle's own service roles, told apart from catalogued capabilities.
+
+    Both live in `services.json` under a bare name, and a private catalog may
+    legitimately name a capability `scheduler` — the machine this grew up on
+    does. The plist filename is what separates them: a sealed role is
+    `live.jstack.hub.<role>.plist`, a capability `live.jstack.automation.
+    <slug>.plist`. Keyed on the name alone, that capability reads as the Hub's
+    scheduler role, and every status lookup answers about the wrong job.
+    """
+    try:
+        catalog = json.loads((app / "Contents/Resources/services.json").read_text())
+        roles = [role for role, filename in catalog.items()
+                 if filename == f"live.jstack.hub.{role}.plist"]
+    except (OSError, ValueError, AttributeError):
+        # The floor every Hub has ever sealed. Answering nothing here would
+        # under-check a bundle whose catalog is momentarily unreadable, and the
+        # callers that act on a bundle verify its seal before asking anyway.
+        return ("host", "menu", "updater")
+    return tuple(roles)
+
+
 def observe(app: Path, configuration: dict) -> dict:
     statuses = control(app, "status")
     _, capability, _ = specification(app, configuration, "host")
@@ -122,6 +144,10 @@ def uninstall_all(configuration: dict, out) -> int:
             observed = control(app, "status")
             if not isinstance(catalog, dict) or set(observed) != set(catalog):
                 raise ValueError("service ownership is unobservable")
+            # The three roles every Hub has ever sealed, and deliberately not
+            # the scheduler: the loop below removes whatever the catalog
+            # declares, so naming a newer role here would only refuse to
+            # uninstall an older bundle that seals no plist for it.
             if not {"host", "menu", "updater"} <= set(catalog):
                 raise ValueError("sealed service owner is incomplete")
             for role, filename in catalog.items():
@@ -137,8 +163,10 @@ def uninstall_all(configuration: dict, out) -> int:
                 records.append({"app": str(app), "role": role, "label": label})
         if len({r["label"] for r in records}) != len(records):
             raise ValueError("service owners declare overlapping labels")
-        # Stop automatic update first, then the menu, then other capabilities.
-        records.sort(key=lambda r: (0 if r["role"] == "updater" else 1 if r["role"] == "menu" else 2, r["label"]))
+        # Stop automatic update first, then the menu, then the daemon that
+        # spawns work, then the services it was booking against.
+        order = {"updater": 0, "menu": 1, "scheduler": 2}
+        records.sort(key=lambda r: (order.get(r["role"], 3), r["label"]))
         if path.exists():
             journal = json.loads(path.read_text())
             if (journal.get("configuration_sha256") != configuration_digest or journal.get("identities") != identities
