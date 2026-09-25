@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User installs the full product on one Mac
 # WHAT: full product on one Mac — hub via README, then the published jRemote client lands and launches
 # TIME: ~15m
 # GUEST: pristine

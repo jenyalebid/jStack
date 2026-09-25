@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User runs plugin commands without a hub
 # WHAT: plugin commands answer in a real Claude Code session — no Hub behind them
 # TIME: ~10m
 # GUEST: derived from $JSTACK_VERIFY_AUTHED_BASE (a guest with Claude Code signed in)

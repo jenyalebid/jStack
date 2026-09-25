@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User updates the hub and its leaves
 # WHAT: the managed update journeys — thirteen receipts from managed_update_accept over a ref
 # TIME: ~60m
 # GUEST: managed by the lab tool (disposable)

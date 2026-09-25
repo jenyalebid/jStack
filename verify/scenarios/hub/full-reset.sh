@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User fully resets the hub
 # WHAT: README full reset kills 5-day-old ghost app state (container + keychain) and comes back alive
 # TIME: ~15m
 # GUEST: pristine

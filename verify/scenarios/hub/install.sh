@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User fresh installs the hub
 # WHAT: fresh Mac, README one-liner from the CDN — hub, scheduler, menu bar, doctor all alive
 # TIME: ~10m
 # GUEST: pristine

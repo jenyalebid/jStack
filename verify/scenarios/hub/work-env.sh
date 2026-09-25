@@ -1,4 +1,5 @@
 #!/bin/bash
+# USER: User sets how a session works
 # WHAT: a setting POSTed to the Hub reaches a real session — session, agent, precedence, a mid-session flip, the markers
 # TIME: ~25m
 # GUEST: derived from $JSTACK_VERIFY_AUTHED_BASE, signed in with the lab token (#140)
