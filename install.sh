@@ -1270,6 +1270,7 @@ fi
 step "Host and menu bar"
 
 HOST_INSTALLER="$CHECKOUT/host/install.sh"
+LEGACY_APPS_DIR="${JSTACK_APPS_DIR:-$HOME/Library/Application Support/jStack}"
 
 # This script is also the repairer. A machine that already has a Hub answering
 # is left alone — moving that one forward is `jstack-host updates build`, which
@@ -1636,6 +1637,56 @@ if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ] \
             # green-looking broken install this script exists to prevent.
             die "sealed Hub install failed — $(tail -3 "$LAST_LOG" 2>/dev/null | tr '\n' ' ')"
         fi
+    fi
+elif [ "${JSTACK_HUB_CURRENT:-0}" = "1" ]; then
+    # The sealed Hub is up, and it owns all four services: host, menu, updater,
+    # scheduler. There is nothing here for the unsealed installer to add — and
+    # running it anyway is what put a SECOND icon in the menu bar. Before this
+    # branch existed, a current Hub failed the sealed condition above and fell
+    # all the way through to the unsealed `host/install.sh` below, which
+    # registers `com.jremote.menubar` (its own `JStack Host.app`) beside the
+    # Hub's `live.jstack.hub.menu`, re-registers `com.jremote.host` against the
+    # port the Hub already holds, and replaces the sealed `jstack-host` wrapper
+    # with a link into `host/.venv`. So a first install showed one icon and
+    # every re-run of this script — including the one the leaf joiner runs when
+    # a Mac's release does not match the hub's — showed two. Moving a
+    # source-build Hub forward is `jstack-host updates build`.
+    note "the sealed Hub owns the host, its menu bar and its updater — nothing to add"
+
+    # And the residue of every earlier re-run that did take that branch. Agents
+    # and the bundle only: the state dir under ~/.local/state/jremote is the
+    # SEALED Hub's too, and the token in it is what every paired device carries.
+    LEGACY_BAR="$LEGACY_APPS_DIR/JStack Host.app"
+    legacy_found=0
+    for l in com.jremote.menubar com.jremote.host com.jremote.updater; do
+        launchctl list "$l" >/dev/null 2>&1 && legacy_found=1
+        [ -f "$HOME/Library/LaunchAgents/$l.plist" ] && legacy_found=1
+    done
+    [ -d "$LEGACY_BAR" ] && legacy_found=1
+    if [ "$legacy_found" = "1" ]; then
+        if [ "$DRY_RUN" = "1" ]; then
+            would "remove the unsealed host agent and the second menu bar app"
+        else
+            warn "an unsealed host from an earlier re-run is still on this Mac — removing it"
+            for l in com.jremote.menubar com.jremote.host com.jremote.updater; do
+                launchctl bootout "gui/$(id -u)/$l" >/dev/null 2>&1 || true
+                rm -f "$HOME/Library/LaunchAgents/$l.plist"
+            done
+            pkill -f "JStack Host.app/Contents/MacOS/JStackHostBar" >/dev/null 2>&1 || true
+            rm -rf "$LEGACY_BAR"
+            ok "the second icon and the unsealed host agent are gone"
+        fi
+    fi
+    # The wrapper the sealed CLI is reached through. `host/install.sh` replaces
+    # it with a link into host/.venv, which leaves a Mac driving the unsealed
+    # CLI against the sealed Hub's state.
+    if [ "$DRY_RUN" != "1" ] \
+       && ! grep -q JStackCLI "$HOME/.local/bin/jstack-host" 2>/dev/null; then
+        mkdir -p "$HOME/.local/bin"
+        printf '#!/bin/sh\nexec "/Applications/jStack Hub.app/Contents/MacOS/JStackCLI" "$@"\n' \
+            > "$HOME/.local/bin/jstack-host"
+        chmod +x "$HOME/.local/bin/jstack-host"
+        ok "jstack-host points at the sealed Hub's CLI again"
     fi
 elif [ ! -f "$HOST_INSTALLER" ]; then
     note "no host installer in this checkout — skipped"

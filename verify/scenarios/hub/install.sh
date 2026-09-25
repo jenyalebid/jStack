@@ -63,10 +63,18 @@ done
 launchctl print "gui/$(id -u)/live.jstack.hub.scheduler" 2>/dev/null | grep -q 'state = running' \
     && echo "OK the scheduler runs as the Hub's own sealed service" \
     || echo "FAIL live.jstack.hub.scheduler is not a running Hub service"
-ls ~/Library/LaunchAgents 2>/dev/null | grep -qi jstack \
-    && echo "FAIL a jstack plist sits in ~/Library/LaunchAgents — registered by no app, so its own row" \
-    || echo "OK no jstack plist in ~/Library/LaunchAgents"
-pgrep -f JStackHostBar >/dev/null && echo "OK menu bar running" || echo "FAIL menu bar not running"
+# Any plist at all, not just a *jstack* one: the unsealed installer's labels are
+# `com.jremote.*`, so a grep for the product's current name could not see the
+# very jobs this invariant exists to keep off the machine.
+ls ~/Library/LaunchAgents 2>/dev/null | grep -q . \
+    && echo "FAIL a plist sits in ~/Library/LaunchAgents — registered by no app, so its own row: $(ls ~/Library/LaunchAgents | tr '\n' ' ')" \
+    || echo "OK ~/Library/LaunchAgents is empty"
+# Counted, not probed. A truthy pgrep passes just as happily with two icons on
+# the bar as with one, and two is what a re-run of the installer used to leave
+# (hub/reinstall).
+nbar="$(pgrep -f JStackHostBar | wc -l | tr -d ' ')"
+[ "$nbar" = 1 ] && echo "OK exactly one menu bar process" \
+    || echo "FAIL $nbar menu bar processes"
 launchctl list | grep -i jstack | sed 's/^/  launchd: /'
 ~/jStack/plugins/jstack/bin/jstack-doctor 2>&1 | grep -i 'versions' | sed 's/^/  doctor: /'
 # "shipped copy" was the old answer: a release snapshot served the plugin.
