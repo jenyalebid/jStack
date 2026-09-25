@@ -134,6 +134,19 @@ class LiveAPI:
         return self._client.request(method.upper(), API + path,
                                     headers=headers, **kw)
 
+    def raw(self, method: str, path: str, **kw) -> httpx.Response:
+        """Call a path that does not live under the API prefix, and record it.
+
+        `/api/health` is the whole reason: it is a route the host serves, so
+        the coverage gate counts it, and it is the one route that must answer
+        before a token exists — so it cannot be reached through `call`, which
+        prefixes every path and attaches a bearer. Without this the gate would
+        report it untested while two tests were calling it with bare httpx.
+        """
+        self.seen.add((method.upper(), path))
+        headers = dict(kw.pop("headers", {}))
+        return self._client.request(method.upper(), path, headers=headers, **kw)
+
     def get(self, template, **kw):
         return self.call("GET", template, **kw)
 

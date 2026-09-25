@@ -184,10 +184,33 @@ def write_ssh_config(path: Path, peers: list[dict],
     _write_marked(path, CONFIG_BEGIN, CONFIG_END, block)
 
 
+def root_step_spent(state: Path | None = None) -> bool:
+    """Whether this machine has ever spent the one root step a grant needs.
+
+    `enabled_remote_login` answers a narrower question — whether a grant
+    *turned Remote Login on* — and is False on a Mac whose owner already ran
+    SSH before any grant, so it cannot decide this by itself: recorded True
+    and recorded False both mean inbound ssh works. What distinguishes a
+    machine that never spent the step is that `enable` left no record at all,
+    which is exactly a Mac adopted before shell access existed and presenting
+    its identity late.
+    """
+    return _remote_login_record(state or hostenv.state_dir()) is not None
+
+
 def apply_material(shell: dict, home: Path) -> list[dict]:
     """The user-writable half of a grant, graded: the authorized block and
-    the peer config. The root half (Remote Login) was spent at adoption —
-    which is what lets a live refresh run without it."""
+    the peer config. Needs no root at all, which is what lets a live refresh
+    run — and lets a Mac adopted before shell access existed become
+    shell-capable on a poke instead of a re-adoption.
+
+    The root half (Remote Login) is spent by `enable` at adoption. A machine
+    presenting its identity later has not spent it and must not pretend
+    otherwise, so an unspent step is appended here as a failed step the hub
+    and the console can name to the user — never acquired silently, and never
+    assumed done. A machine that did spend it emits nothing here, because
+    `enable` reports that step where it is actually taken.
+    """
     steps: list[dict] = []
     ssh_dir = Path(home) / ".ssh"
     authorized = list(shell.get("authorized") or [])
@@ -208,6 +231,14 @@ def apply_material(shell: dict, home: Path) -> list[dict]:
     except (OSError, ShellAccessError) as exc:
         steps.append({"step": "ssh-config", "ok": False,
                       "note": f"could not write the ssh config: {exc}"})
+    if authorized and not root_step_spent():
+        steps.append({
+            "step": "remote-login", "ok": False,
+            "note": "the granted keys are in place, but inbound ssh needs "
+                    "Remote Login on and no grant on this Mac has ever turned "
+                    "it on — turn on System Settings > General > Sharing > "
+                    "Remote Login, or re-run the joiner, which asks for root "
+                    "once and does it"})
     return steps
 
 

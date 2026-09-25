@@ -492,10 +492,15 @@ def _apply_shell(shell: dict, *, home: Path,
     Runs after the tunnel is up, so a step that fails is reported beside the
     attach that still succeeded — shell access is re-runnable via the joiner,
     the enrolment code it would cost is not.
+
+    The root step goes first because the joiner is where it is spent: with it
+    recorded, `apply_material` grades it as done instead of reporting it
+    outstanding, which is the report reserved for a machine presenting its
+    identity over the managed channel with no root moment of its own.
     """
     if not shell.get("authorized"):
         return []
     from . import shell_access
-    steps = shell_access.apply_material(shell, home)
-    steps += shell_access.enable(runner=runner, sudo=sudo)
+    steps = shell_access.enable(runner=runner, sudo=sudo)
+    steps += shell_access.apply_material(shell, home)
     return steps

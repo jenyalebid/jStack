@@ -1039,6 +1039,120 @@ def shell_adopt(journey, fleet: Fleet, candidate: Candidate) -> None:
                                                 "hub_shell": "answers"})
 
 
+def upgrade_shell(journey, fleet: Fleet, candidate: Build) -> None:
+    """A Mac already attached and running the published release gains working
+    ssh by updating — no re-adoption, no joiner run.
+
+    Before this commit the identity reached the hub in one moment only, the
+    adoption redeem payload, so a Mac adopted by an earlier build holds
+    `hosts.shell_pubkey` empty forever and every shell route is a no-op on it.
+    This journey manufactures that machine, updates it, and then proves ssh
+    works off a single poke: the hub's `/hosts` row, the hub's `~/.ssh/config`
+    and a real `uname` over the granted path.
+
+    The drop-in is checked absent because the fix must not have bought root
+    (`7e5ac3f`): a late presenter spends no root moment and reports what it
+    owes instead.
+    """
+    from jstack_host.enrolment import peer_name
+    guest = fleet.leaves[0]
+    expect(fleet.prior is not None, "this run names no earlier ref to promote from")
+    expect(fleet.plan.get("adopt_command"),
+           "manufacturing a pre-shell adoption needs 'adopt_command' in the plan")
+    stage_prior(fleet, guest, journey=journey)
+    before = guest.installed()
+    expect(before["sha"] != candidate.sha,
+           "this Mac already runs the commit under test; the promotion needs the earlier one")
+    # The pre-shell machine has to be *made*, not hoped for: a fixture leaf may
+    # already carry an identity from a candidate-build adoption, and staging the
+    # prior over it leaves both halves in place. The prior's own joiner is what
+    # puts it back — an adoption by a build with no shell feature, which is how
+    # the owner's Mac got here. It is the only adoption in this journey and it
+    # runs BEFORE the update the promotion is judged on.
+    guest.sh("/bin/rm -rf ~/.local/state/jremote/ssh "
+             "~/.local/state/jremote/shell_access.json")
+    stale = fleet.machine(guest)
+    stale_alias = peer_name(hub_host_row(fleet, stale).get("name") or "") or stale
+    answer = fleet.hub.call(f"/hosts/{stale}/forget", {})
+    expect(answer["status"] == 200, f"the hub would not forget {stale}: {answer}")
+    machine = adopt(fleet, guest)
+    row_before = hub_host_row(fleet, machine)
+    expect(row_before, f"the hub does not list {machine} after the pre-shell adoption")
+    expect(not row_before.get("shell_user"),
+           f"the staged Mac already has a shell identity on the hub: "
+           f"{row_before.get('shell_user')} — there is no promotion to observe")
+    block = authorized_block(guest)
+    expect(not block, f"the pre-shell Mac already authorizes granted keys: {block}")
+    # Asserted, not assumed: forget rewrites the hub's config, so the entry the
+    # promotion is credited with gaining has to be gone here first.
+    staged_config = fleet.hub.sh("/bin/cat ~/.ssh/config 2>/dev/null; true")
+    expect(f"Host {stale_alias}" not in staged_config,
+           f"the hub's ssh config still names {stale_alias}; there is no entry to gain")
+    # The prior carries no refresh route at all, or carries one that can answer
+    # nothing; either is the pre-shell state, and which one is recorded.
+    pulled = guest.call("/shell/refresh", {})
+    expect(pulled["status"] in (200, 404, 405),
+           f"the prior's refresh route answered {pulled['status']}")
+    prior_steps = (json.loads(pulled["body"]).get("steps") or []
+                   if pulled["status"] == 200 else [])
+    expect(not prior_steps,
+           f"the prior applied shell material; it is not a pre-shell build: {prior_steps}")
+    journey.observe("pre_shell_machine",
+                    {"machine": machine, "build": before["build"], "sha": before["sha"],
+                     "shell_user": "", "authorized_block": [],
+                     "hub_config_alias": "absent",
+                     "refresh_status": pulled["status"], "refresh_steps": 0})
+    job = fleet.hub.queue(machine, request_id("upgrade-shell"))
+    journey.note(f"hub queued {job['jobs'][0]['id']} for {machine}")
+    fleet.hub.wait_for("current", machine)
+    state = guest.installed()
+    identity_check(journey, "promoted_build", state, candidate)
+    stamp_before = guest.sh(PARENT_DIGEST).strip()
+    refreshed = guest.call("/shell/refresh", {})
+    expect(refreshed["status"] == 200,
+           f"the promoted machine's refresh answered {refreshed['status']}")
+    steps = json.loads(refreshed["body"]).get("steps") or []
+    graded = {s.get("step"): s for s in steps}
+    expect(graded.get("authorized-keys", {}).get("ok") is True,
+           f"the granted keys did not land: {steps}")
+    expect(graded.get("ssh-config", {}).get("ok") is True,
+           f"the peer config did not land: {steps}")
+    journey.observe("presented_on_refresh",
+                    {"machine": machine,
+                     "steps": [{k: s.get(k) for k in ("step", "ok", "note")}
+                               for s in steps]})
+    # shell_alias fails the journey when the row still names no shell account,
+    # which is the defect's own signature: the promotion did not reach the hub.
+    row, alias = shell_alias(fleet, machine)
+    journey.observe("hub_row_gained_identity", {"machine": machine, "alias": alias,
+                                                "shell_user": row["shell_user"]})
+    config = fleet.hub.sh("/bin/cat ~/.ssh/config 2>/dev/null; true")
+    expect(f"Host {alias}" in config,
+           f"the hub's ssh config still names no {alias} after the promotion")
+    journey.observe("hub_config_named", {"alias": alias})
+    uname = ssh_over(fleet.hub, alias, "/usr/bin/uname -a")
+    expect("Darwin" in uname and "REFUSED" not in uname,
+           f"the hub could not shell into the promoted {alias}: {uname.strip()[-300:]}")
+    journey.observe("hub_shell_answers", {"alias": alias, "uname": uname.strip()[:200]})
+    dropin = ssh_over(fleet.hub, alias,
+                      f"sudo -n /bin/ls {SUDOERS_DROPIN} 2>&1 || echo ABSENT")
+    expect("ABSENT" in dropin,
+           f"the promotion laid a sudoers drop-in: {dropin.strip()[-300:]}")
+    # The lab image ships Remote Login on, so a machine that never spent the
+    # root moment still answers ssh — and must still say it owes the step.
+    root_step = graded.get("remote-login")
+    journey.observe("no_standing_root",
+                    {"dropin": "absent",
+                     "root_step_reported": bool(root_step),
+                     "root_step": {k: root_step.get(k) for k in ("step", "ok", "note")}
+                                  if root_step else None})
+    stamp_after = guest.sh(PARENT_DIGEST).strip()
+    expect(stamp_after == stamp_before,
+           f"the promotion rewrote the adoption record: {stamp_before} -> {stamp_after}")
+    journey.observe("no_readoption", {"parent_record": stamp_after,
+                                      "joiner_runs": 0, "adoptions": 0})
+
+
 def lab_call(lab_root: str, port: int, hub_address: str, *argv: str,
              timeout: int = 300) -> dict:
     done = subprocess.run([sys.executable, str(LAB_TOOL), "--root", lab_root,
@@ -1231,10 +1345,15 @@ def shell_detach(journey, fleet: Fleet, candidate: Candidate) -> None:
 # Two journeys are permanent for their leaf and order the tail: revocation
 # kills leaves[-1]'s credential, so everything needing a live pair runs before
 # it; shell_detach removes leaves[0] from the fleet entirely, so it runs last.
+# upgrade_shell sits between them: it withdraws leaves[0]'s row and re-adopts
+# it from the prior, so it must not run before a journey that reads the row
+# adoption left (shell_adopt), and it must leave the leaf on the candidate with
+# live shell material, which is what shell_detach then takes apart.
 JOURNEYS = {"fresh_install": fresh_install, "upgrade": upgrade, "fleet": fleet_journey,
             "offline_catchup": offline_catchup, "session_survival": session_survival,
             "interruption": interruption, "off_network": off_network,
             "shell_adopt": shell_adopt, "shell_flip": shell_flip,
+            "upgrade_shell": upgrade_shell,
             "revocation": revocation, "shell_detach": shell_detach}
 
 # The guests each journey drives; everyone else may be parked on a
@@ -1250,6 +1369,7 @@ CAST = {"fresh_install": lambda f: (f.hub, f.fresh),
         "shell_adopt": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
         # Both leaves live at once; the hub role runs on the host (the lab).
         "shell_flip": lambda f: tuple(f.leaves[:2]),
+        "upgrade_shell": lambda f: (f.hub, f.leaves[0] if f.leaves else None),
         "shell_detach": lambda f: (f.hub, f.leaves[0] if f.leaves else None)}
 
 
@@ -1691,7 +1811,8 @@ def read_fault(process: subprocess.Popen, *, timeout: int = 1800) -> dict:
 #: Journeys that start on an earlier commit and move forward from it. Without
 #: `--prior-ref` there is nothing to move from, and that is a skip with a
 #: reason, never a journey quietly reduced to a no-op.
-NEEDS_PRIOR = {"upgrade", "offline_catchup", "session_survival", "interruption", "revocation"}
+NEEDS_PRIOR = {"upgrade", "upgrade_shell", "offline_catchup", "session_survival",
+               "interruption", "revocation"}
 
 
 def unsupported(fleet: Fleet, name: str) -> str | None:

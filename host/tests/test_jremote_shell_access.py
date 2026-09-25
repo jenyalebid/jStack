@@ -495,7 +495,12 @@ def test_apply_material_writes_both_files_and_needs_no_runner(tmp_path):
     assert shell_access.read_authorized_block(
         home / ".ssh" / "authorized_keys") == [LINE_A]
     assert "Host work-temp" in (home / ".ssh" / "config").read_text()
-    assert len(steps) == 2 and all(s["ok"] for s in steps)
+    assert [s["step"] for s in steps] == ["authorized-keys", "ssh-config",
+                                          "remote-login"]
+    assert all(s["ok"] for s in steps[:2])
+    # No grant on this machine ever spent the root step, so it is owed, not
+    # assumed done — the whole point of a presentation that costs no root.
+    assert steps[2]["ok"] is False
 
 
 def test_refresh_route_pulls_from_the_parent_and_applies(tmp_path, monkeypatch):
@@ -507,7 +512,8 @@ def test_refresh_route_pulls_from_the_parent_and_applies(tmp_path, monkeypatch):
 
     assert shell_access.read_authorized_block(
         Path(os.environ["HOME"]) / ".ssh" / "authorized_keys") == [LINE_A]
-    assert out["steps"] and all(s["ok"] for s in out["steps"])
+    written = [s for s in out["steps"] if s["step"] != "remote-login"]
+    assert written and all(s["ok"] for s in written)
 
 
 def test_refresh_route_with_no_material_touches_nothing(monkeypatch):
@@ -680,3 +686,239 @@ def test_shell_access_is_a_probed_host_capability():
     assert router._probe("shell_access") is False
     shell_access.identity()
     assert router._probe("shell_access") is True
+
+
+# ── a machine adopted before the feature presents its key late ──────────────
+
+def _presenting(monkeypatch, mapping: dict):
+    """Wire credential → machine the way the hub resolves it, so a presentation
+    can only ever be aimed at the row the credential names."""
+    from jstack_host import managed_access
+    monkeypatch.setattr(managed_access, "is_leaf", lambda: False)
+    monkeypatch.setattr(managed_access, "leaf_for_device",
+                        lambda device_id: mapping.get(device_id))
+
+
+def test_a_machine_adopted_before_the_feature_presents_its_key_on_refresh(fleet, monkeypatch):
+    """The defect this closes: `set_host_shell` had one writer, the adoption
+    redeem, so a Mac adopted by an earlier build held an empty row forever and
+    `leaf_shell` answered {} for it until somebody re-adopted it."""
+    from jstack_host import router
+    fleet.upsert_host("old-key1", "Old Mac", "10.66.0.30", 9090)
+    from jstack_host import shell_grants
+    assert shell_grants.leaf_shell("old-key1") == {}, "the pre-shell state"
+    _presenting(monkeypatch, {"dev-old": fleet.host_row("old-key1")})
+
+    out = router.managed_shell(router.ManagedShellRequest(pubkey=LINE_B, user="alex"),
+                              device_id="dev-old")
+
+    row = fleet.host_row("old-key1")
+    assert row["shell_pubkey"] == LINE_B and row["shell_user"] == "alex"
+    # And the same request answers the set it just became eligible for.
+    assert out["authorized"] == [shell_access.identity()]
+    assert shell_grants.leaf_shell("old-key1")["authorized"]
+
+
+def test_presenting_late_puts_the_machine_in_the_hubs_own_ssh_config(fleet, monkeypatch):
+    from jstack_host import router
+    fleet.upsert_host("old-key1", "Old Mac", "10.66.0.30", 9090)
+    _presenting(monkeypatch, {"dev-old": fleet.host_row("old-key1")})
+    cfg = Path(os.environ["HOME"]) / ".ssh" / "config"
+
+    router.managed_shell(router.ManagedShellRequest(pubkey=LINE_B, user="alex"),
+                        device_id="dev-old")
+
+    assert "Host old-mac" in cfg.read_text(), "the hub cannot ssh what it cannot name"
+
+
+def test_a_machine_cannot_present_an_identity_for_another_machines_row(fleet, monkeypatch):
+    """There is no key parameter to aim: the credential names the machine."""
+    from jstack_host import router
+    _presenting(monkeypatch, {"dev-src": fleet.host_row("src-key1")})
+    other_before = dict(fleet.host_row("dst-key1"))
+
+    router.managed_shell(router.ManagedShellRequest(pubkey=LEAF_LINE, user="mallory"),
+                        device_id="dev-src")
+
+    assert fleet.host_row("src-key1")["shell_pubkey"] == LEAF_LINE
+    after = fleet.host_row("dst-key1")
+    assert after["shell_pubkey"] == other_before["shell_pubkey"]
+    assert after["shell_user"] == other_before["shell_user"] == "alex"
+
+
+def test_an_unchanged_key_is_not_rewritten(fleet, monkeypatch):
+    from jstack_host import router
+    _presenting(monkeypatch, {"dev-src": fleet.host_row("src-key1")})
+    writes = []
+    monkeypatch.setattr(type(fleet), "set_host_shell",
+                        lambda self, *a: writes.append(a) or True)
+
+    router.managed_shell(router.ManagedShellRequest(pubkey=LINE_A, user="alex"),
+                        device_id="dev-src")
+    assert writes == [], "a settled machine's refresh must touch no row"
+
+    router.managed_shell(router.ManagedShellRequest(pubkey=LINE_B, user="alex"),
+                        device_id="dev-src")
+    assert writes == [("src-key1", LINE_B, "alex")], "a changed key is stored"
+
+
+def test_a_presented_key_that_would_smuggle_options_is_refused(fleet, monkeypatch):
+    from jstack_host import router
+    fleet.upsert_host("old-key1", "Old Mac", "10.66.0.30", 9090)
+    _presenting(monkeypatch, {"dev-old": fleet.host_row("old-key1")})
+
+    out = router.managed_shell(
+        router.ManagedShellRequest(pubkey='command="rm -rf /" ssh-ed25519 AAAA k',
+                                   user="alex"),
+        device_id="dev-old")
+
+    assert fleet.host_row("old-key1")["shell_pubkey"] == ""
+    assert out == {}, "an unstorable identity earns no set"
+
+
+def test_a_presented_account_that_is_not_a_name_never_blanks_a_working_one(fleet, monkeypatch):
+    """Half a presentation is not an upgrade, and must not be a downgrade.
+
+    `hub_peers` skips a row with no `shell_user`, so storing a valid key beside
+    an unusable account would take a machine the hub can currently reach and
+    make it unreachable — while answering 200. Both halves or neither.
+    """
+    from jstack_host import router
+    _presenting(monkeypatch, {"dev-src": fleet.host_row("src-key1")})
+    before = dict(fleet.host_row("src-key1"))
+    assert before["shell_user"] == "alex", "the fixture's working state"
+
+    for account in ("", "root; rm -rf /", "a" * 300, "has space"):
+        router.managed_shell(
+            router.ManagedShellRequest(pubkey=LINE_B, user=account),
+            device_id="dev-src")
+        row = fleet.host_row("src-key1")
+        assert row["shell_user"] == "alex", f"{account!r} blanked the account"
+        assert row["shell_pubkey"] == before["shell_pubkey"], (
+            f"{account!r} stored a key with no account to reach it under")
+
+
+def test_a_pull_that_presents_nothing_still_reads(fleet, monkeypatch):
+    """Every build before this one posts an empty body; it must be unaffected."""
+    from jstack_host import router, shell_grants
+    shell_grants.flip("src-key1", "dst-key1", True, poster=_wire([]))
+    _presenting(monkeypatch, {"dev-dst": fleet.host_row("dst-key1")})
+
+    assert router.managed_shell(None, device_id="dev-dst") == \
+        shell_grants.leaf_shell("dst-key1")
+    assert fleet.host_row("dst-key1")["shell_pubkey"] == LINE_B
+
+
+def test_the_leaf_presents_its_identity_on_every_pull(monkeypatch):
+    import getpass
+    from jstack_host import managed_access
+    sent = []
+    monkeypatch.setattr(managed_access, "_post_parent",
+                        lambda route, body: sent.append((route, body)) or {})
+    managed_access.parent_shell()
+
+    assert sent == [("shell", {"pubkey": shell_access.public_key(),
+                               "user": getpass.getuser()})]
+    assert sent[0][1]["pubkey"].startswith("ssh-ed25519 ")
+
+
+def test_a_mint_that_fails_costs_shell_access_and_never_the_refresh(monkeypatch):
+    from jstack_host import managed_access
+    sent = []
+    monkeypatch.setattr(managed_access, "_post_parent",
+                        lambda route, body: sent.append((route, body)) or {})
+    monkeypatch.setattr(shell_access, "identity", lambda *a, **kw: (_ for _ in ()).throw(
+        shell_access.ShellAccessError("no ssh-keygen here")))
+
+    assert managed_access.parent_shell() == {}
+    assert sent == [("shell", {})], "the pull itself must still happen"
+
+
+# ── the one root step stays honest ──────────────────────────────────────────
+
+def test_a_refresh_on_a_machine_whose_remote_login_is_off_owes_the_root_step(monkeypatch):
+    """The user-writable half lands with no root at all; the root step adoption
+    spends is reported outstanding rather than acquired or assumed."""
+    from jstack_host import managed_access, router
+    monkeypatch.setattr(managed_access, "is_leaf", lambda: True)
+    monkeypatch.setattr(managed_access, "parent_shell",
+                        lambda: {"authorized": [LINE_A], "peers": []})
+    assert shell_access.root_step_spent() is False
+
+    steps = router.shell_refresh(device_id="ignored")["steps"]
+
+    home = Path(os.environ["HOME"])
+    assert shell_access.read_authorized_block(home / ".ssh" / "authorized_keys") == [LINE_A]
+    assert _step(steps, "authorized-keys")["ok"] is True
+    assert _step(steps, "ssh-config")["ok"] is True
+    owed = _step(steps, "remote-login")
+    assert owed and owed["ok"] is False
+    assert "Remote Login" in owed["note"]
+
+
+def test_the_outstanding_root_step_reaches_the_hub_as_a_failed_refresh(fleet):
+    """`refresh_on` is the channel: no new one was invented for this."""
+    from jstack_host import shell_grants
+
+    def poster(url, payload, token):
+        from jstack_host import grants
+        if url.endswith(grants.MINT_PATH):
+            return 200, {"device": {"name": "shell refresh"}, "token": "jr1.p.tok"}
+        return 200, {"steps": [{"step": "authorized-keys", "ok": True, "note": ""},
+                               {"step": "remote-login", "ok": False,
+                                "note": "inbound ssh needs Remote Login on"}]}
+
+    step = shell_grants.refresh_on("dst-key1", poster=poster)
+    assert step["ok"] is False
+    assert "Remote Login" in step["note"]
+
+
+def test_a_machine_that_spent_the_root_step_owes_nothing(monkeypatch):
+    from jstack_host import managed_access, router
+    shell_access.enable(runner=_Runner(answers={"-getremotelogin": "Remote Login: Off\n"}),
+                        sudo=False)
+    assert shell_access.root_step_spent() is True
+    monkeypatch.setattr(managed_access, "is_leaf", lambda: True)
+    monkeypatch.setattr(managed_access, "parent_shell",
+                        lambda: {"authorized": [LINE_A], "peers": []})
+
+    steps = router.shell_refresh(device_id="ignored")["steps"]
+    assert _step(steps, "remote-login") is None
+    assert all(s["ok"] for s in steps)
+
+
+def test_a_machine_whose_grant_found_remote_login_already_on_owes_nothing():
+    """`enabled_remote_login` is False here — it answers whether the grant
+    turned it on — so it cannot be the predicate on its own: the record's
+    existence is what says the root step was spent."""
+    shell_access.enable(runner=_Runner(answers={"-getremotelogin": "Remote Login: On\n"}),
+                        sudo=False)
+    assert shell_access.enabled_remote_login() is False
+    assert shell_access.root_step_spent() is True
+    steps = shell_access.apply_material({"authorized": [LINE_A], "peers": []},
+                                        Path(os.environ["HOME"]))
+    assert _step(steps, "remote-login") is None
+
+
+def test_no_material_means_no_owed_root_step(tmp_path):
+    """A machine with nothing granted owes nothing; the step follows the keys."""
+    steps = shell_access.apply_material({"authorized": [], "peers": []},
+                                        tmp_path / "empty-home")
+    assert _step(steps, "remote-login") is None
+
+
+# ── the adoption path is untouched ──────────────────────────────────────────
+
+def test_the_adoption_path_still_stores_the_key_and_spends_the_root_step(tmp_path):
+    """Adoption keeps its one root moment and reports every step ok — the late
+    presentation added a second road in, it did not change this one."""
+    shell = {"authorized": [LINE_A], "peers": []}
+    runner = _Runner(answers={"-getremotelogin": "Remote Login: Off\n"})
+    result = _attach(tmp_path, _host_response(shell=shell), runner=runner)
+
+    assert _step(result["shell_steps"], "remote-login")["ok"] is True
+    assert all(s["ok"] for s in result["shell_steps"])
+    assert [s["step"] for s in result["shell_steps"]].count("remote-login") == 1
+    assert shell_access.read_authorized_block(
+        tmp_path / "home" / ".ssh" / "authorized_keys") == [LINE_A]
+    assert not (tmp_path / "root" / shell_access.SUDOERS_PATH).exists()

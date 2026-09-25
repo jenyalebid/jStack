@@ -47,6 +47,9 @@ REQUIRED: dict[str, tuple[str, ...]] = {
                     "no_standing_root", "joiner_rerun_idempotent"),
     "shell_flip": ("granted_pair", "peer_shell_answers", "revoked_pair",
                    "refused_immediately", "no_readoption"),
+    "upgrade_shell": ("pre_shell_machine", "promoted_build", "presented_on_refresh",
+                      "hub_row_gained_identity", "hub_config_named", "hub_shell_answers",
+                      "no_standing_root", "no_readoption"),
     "shell_detach": ("shell_before_detach", "detach_steps", "material_gone",
                      "remote_login_restored", "hub_forgot_machine", "hub_shell_refused"),
 }

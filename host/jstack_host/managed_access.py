@@ -100,7 +100,28 @@ def parent_grant(key: str) -> dict:
 
 
 def parent_shell() -> dict:
-    return _post_parent("shell", {})
+    """Present this machine's shell identity to the parent, then pull its set.
+
+    One call does both because the parent needs no second trust decision: the
+    credential this request carries is what names the machine, so a machine can
+    only ever present its own identity for its own row. Adoption spent exactly
+    this trust the one time it minted the key into the redeem payload — the
+    difference here is only that the moment can come again, which is what makes
+    a Mac adopted before shell access existed shell-capable without re-adopting
+    it.
+
+    A mint that fails costs shell access and never the refresh — the same
+    discipline the attach spends it under. An old parent ignores the fields and
+    answers the read it always answered.
+    """
+    from . import shell_access
+    body: dict = {}
+    try:
+        import getpass
+        body = {"pubkey": shell_access.identity(), "user": getpass.getuser()}
+    except (shell_access.ShellAccessError, OSError, KeyError):
+        body = {}
+    return _post_parent("shell", body)
 
 
 def device_allowed(device_id: str, *, local: bool = False) -> bool:

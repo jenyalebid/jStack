@@ -500,7 +500,9 @@ def redeem(raw_code: str, client_ip: str, host_key: str = "",
             shell = {}
             note = (note + "; " if note else "") + (
                 f"shell access could not be set up ({type(exc).__name__}) — "
-                "re-run the joiner to retry")
+                "the machine re-presents its identity on its next shell "
+                "refresh, so a poke from the hub retries it; the joiner does "
+                "too")
 
     _announce(row, device_row, client_ip, kind, rekeyed is not None)
     return {"device": device_row, "token": token,

@@ -7,8 +7,13 @@ affected machine over the managed channel; the poked machine pulls its own
 set back through its parent credential (`/managed/shell`) and rewrites the
 user-writable half, so no key material rides the poke and a missed poke
 degrades to "until the next refresh or joiner run", never to a machine
-silently keeping revoked access. Root was spent once, at adoption: a live
-flip needs none, which is why the authorized block is user-writable.
+silently keeping revoked access. A live flip spends no root at all, which is
+why the authorized block is user-writable; a machine that never spent the one
+root step (Remote Login) says so in its graded steps instead of half-granting.
+
+The pull also *takes* the presenting machine's own pubkey and user, so an
+identity is not adoption-only: a Mac adopted before shell access existed
+becomes shell-capable on one poke, never a re-adoption.
 """
 
 from __future__ import annotations
@@ -32,8 +37,9 @@ def _store():
 def leaf_shell(host_key: str) -> dict:
     """What `host_key`'s machine must authorize and may reach — the one
     compute behind both the adoption handshake and a live pull. {} for a
-    machine that never presented a key, which is a pre-shell build joining
-    exactly as it always did."""
+    machine that has not presented a key yet — a build old enough to present
+    none at all, or the first moment of a pre-shell Mac's refresh, before the
+    same request stores what it presented."""
     store = _store()
     row = store.host_row(host_key)
     if row is None or row["deleted"] or not row["shell_pubkey"]:
