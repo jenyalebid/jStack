@@ -142,6 +142,14 @@ def _tell_parent(rec: dict, host_key: str, poster) -> list[dict]:
                      if status == 200 else
                      f"the parent did not drop the tile ({status or 'unreachable'}: "
                      f"{body.get('detail', 'no detail')}) — forget it there by hand")})
+        if status == 200 and device_id and body.get("credential_revoked") == device_id:
+            # A hub that revokes the credential with the tile has done the
+            # last step already; the revoke below would find the token dead
+            # and the reach gone, and read as a failure that is not one.
+            steps.append({"step": "parent-revoke", "ok": True,
+                          "note": "this machine's credential on the parent is "
+                                  "revoked — it went with the tile"})
+            return steps
     # Last, and deliberately: this kills the token the call above needs.
     if device_id:
         status, body = poster(

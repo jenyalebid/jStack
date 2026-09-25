@@ -393,8 +393,23 @@ def test_a_machine_forgets_itself_and_only_itself_off_the_console(store):
     leaf = TestClient(app)
     leaf.headers.update({"Authorization": f"Bearer {token}"})
     assert leaf.post("/api/jremote/v1/hosts/host-key-bbbb/forget").status_code == 403
-    assert leaf.post("/api/jremote/v1/hosts/host-key-aaaa/forget").status_code == 200
+    answer = leaf.post("/api/jremote/v1/hosts/host-key-aaaa/forget")
+    assert answer.status_code == 200
     assert store.host_row("host-key-aaaa")["deleted"]
+    # The credential goes with the tile: the machine could not revoke it
+    # afterwards (the tombstone ends its reach, and a machine credential may
+    # not disconnect), and alive it would still open the hub's /managed/ routes.
+    assert answer.json()["credential_revoked"] == row["id"]
+    assert store.device(row["id"])["revoked_at"] is not None
+    assert leaf.post("/api/jremote/v1/hosts/host-key-aaaa/forget").status_code == 401
+
+
+def test_the_console_forgetting_a_machine_keeps_its_own_credential(client, store, on_console):
+    store.upsert_host("host-key-aaaa", "Laptop", "10.66.0.7", 9090)
+    answer = client.post("/api/jremote/v1/hosts/host-key-aaaa/forget")
+    assert answer.status_code == 200
+    assert answer.json()["credential_revoked"] == ""
+    assert client.get("/api/jremote/v1/host").status_code == 200
 
 
 def test_managing_a_host_that_is_not_there_is_a_404(client, store, on_console):

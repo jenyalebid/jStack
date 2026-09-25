@@ -1049,13 +1049,21 @@ def forget_host(key: str, request: Request, device_id: str = Depends(current_dev
     from . import grants, shell_grants
     from .store import get_store
     own = managed_access.leaf_for_device(device_id)
-    if own is None or own["key"] != key:
+    itself = own is not None and own["key"] == key
+    if not itself:
         managed_access.require_console(request)
     if not get_store().forget_host(key):
         raise HTTPException(status_code=404,
                             detail="unknown or already forgotten host")
+    # The credential goes with the tile when the machine itself is the caller.
+    # It could not revoke itself afterwards: the tombstone already ends its
+    # reach (`managed_access.authorize`), and a machine credential is not a
+    # device that may disconnect (`revoke_device`). Left alive it would still
+    # open every /managed/ route of a hub that has forgotten the machine.
+    revoked = device_id if itself and devices.revoke(device_id) else ""
     return {"forgotten": key, "grant_dropped": grants.forget(key),
-            "shell_steps": shell_grants.machine_forgotten(key)}
+            "shell_steps": shell_grants.machine_forgotten(key),
+            "credential_revoked": revoked}
 
 
 class HostGrantRequest(BaseModel):
