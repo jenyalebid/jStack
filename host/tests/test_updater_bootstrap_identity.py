@@ -116,3 +116,31 @@ def test_updates_enable_is_a_supported_host_command(tmp_path, monkeypatch, capsy
     assert called["state_dir"] == tmp_path
     assert called["public"]
     assert json.loads(capsys.readouterr().out) == {"supervisor": "installed"}
+
+
+def test_the_channel_and_build_verbs_read_the_installed_hosts_state_dir(tmp_path, monkeypatch, capsys):
+    """The config these two act on is the installed host's, not the package
+    default. Unadopted, `channel` answered "updates are not enabled" on a hub
+    whose updater was current — and `build` is the same read, so the only door
+    that builds was shut the same way."""
+    import os
+    from jstack_host import install_host
+
+    live = tmp_path / "live"
+    (live / "updates").mkdir(parents=True)
+    (live / "updates/config.json").write_text(json.dumps({"channel": "dev"}))
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    monkeypatch.delenv("JREMOTE_STATE_DIR", raising=False)
+    monkeypatch.setattr(install_host, "adopt_installed_environment",
+                        lambda path=None: os.environ.setdefault("JREMOTE_STATE_DIR", str(live)))
+
+    args = cli.build_parser().parse_args(["updates", "channel"])
+    assert args.fn(args) == 0
+    assert capsys.readouterr().out.strip() == "dev"
+
+    # An explicit --state-dir still outranks what the service declares, and a
+    # state dir holding no updater config is still the honest refusal.
+    args = cli.build_parser().parse_args(
+        ["updates", "channel", "--state-dir", str(tmp_path / "elsewhere")])
+    assert args.fn(args) == 1
+    assert "updates are not enabled" in capsys.readouterr().err
