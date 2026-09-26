@@ -65,10 +65,33 @@ def machine_line(observation: dict | None) -> str:
     return value if value in releases.LINES else releases.STABLE_CHANNEL
 
 
+def pre_lines_offer(line: str) -> Path | None:
+    """A hub that predated lines wrote whatever it built, dev included, into
+    the one `latest.json`. When such a hub moves onto lines while following
+    dev, that file is still dev's offer — its manifest names the line it was
+    built from — until the hub builds again and dev gets its own file. Read
+    where it is, so the hub's own row is not "not_published" the moment it
+    lands on this code (hub/update, 2026-09-26)."""
+    if line == releases.STABLE_CHANNEL:
+        return None
+    path = latest_path(releases.STABLE_CHANNEL)
+    if not path.exists():
+        return None
+    try:
+        envelope = json.loads(path.read_text())
+    except ValueError:
+        return None
+    manifest = envelope.get("manifest") if isinstance(envelope, dict) else None
+    channel = (manifest or {}).get("channel") or {}
+    return path if isinstance(channel, dict) and channel.get("name") == line else None
+
+
 def offer(line: str = releases.STABLE_CHANNEL) -> dict | None:
     path = latest_path(line)
     if not path.exists():
-        return None
+        path = pre_lines_offer(line)
+        if path is None:
+            return None
     envelope = json.loads(path.read_text())
     settings = config()
     manifest = releases.verify(envelope, settings.get("public_key", ""),

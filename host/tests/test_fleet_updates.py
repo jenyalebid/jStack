@@ -819,6 +819,47 @@ def test_the_feed_keeps_main_where_old_leaves_read_it_and_dev_beside_it(tmp_path
     assert fleet.machine_line({"line": "feature/x"}) == "main"
 
 
+def test_a_dev_build_a_hub_made_before_lines_is_still_devs_offer(tmp_path, monkeypatch, release):
+    """A hub following dev that predated lines built dev into the one
+    `latest.json`. Moved onto lines, it reads that file as dev's offer until it
+    builds again; a main build there is never dev's (hub/update, 2026-09-26:
+    the guest hub landed on the candidate and sat on not_published)."""
+    from jstack_host import releases as app_releases
+    key, public, envelope = release
+    monkeypatch.setattr(app_releases, "RELEASE_DIR", tmp_path / "releases/mac")
+    monkeypatch.setattr(hostenv, "state_dir", lambda: tmp_path / "state")
+    fleet.root().mkdir(parents=True)
+    atomic_json(fleet.root() / "config.json", {"public_key": public, "candidate_test": True})
+    feed = fleet.feed_dir()
+
+    def publish(channel):
+        manifest = {**envelope["manifest"], "release": "pre-lines-1",
+                    "channel": {"github_repo": "o/r", "name": channel}}
+        signed = releases.sign(manifest, key.private_bytes_raw())
+        atomic_json(feed / "latest.json", signed)
+        for item in manifest["components"].values():
+            (feed / "pre-lines-1").mkdir(parents=True, exist_ok=True)
+            (feed / "pre-lines-1" / item["file"]).write_bytes(b"artifact")
+        return signed
+
+    signed = publish("dev")
+    assert fleet.pre_lines_offer("dev") == feed / "latest.json"
+    assert fleet.offer("dev") == signed
+    assert fleet.offer("main") == signed   # what a leaf that predates lines reads, as before
+    # Once dev has its own file, that file is dev's offer and the old one is not consulted.
+    dev_manifest = {**envelope["manifest"], "release": "dev-2"}
+    atomic_json(feed / "latest-dev.json", releases.sign(dev_manifest, key.private_bytes_raw()))
+    (feed / "dev-2").mkdir()
+    for item in dev_manifest["components"].values():
+        (feed / "dev-2" / item["file"]).write_bytes(b"artifact")
+    assert fleet.offer("dev")["manifest"]["release"] == "dev-2"
+    (feed / "latest-dev.json").unlink()
+    # A main build in the old file is main's alone.
+    publish("main")
+    assert fleet.pre_lines_offer("dev") is None and fleet.offer("dev") is None
+    assert fleet.pre_lines_offer("main") is None
+
+
 def test_inventory_measures_each_machine_against_its_own_line(rig, release, offers):
     store, console, remote = rig
     offers["dev"] = _dev_offer(release)
