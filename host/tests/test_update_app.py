@@ -647,3 +647,32 @@ def test_an_update_that_keeps_its_signing_identity_leaves_the_updater_item_alone
     assert job["transaction"]["updater_reregister"] is False
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: pytest.fail("no relaunch helper"))
     backend.prepare_restart(job)
+
+
+def test_an_automation_role_gone_after_the_swap_fails_by_name_and_settling_restores_it(monkeypatch, tmp_path):
+    """The home hub's update of 2026-09-25 19:11: nine automation roles read
+    not_registered mid-job and were registered by hand (#197). A role the
+    snapshot held enabled and verification finds gone must never read as a
+    passed update, the failure must say which role, and settling registers it."""
+    app = bundle(tmp_path / "Hub.app", {**SEALED, **capability("tunnel")}, {"tunnel": CAPABILITY})
+    registry = {"host": "not_registered", "menu": "not_registered", "tunnel": "not_registered"}
+
+    def control(app, action, role=None):
+        if action == "status":
+            return dict(registry)
+        registry[role] = "enabled" if action == "register" else "not_registered"
+        return {"service": role, "status": registry[role]}
+
+    monkeypatch.setattr(update_app, "control", control)
+    monkeypatch.setattr(update_plugins, "discover", lambda: {})
+    monkeypatch.setattr(update_plugins, "observed", lambda _: {})
+    monkeypatch.setattr(install_host, "is_loaded", lambda _: False)
+    backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
+    job = {"id": "job-197", "envelope": {"manifest": {"components": {"stack": {"version": "1"}}}},
+           "transaction": {"apps": {}, "services": {
+               "host": "not_registered", "menu": "not_registered", "tunnel": "enabled"}}}
+    assert not backend.verify(job)
+    assert backend.unverified == "tunnel service is not_registered, was enabled before the update"
+    assert backend.settle(job) == {"error": ""}
+    assert registry["tunnel"] == "enabled"
+    assert backend.verify(job) and backend.unverified == ""
