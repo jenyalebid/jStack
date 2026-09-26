@@ -68,7 +68,9 @@
         "hooks/session-start-inject.py",
         "hooks/hooks.json"
       ],
-      "config": [],
+      "config": [
+        "~/.claude/jstack/review.json"
+      ],
       "docs": [],
       "test": {
         "type": "script",
@@ -313,7 +315,7 @@
       "kind": "system",
       "name": "Timeline Log",
       "status": "live",
-      "description": "Timeline sqlite store ({timeline_dir}/timeline.db) written and read by bin/log_event — block format, chronological order, pipeline-task consolidation, direct/indirect origin, and a session→tag relation naming the subject a stretch of work was about. The day's spine: feeds daily briefs, nightly reviews, and seat injection.",
+      "description": "Timeline sqlite store ({timeline_dir}/timeline.db) written and read by bin/log_event — block format, chronological order, pipeline-task consolidation, direct/indirect origin, and a session→tag relation naming the subject a stretch of work was about. The day's spine: feeds daily briefs, nightly reviews, and seat injection. `log_event where` names the db this writer resolved — the probe any other reader of the store uses to prove it is reading the same file, rather than deriving the path a second time and succeeding against a different one.",
       "code": [
         "bin/log_event",
         "rules-stage/timeline.md"

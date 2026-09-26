@@ -545,3 +545,68 @@ def test_install_sh_makes_a_seat_under_every_agent_it_touches():
     # And the line the installer signs off with points at the seat, never the
     # workspace above it.
     assert re.search(r"cd \$AGENT_ROOT/\$\{AGENT_NAME:-<agent>\}/\$SEAT_NAME", INSTALL)
+
+
+def test_pairing_asks_the_disk_whether_there_is_an_app():
+    """A Mac that already has jRemote gets its app paired, not a typed code.
+
+    `APP_INSTALLED` answered "did THIS run install the app", and step 10 read
+    it as "is there an app to pair". The two differ on every Mac that already
+    had one — a `--no-app` install over an existing client, or an app step that
+    reported a problem with a working bundle still in place — and there the
+    installer printed a code for a device sitting on that same disk and never
+    opened the app. Proven on a guest 2026-09-25: the staged client was never
+    launched, so neither of the install's own `jremote://` links was ever
+    fired.
+    """
+    assert re.search(r'if \[ -d "/Applications/jRemote\.app" \]; then APP_INSTALLED=1', CODE), \
+        "install.sh no longer records an app it did not install itself"
+    # And the flag is still what the pairing steps branch on, so the line above
+    # is reaching the thing it was written for.
+    assert CODE.count("APP_INSTALLED") >= 4
+
+
+# ── the root is asserted twice, and neither witness may be lost quietly ──
+
+def test_install_records_the_root_where_a_shell_less_service_reads_it():
+    """The sealed Hub launches with `HOME` and nothing else, so a root that
+    lives only in a shell profile is a root it cannot see: it derived Logs,
+    Config and State under `$HOME` and read an empty timeline while `log_event`
+    wrote the declared root's. Two markers, because `--agent-root` may put
+    agents outside the root and neither answer can be derived from the other.
+    Keep these paths in step with hostenv.{instance_root,stack_root}_marker()."""
+    assert '"$HOME/.config/jstack/instance_root"' in CODE
+    assert '> "$HOME/.config/jstack/root"' in CODE
+
+
+def test_a_lost_profile_declaration_is_restored_not_re_asked():
+    """`declared_root` watches the shell profile, and the profile is a file
+    anything may rewrite — an uninstall --purge, an editor, a dotfile manager.
+    A re-install that then read no root offered `$HOME` as the default and
+    orphaned the tree, which is the exact failure `declared_root` exists to
+    prevent, arriving through a door it does not watch. The recorded root is
+    the second witness, and finding it re-declares the line."""
+    assert "recorded_root()" in CODE
+    assert 'elif JSTACK_ROOT="$(recorded_root)"; then' in CODE
+    # …and believing it must put the declaration BACK, or the next install
+    # asks again and the repair lasts exactly one run.
+    branch = CODE.split('elif JSTACK_ROOT="$(recorded_root)"; then', 1)[1].split("else", 1)[0]
+    assert "DECLARE_ROOT=1" in branch
+
+
+def test_purge_takes_the_markers_with_the_declaration():
+    """A purge that stripped the profile line but left the markers would hand
+    the next install a root it was just told to forget."""
+    assert 'rm -f "$HOME/.config/jstack/root" "$HOME/.config/jstack/instance_root"' in CODE
+
+
+def test_install_ships_a_default_injection_config():
+    """The SessionStart injector is opt-in and nothing in this repo ever wrote
+    its key, so every fresh install closed the write half of the running-memory
+    loop and left the read half off, silently. Written only when absent — the
+    file is the user's, and a machine that narrowed which seats inject must not
+    have a catch-all put back under it on every update."""
+    assert "timeline_inject" in CODE
+    assert 'if [ -f "$REVIEW_CFG" ]; then' in CODE
+    block = CODE.split('REVIEW_CFG=', 1)[1].split("# ── 6.", 1)[0]
+    assert "ok \"$REVIEW_CFG already exists" in block, "an existing config must be left alone"

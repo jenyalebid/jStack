@@ -241,6 +241,20 @@ def check_timeline() -> dict:
                       "normal until the first `log_event`, which creates it")
     try:
         with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if "entries" not in tables:
+                # `msg` shares this file and creates only its own `messages`
+                # table, so a Mac whose first timeline write is a message —
+                # which a fresh install's own agent session does — has a db
+                # with no `entries` in it. That is a store waiting for its
+                # first event, not a broken one: log_event's schema is CREATE
+                # TABLE IF NOT EXISTS and adds it to the file as it stands.
+                # Graded FAIL, it told every reader of a fresh install that
+                # their timeline was unreadable.
+                return _check("timeline", OK,
+                              f"{db} — no entries yet ({', '.join(sorted(tables)) or 'empty'})",
+                              "normal until the first `log_event`")
             rows = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
     except sqlite3.Error as e:
         return _check("timeline", FAIL, f"{db} is not a readable timeline: {e}",
@@ -459,6 +473,70 @@ def check_review() -> dict:
                       "drop `agent_root` from review.json unless the split is deliberate")
     return _check("review", OK,
                   f"{action}: {len(agents)} agent(s) resolvable from {agent_root}")
+
+
+def check_injection() -> dict:
+    """The READ half of the running-memory loop — does any seat get injected?
+
+    `review` grades the WRITE half: sessions resolve to an agent and log. This
+    grades whether anything reads them back. The two are independent, and the
+    half that fails silently is this one: `timeline_inject` is opt-in, no
+    config key means no injection anywhere, and nothing in this repo ships a
+    default or writes one at install. So a fresh install writes its timeline
+    correctly and never reads it, with nothing on any screen saying so — a
+    machine ran that way from bring-up until somebody happened to look.
+
+    The hook's own `inject_count` answers, imported rather than restated: a
+    second copy of the config walk here would go stale against the injector
+    and grade a machine on a rule it no longer follows.
+    """
+    hook = PLUGIN_ROOT / "hooks" / "session-start-inject.py"
+    if not hook.is_file():
+        return _check("injection", FAIL, f"no injector at {hook}",
+                      "reinstall the plugin — SessionStart has nothing to call")
+    try:
+        mod = _load_engine(hook)
+    except Exception as e:  # noqa: BLE001 — a doctor never dies on a check
+        return _check("injection", FAIL, f"injector will not load: {e}",
+                      f"run {hook} --explain <agent/seat> by hand for the traceback")
+
+    cfg_path = Path(os.environ.get(
+        "JSTACK_REVIEW_CONFIG",
+        str(Path.home() / ".claude" / "jstack" / "review.json"))).expanduser()
+    if os.environ.get("JSTACK_TIMELINE_INJECT_DISABLED") == "1":
+        return _check("injection", WARN,
+                      "JSTACK_TIMELINE_INJECT_DISABLED=1 — no session reads its "
+                      "seat's history", "unset it to close the loop")
+
+    cfg = mod._config()
+    if not cfg_path.exists():
+        return _check("injection", WARN, f"no config at {cfg_path} — no seat injects",
+                      'create it with {"timeline_inject": {"*/*": 10}} — sessions '
+                      "are logging into a timeline nothing reads back")
+    if not isinstance(cfg.get("timeline_inject"), dict):
+        return _check("injection", WARN,
+                      f"{cfg_path} declares no timeline_inject — no seat injects",
+                      'add {"timeline_inject": {"*/*": 10}}: injection is opt-in, '
+                      "so the read half of the loop is off until it is named")
+
+    seats = []
+    for agent in root.agents():
+        found = root.seats(agent) or ["chat"]
+        seats += [(agent.lower(), seat) for seat in found]
+    if not seats:
+        return _check("injection", WARN,
+                      f"{cfg_path} configures injection, but no agents resolve under "
+                      f"{root.agents_dir()}", "the `agents` check above says why")
+    live = [f"{a}/{m}" for a, m in seats if mod.inject_count(cfg, a, m) > 0]
+    if not live:
+        return _check("injection", WARN,
+                      f"no seat of {len(seats)} matches a timeline_inject key",
+                      'add a catch-all: {"timeline_inject": {"*/*": 10}} — every '
+                      "seat is writing history no session reads")
+    return _check("injection", OK,
+                  f"{len(live)} of {len(seats)} seat(s) inject: "
+                  f"{', '.join(sorted(live)[:6])}"
+                  + (" …" if len(live) > 6 else ""))
 
 
 def check_bin() -> dict:
@@ -823,7 +901,7 @@ def check_versions() -> dict:
 CHECKS = (check_python, check_claude, check_git, check_dateutil, check_root,
           check_agents, check_timeline, check_rules, check_commands, check_hooks,
           check_host,
-          check_bin, check_config, check_review, check_scheduler,
+          check_bin, check_config, check_review, check_injection, check_scheduler,
           check_marketplace_source, check_versions)
 
 
