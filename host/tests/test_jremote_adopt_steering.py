@@ -65,7 +65,7 @@ def hub(tmp_path, monkeypatch):
 
 def _adopt(name="Work Mac", offline=False, **over):
     fields = {"name": name, "offline": offline, "ttl": None, "port": None,
-              "json": False, "state_dir": None}
+              "json": False, "state_dir": None, "reinstall": False}
     return SimpleNamespace(**{**fields, **over})
 
 
@@ -109,7 +109,39 @@ def test_a_refused_offline_adopt_mints_no_code(hub, monkeypatch):
     assert hub.minted == []
 
 
+def test_the_refusal_names_the_reinstall_route(hub, monkeypatch, capsys):
+    """The third case the refusal used to leave unnamed: a live Mac about to be
+    purged, whose only remaining route in is the file minted before the purge."""
+    _mesh(monkeypatch, {"work-mac"})
+
+    cli._cmd_adopt(_adopt(offline=True))
+    assert "adopt 'Work Mac' --offline --reinstall" in capsys.readouterr().err
+
+
 # ── and the cases that must NOT be refused ───────────────────────────────────
+
+def test_a_live_mac_about_to_be_purged_gets_the_file_when_told_so(hub, monkeypatch):
+    """#178. The peer is live and answers, and the operator knows what the peer
+    table cannot: after the purge this Mac has no jStack and no route here. The
+    carried file is minted now, while the tunnel is still up, and the standing
+    peer is left alone for `_adopt_offline` to reuse."""
+    _mesh(monkeypatch, {"work-mac"})
+
+    assert cli._cmd_adopt(_adopt(offline=True, reinstall=True)) == 0
+    assert hub.carried, "the reinstall route was refused like a stray file"
+    assert hub.minted and hub.minted[-1]["name"] == "Work Mac"
+
+
+def test_reinstall_without_offline_is_refused_before_minting(hub, monkeypatch, capsys):
+    """A flag that silently does nothing is a trap; without --offline there is
+    no carried file for it to describe."""
+    _mesh(monkeypatch, set())
+
+    assert cli._cmd_adopt(_adopt(reinstall=True)) == 2
+    assert hub.minted == []
+    assert "--offline" in capsys.readouterr().err
+
+
 
 def test_a_live_peer_that_does_not_answer_still_gets_the_file(hub, monkeypatch):
     """The case the whole carried flow exists for, and the one a check on the
