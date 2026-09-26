@@ -114,8 +114,9 @@ fires:
   * never left behind — after the Enter, the box is checked. Typing a slash command opens
     the CLI's autocomplete, and no send is guaranteed to take, so anything of ours still
     sitting there is cleared back out. A hook that types cleans up after itself;
-  * never forced — everything here gives up silently. A missed seam costs headroom and the
-    CLI's backstop catches it. A misplaced `/compact` costs a person's message.
+  * never forced — a busy pane is waited on, on a bounded schedule (`RETRY_WINDOWS`), and
+    then given up on, in the log. A missed seam costs headroom and the CLI's backstop
+    catches it. A misplaced `/compact` costs a person's message.
 
 Only managed sessions run in tmux. One without a managed session is left alone.
 
@@ -144,7 +145,17 @@ from pathlib import Path
 from . import agent_prefs, codex_transcript, compaction, context_ceiling, hostenv, managed
 
 POLL_SECS = 0.5
-MAX_WAIT_SECS = 20  # somebody typing for longer than this: leave it, the next Stop retries
+MAX_WAIT_SECS = 20  # one look at the pane; `persist` decides whether there is another
+
+#: The windows a busy pane is re-read in after the first MAX_WAIT_SECS, ~15 min in all.
+#:
+#: `busy` was terminal, and "the next Stop retries" is false for a session that parked —
+#: there is no next Stop. 244ca668 declared a seam at 165,840, the child found the pane not
+#: ready for twenty seconds, logged `busy`, and the session sat until a person typed into
+#: it twelve minutes later, into a pane that by then read idle. Every window keeps checking
+#: whether a real turn landed, so a person who starts typing ends the retry within a poll —
+#: long before their own Stop could find this session's lock still held.
+RETRY_WINDOWS = (20, 40, 60, 120, 240, 420)
 
 #: One lock PER SESSION, and the per-session part is load-bearing. The invariant is
 #: narrower than the machine: `run` must not have two children half-deciding for ONE
@@ -1126,9 +1137,24 @@ def compacts_when_done(agent):
 
 # --- across the boundary -----------------------------------------------------------------
 
-def wait_and_send(name, path, threshold, size_at_stop, engine):
+def persist(sid, stage, attempt):
+    """`attempt(window)` until it answers anything but `busy`, then `gave-up`.
+
+    One row per retry, so a stall is read off the log instead of inferred from a missing
+    line. The give-up is the caller's own outcome row.
+    """
+    outcome = attempt(MAX_WAIT_SECS)
+    for n, window in enumerate(RETRY_WINDOWS, 1):
+        if outcome != "busy":
+            return outcome
+        record(sid=sid[:8], stage=stage, outcome="busy", retry=n, window=window)
+        outcome = attempt(window)
+    return "gave-up" if outcome == "busy" else outcome
+
+
+def wait_and_send(name, path, threshold, size_at_stop, engine, window=None):
     """Poll until it is provably safe, then compact. Silence on every other outcome."""
-    deadline = time.time() + MAX_WAIT_SECS
+    deadline = time.time() + (window or MAX_WAIT_SECS)
     while time.time() < deadline:
         keepalive()
         if not os.path.exists(path):
@@ -1144,7 +1170,8 @@ def wait_and_send(name, path, threshold, size_at_stop, engine):
     return "busy"
 
 
-def wait_and_continue(name, path, offset, wants_resume, has_rows=False, engine="claude"):
+def wait_and_continue(name, path, offset, wants_resume, has_rows=False, engine="claude",
+                      window=None):
     """Once the boundary lands, hand the session back its work — if it asked for it.
 
     `wants_resume` IS THE DECLARATION, PASSED DOWN, not read again. Re-reading was the hole
@@ -1185,7 +1212,7 @@ def wait_and_continue(name, path, offset, wants_resume, has_rows=False, engine="
                 return "continued" if send_continue(name, has_rows, engine, path) else "not-taken"
             # The TUI redraws for a moment after a compaction, and somebody may have started
             # typing during it. Give the box a chance to settle, then leave it to them.
-            if time.time() - landed_at > MAX_WAIT_SECS:
+            if time.time() - landed_at > (window or MAX_WAIT_SECS):
                 return "busy"
         elif was_aborted(pane(name), COMPACT_CMD, engine, turn):
             # Killed mid-run. No boundary is ever coming, and the command is sitting armed
@@ -1206,27 +1233,23 @@ def continue_in_place(name, path, sid, offset, has_rows=False, engine="claude"):
     race — it needs only the two guards that decide whether typing is allowed at all, and it
     takes both from the same functions the boundary path uses.
 
-    Giving up after MAX_WAIT_SECS is not the cheap kind of silence the rest of this file
-    accepts, because "the next Stop retries" is false for a session that parked. It is
-    survivable only because an outside stall sweep finds exactly this state — an unclaimed
-    seam — as its second signal.
+    A busy pane is retried by `persist`: the session parked, so no next Stop is coming.
     """
-    deadline = time.time() + MAX_WAIT_SECS
-    while time.time() < deadline:
-        keepalive()
-        if not os.path.exists(path):
-            outcome = "gone"
-            break
-        if turn_moved(path, offset, engine):
-            outcome = "taken"  # a person is driving; this is no longer ours
-            break
-        if pane_is_ready(pane(name), engine, turn_state(path, engine)):
-            text = CONTINUE_IN_PLACE + (DOCKET_LINE if has_rows else "")
-            outcome = "continued" if submit(name, text, engine, path) else "not-taken"
-            break
-        time.sleep(POLL_SECS)
-    else:
-        outcome = "busy"
+    def attempt(window):
+        deadline = time.time() + window
+        while time.time() < deadline:
+            keepalive()
+            if not os.path.exists(path):
+                return "gone"
+            if turn_moved(path, offset, engine):
+                return "taken"  # a person is driving; this is no longer ours
+            if pane_is_ready(pane(name), engine, turn_state(path, engine)):
+                text = CONTINUE_IN_PLACE + (DOCKET_LINE if has_rows else "")
+                return "continued" if submit(name, text, engine, path) else "not-taken"
+            time.sleep(POLL_SECS)
+        return "busy"
+
+    outcome = persist(sid, "in-place", attempt)
     record(sid=sid[:8], outcome=f"in-place/{outcome}")
     return f"in-place/{outcome}"
 
@@ -1468,9 +1491,11 @@ def run(name, path, sid, threshold, size_at_stop, wants_resume, has_rows=False,
     """Compact, then step across the boundary. One lock covers both — the continue is part
     of the same decision, and a second delivery FROM THIS SESSION must not start its own
     half of it. Another session's delivery is not a conflict and never was."""
-    sent = wait_and_send(name, path, threshold, size_at_stop, engine)
-    outcome = sent if sent != "sent" else \
-        f"sent/{wait_and_continue(name, path, size_at_stop, wants_resume, has_rows, engine)}"
+    outcome = persist(sid, "compact", lambda window: wait_and_send(
+        name, path, threshold, size_at_stop, engine, window))
+    if outcome == "sent":
+        outcome += "/" + persist(sid, "continue", lambda window: wait_and_continue(
+            name, path, size_at_stop, wants_resume, has_rows, engine, window))
     record(sid=sid[:8], outcome=outcome)
     return outcome
 
