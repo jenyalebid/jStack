@@ -1983,4 +1983,11 @@ and run /jstack:work on any topic. Re-run this script any time to update;
 it changes only what has drifted.
 EOF
 
-exit 0
+# The exit code says what the verdict said. A joiner runs this script under
+# `|| die`, and an unconditional `exit 0` under a FAIL told it a broken install
+# had finished (#124). Warnings are capabilities not yet added — still a
+# working jStack; a failure is not.
+case "$rc" in
+    0|1) exit 0 ;;
+    *)   exit 2 ;;
+esac

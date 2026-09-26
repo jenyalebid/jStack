@@ -381,6 +381,17 @@ def test_install_sh_does_not_replace_a_published_hub_whose_state_lives_elsewhere
     assert "launchctl bootout" not in refusal, "the old Hub is booted out before the refusal"
 
 
+def test_install_sh_exits_with_the_doctors_verdict():
+    """The last thing the installer does is run `jstack-doctor` and print its
+    verdict — and then it exited 0 whatever that verdict was (#124). A joiner
+    runs this script under `|| die` and could not tell a broken install from a
+    clean one. Warnings (1) are still a working jStack; a FAIL is not."""
+    tail = CODE[CODE.rindex('"$BIN/jstack-doctor" | tee'):]
+    assert "rc=${PIPESTATUS[0]}" in tail
+    assert not tail.rstrip().endswith("exit 0"), "install.sh exits 0 whatever the doctor said"
+    assert re.search(r'case "\$rc" in\s+0\|1\) exit 0 ;;\s+\*\)\s+exit 2 ;;', tail)
+
+
 def test_the_runtime_gate_does_not_demand_a_team_a_self_built_hub_cannot_have():
     """The Hub's C runtime validates the seal before importing any module, and
     it asked for the publisher's Developer ID team unconditionally. A Hub
