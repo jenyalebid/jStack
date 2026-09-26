@@ -58,6 +58,7 @@ BASE.pop("JSTACK_SCRATCHPAD", None)
 # session running this test would otherwise lend it one.
 BASE.pop("CLAUDE_CODE_SESSION_ID", None)
 BASE["JSTACK_AGENTS_DIR"] = str(agents)
+BASE["JSTACK_PAD_LOG"] = str(TMP / "pad-link.log")
 
 def run(cwd, sid="sid-abcdef1234", scratchpad=None, payload=None):
     env = BASE.copy()
@@ -78,6 +79,8 @@ check("exits 0", code == 0)
 check("the harness path is now a symlink", sp.is_symlink())
 check("it points at the seat's pad", sp.resolve() == (seat / "pad").resolve())
 check("the pad was created", (seat / "pad").is_dir())
+log = (TMP / "pad-link.log").read_text() if (TMP / "pad-link.log").exists() else ""
+check("the run left its line in the pad log", "sid-abcdef1234" in log and "linked" in log)
 check("the hook prints nothing on stdout", out == "")
 
 # --- the default path is the harness's, derived the same way ---------------
