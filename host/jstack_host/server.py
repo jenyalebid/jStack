@@ -176,6 +176,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:                                 # noqa: BLE001
         _log(f"internal credential skipped ({type(e).__name__}: {e})")
 
+    # The hub's ssh blocks, back to what the store says (#186). Nothing else
+    # rewrites them unless a machine joins, changes grants or is forgotten.
+    try:
+        from . import shell_grants
+        out = shell_grants.reconcile_hub()
+        if out["fixed"]:
+            _log(f"hub ssh {', '.join(out['fixed'])} rebuilt — {out['note']}")
+    except Exception as e:                                 # noqa: BLE001
+        _log(f"hub ssh reconcile skipped ({type(e).__name__}: {e})")
+
     try:
         from . import managed
         for sid in managed.reconcile():

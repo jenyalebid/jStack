@@ -881,6 +881,23 @@ def _cmd_token(args) -> int:
     return 0
 
 
+def _cmd_shell_grants_refresh(args) -> int:
+    """Rebuild the hub's ssh blocks from its store — what startup does, on
+    demand."""
+    _adopt(args)
+    import json
+    from . import shell_grants
+    out = shell_grants.reconcile_hub()
+    if args.json:
+        print(json.dumps(out))
+    elif not out["hub"]:
+        print(out["note"])
+    else:
+        fixed = ", ".join(out["fixed"]) or "nothing — already current"
+        print(f"rebuilt {fixed} ({out['note']})")
+    return 0
+
+
 def _cmd_where(args) -> int:
     """Every path this host resolves, so a support question is one paste.
 
@@ -1696,6 +1713,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "on this host)")
     p.add_argument("--state-dir", default=None)
     p.set_defaults(fn=_cmd_welcome)
+
+    p = sub.add_parser("shell-grants", help="the hub's ssh access to its machines")
+    sg = p.add_subparsers(dest="shell_grants_cmd", required=True)
+    sp = sg.add_parser("refresh",
+                       help="rebuild the hub's ssh config and keys block from its store")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--state-dir", default=None)
+    sp.set_defaults(fn=_cmd_shell_grants_refresh)
 
     p = sub.add_parser("token", help="print this host's bearer token")
     p.add_argument("--state-dir", default=None)
