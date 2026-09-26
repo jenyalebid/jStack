@@ -243,14 +243,17 @@ def seeded(installing, tmp_path, **overrides):
     return root, feed, output
 
 
-def test_the_install_lands_what_it_built_as_the_hubs_first_offer(installing, tmp_path):
+@pytest.mark.parametrize("ref,offer", [("main", "latest.json"), ("dev", "latest-dev.json")])
+def test_the_install_lands_what_it_built_as_the_hubs_first_offer(installing, tmp_path, ref, offer):
     """`inherited()` refuses on an empty feed, so a hub that never lands its
     first release can never build a second one — and a hub with no feed serves
-    no leaf."""
-    root, feed, output = seeded(installing, tmp_path)
+    no leaf. The offer is its line's: main where every leaf reads it, dev
+    beside it."""
+    root, feed, output = seeded(installing, tmp_path, ref=ref)
     answer = build_source.seed(root, output)
     public = build_source.build_key(root)[1]
-    manifest = releases.verify(json.loads((feed / "latest.json").read_text()), public)
+    assert sorted(path.name for path in feed.glob("latest*.json")) == [offer]
+    manifest = releases.verify(json.loads((feed / offer).read_text()), public)
     assert manifest["release"] == answer["release"]
     for item in manifest["components"].values():
         releases.check_artifact(feed / manifest["release"] / item["file"], item)

@@ -64,7 +64,9 @@ def test_reading_the_source_reports_the_last_answer_and_asks_for_no_new_one(rig,
     root, console, _, _ = rig
     _airgap(monkeypatch)
     body = console.get(SOURCE).json()
-    assert body["ref"] == "stable" and body["repository"] == "example/stack"
+    # The config still says `stable`, as every config written before lines
+    # does; it is read as main.
+    assert body["ref"] == "main" and body["repository"] == "example/stack"
     assert body["enabled"] is True and body["managed"] is False
     assert body["running"] == {"release": "2026-09-20-aaaaaaaa-1234", "sha": "a" * 40,
                                "version": "0.75.0", "dirty": False}
@@ -130,7 +132,7 @@ def test_a_rebuild_answers_before_it_finishes_and_is_read_back_as_in_flight(rig,
     # said "idle" over a build already accepted is the window lying.
     assert answer.json()["build"]["state"] == "building"
     assert console.get(SOURCE).json()["build"]["state"] == "building"
-    assert not release and json.loads((root / "build.json").read_text())["ref"] == "stable"
+    assert not release and json.loads((root / "build.json").read_text())["ref"] == "main"
     started.set()
 
 
@@ -172,7 +174,14 @@ def test_a_managed_mac_is_refused_cleanly_rather_than_raising_inside_the_build(r
     refused = console.post(BUILD)
     assert refused.status_code == 409
     assert refused.json()["detail"] == "a managed machine takes its builds from its parent"
-    assert console.post(REF, json={"ref": "dev"}).status_code == 409
+    # A leaf picks its line — which of its parent's offers it takes — and
+    # nothing else: it never builds, so any other branch names nothing.
+    branch = console.post(REF, json={"ref": "feature/x"})
+    assert branch.status_code == 409 and "main or dev" in branch.json()["detail"]
+    assert json.loads((root / "config.json").read_text())["channel"] == "stable"
+    moved = console.post(REF, json={"ref": "dev"})
+    assert moved.status_code == 200 and moved.json()["ref"] == "dev"
+    assert json.loads((root / "config.json").read_text())["channel"] == "dev"
     body = console.get(SOURCE).json()
     assert body["managed"] is True and body["can_build"] is False
     assert not (root / "build.json").exists()

@@ -13,6 +13,7 @@ import tarfile
 import time
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -99,7 +100,7 @@ def test_a_check_compares_head_against_the_build_this_hub_holds(tmp_path, publis
         build_source.check(root, config, client=client, now=1000)
     status = json.loads((root / "channel.json").read_text())
     assert status["status"] == expected and status["release"] == "published-1"
-    assert status["ref"] == "stable" and status["checked"] == 1000
+    assert status["ref"] == "main" and status["checked"] == 1000
 
 
 def test_a_check_keeps_the_three_hundred_second_floor(tmp_path, publisher):
@@ -162,9 +163,23 @@ def test_a_ref_that_is_not_a_branch_is_refused(name):
 
 
 def test_no_ref_configured_is_the_stable_line_and_stable_is_main():
-    assert build_source.channel_ref({}) == releases.STABLE_CHANNEL
+    assert build_source.channel_ref({}) == releases.STABLE_CHANNEL == "main"
     assert build_source.branch(releases.STABLE_CHANNEL) == "main"
     assert build_source.branch("feature/x") == "feature/x"
+    # Every config and sealed identity written before lines says `stable`.
+    assert build_source.channel_ref({"channel": "stable"}) == "main"
+    assert build_source.branch("stable") == "main"
+    assert releases.LINES == ("main", "dev")
+
+
+def test_a_machine_is_on_a_line_even_when_it_follows_a_branch():
+    assert build_source.line({}) == "main"
+    assert build_source.line({"channel": "stable"}) == "main"
+    assert build_source.line({"channel": "dev"}) == "dev"
+    assert build_source.line({"channel": "feature/x"}) == "main"
+    assert build_source.latest_name("main") == "latest.json"
+    assert build_source.latest_name("dev") == "latest-dev.json"
+    assert build_source.latest_name("feature/x") == "latest.json"
 
 
 def test_the_publisher_and_the_builder_share_one_ref_vocabulary():
@@ -388,7 +403,7 @@ def test_a_build_lands_the_shape_stage_already_consumes(builder):
         trust = json.loads(bundle.extractfile("host/jstack_host/release-trust.json").read())
     # stage() reads exactly these three facts back out of the tarball.
     assert identity["release"] == release and identity["sha"] == manifest["sources"]["stack"]
-    assert identity["package_sha256"] and identity["channel"] == "stable"
+    assert identity["package_sha256"] and identity["channel"] == "main"
     assert trust["public_key"] == build_source.build_key(root)[1]
 
 
@@ -415,7 +430,7 @@ def test_a_hub_with_private_capabilities_builds_their_variant_beside_the_feed(bu
     public = build_source.build_key(root)[1]
     # The public bundle first, then the same identity with the catalog in it.
     assert [item[0] for item in built] == [None, {"tunnel": {"argv": ["/bin/true"]}}]
-    assert {item[1:] for item in built} == {(release, public, build_source.release_date(), "stable")}
+    assert {item[1:] for item in built} == {(release, public, build_source.release_date(), "main")}
     variant = store / release / "hub-catalog.zip"
     assert zipfile.ZipFile(variant).namelist() == ["jStack Hub.app/Contents/Info.plist"]
     # Machine-local only: the feed carries the public bundle and nothing else.
@@ -499,3 +514,71 @@ def test_a_leaf_never_builds(builder, excluded):
     with pytest.raises(releases.ReleaseError, match="from its parent"):
         build_source.build(root, config)
     assert not calls
+
+
+# ── Lines ───────────────────────────────────────────────────────────────────
+
+def test_building_the_lines_skips_a_line_already_built_at_its_tip(builder, monkeypatch):
+    root, feed, config, _ = builder
+    # main's offer is a build of OLD this hub signed; dev has never been built.
+    private, public = build_source.build_key(root)
+    published(feed, SimpleNamespace(private_bytes_raw=lambda: private))
+    config["public_key"] = public
+    tips = {"main": OLD, "dev": HEAD}
+    monkeypatch.setattr(build_source, "head", lambda client, repo, ref: tips[ref])
+    built = []
+    real = build_source.build
+
+    def recording(where, settings, **kwargs):
+        built.append(kwargs.get("ref"))
+        return real(where, settings, **kwargs)
+
+    monkeypatch.setattr(build_source, "build", recording)
+    main_before = (feed / "latest.json").read_bytes()
+    result = build_source.build_lines(root, config, client=object())
+    assert built == ["dev"]
+    assert result["main"] == {"skipped": "current", "release": "published-1", "sha": OLD}
+    assert result["dev"]["ref"] == "dev"
+    # Each line has its own offer; main's is untouched by a dev build, and dev
+    # carried main's client forward for its first one.
+    assert (feed / "latest.json").read_bytes() == main_before
+    dev = releases.verify(json.loads((feed / "latest-dev.json").read_text()),
+                          build_source.build_key(root)[1])
+    assert dev["channel"]["name"] == "dev" and dev["sources"]["stack"] == HEAD
+    assert build_source.held(config, "dev") == (dev["release"], HEAD)
+    built.clear()
+    tips["dev"] = HEAD
+    assert build_source.build_lines(root, config, client=object())["dev"]["skipped"] == "current"
+    assert built == []
+
+
+def test_a_first_build_that_rotates_the_key_withdraws_the_other_lines_stale_offer(builder):
+    """One pinned key at a time. main's offer is the publisher's; the first
+    dev build pins this hub's key, and an offer only the old key signed would
+    read as a broken feed on every route that serves main."""
+    root, feed, config, _ = builder
+    build_source.build(root, config, ref="dev")
+    assert not (feed / "latest.json").exists()
+    assert build_source.held(config, "main") == ("", "")
+    releases.verify(json.loads((feed / "latest-dev.json").read_text()), config["public_key"])
+
+
+@pytest.mark.parametrize("argv,expected", [
+    ([], ("lines",)),
+    (["--ref", "dev"], ("build", "dev")),
+])
+def test_updates_build_builds_the_lines_unless_told_one_ref(tmp_path, monkeypatch, capsys,
+                                                             argv, expected):
+    from jstack_host import cli, hostenv
+    state = tmp_path / "state"
+    (state / "updates").mkdir(parents=True)
+    (state / "updates/config.json").write_text('{"github_repo": "example/stack"}')
+    monkeypatch.setattr(hostenv, "state_dir", lambda: state)
+    seen = []
+    monkeypatch.setattr(build_source, "build_lines",
+                        lambda root, config: seen.append(("lines",)) or {"main": {}})
+    monkeypatch.setattr(build_source, "build", lambda root, config, ref=None:
+                        seen.append(("build", ref)) or {"release": "r"})
+    monkeypatch.setattr("sys.argv", ["jstack-host", "updates", "build", *argv])
+    assert cli.main() in (0, None) and seen == [expected]
+    assert json.loads(capsys.readouterr().out)

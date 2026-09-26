@@ -93,11 +93,13 @@ PARENT_URL = ("f=$HOME/.local/state/jremote/parent.json; [ ! -f \"$f\" ] || "
               + " \"$f\"")
 #: The build a hub last offered its fleet, as the hub's own feed states it:
 #: which build, and which client it carries. Read after `updates build`, whose
-#: answer names the build but not its parts.
+#: answer names the build but not its parts. The offer is the followed line's:
+#: dev has its own file beside main's `latest.json`.
 SERVED = ("f=$HOME/.local/state/jremote/updates/config.json; "
           + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
               "import json,sys; c=json.load(open(sys.argv[1])); "
-              "m=json.load(open(c['feed_dir'] + '/latest.json'))['manifest']; "
+              "n='latest-dev.json' if c.get('channel')=='dev' else 'latest.json'; "
+              "m=json.load(open(c['feed_dir'] + '/' + n))['manifest']; "
               "print(json.dumps({'build': m['release'], "
               "'client': str(m['components']['client']['version'])}))")
           + " \"$f\"")
@@ -546,8 +548,10 @@ class LocalHub(Guest):
         return str(self.config().get("public_key") or "")
 
     def served(self) -> dict:
-        """What this Mac's feed offers, and the commit it was built from."""
-        feed = Path(self.config()["feed_dir"]) / "latest.json"
+        """What this Mac's feed offers its own line, and the commit it was built from."""
+        config = self.config()
+        feed = Path(config["feed_dir"]) / (
+            "latest-dev.json" if config.get("channel") == "dev" else "latest.json")
         try:
             manifest = json.loads(feed.read_text())["manifest"]
         except (OSError, ValueError, KeyError) as exc:

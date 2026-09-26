@@ -203,7 +203,8 @@ def test_provisioning_keeps_existing_credentials_and_unknown_client_identity(fre
     assert config["menubar_bundle_id"] == "live.jstack.hub"
 
 
-@pytest.mark.parametrize("built_from,expected", [("feature/x", "feature/x"), (None, "stable")])
+@pytest.mark.parametrize("built_from,expected", [("feature/x", "feature/x"), (None, "main"),
+                                                 ("stable", "main"), ("dev", "dev")])
 def test_provisioning_carries_the_ref_the_bundle_was_built_from(fresh, monkeypatch,
                                                                 built_from, expected):
     """A hub moved onto a branch installs a branch build. Dropping the ref

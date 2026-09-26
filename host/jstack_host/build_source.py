@@ -54,14 +54,25 @@ def channel_ref(config: dict) -> str:
     """Which ref this hub follows.
 
     Absent from the config on every hub installed before a ref could be
-    chosen, and what those hubs hold came off main — so absent is `stable`,
-    not "unset". `stable` is the name main answers to; anything else is a
-    branch this hub was deliberately moved onto.
+    chosen, and what those hubs hold came off main — so absent is main, not
+    "unset". `stable` is the name main answered to before every machine could
+    pick a line, and it still reads as main: every config and every sealed
+    identity written before then says `stable`, and this is the one place
+    that migrates them. Anything else is a branch this hub was deliberately
+    moved onto.
     """
     name = str(config.get("channel") or releases.STABLE_CHANNEL).strip()
     if not CHANNEL.fullmatch(name) or ".." in name:
         raise releases.ReleaseError("release channel must name a branch")
-    return name
+    return releases.STABLE_CHANNEL if name == "stable" else name
+
+
+def line(config: dict) -> str:
+    """The release line this machine is on: its ref when that is a line, else
+    main. A hub moved onto a feature branch for a debug build still has a
+    line — the one whose offer its feed serves when nobody names another."""
+    ref = channel_ref(config)
+    return ref if ref in releases.LINES else releases.STABLE_CHANNEL
 
 
 def source_origin(machine: str) -> dict:
@@ -78,7 +89,7 @@ def source_origin(machine: str) -> dict:
 
 def branch(ref: str) -> str:
     """The git branch a ref name selects. `stable` is this repo's main."""
-    return "main" if ref == releases.STABLE_CHANNEL else ref
+    return "main" if ref in ("stable", releases.STABLE_CHANNEL) else ref
 
 
 def release_date() -> str:
@@ -123,8 +134,23 @@ def head(client: httpx.Client, repo: str, ref: str) -> str:
     return value
 
 
-def held(config: dict) -> tuple[str, str]:
-    """The build this hub already holds: its release ID and its source commit.
+def latest_name(ref: str) -> str:
+    """The file in a feed holding a line's offer. Main keeps `latest.json`, so
+    a leaf that predates lines reads exactly the offer it always read; dev has
+    its own. A debug build of any other branch lands in main's, where a hub
+    moved onto a branch has always put what it built."""
+    return "latest-dev.json" if ref == "dev" else "latest.json"
+
+
+def built_from(manifest: dict) -> str:
+    """The ref a signed manifest says it was built from — main for one that
+    predates the field or still spells it `stable`."""
+    return channel_ref({"channel": (manifest.get("channel") or {}).get("name")})
+
+
+def held(config: dict, ref: str | None = None) -> tuple[str, str]:
+    """The build this hub already holds on a line: its release ID and its
+    source commit. The line is `ref`'s, or the followed ref's when none is named.
 
     Read through the same signature check every other reader of this feed
     uses, so a feed this hub cannot verify surfaces as a failed check rather
@@ -133,7 +159,7 @@ def held(config: dict) -> tuple[str, str]:
     feed = config.get("feed_dir")
     if not feed:
         raise releases.ReleaseError("no feed directory is configured")
-    latest = Path(feed) / "latest.json"
+    latest = Path(feed) / latest_name(ref or channel_ref(config))
     if not latest.exists():
         return "", ""
     manifest = releases.verify(json.loads(latest.read_text()), config.get("public_key", ""),
@@ -164,7 +190,7 @@ def check(root: Path, config: dict, *, client=None, now=None) -> dict | None:
     client = client or httpx.Client(timeout=30, follow_redirects=True, trust_env=False)
     try:
         sha = head(client, repo, branch(ref))
-        release, installed = held(config)
+        release, installed = held(config, ref)
         answer = {"checked": now, "ref": ref, "head": sha, "release": release,
                   "status": "current" if installed == sha else "behind"}
         atomic_json(status_file, answer)
@@ -235,20 +261,25 @@ def component(path: Path, version: str) -> dict:
             "sha256": releases.digest(path)}
 
 
-def inherited(config: dict) -> dict:
+def inherited(config: dict, ref: str | None = None) -> dict:
     """The client artifact this build carries forward, and where it lives.
 
     jRemote's Mac app is closed source and is not built here. What a hub can
     honestly do is keep serving the exact client bytes it already holds and
     already verified, so a locally built Hub names that same artifact and the
     same client commit. A hub with nothing in its feed has no client to carry
-    and cannot produce a complete release.
+    and cannot produce a complete release. The line's own offer when it has
+    one; another line's for a line's first build, which is how dev gets its
+    client on a hub that only ever built main, and main on one installed off dev.
     """
     feed = Path(config["feed_dir"])
-    if not (feed / "latest.json").exists():
+    names = [latest_name(ref or channel_ref(config))]
+    names += [latest_name(name) for name in releases.LINES if latest_name(name) not in names]
+    latest = next((feed / name for name in names if (feed / name).exists()), None)
+    if latest is None:
         raise releases.ReleaseError(
             "this hub holds no release to carry a client artifact forward from")
-    manifest = releases.verify(json.loads((feed / "latest.json").read_text()),
+    manifest = releases.verify(json.loads(latest.read_text()),
                                config.get("public_key", ""),
                                promoted=not config.get("candidate_test", False))
     item = manifest["components"]["client"]
@@ -412,6 +443,34 @@ def variant_present(config: dict, release_id: str) -> None:
             f"private capability build for {release_id} is missing: {target}")
 
 
+def build_lines(root: Path, config: dict, *, client=None) -> dict:
+    """Build each line whose tip moved since the build this hub holds for it.
+
+    One question per line — the tip's sha, the same forty bytes a check asks
+    for — and a build only where it differs from the line's own offer. What
+    `updates build` does when nobody names a ref.
+    """
+    refusal = build_refusal(root, config)
+    if refusal:
+        raise releases.ReleaseError(refusal)
+    repo = repository(config["github_repo"])
+    owned = client is None
+    client = client or httpx.Client(timeout=30, follow_redirects=True, trust_env=False)
+    results = {}
+    try:
+        for name in releases.LINES:
+            sha = head(client, repo, branch(name))
+            release, installed = held(config, name)
+            if installed == sha:
+                results[name] = {"skipped": "current", "release": release, "sha": sha}
+                continue
+            results[name] = build(root, config, ref=name)
+    finally:
+        if owned:
+            client.close()
+    return results
+
+
 def _build(root: Path, config: dict, ref: str) -> dict:
     from . import build_hub
     from .update_macos import command
@@ -421,7 +480,7 @@ def _build(root: Path, config: dict, ref: str) -> dict:
     private, public = build_key(root)
     source = Path(config.get("source_dir") or root / "source")
     sha = fetch(source, repo, branch(ref))
-    previous = inherited(config)
+    previous = inherited(config, ref)
     client_sha = previous["sources"]["client"]
     dependencies = previous.get("client_packages", {})
     date = release_date()
@@ -435,7 +494,7 @@ def _build(root: Path, config: dict, ref: str) -> dict:
         for item in manifest["components"].values():
             releases.check_artifact(feed / release_id / item["file"], item)
         variant_present(config, release_id)
-        return _offer(root, config, feed, envelope, public)
+        return _offer(root, config, feed, envelope, public, ref)
     work = Path(tempfile.mkdtemp(prefix="build-", suffix=".noindex", dir=root))
     stack, output = work / "stack", work / release_id
     output.mkdir(parents=True)
@@ -455,7 +514,7 @@ def _build(root: Path, config: dict, ref: str) -> dict:
         # switch is not a downgrade — its old count means nothing on the new
         # line. What this does catch is a ref force-pushed backwards under a
         # hub that is following it.
-        if (previous.get("channel", {}).get("name") or releases.STABLE_CHANNEL) == ref and (
+        if built_from(previous) == ref and (
                 isinstance(previous.get("sequence"), int) and sequence < previous["sequence"]):
             raise releases.ReleaseError(f"{ref} is behind the build this hub already holds")
         built_by = source_origin(config.get("machine", ""))
@@ -500,15 +559,16 @@ def _build(root: Path, config: dict, ref: str) -> dict:
             compatibility=previous["compatibility"])
         envelope = releases.sign(manifest, private)
         land(feed, output, envelope)
-        return _offer(root, config, feed, envelope, public)
+        return _offer(root, config, feed, envelope, public, ref)
     finally:
         subprocess.run(["git", "-C", str(source), "worktree", "remove", "--force", str(stack)],
                        capture_output=True, timeout=300)
         shutil.rmtree(work, ignore_errors=True)
 
 
-def _offer(root: Path, config: dict, feed: Path, envelope: dict, public: str) -> dict:
-    """Pin this hub's trust to its own key, then offer what it built.
+def _offer(root: Path, config: dict, feed: Path, envelope: dict, public: str,
+           ref: str) -> dict:
+    """Pin this hub's trust to its own key, then offer what it built on its line.
 
     One pinned key at a time, rotated at the one moment a hub stops taking
     someone else's bytes and starts producing its own. The order matters: a
@@ -523,8 +583,19 @@ def _offer(root: Path, config: dict, feed: Path, envelope: dict, public: str) ->
         if saved.get("public_key") != public:
             atomic_json(config_path, {**saved, "public_key": public})
     config["public_key"] = public
-    atomic_json(feed / "latest.json", envelope)
-    return {"release": envelope["manifest"]["release"], "public_key": public}
+    atomic_json(feed / latest_name(ref), envelope)
+    # Another line's offer signed by the key just rotated out is one every
+    # route would now refuse to verify — a feed that reads as broken. It is
+    # withdrawn instead, and that line's next build offers it again.
+    for other in {latest_name(name) for name in releases.LINES} - {latest_name(ref)}:
+        path = feed / other
+        try:
+            if path.exists():
+                releases.verify(json.loads(path.read_text()), public,
+                                promoted=not config.get("candidate_test", False))
+        except (releases.ReleaseError, ValueError):
+            path.unlink(missing_ok=True)
+    return {"release": envelope["manifest"]["release"], "public_key": public, "ref": ref}
 
 
 def compatibility_of(hub: Path, client: Path) -> dict:
@@ -692,7 +763,7 @@ def seed(root: Path, output: Path) -> dict:
                                promoted=not config.get("candidate_test", False))
     feed = Path(config["feed_dir"])
     land(feed, output, envelope)
-    atomic_json(feed / "latest.json", envelope)
+    atomic_json(feed / latest_name(built_from(manifest)), envelope)
     return {"release": manifest["release"], "feed": str(feed)}
 
 

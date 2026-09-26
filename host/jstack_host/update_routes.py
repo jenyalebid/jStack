@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from . import devices, fleet_updates as fleet, hostenv, managed_access
 from .auth import current_device
-from .release_manifest import ReleaseError, identifier
+from .release_manifest import LINES, STABLE_CHANNEL, ReleaseError, identifier
 
 router = APIRouter()
 
@@ -33,13 +33,32 @@ def leaf(device_id: str) -> dict:
     return row
 
 
-def offered() -> dict | None:
+def own_line() -> str:
+    """The line this machine is on, out of its own updater config."""
+    from . import build_source
+    try:
+        return build_source.line(fleet.config())
+    except (ReleaseError, ValueError, OSError):
+        return STABLE_CHANNEL
+
+
+def offered(line: str | None = None) -> dict | None:
+    """The offer for `line` — this machine's own line when none is named.
+
+    A leaf asks its parent, naming its line; a parent too old to read the
+    name answers with main's offer, which is what every leaf got before.
+    """
+    line = line or own_line()
     try:
         if managed_access.is_leaf():
-            return managed_access._post_parent("updates/check", {}).get("offer")
-        return fleet.offer()
+            return managed_access._post_parent("updates/check", {"line": line}).get("offer")
+        return fleet.offer(line)
     except (ReleaseError, ValueError, OSError) as exc:
         raise HTTPException(503, str(exc)) from exc
+
+
+def release_of(offer: dict | None) -> str | None:
+    return offer["manifest"]["release"] if offer else None
 
 
 @router.get("/updates/latest")
@@ -51,17 +70,23 @@ def latest():
 def inventory(request: Request, device_id: str = Depends(current_device)):
     local_admin(request, device_id)
     from .store import get_store
-    offer = offered()
-    desired = offer["manifest"]["release"] if offer else None
     store = fleet.FleetStore()
+    mine = own_line()
+    if managed_access.is_leaf():
+        # A leaf sees one machine, itself, and one offer: its line's.
+        lines = {mine: release_of(offered(mine))}
+    else:
+        lines = {line: release_of(offered(line)) for line in LINES}
     # Only a recent supervisor report implies update capability. Reading this
     # endpoint must not manufacture a supervisor heartbeat on an old install.
-    rows = [store.inventory(hostenv.host_id(), hostenv.host_name(), desired)]
+    # Each machine is measured against its own line's offer, never another's.
+    rows = [store.inventory(hostenv.host_id(), hostenv.host_name(), lines[mine], mine)]
     if not managed_access.is_leaf():
         for row in get_store().list_hosts():
             if not row["deleted"]:
-                rows.append(store.inventory(row["key"], row["name"], desired))
-    return {"release": desired, "machines": rows}
+                line = store.line(row["key"])
+                rows.append(store.inventory(row["key"], row["name"], lines.get(line), line))
+    return {"release": lines[mine], "lines": lines, "machines": rows}
 
 
 # ── The ref this hub follows ────────────────────────────────────────────────
@@ -166,12 +191,16 @@ def set_source(body: SourceRef, request: Request, device_id: str = Depends(curre
     config = _config()
     if not path.exists():
         raise HTTPException(409, "updates are not enabled on this host")
-    if managed_access.is_leaf():
-        raise HTTPException(409, "a managed machine runs what its parent built")
     try:
         name = build_source.channel_ref({"channel": body.ref})
     except ReleaseError as exc:
         raise HTTPException(400, f"{exc}: {body.ref!r}") from exc
+    if managed_access.is_leaf() and name not in LINES:
+        # A leaf picks its line — which of its parent's offers it takes. It
+        # never builds, so a branch that is not a line names nothing it could
+        # ever be offered.
+        raise HTTPException(409, "a managed machine follows one of its parent's lines: "
+                                 + " or ".join(LINES))
     atomic_json(path, {**config, "channel": name})
     return _source()
 
@@ -231,9 +260,6 @@ def queue(body: QueueRequest, request: Request, device_id: str = Depends(current
             raise HTTPException(403, "a managed Mac can update only itself")
         # The hub owns this job even when initiated by a local leaf click.
         return managed_access._post_parent("updates/request", {"request_id": body.request_id})
-    offer = offered()
-    if offer is None:
-        raise HTTPException(409, "no complete release has been offered")
     targets = [(hostenv.host_id(), "local")]
     targets.extend((row["key"], row["device_id"]) for row in get_store().list_hosts()
                    if not row["deleted"] and row["device_id"])
@@ -243,6 +269,11 @@ def queue(body: QueueRequest, request: Request, device_id: str = Depends(current
     if not targets:
         raise HTTPException(404, "unknown managed machine")
     store = fleet.FleetStore()
+    # Each machine takes its own line's offer. Nothing installs anywhere that
+    # is not queued here — this route is the only door to a job.
+    offers = {line: offered(line) for line in LINES}
+    if not any(offers.values()):
+        raise HTTPException(409, "no complete release has been offered")
     jobs, errors = [], []
     for machine, authority in targets:
         try:
@@ -250,6 +281,10 @@ def queue(body: QueueRequest, request: Request, device_id: str = Depends(current
                 row = devices.row(authority)
                 if row is None or row.get("revoked_at") is not None:
                     raise ReleaseError("machine credential is revoked; update not authorized")
+            line = own_line() if authority == "local" else store.line(machine)
+            offer = offers[line]
+            if offer is None:
+                raise ReleaseError(f"no complete release has been offered on {line}")
             jobs.append(fleet.public_job(store.queue(machine, authority, offer, body.request_id)))
         except ReleaseError as exc:
             errors.append({"machine": machine, "detail": str(exc)})
@@ -265,20 +300,31 @@ class LocalRequest(BaseModel):
 @router.post("/managed/updates/request")
 def request_own_update(body: LocalRequest, device_id: str = Depends(current_device)):
     row = leaf(device_id)
-    offer = offered()
+    store = fleet.FleetStore()
+    line = store.line(row["key"])
+    offer = offered(line)
     if offer is None:
-        raise HTTPException(409, "no complete release has been offered")
+        raise HTTPException(409, f"no complete release has been offered on {line}")
     try:
-        job = fleet.FleetStore().queue(row["key"], device_id, offer, body.request_id)
+        job = store.queue(row["key"], device_id, offer, body.request_id)
         return {"jobs": [fleet.public_job(job)], "errors": []}
     except ReleaseError as exc:
         raise HTTPException(409, str(exc)) from exc
 
 
+class CheckRequest(BaseModel):
+    #: The line the asking leaf is on. A leaf that predates lines sends `{}`,
+    #: and main is the offer it always got.
+    line: str = Field(default=STABLE_CHANNEL, max_length=64)
+
+
 @router.post("/managed/updates/check")
-def managed_check(device_id: str = Depends(current_device)):
+def managed_check(body: CheckRequest | None = None, device_id: str = Depends(current_device)):
     leaf(device_id)
-    return {"offer": offered()}
+    asked = body.line if body else STABLE_CHANNEL
+    if asked not in (*LINES, "stable"):
+        raise HTTPException(400, f"not a release line: {asked!r}")
+    return {"offer": offered(fleet.machine_line({"line": asked}))}
 
 
 class Heartbeat(BaseModel):
@@ -346,7 +392,9 @@ def heartbeat(machine: str, authority: str, body: Heartbeat) -> dict:
         # leaf already takes its authority from. A leaf pinned the key of the
         # bundle that installed it, and a hub that builds signs with its own —
         # so without this, the first build under a leaf stranded it (#144).
-        return {"job": result, "offer": offered(),
+        # The offer is the reporting machine's own line's.
+        line = own_line() if machine == hostenv.host_id() else fleet.machine_line(body.observation)
+        return {"job": result, "offer": offered(line),
                 "public_key": fleet.config().get("public_key", "")}
     except (ReleaseError, ValueError) as exc:
         raise HTTPException(409, str(exc)) from exc

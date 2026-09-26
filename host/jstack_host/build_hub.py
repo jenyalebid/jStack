@@ -169,7 +169,7 @@ def release_identity(source_sha: str, version: str, *, release_id=None, github_r
         identity = {"sha": source_sha, "release": identifier(release_id), "version": version,
                     "date": date, "github_repo": repository(github_repo)}
         if channel is not None:
-            # `channel_ref` reads an empty ref as `stable`, which is right for a
+            # `channel_ref` reads an empty ref as main, which is right for a
             # config written before refs existed and wrong for a caller naming
             # one: silently following main is the defect this field exists to
             # close, not an acceptable default for a build that asked.
@@ -538,7 +538,7 @@ def main():
     parser.add_argument("--release-id")
     parser.add_argument("--github-repo")
     parser.add_argument("--date", help="ISO day this release is cut, e.g. 2026-09-21")
-    parser.add_argument("--channel", help="the ref these bytes are built from; absent means stable")
+    parser.add_argument("--channel", help="the ref these bytes are built from; absent means main")
     parser.add_argument("--trust-key", help="base64 Ed25519 public key this Hub will verify its updates against")
     parser.add_argument("--signing-config", type=Path)
     parser.add_argument("--notarize", action="store_true")
