@@ -67,6 +67,9 @@ SETTLE = 8
 #: How long a freshly adopted leaf is given to take the hub's key on its
 #: heartbeat before it is judged unable to.
 KEY_PATIENCE = 30
+#: How long a leaf told its line is given to name it on its heartbeat before
+#: it is judged an updater that names none.
+LINE_PATIENCE = 90
 #: The key a host's updater verifies every job against, or nothing where no
 #: host is installed. Asked the same way of a hub and of a leaf.
 TRUST_KEY = ("f=$HOME/.local/state/jremote/updates/config.json; [ ! -f \"$f\" ] || "
@@ -904,6 +907,7 @@ def upgrade(journey, fleet: Fleet, build: Build) -> None:
     journey.observe("previous_build", {"build": before["build"], "sha": before["sha"],
                                        "client": before["client"], "menubar": before["menubar"]})
     machine = fleet.machine(guest)
+    follow_line(fleet, guest, machine, build, journey)
     job = fleet.hub.queue(machine, request_id("upgrade"))
     journey.note(f"hub queued {job['jobs'][0]['id']} for {machine}")
     fleet.hub.wait_for("current", machine)
@@ -922,6 +926,7 @@ def fleet_journey(journey, fleet: Fleet, build: Build) -> None:
     journey.observe("hub_self_update", update_to_build(fleet, fleet.hub, hub_machine, build))
     # The leaf's own Update action: queued on the leaf, owned by the hub.
     leaf_machine = fleet.machine(first)
+    follow_line(fleet, first, leaf_machine, build, journey)
     local = first.queue("self", request_id("leaf-local"))
     journey.note(f"leaf-initiated job {local['jobs'][0]['id']}")
     fleet.hub.wait_for("current", leaf_machine)
@@ -929,7 +934,7 @@ def fleet_journey(journey, fleet: Fleet, build: Build) -> None:
     journey.observe("leaf_local_update", {"machine": leaf_machine, "job": local["jobs"][0]["id"]})
     fleet.cast(fleet.hub, second)
     other = fleet.machine(second)
-    journey.observe("leaf_remote_update", update_to_build(fleet, second, other, build))
+    journey.observe("leaf_remote_update", update_to_build(fleet, second, other, build, journey))
     # The Mac fresh_install adopted is in this fleet only when this run made
     # it: a fresh guest no journey installed on is a pristine Mac, not a row.
     enrolled = fleet.fresh if fleet.fresh and fleet.fresh.name in fleet.installed else None
@@ -986,6 +991,7 @@ def offline_catchup(journey, fleet: Fleet, build: Build) -> None:
     guest = fleet.leaves[-1]
     machine = fleet.machine(guest)
     stage_prior(fleet, guest, journey=journey)
+    follow_line(fleet, guest, machine, build, journey)
     guest.stop()
     journey.note(f"{guest.name} stopped; waiting for its report to go stale")
     time.sleep(100)
@@ -1013,7 +1019,7 @@ def session_survival(journey, fleet: Fleet, build: Build) -> None:
     journey.observe("session_pid", {"session": session["session"], "pid": session["pid"],
                                     "bypass_prompt_nudged": session["nudged"],
                                     "request_redelivered": session["reprompted"]})
-    update_to_build(fleet, guest, machine, build)
+    update_to_build(fleet, guest, machine, build, journey)
     after = guest.tool_call("session-proof", "--session", session["session"])
     expect(after.get("session") == session["session"] and
            after.get("holders") == session["holders"],
@@ -1134,6 +1140,7 @@ def reboot_mid_apply(journey, fleet: Fleet, guest: Guest, machine: str, build: B
     previous = fleet.prior
     try:
         fleet.offer(previous)
+        follow_line(fleet, guest, machine, previous, journey)
         fault = arm_fault(guest, "freeze")
         frozen = fleet.hub.queue(machine, request_id("reboot"))["jobs"][0]
         injected = read_freeze(fault)
@@ -1167,6 +1174,7 @@ def interruption(journey, fleet: Fleet, build: Build) -> None:
     guest = fleet.leaves[0]
     machine = fleet.machine(guest)
     stage_prior(fleet, guest, journey=journey)
+    follow_line(fleet, guest, machine, build, journey)
     ensure_true_updater(journey, guest)
     fault = arm_fault(guest, "interruption")
     job = fleet.hub.queue(machine, request_id("interrupt"))["jobs"][0]
@@ -1188,6 +1196,7 @@ def revocation(journey, fleet: Fleet, build: Build) -> None:
     guest = fleet.leaves[-1]
     machine = fleet.machine(guest)
     stage_prior(fleet, guest, journey=journey)
+    follow_line(fleet, guest, machine, build, journey)
     guest.sh("'/Applications/jStack Hub.app/Contents/MacOS/JStackHub' unregister updater")
     try:
         job = fleet.hub.queue(machine, request_id("revoked"))["jobs"][0]
@@ -1351,7 +1360,8 @@ def on_candidate(journey, fleet: Fleet, guest: Guest, machine: str, candidate: B
     done with the forget, and read `parent-revoke 401` off code this run was
     not testing.
     """
-    journey.observe("leaf_on_candidate", update_to_build(fleet, guest, machine, candidate))
+    journey.observe("leaf_on_candidate",
+                    update_to_build(fleet, guest, machine, candidate, journey))
 
 
 def shell_adopt(journey, fleet: Fleet, candidate: Build) -> None:
@@ -1464,6 +1474,7 @@ def upgrade_shell(journey, fleet: Fleet, candidate: Build) -> None:
                      "shell_user": "", "authorized_block": [],
                      "hub_config_alias": "absent",
                      "refresh_status": pulled["status"], "refresh_steps": 0})
+    follow_line(fleet, guest, machine, candidate, journey)
     job = fleet.hub.queue(machine, request_id("upgrade-shell"))
     journey.note(f"hub queued {job['jobs'][0]['id']} for {machine}")
     fleet.hub.wait_for("current", machine)
@@ -2052,6 +2063,56 @@ def trust_key(guest: Guest) -> str:
     return guest.sh(TRUST_KEY).strip()
 
 
+def line_of(ref: str) -> str:
+    """The line whose offer a build of `ref` is: its own when `ref` is a line,
+    else main's, where a hub files every debug build."""
+    return ref if ref in LINES else LINES[0]
+
+
+def follow_line(fleet: Fleet, guest: Guest, machine: str, build: Build, journey=None) -> str | None:
+    """Put a leaf on the line whose offer `build` is, before the hub is asked
+    to update it.
+
+    A hub with lines answers a queue with the offer of the line the machine's
+    own heartbeat names — main for an updater that names none. The hub itself
+    is never moved: its line is where `Fleet.offer` left it. A hub before
+    lines lists no line and keeps one offer, so there is nothing to follow. A
+    leaf on another line takes `updates channel`, as its owner would type it,
+    and a kicked updater; the hub's row has to say the new line before the
+    queue. A leaf that never says one — every updater before lines — can take
+    only main's offer, and that is named here rather than measured later as a
+    job that settles current on the commit the leaf already ran.
+    """
+    if guest is fleet.hub:
+        return None
+    row = fleet.hub.row(machine)
+    if "line" not in row:
+        return None
+    wanted = line_of(build.ref)
+    if row["line"] == wanted:
+        return wanted
+    say = journey.note if journey is not None else (lambda text: print(text, flush=True))
+    say(f"{guest.name} is on {row['line']}; moving it onto {wanted}, whose offer "
+        f"{build.slug} is, by its own `updates channel`")
+    try:
+        guest.sh(host_cli(f"updates channel {shlex.quote(wanted)}"), timeout=120)
+    except AcceptanceFailure as exc:
+        raise AcceptanceFailure(
+            f"{guest.name} refused `updates channel {wanted}`, as a Mac before lines may, "
+            f"so it can take only main's offer and {build.slug} is not main's: {exc}") from exc
+    guest.sh("/bin/launchctl kickstart -k gui/$(id -u)/live.jstack.hub.updater")
+    deadline = time.monotonic() + LINE_PATIENCE
+    while time.monotonic() < deadline:
+        time.sleep(SETTLE)
+        row = fleet.hub.row(machine)
+        if row.get("line") == wanted:
+            return wanted
+    raise AcceptanceFailure(
+        f"the hub still lists {guest.name} on {row.get('line')} after `updates channel "
+        f"{wanted}`: its updater reports no line, as none before lines does, so it can "
+        f"take only main's offer and {build.slug} is not main's")
+
+
 def follows(fleet: Fleet, guest: Guest) -> bool:
     """Whether this guest's updater accepts what the hub signs.
 
@@ -2277,6 +2338,7 @@ def stage_prior(fleet: Fleet, guest: Guest, *, journey=None) -> dict:
         machine = fleet.machine(guest)
         try:
             fleet.offer(fleet.prior)
+            follow_line(fleet, guest, machine, fleet.prior, journey)
             fleet.hub.queue(machine, request_id("stage-prior"))
             fleet.hub.wait_for("current", machine)
         finally:
@@ -2290,9 +2352,11 @@ def stage_prior(fleet: Fleet, guest: Guest, *, journey=None) -> dict:
     return state
 
 
-def update_to_build(fleet: Fleet, guest: Guest, machine: str, build: Build) -> dict:
+def update_to_build(fleet: Fleet, guest: Guest, machine: str, build: Build,
+                    journey=None) -> dict:
     state = guest.installed()
     if state["sha"] != build.sha:
+        follow_line(fleet, guest, machine, build, journey)
         job = fleet.hub.queue(machine, request_id("to-build"))["jobs"][0]
         fleet.hub.wait_for("current", machine)
         state = guest.installed()

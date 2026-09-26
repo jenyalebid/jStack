@@ -678,6 +678,127 @@ class KeyedFleet(ScriptedFleet):
         return done
 
 
+class LinedFleet(ScriptedFleet):
+    """A hub with lines: every inventory row names the line its Mac's own
+    heartbeat carries, main when the heartbeat names none.
+
+    `updates channel` on a leaf writes its config; the kicked updater then
+    says the new line on its heartbeat — unless `says_line` is off, which is
+    every updater from before lines: its config takes the name, its heartbeat
+    carries nothing, and the hub keeps its row on main.
+    """
+
+    def __init__(self, *, lines=None, says_line=True, **kwargs):
+        super().__init__(**kwargs)
+        self.lines: dict[str, str] = dict(lines or {})
+        self.says_line = says_line
+        self.channels: list[tuple[str, str]] = []
+
+    def __call__(self, argv, **kwargs):
+        _, action, name, *rest = argv
+        command = rest[0] if rest else ""
+        if action == "ssh" and "updates channel " in command:
+            self.calls.append(list(argv))
+            line = command.split("updates channel ")[1].split()[0]
+            self.channels.append((name, line))
+            if self.says_line:
+                self.lines["machine-" + name] = line
+            return subprocess.CompletedProcess(argv, 0, line + "\n", "")
+        done = super().__call__(argv, **kwargs)
+        if action == "ssh" and "inventory" in command:
+            answer = json.loads(done.stdout)
+            for row in answer["machines"]:
+                row["line"] = self.lines.get(row["machine"], "main")
+            return subprocess.CompletedProcess(argv, 0, json.dumps(answer), "")
+        return done
+
+
+def test_a_build_s_offer_is_its_own_line_s_or_main_s(runner):
+    assert runner.line_of("main") == "main" and runner.line_of("dev") == "dev"
+    # A debug build of any other ref lands in main's feed.
+    assert runner.line_of("release/26.9.1") == "main"
+    assert runner.line_of("feature/x") == "main"
+
+
+def test_a_leaf_on_main_is_moved_onto_the_candidate_s_line_before_its_upgrade(
+        runner, subject, tmp_path, monkeypatch):
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    scripted = LinedFleet()
+    result, receipt = journey_result(runner, subject, "upgrade", scripted, tmp_path)
+    assert result == "passed"
+    assert scripted.channels == [("leaf-a", "dev")] and "leaf-a" in scripted.kicked
+    commands = [c[3] for c in scripted.calls if len(c) > 3]
+    channel = next(i for i, c in enumerate(commands) if "updates channel dev" in c)
+    queue = next(i for i, c in enumerate(commands) if "queue" in c)
+    assert channel < queue, "the line is chosen before the hub is asked to update the leaf"
+
+
+def test_a_leaf_already_on_the_line_is_left_alone(runner, subject, tmp_path, monkeypatch):
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    scripted = LinedFleet(lines={"machine-leaf-a": "dev"})
+    result, _ = journey_result(runner, subject, "upgrade", scripted, tmp_path)
+    assert result == "passed"
+    assert scripted.channels == [] and scripted.kicked == []
+
+
+def test_a_leaf_whose_heartbeat_names_no_line_fails_by_name(
+        runner, subject, tmp_path, monkeypatch):
+    """An updater from before lines writes the channel it is told and reports
+    none, so the hub keeps it on main and can only ever offer it main's
+    build. The failure names that, instead of a job that settles current on
+    the commit the leaf already ran."""
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    monkeypatch.setattr(runner, "LINE_PATIENCE", 0)
+    scripted = LinedFleet(says_line=False)
+    result, receipt = journey_result(runner, subject, "upgrade", scripted, tmp_path)
+    assert result == "failed"
+    assert "reports no line" in receipt["detail"]
+    assert "dev@" + HEAD_SHA[:8] + " is not main's" in receipt["detail"]
+    assert scripted.channels == [("leaf-a", "dev")]
+    assert scripted.queued == [], "nothing is queued for a leaf that cannot take the offer"
+
+
+def test_a_hub_before_lines_lists_no_line_and_tells_no_leaf_one(runner, subject, tmp_path):
+    scripted = ScriptedFleet()
+    result, _ = journey_result(runner, subject, "upgrade", scripted, tmp_path)
+    assert result == "passed"
+    assert not any("updates channel" in c[3] for c in scripted.calls if len(c) > 3)
+
+
+def test_the_hub_itself_is_never_told_a_line(runner, subject, tmp_path, monkeypatch):
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    scripted = LinedFleet()
+    result, _ = journey_result(runner, subject, "fleet", scripted, tmp_path)
+    assert result == "passed"
+    assert "machine-hub" in scripted.queued, "the hub updates itself by its own queue"
+    assert scripted.channels == [("leaf-a", "dev")], "a leaf follows; the hub is never told"
+
+
+class LinedKeyedFleet(LinedFleet, KeyedFleet):
+    pass
+
+
+def test_staging_the_prior_puts_a_leaf_on_dev_back_on_the_prior_s_line(
+        runner, subject, earlier, tmp_path, monkeypatch):
+    """The prior's offer is main's (a line, or a debug build filed there), so
+    a leaf left on dev by an earlier journey is moved first — or the hub would
+    answer its queue with dev's offer, the candidate it already runs."""
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    monkeypatch.setattr(runner, "KEY_PATIENCE", 0)
+    scripted = LinedKeyedFleet(release=CANDIDATE, sha=HEAD_SHA,
+                               keys={"hub": "hub-key", "leaf-a": "hub-key"},
+                               lines={"machine-leaf-a": "dev"})
+    fleet = build(runner, scripted, prior=earlier,
+                  adopt_command="/bin/bash ~/adopt-to-hub.sh hub.local")
+    fleet.build = subject
+    offered = []
+    monkeypatch.setattr(fleet, "offer", lambda b: offered.append(b.sha))
+    state = runner.stage_prior(fleet, fleet.leaves[0])
+    assert state["sha"] == PRIOR_SHA
+    assert offered == [PRIOR_SHA, HEAD_SHA]
+    assert scripted.channels == [("leaf-a", "main")]
+
+
 def _keyed(runner, monkeypatch, tmp_path, earlier, subject, **kwargs):
     monkeypatch.setattr(runner.time, "sleep", lambda _: None)
     monkeypatch.setattr(runner, "KEY_PATIENCE", 0)
@@ -968,7 +1089,8 @@ def test_revocation_failure_restores_the_fixture_supervisor(runner, monkeypatch)
     def fail(*args):
         raise runner.AcceptanceFailure("credential revocation failed")
 
-    hub = SimpleNamespace(queue=lambda *args: {"jobs": [{"id": "queued"}]}, tool_call=fail)
+    hub = SimpleNamespace(queue=lambda *args: {"jobs": [{"id": "queued"}]}, tool_call=fail,
+                          row=lambda machine: {"machine": machine, "state": "current"})
     fleet = SimpleNamespace(leaves=[guest], machine=lambda _: "leaf", hub=hub)
     with pytest.raises(runner.AcceptanceFailure, match="revocation failed"):
         runner.revocation(SimpleNamespace(observe=lambda *args: None), fleet, None)
@@ -1214,6 +1336,7 @@ def _fault_fleet(runner, monkeypatch, *, fault_result, prior_release=PRIOR):
     queued = []
     hub = SimpleNamespace(queue=lambda machine, request: queued.append(request) or
                           {"jobs": [{"id": "job-" + request.split("-")[1]}]},
+                          row=lambda machine: {"machine": machine, "state": "current"},
                           wait_for=lambda state, machine: {"state": state, "job": {}})
     guest = SimpleNamespace(name="leaf", installed=lambda: {"build": prior_release, "sha": PRIOR_SHA,
                                                              "client": "91", "menubar": "20260922"},
@@ -1276,6 +1399,7 @@ def _reboot_fleet(runner, monkeypatch, tmp_path, *, settled_detail, leftovers=""
         "injected": "freeze", "job": "job-reboot", "pid": 41, "copies": ["/Applications/x.incoming-j"]})
     hub = SimpleNamespace(
         sh=lambda command, **kwargs: "",  # the key it signs with: none, like the leaf's
+        row=lambda machine: {"machine": machine, "state": "current"},  # before lines: no line
         queue=lambda machine, request: queued.append(request) or {"jobs": [{"id": "job-" + request.split("-")[1]}]},
         wait_for=lambda state, machine: {"state": state, "job": {"id": "job-reboot", "detail": settled_detail}})
     installed = iter([{"build": CANDIDATE, "sha": HEAD_SHA},
