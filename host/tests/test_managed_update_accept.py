@@ -1931,7 +1931,8 @@ def test_a_projection_that_breaks_a_line_fails_by_name(runner, tmp_path, defect,
 
 def test_delegate_leaf_is_ordered_on_the_provisioned_adoption(runner):
     order = list(runner.JOURNEYS)
-    assert order.index("shell_adopt") < order.index("delegate_leaf") < order.index("upgrade_shell")
+    assert order.index("shell_adopt") < order.index("delegate_leaf") < order.index("revocation")
+    assert "upgrade_shell" not in order, "retired: no prior since 0d5972d lacks shell access"
     assert "delegate_leaf" in runner.HOST_HUB_SAFE
     fleet = SimpleNamespace(hub="hub", leaves=["a", "b"], fresh=None)
     assert runner.CAST["delegate_leaf"](fleet) == ("hub", "a")
