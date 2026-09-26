@@ -66,8 +66,11 @@ def run_hook(session_id, transcript, stop_active=False, cwd=None, env_extra=None
     out = r.stdout.strip()
     return json.loads(out) if out else None
 
+TOOL = {"type": "assistant", "message": {"content": [
+    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}}
 CRON = [
     {"type": "user", "message": {"content": "[cron:x Wake] /social_reply post=1"}},
+    TOOL,
     {"type": "last-prompt"},
 ]
 
@@ -110,6 +113,11 @@ check("TUI session never blocks", run_hook("sid-user-2", t) is None)
 # tiny transcript (no-op wake) never blocks
 t = mk_transcript("tiny.jsonl", CRON, pad=0)
 check("tiny transcript never blocks", run_hook("sid-tiny-1", t) is None)
+
+# a big transcript with no tool call is still a no-op — it only answered, and
+# the block would overwrite that answer on a `-p` caller's stdout
+t = mk_transcript("answer-only.jsonl", [e for e in CRON if e is not TOOL])
+check("a session with no tool call never blocks", run_hook("sid-noop-1", t) is None)
 
 # plumbing guards
 t = mk_transcript("skip.jsonl", CRON)

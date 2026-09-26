@@ -50,9 +50,14 @@ def test_signed_hub_has_hub_name_and_exact_build_identity():
     info = build_hub.hub_info("0.69.3", {"date": "2026-09-21", "sha": "a" * 40})
     assert info["CFBundleName"] == info["CFBundleDisplayName"] == "jStack Hub"
     assert info["CFBundleIdentifier"] == "live.jstack.hub"
-    # The day it was cut, not a counter anyone could mistake for jRemote's.
-    assert info["CFBundleVersion"] == "20260921"
+    # The day it was cut, not a counter anyone could mistake for jRemote's;
+    # then the month's release (0 for a version not of the YY.M.N shape) and
+    # the commit, so two commits built on one day never share it.
+    assert info["CFBundleVersion"] == f"20260921.0.{int('a' * 8, 16)}"
     assert info["CFBundleShortVersionString"] == "0.69.3"
+    release = build_hub.hub_info("26.9.3", {"date": "2026-09-21", "sha": "0000beef" + "0" * 32})
+    assert release["CFBundleVersion"] == "20260921.3.48879"
+    assert release["CFBundleShortVersionString"] == "26.9.3"
     for key, purpose in info.items():
         if key.startswith("NS") and key.endswith("UsageDescription"):
             assert purpose.startswith("jStack Hub ")

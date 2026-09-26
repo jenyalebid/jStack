@@ -15,6 +15,7 @@ ships, so a route that only works when someone else mounts it fails here.
 
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -51,11 +52,137 @@ import pytest
 _STATE_DIR = Path(tempfile.mkdtemp(prefix="jstack-host-tests-state-"))
 os.environ["JREMOTE_STATE_DIR"] = str(_STATE_DIR)
 
+# ── The suite never sees the operator's home ───────────────────────────────
+#
+# THE SUITE WAS REWRITING THE OPERATOR'S SSH FILES (#186). Shell access writes
+# `~/.ssh/authorized_keys` and `~/.ssh/config`, and every production entry
+# point that does it — `detach_parent.detach`, `attach_parent.attach`, the
+# `/shell/refresh` route, `shell_grants.refresh_hub_config` behind `/forget`
+# and enrolment — answers `Path.home()` when no home is passed, which is how
+# they run for real. A test that reached one without a home argument (the
+# detach tests, the grant tests' forget, the three-process HTTP test whose
+# leaf attaches) wrote the real files: the managed block emptied, a test
+# node's key granted login, the hub's peer config blanked.
+#
+# The fix is the same shape as the state dir above, for the same reason: HOME
+# moves at conftest import, ahead of every package import, so the constants
+# bound at import (`hostenv.HOME`, `spend.PROJECTS`, `router._DUB_SESSION`, …)
+# and the call-time `Path.home()` / `os.path.expanduser` readers all answer the
+# same throwaway home — and a spawned child process inherits it. One home for
+# the session, not one per test: a constant binds once, so per-test homes
+# would split the package between two answers.
+#
+# The throwaway home carries what a machine running the host always has and
+# the suite reads: `~/.claude/projects`, the jstack plugin (linked to THIS
+# checkout's copy, so the adapters under test are the ones exercised — not
+# whichever the operator installed), and the `claude` binary on the spawn
+# path. The only links out are the plugin directory (into this checkout) and
+# the `claude` executable; no directory of the operator's home is reachable.
+#
+# `REAL_HOME` is kept only so the tripwire can prove the real files untouched.
+REAL_HOME = Path.home()
+REAL_SSH_FILES = (REAL_HOME / ".ssh" / "authorized_keys", REAL_HOME / ".ssh" / "config")
+_SESSION_HOME = Path(tempfile.mkdtemp(prefix="jstack-host-tests-home-"))
+
+
+def _furnish(home: Path) -> None:
+    (home / ".claude" / "projects").mkdir(parents=True)
+    plugin = Path(__file__).resolve().parents[2] / "plugins" / "jstack"
+    if plugin.is_dir():
+        (home / "jStack" / "plugins").mkdir(parents=True)
+        (home / "jStack" / "plugins" / "jstack").symlink_to(plugin)
+    claude = shutil.which("claude")
+    if claude:
+        (home / ".local" / "bin").mkdir(parents=True)
+        (home / ".local" / "bin" / "claude").symlink_to(os.path.realpath(claude))
+
+
+_furnish(_SESSION_HOME)
+os.environ["HOME"] = str(_SESSION_HOME)
+
+
+def real_ssh_fingerprint() -> dict:
+    """size + sha256 of the operator's real ssh files (None when absent)."""
+    import hashlib
+    out = {}
+    for path in REAL_SSH_FILES:
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            out[str(path)] = None
+        else:
+            out[str(path)] = (len(data), hashlib.sha256(data).hexdigest())
+    return out
+
+
+# ── The tripwire: no write reaches the real ~/.ssh from this process ────────
+#
+# Refused at the syscall, not compared afterwards. A before/after checksum of
+# the real files cannot say WHO wrote them: every other checkout on the
+# machine running this suite without the fix writes the same files, and a
+# checksum tripwire blamed whichever test here happened to be running. An
+# audit hook sees only this interpreter's own opens, renames, chmods and
+# removals, refuses them (PermissionError, so nothing lands) and names the
+# test that tried. Children are covered by HOME itself: they inherit it.
+_REAL_SSH_DIRS = {os.path.abspath(REAL_HOME / ".ssh"),
+                  os.path.realpath(REAL_HOME / ".ssh")}
+_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+_MUTATING_EVENTS = {"os.chmod", "os.chown", "os.rename", "os.remove", "os.rmdir",
+                    "os.mkdir", "os.truncate", "os.link", "os.symlink",
+                    "os.utime", "shutil.rmtree", "shutil.move", "shutil.copyfile"}
+REAL_SSH_WRITES: list = []
+
+
+def _in_real_ssh(target) -> bool:
+    if isinstance(target, int) or target is None:
+        return False
+    try:
+        path = os.path.abspath(os.fsdecode(target))
+    except TypeError:
+        return False
+    return any(path == d or path.startswith(d + os.sep) for d in _REAL_SSH_DIRS)
+
+
+def _real_ssh_guard(event, args):
+    if event == "open":
+        path, mode, flags = args
+        writes = (isinstance(flags, int) and flags & _WRITE_FLAGS) or (
+            isinstance(mode, str) and any(c in mode for c in "wax+"))
+        targets = (path,) if writes else ()
+    elif event in _MUTATING_EVENTS:
+        targets = args[:2]
+    else:
+        return
+    for target in targets:
+        if _in_real_ssh(target):
+            REAL_SSH_WRITES.append((event, os.fsdecode(target)))
+            raise PermissionError(f"host tests may not write {os.fsdecode(target)} (#186)")
+
+
+sys.addaudithook(_real_ssh_guard)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(monkeypatch):
+    """Every test runs in the session's throwaway home with no ssh files of its
+    own yet, and a test that still reached the real ~/.ssh fails by name
+    instead of passing with the damage on the machine."""
+    monkeypatch.setenv("HOME", str(_SESSION_HOME))
+    shutil.rmtree(_SESSION_HOME / ".ssh", ignore_errors=True)
+    del REAL_SSH_WRITES[:]
+    yield _SESSION_HOME
+    if REAL_SSH_WRITES:
+        hits = list(REAL_SSH_WRITES)
+        del REAL_SSH_WRITES[:]
+        pytest.fail(f"this test tried to write the real ~/.ssh (#186): {hits}",
+                    pytrace=False)
+
 
 def pytest_sessionfinish(session, exitstatus):
     """Take the run's state dir away with it. Best-effort: a leftover temp
     directory is untidy, and failing the run over one would be worse."""
     shutil.rmtree(_STATE_DIR, ignore_errors=True)
+    shutil.rmtree(_SESSION_HOME, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")

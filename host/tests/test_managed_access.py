@@ -79,6 +79,21 @@ def test_leaf_loopback_is_not_an_administration_console(rig, monkeypatch):
     assert console.post("/api/jremote/v1/enrolment/codes", json={"name": "x"}).status_code == 403
 
 
+def test_a_fresh_local_hub_is_its_own_console(rig, monkeypatch):
+    """Where a fresh install lands: no `wg0.conf`, no gateway address, no
+    parent — mode `local`. Its own menu bar still manages devices (the pairing
+    item was missing on every fresh hub while the gate read mesh ownership);
+    a remote caller still is not the console."""
+    _, _, _, console, remote = rig
+    monkeypatch.setattr(mode, "is_hub", lambda: False)
+    monkeypatch.setattr(mode, "is_managed", lambda: False)
+    monkeypatch.setattr(mode, "current", lambda: {"mode": "local"})
+    assert console.get("/api/jremote/v1/host").json()["features"]["device_management"] is True
+    assert console.post("/api/jremote/v1/enrolment/codes", json={"name": "phone"}).status_code == 200
+    assert remote.get("/api/jremote/v1/host").json()["features"]["device_management"] is False
+    assert remote.post("/api/jremote/v1/enrolment/codes", json={"name": "x"}).status_code == 403
+
+
 def test_local_app_introduction_creates_no_independent_leaf_device(rig, monkeypatch):
     from jstack_host import enrolment
     store, _, _, console, remote = rig

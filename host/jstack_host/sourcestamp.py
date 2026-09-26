@@ -79,6 +79,11 @@ def capture() -> dict:
                 _stamp["version"] = data["version"]
             if data.get("date"):
                 _stamp["date"] = data["date"]
+            # A debug build — a branch that is not a line, or a commit no
+            # bump covers — says so to `/host` and the menu, never passing
+            # for the release its version would otherwise name.
+            if data.get("debug"):
+                _stamp["debug"] = True
             # Where these bytes were published from. A signed bundle has no
             # `.git` to ask, and the one caller that needed this — the joiner
             # file's installer URL — was asking git inside the app bundle and

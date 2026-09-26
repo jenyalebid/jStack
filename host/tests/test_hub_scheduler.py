@@ -94,7 +94,7 @@ def test_the_scheduler_environment_cannot_smuggle_an_import_path():
 # which runs `launchctl bootout` on every live.jstack.hub role and unlinks
 # ~/.local/bin/jstack-host. On 2026-09-24 17:31 it did exactly that to the
 # production Hub. It is refused wherever the Hub is installed; its real proof
-# is a lab guest (verify/scenarios/hub/uninstall.sh).
+# is the hub/uninstall journey, in a lab guest.
 @destructive
 def test_uninstall_stops_and_boots_out_every_sealed_role(monkeypatch, tmp_path):
     app = tmp_path / "Hub.app"
@@ -209,7 +209,7 @@ def test_install_refuses_where_the_hub_owns_the_daemon(home):
 
 
 def test_install_still_writes_its_own_service_where_there_is_no_hub(home):
-    """The Hub-less Mac is the case `verify/scenarios/plugin/scheduler.sh` runs."""
+    """The Hub-less Mac is the case the plugin/scheduler journey runs in a guest."""
     result = tool("install", "--dry-run", home=home)
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"{LEGACY}.plist" in result.stdout
@@ -341,7 +341,7 @@ def test_the_two_launchers_agree_on_how_the_daemon_is_started():
 def test_every_file_naming_the_hub_service_names_the_same_label():
     label = build_hub.service_plist("scheduler")["Label"]
     assert label == "live.jstack.hub.scheduler"
-    for path in (TOOL, DOCTOR, REPO / "install.sh", REPO / "verify/scenarios/hub/install.sh"):
+    for path in (TOOL, DOCTOR, REPO / "install.sh"):
         assert label in path.read_text(), path
     # And the standalone label stays distinct, or uninstalling one would unload
     # the other.
@@ -375,16 +375,6 @@ def test_the_installer_no_longer_writes_a_launch_agent_for_this_daemon():
             f"branch, so a Hub machine would get two: {line.strip()}")
     # And an upgraded Mac gets the old row swept rather than keeping it forever.
     assert f"{LEGACY}.plist" in installer and f'bootout "gui/$(id -u)/{LEGACY}"' in installer
-
-
-def test_no_scenario_still_asserts_the_legacy_plist_on_a_hub_machine():
-    for name in ("install", "uninstall", "full-reset"):
-        text = (REPO / f"verify/scenarios/hub/{name}.sh").read_text()
-        assert f"{LEGACY}.plist" not in text, name
-        assert "parent bundle identifier = live.jstack.hub" in text or "LaunchAgents" in text, name
-    # The Hub-less scenario is the one place the standalone plist is still the
-    # right answer, and it must keep asserting it.
-    assert f"{LEGACY}.plist" in (REPO / "verify/scenarios/plugin/scheduler.sh").read_text()
 
 
 # --------------------------------------- the machine that updates into this build

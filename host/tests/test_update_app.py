@@ -558,6 +558,37 @@ def test_spawned_reads_a_pid_from_launchd_not_a_registration(monkeypatch):
     assert spawned("live.jstack.hub.menu", seconds=0) is False
 
 
+def test_spawned_accepts_a_scheduled_role_launchd_holds_between_runs(monkeypatch):
+    """Home hub, 2026-09-25 19:11 (#203): the self-update failed naming seven
+    automation roles "registered but launchd could not spawn it" while every
+    one was loaded with exit 0. They run on a calendar or an interval, so
+    between runs launchd shows no pid; that is the job at rest, not a refusal."""
+    import subprocess
+    spawned = _REAL_SPAWNED
+    shown = {"stdout": ""}
+    monkeypatch.setattr(install_host, "_launchctl",
+                        lambda *args: subprocess.CompletedProcess(args, 0, shown["stdout"], ""))
+    calendar = ("live.jstack.automation.host-audit = {\n\tstate = not running\n"
+                "\tjob state = uninitialized\n\tlast exit code = (never exited)\n\truns = 0\n"
+                "\tevent triggers = {\n\t\tcalendar => {\n\t\t\tkeepalive = 0\n"
+                "\t\t\tstream = com.apple.launchd.calendarinterval\n\t\t}\n\t}\n}")
+    interval = ("live.jstack.automation.ddns = {\n\tstate = not running\n\tjob state = exited\n"
+                "\tlast exit code = 0\n\trun interval = 300 seconds\n\truns = 41\n}")
+    for shown["stdout"] in (calendar, interval):
+        assert spawned("live.jstack.automation.x", seconds=0) is True
+    # A scheduled job launchd refused is still a refusal.
+    shown["stdout"] = ("live.jstack.automation.ddns = {\n\tstate = spawn failed\n"
+                       "\tlast exit code = 78\n\trun interval = 300 seconds\n}")
+    assert spawned("live.jstack.automation.x", seconds=0) is False
+    # A service that stays up and shows no pid is not spawned, schedule or not.
+    shown["stdout"] = "live.jstack.hub.host = {\n\tstate = not running\n\tlast exit code = 0\n}"
+    assert spawned("live.jstack.hub.host", seconds=0) is False
+    # An unloaded label is never spawned, whatever the text says.
+    monkeypatch.setattr(install_host, "_launchctl",
+                        lambda *args: subprocess.CompletedProcess(args, 113, interval, "not found"))
+    assert spawned("live.jstack.automation.x", seconds=0) is False
+
+
 def _settled_job(release, sha):
     return {"state": "current", "finalized": True, "release": release,
             "transaction": {"apps": {"menubar": {}}},

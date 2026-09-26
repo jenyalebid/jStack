@@ -95,9 +95,6 @@ ALLOW = {
     ("plugins/jstack/hooks/attention.py", "jremote"):
         "the hook reads the marker that app's host writes, and a reader cannot "
         "name a file without naming it — same ground as the host/ prefix below",
-    ("verify/scenarios/hub/agent-tools.sh", "jremote"):
-        "the journey reads the same marker the hook does, to ask whether the "
-        "hook wrote where the Hub declared rather than where this Mac keeps it",
     ("install.sh", "jarvis"):
         "the shipped default name for the first agent workspace — a product "
         "default the owner chose, printed in --help and used when the prompt "
@@ -123,15 +120,6 @@ ALLOW_PREFIX = {
         "the host of that app, open-sourced deliberately — it names itself",
     ("app/", "jremote"):
         "the installer for that app — closed binary, open install path",
-    ("verify/", "jremote"):
-        "the acceptance suite drives that app as a user does — it installs it, "
-        "clicks it and reads its windows, and a scenario that may not name what "
-        "it is driving cannot describe what it saw",
-    ("verify/", "jarvis"):
-        "the scenarios run the shipped installer with its shipped defaults, and "
-        "the default first agent workspace is named there — same ground as the "
-        "install.sh entry above. The home-path term still fails under verify/, "
-        "which is the leak this one would otherwise hide",
 }
 
 SELF = "plugins/jstack/tests/scrub.sh"  # holds the term list; cannot scan itself

@@ -25,6 +25,10 @@ Verify: command · ./verify/build-from-ref.sh
 - Numbering is advisory. Document order is the stage's identity; a number that
   disagrees is reported and ignored.
 - `# Part one — …` H1s are structure. A stage never lives at H1.
+- Above the first stage, `Branch: <name>`, `Issue: <owner/repo#N>` and
+  `PR: <ref>` bind where the work lands — one token each, all optional. With
+  no `Branch:` line, the branch checked out where the plan is approved is
+  recorded. Later: `jstack-host plan set <id> --branch … --issue … --pr …`.
 
 ## Proof kinds
 

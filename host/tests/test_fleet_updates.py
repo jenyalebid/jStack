@@ -182,7 +182,14 @@ def test_parent_accepts_a_leaf_rollback_after_restart_during_download(tmp_path, 
 
 
 @pytest.fixture
-def rig(tmp_path, monkeypatch, app, release):
+def offers(release):
+    """What this hub's feed offers per line: main carries the release, dev
+    nothing until a test offers it one."""
+    return {"main": release[2], "dev": None}
+
+
+@pytest.fixture
+def rig(tmp_path, monkeypatch, app, release, offers):
     state = tmp_path / "state"
     monkeypatch.setattr(hostenv, "state_dir", lambda: state)
     monkeypatch.setattr(hostenv, "host_id", lambda: "hub-main")
@@ -190,7 +197,7 @@ def rig(tmp_path, monkeypatch, app, release):
     monkeypatch.setattr(attach_parent, "parent_record", lambda: {})
     monkeypatch.setattr(mode, "is_managed", lambda: False)
     monkeypatch.setattr(mode, "is_hub", lambda: True)
-    monkeypatch.setattr(fleet, "offer", lambda: release[2])
+    monkeypatch.setattr(fleet, "offer", lambda line="main": offers[line])
     store = stores.get_store()
     monkeypatch.setattr(devices, "_store", lambda: store)
     internal = devices.internal_token()
@@ -784,3 +791,149 @@ def test_reused_request_keeps_its_job_after_state_and_inventory_change(tmp_path,
     assert reopened.queue("leaf", "credential", release[2], "update-all")["id"] == job["id"]
     with pytest.raises(releases.ReleaseError, match="different update"):
         reopened.queue("leaf", "other-credential", release[2], "update-all")
+
+
+# ── Lines: every machine takes its own line's offer ─────────────────────────
+
+def _dev_offer(release):
+    manifest = {**release[2]["manifest"], "release": "dev-1"}
+    return releases.sign(manifest, release[0].private_bytes_raw())
+
+
+def _leaf(store, key):
+    row, token = devices.mint(key)
+    store.upsert_host(key, key, "10.66.0.9")
+    store.bind_host_device(key, row["id"])
+    return {"Authorization": "Bearer " + token}
+
+
+def test_the_feed_keeps_main_where_old_leaves_read_it_and_dev_beside_it(tmp_path, monkeypatch):
+    from jstack_host import releases as app_releases
+    monkeypatch.setattr(app_releases, "RELEASE_DIR", tmp_path / "releases/mac")
+    assert fleet.latest_path("main") == tmp_path / "releases/fleet/latest.json"
+    assert fleet.latest_path() == fleet.latest_path("main")
+    assert fleet.latest_path("dev") == tmp_path / "releases/fleet/latest-dev.json"
+    assert fleet.offer("dev") is None
+    assert fleet.machine_line({}) == "main" and fleet.machine_line({"line": "stable"}) == "main"
+    assert fleet.machine_line({"line": "dev"}) == "dev"
+    assert fleet.machine_line({"line": "feature/x"}) == "main"
+
+
+def test_a_dev_build_a_hub_made_before_lines_is_still_devs_offer(tmp_path, monkeypatch, release):
+    """A hub following dev that predated lines built dev into the one
+    `latest.json`. Moved onto lines, it reads that file as dev's offer until it
+    builds again; a main build there is never dev's (hub/update, 2026-09-26:
+    the guest hub landed on the candidate and sat on not_published)."""
+    from jstack_host import releases as app_releases
+    key, public, envelope = release
+    monkeypatch.setattr(app_releases, "RELEASE_DIR", tmp_path / "releases/mac")
+    monkeypatch.setattr(hostenv, "state_dir", lambda: tmp_path / "state")
+    fleet.root().mkdir(parents=True)
+    atomic_json(fleet.root() / "config.json", {"public_key": public, "candidate_test": True})
+    feed = fleet.feed_dir()
+
+    def publish(channel):
+        manifest = {**envelope["manifest"], "release": "pre-lines-1",
+                    "channel": {"github_repo": "o/r", "name": channel}}
+        signed = releases.sign(manifest, key.private_bytes_raw())
+        atomic_json(feed / "latest.json", signed)
+        for item in manifest["components"].values():
+            (feed / "pre-lines-1").mkdir(parents=True, exist_ok=True)
+            (feed / "pre-lines-1" / item["file"]).write_bytes(b"artifact")
+        return signed
+
+    signed = publish("dev")
+    assert fleet.pre_lines_offer("dev") == feed / "latest.json"
+    assert fleet.offer("dev") == signed
+    assert fleet.offer("main") == signed   # what a leaf that predates lines reads, as before
+    # Once dev has its own file, that file is dev's offer and the old one is not consulted.
+    dev_manifest = {**envelope["manifest"], "release": "dev-2"}
+    atomic_json(feed / "latest-dev.json", releases.sign(dev_manifest, key.private_bytes_raw()))
+    (feed / "dev-2").mkdir()
+    for item in dev_manifest["components"].values():
+        (feed / "dev-2" / item["file"]).write_bytes(b"artifact")
+    assert fleet.offer("dev")["manifest"]["release"] == "dev-2"
+    (feed / "latest-dev.json").unlink()
+    # A main build in the old file is main's alone.
+    publish("main")
+    assert fleet.pre_lines_offer("dev") is None and fleet.offer("dev") is None
+    assert fleet.pre_lines_offer("main") is None
+
+
+def test_inventory_measures_each_machine_against_its_own_line(rig, release, offers):
+    store, console, remote = rig
+    offers["dev"] = _dev_offer(release)
+    headers = _leaf(store, "leaf-dev")
+    _leaf(store, "leaf-main")
+    beat = "/api/jremote/v1/managed/updates/heartbeat"
+    answer = remote.post(beat, headers=headers,
+                         json={"observation": {"supervisor": 1, "line": "dev"}})
+    assert answer.status_code == 200, answer.text
+    # The heartbeat answers with the reporting machine's own line's offer.
+    assert answer.json()["offer"]["manifest"]["release"] == "dev-1"
+    inventory = console.get("/api/jremote/v1/updates/inventory").json()
+    assert inventory["lines"] == {"main": "test-1", "dev": "dev-1"}
+    rows = {row["machine"]: row for row in inventory["machines"]}
+    assert rows["hub-main"]["line"] == "main" and rows["hub-main"]["desired"] == "test-1"
+    assert rows["leaf-dev"]["line"] == "dev" and rows["leaf-dev"]["desired"] == "dev-1"
+    # A machine that never said which line it is on is on main.
+    assert rows["leaf-main"]["line"] == "main" and rows["leaf-main"]["desired"] == "test-1"
+
+
+def test_a_queue_hands_each_machine_its_own_lines_release(rig, release, offers):
+    store, console, remote = rig
+    offers["dev"] = _dev_offer(release)
+    headers = _leaf(store, "leaf-dev")
+    _leaf(store, "leaf-main")
+    remote.post("/api/jremote/v1/managed/updates/heartbeat", headers=headers,
+                json={"observation": {"supervisor": 1, "line": "dev"}})
+    queued = console.post("/api/jremote/v1/updates/queue",
+                          json={"target": "all", "request_id": "click"})
+    assert queued.status_code == 200, queued.text
+    jobs = {job["machine"]: job["release"] for job in queued.json()["jobs"]}
+    assert jobs == {"hub-main": "test-1", "leaf-dev": "dev-1", "leaf-main": "test-1"}
+
+
+def test_a_line_with_nothing_offered_queues_nothing_for_its_machines(rig):
+    store, console, remote = rig
+    headers = _leaf(store, "leaf-dev")
+    remote.post("/api/jremote/v1/managed/updates/heartbeat", headers=headers,
+                json={"observation": {"supervisor": 1, "line": "dev"}})
+    queued = console.post("/api/jremote/v1/updates/queue",
+                          json={"target": "leaf-dev", "request_id": "click"})
+    assert queued.status_code == 409
+    assert "no complete release has been offered on dev" in queued.text
+    own = remote.post("/api/jremote/v1/managed/updates/request", headers=headers,
+                      json={"request_id": "own"})
+    assert own.status_code == 409 and "on dev" in own.text
+
+
+def test_a_leaf_asks_for_its_line_and_an_old_leaf_asking_nothing_gets_main(rig, release, offers):
+    store, _, remote = rig
+    offers["dev"] = _dev_offer(release)
+    headers = _leaf(store, "leaf-one")
+    check = "/api/jremote/v1/managed/updates/check"
+    assert remote.post(check, headers=headers).json()["offer"]["manifest"]["release"] == "test-1"
+    assert remote.post(check, headers=headers, json={}).json()["offer"]["manifest"]["release"] == "test-1"
+    assert remote.post(check, headers=headers,
+                       json={"line": "dev"}).json()["offer"]["manifest"]["release"] == "dev-1"
+    assert remote.post(check, headers=headers, json={"line": "feature/x"}).status_code == 400
+
+
+def test_a_leaf_names_its_line_when_it_asks_its_parent(monkeypatch, tmp_path):
+    asked = []
+    monkeypatch.setattr(managed_access, "is_leaf", lambda: True)
+    monkeypatch.setattr(managed_access, "_post_parent",
+                        lambda route, body: asked.append((route, body)) or {"offer": None})
+    monkeypatch.setattr(fleet, "config", lambda: {"channel": "dev"})
+    assert update_routes.offered() is None
+    monkeypatch.setattr(fleet, "config", lambda: {"channel": "stable"})
+    update_routes.offered()
+    assert asked == [("updates/check", {"line": "dev"}), ("updates/check", {"line": "main"})]
+
+
+def test_the_heartbeat_carries_the_line_this_machine_is_on(tmp_path):
+    from jstack_host.update_macos import MacBackend
+    for channel, line in (("dev", "dev"), ("stable", "main"), (None, "main"), ("feature/x", "main")):
+        config = {} if channel is None else {"channel": channel}
+        assert MacBackend(tmp_path, config).line() == line

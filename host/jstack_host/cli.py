@@ -116,10 +116,13 @@ def _cmd_updates_channel(args) -> int:
 
 
 def _cmd_updates_build(args) -> int:
-    """Build this hub's ref into an offer. The only door that builds.
+    """Build into an offer. The only door that builds.
 
     Explicit because it is minutes of work and megabytes of output — the
     supervisor's 300s tick asks GitHub for one commit sha and stops there.
+    With no ref, every line whose tip moved since its last build is built;
+    `--ref` builds that one ref. A release is made only off main or dev, from
+    a commit a version bump covers; `--debug` builds anything else and says so.
     """
     import json
     from . import build_source, release_manifest
@@ -128,7 +131,12 @@ def _cmd_updates_build(args) -> int:
     if config_path is None:
         return 1
     try:
-        print(json.dumps(build_source.build(config_path.parent, config, ref=args.ref)))
+        if args.ref is None and not args.debug:
+            result = build_source.build_lines(config_path.parent, config)
+        else:
+            result = build_source.build(config_path.parent, config, ref=args.ref,
+                                        debug=args.debug)
+        print(json.dumps(result))
     except release_manifest.ReleaseError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1228,9 +1236,20 @@ def _ambient_session(args) -> str:
 
 
 def _cmd_plan_list(args) -> int:
+    """Every plan, with who worked it and where its work lands.
+
+    `session` is the first session joined — the author — and `sessions` all
+    of them; `branch`, `issue` and `pr` are null until something bound them.
+    """
     _adopt(args)
-    from . import grants, plans
+    from . import plans
     rows = plans.list_plans()
+    joined = plans.session_ids(r["id"] for r in rows)
+    for r in rows:
+        r["sessions"] = joined.get(r["id"], [])
+        r["session"] = r["sessions"][0] if r["sessions"] else None
+        for key in plans.TRACKING:
+            r[key] = r.get(key) or None
     if getattr(args, "json", False):
         import json
         print(json.dumps(rows))
@@ -1239,10 +1258,50 @@ def _cmd_plan_list(args) -> int:
         print('no plans on this host — `jstack-host plan open "<title>"` '
               "starts one.")
         return 0
-    print(f"{'PLAN':<38} {'STATUS':<10} {'UPDATED':<18} TITLE")
+    print(f"{'SESSION':<9} {'PLAN':<37} {'BRANCH':<24} {'ISSUE':<20} "
+          f"{'PR':<8} {'STATUS':<10} TITLE")
     for r in rows:
-        print(f"{r['id']:<38} {r['status']:<10} "
-              f"{grants.stamp(r['updated_at']):<18} {r['title']}")
+        print(f"{(r['session'] or '-')[:8]:<9} {r['id']:<37} "
+              f"{r['branch'] or '-':<24} {r['issue'] or '-':<20} "
+              f"{r['pr'] or '-':<8} {r['status']:<10} {r['title']}")
+    return 0
+
+
+def _cmd_plan_current(args) -> int:
+    """The plan this session is on — its id, for `plan set` and the skills.
+
+    Exit 1 with nothing on stdout when there is none, so
+    `P=$(jstack-host plan current) && jstack-host plan set "$P" …` binds
+    nothing rather than binding an error message.
+    """
+    _adopt(args)
+    from . import plans
+    session = _ambient_session(args)
+    row = plans.open_plan_for_session(session) if session else None
+    if row is None:
+        print("no open plan for " + (f"session {session}" if session else
+              "this shell — no session id in the environment, pass --session"),
+              file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        import json
+        print(json.dumps(row))
+    else:
+        print(row["id"])
+    return 0
+
+
+def _cmd_plan_set(args) -> int:
+    """Bind a plan to its branch, issue or PR after the fact; `""` clears one."""
+    _adopt(args)
+    from . import plans
+    try:
+        plans.set_tracking(args.plan_id, branch=args.branch, issue=args.issue,
+                           pr=args.pr)
+    except ValueError as exc:
+        return _refusal(exc)
+    row = plans.plan(args.plan_id)
+    print("  ".join(f"{k} {row[k] or '-'}" for k in plans.TRACKING))
     return 0
 
 
@@ -1271,8 +1330,9 @@ def _cmd_plan_show(args) -> int:
     print(f"title   {p['title']}")
     print(f"status  {p['status']}")
     for label, key in (("file", "plan_file"), ("engine", "engine"),
-                       ("repo", "repo")):
-        if p[key]:
+                       ("repo", "repo"), ("branch", "branch"), ("issue", "issue"),
+                       ("pr", "pr")):
+        if p.get(key):
             print(f"{label:<7} {p[key]}")
     if not rows:
         print("\n  no stages yet — `jstack-host plan stages <id> --from-file "
@@ -1374,6 +1434,7 @@ def _cmd_plan_stages(args) -> int:
     # entry, and `plan_file` is the column the document route reads.
     plans.update_plan_meta(args.plan_id, plan_file=str(Path(args.from_file).expanduser()),
                            title=parsed.title or None)
+    plans.bind_authored(args.plan_id, parsed, plans.plan(args.plan_id)["repo"])
     for s in plans.stages(args.plan_id):
         print(f"{s['id']}  #{s['ordinal']}  {s['status']:<8} {s['title']}")
     return 0
@@ -1674,12 +1735,15 @@ def build_parser() -> argparse.ArgumentParser:
     up = updates.add_parser(
         "channel", help="read or set the ref this hub follows")
     up.add_argument("name", nargs="?", default=None,
-                    help="a branch name, or 'stable' for main (omit to read)")
+                    help="main or dev, or any branch for debug builds (omit to read)")
     up.add_argument("--state-dir", default=None)
     up.set_defaults(fn=_cmd_updates_channel)
     up = updates.add_parser(
-        "build", help="build this hub's ref and offer the result")
-    up.add_argument("--ref", default=None, help="build this ref instead of the configured one")
+        "build", help="build each line that moved (or --ref) and offer the result")
+    up.add_argument("--ref", default=None,
+                    help="build this ref only; without it every line whose tip moved is built")
+    up.add_argument("--debug", action="store_true",
+                    help="a debug build: any branch, no version bump required, never a release")
     up.add_argument("--state-dir", default=None)
     up.set_defaults(fn=_cmd_updates_build)
 
@@ -1722,6 +1786,19 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("--json", action="store_true")
     pl.add_argument("--state-dir", default=None)
     pl.set_defaults(fn=_cmd_plan_list)
+    pl = plans_p.add_parser("current", help="the id of the plan this session is on")
+    pl.add_argument("--session", default="",
+                    help="whose plan (default: this shell's session)")
+    pl.add_argument("--json", action="store_true")
+    pl.add_argument("--state-dir", default=None)
+    pl.set_defaults(fn=_cmd_plan_current)
+    pl = plans_p.add_parser("set", help="bind a plan to its branch, issue or PR")
+    pl.add_argument("plan_id")
+    pl.add_argument("--branch", default=None)
+    pl.add_argument("--issue", default=None, help="e.g. owner/repo#12")
+    pl.add_argument("--pr", default=None, help="a PR number or URL")
+    pl.add_argument("--state-dir", default=None)
+    pl.set_defaults(fn=_cmd_plan_set)
     pl = plans_p.add_parser("show", help="a plan, its stages and their proofs")
     pl.add_argument("plan_id")
     pl.add_argument("--json", action="store_true")

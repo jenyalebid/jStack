@@ -64,6 +64,15 @@ Config keys (all optional):
   escalate_cmd          executable called with <agent> <session_id> <reason>
                         on persistent failure (default: log only)
   extra_path            list of dirs prepended to the spawned review's PATH
+  selfwrite_extra_prompt  text appended verbatim to the self-write prompt —
+                        a host step the one turn also runs (default: none)
+  post_selfwrite_cmd    command run after a self-write that filed its entry
+                        (SELFWRITE_DONE) as <cmd> <session_id> <transcript>,
+                        where <transcript> is the self-write's own transcript
+                        (its last assistant turn is the self-write's reply).
+                        Same PATH as the spawn, 120s timeout, logged as
+                        POST_SELFWRITE ok|fail|timeout; never changes the
+                        self-write's outcome (default: none)
   timeline_dir          default $JSTACK_TIMELINE_DIR, else root.timeline_dir()
                         — {root}/Logs/Timeline (also exported as
                         JSTACK_TIMELINE_DIR to the spawn)
@@ -83,6 +92,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -282,6 +292,11 @@ DEFAULTS = {
     "tg_classify_cmd": None,
     "escalate_cmd": None,
     "extra_path": [],
+    # Host hooks around the self-write. The engine knows nothing of what a
+    # host does with them: the prompt text rides the one turn verbatim, and
+    # the command gets the ids it needs to read what that turn wrote.
+    "selfwrite_extra_prompt": None,
+    "post_selfwrite_cmd": None,
     # None → derived (root.timeline_dir): the ONE location bin/log_event and
     # bin/msg also resolve to. A literal here would be a third opinion about
     # where the single db lives, and this engine is the one that exports the
@@ -1034,6 +1049,9 @@ def spawn_selfwrite(session_id: str, agent: str, agent_title: str,
         delta_note=SELFWRITE_DELTA_NOTE.format(boundary=boundary) if boundary else "",
         compact_note=compact_note,
     )
+    extra_prompt = CFG.get("selfwrite_extra_prompt")
+    if isinstance(extra_prompt, str) and extra_prompt.strip():
+        prompt += "\n\n" + extra_prompt
     stamp = last_reviewed_boundary(jsonl_path, jsonl_path.stat().st_size)
     if stamp:
         date, at = stamp.split(" ")
@@ -1105,6 +1123,27 @@ def spawn_selfwrite(session_id: str, agent: str, agent_title: str,
     # evidence that one appeared.
     pre_max_id = _timeline_max_id(CFG["timeline_dir"])
     try:
+        return _selfwrite_outcome(cmd, cwd, env, session_id, agent, pre_max_id, dub_path)
+    finally:
+        # The timeline row is the artifact; the dub is scratch. Remove it on
+        # every exit path so nothing ever accumulates in the resume picker —
+        # after post_selfwrite_cmd, which reads the self-write's reply from it.
+        try:
+            if native:
+                with CodexRPC() as rpc:
+                    rpc.call("thread/delete", {"threadId": dub_id})
+            else:
+                dub_path.unlink(missing_ok=True)
+            dub_rec.unlink(missing_ok=True)
+        except (OSError, RuntimeError, TimeoutError):
+            pass
+
+
+def _selfwrite_outcome(cmd: list, cwd: str, env: dict, session_id: str,
+                       agent: str, pre_max_id: int, dub_path: Path) -> bool | None:
+    """Run the one-turn resume and settle what it did (spawn_selfwrite owns
+    the dub's lifetime around this call)."""
+    try:
         result = subprocess.run(
             cmd, cwd=cwd, capture_output=True, text=True,
             env=env, timeout=int(CFG["selfwrite_timeout_secs"]),
@@ -1115,18 +1154,6 @@ def spawn_selfwrite(session_id: str, agent: str, agent_title: str,
     except Exception as e:
         _log(f"SELFWRITE_ERR {session_id[:8]} → {agent}: {e}")
         return
-    finally:
-        # The timeline row is the artifact; the dub is scratch. Remove it on
-        # every exit path so nothing ever accumulates in the resume picker.
-        try:
-            if native:
-                with CodexRPC() as rpc:
-                    rpc.call("thread/delete", {"threadId": dub_id})
-            else:
-                dub_path.unlink(missing_ok=True)
-            dub_rec.unlink(missing_ok=True)
-        except (OSError, RuntimeError, TimeoutError):
-            pass
 
     if result.returncode != 0:
         blob = (result.stdout or "") + (result.stderr or "")
@@ -1156,6 +1183,7 @@ def spawn_selfwrite(session_id: str, agent: str, agent_title: str,
 
     if grew:
         _log(f"SELFWRITE_DONE {session_id[:8]} → {agent} ({len(out)} chars, +1 entry)")
+        run_post_selfwrite(session_id, dub_path, env)
         return True
     elif claimed:
         _log(f"SELFWRITE_NOROW {session_id[:8]} → {agent}: claimed log_event but no "
@@ -1164,6 +1192,44 @@ def spawn_selfwrite(session_id: str, agent: str, agent_title: str,
         _log(f"SELFWRITE_NOENTRY {session_id[:8]} → {agent}: dub wrote no entry: {tail}")
         return True
     return False
+
+
+POST_SELFWRITE_TIMEOUT_SECS = 120
+
+
+def run_post_selfwrite(session_id: str, transcript: Path, env: dict) -> str | None:
+    """Run the host's post_selfwrite_cmd as <cmd> <session_id> <transcript>.
+
+    `transcript` is the self-write's own transcript, so the host can read what
+    the turn wrote in answer to selfwrite_extra_prompt. The command is a
+    string split like a shell would (so it may carry a subcommand), with `~`
+    expanded, run with the spawn's PATH. Its result is logged and returned,
+    never raised: the entry is already filed, and nothing a host hook does can
+    un-write it. Returns "ok" | "fail" | "timeout", or None when unset."""
+    raw = CFG.get("post_selfwrite_cmd")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        argv = [os.path.expanduser(a) for a in shlex.split(raw)]
+    except ValueError as e:
+        _log(f"POST_SELFWRITE fail {session_id[:8]}: bad command: {e}")
+        return "fail"
+    try:
+        r = subprocess.run(argv + [session_id, str(transcript)],
+                           capture_output=True, text=True, env=env,
+                           timeout=POST_SELFWRITE_TIMEOUT_SECS)
+    except subprocess.TimeoutExpired:
+        _log(f"POST_SELFWRITE timeout {session_id[:8]}: after {POST_SELFWRITE_TIMEOUT_SECS}s")
+        return "timeout"
+    except Exception as e:
+        _log(f"POST_SELFWRITE fail {session_id[:8]}: {e}")
+        return "fail"
+    tail = " ".join(((r.stdout or "") + " " + (r.stderr or "")).split())[-200:]
+    if r.returncode != 0:
+        _log(f"POST_SELFWRITE fail {session_id[:8]}: exit {r.returncode}: {tail}")
+        return "fail"
+    _log(f"POST_SELFWRITE ok {session_id[:8]}: {tail}")
+    return "ok"
 
 
 def spawn_review(session_id: str, agent: str, agent_title: str,

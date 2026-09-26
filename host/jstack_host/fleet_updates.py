@@ -48,10 +48,50 @@ def feed_dir() -> Path:
     return app_releases.RELEASE_DIR.parent / "fleet"
 
 
-def offer() -> dict | None:
-    path = feed_dir() / "latest.json"
+def latest_path(line: str = releases.STABLE_CHANNEL) -> Path:
+    """Where a line's offer sits in this hub's feed: `latest.json` for main —
+    the file every leaf that predates lines already reads — and
+    `latest-dev.json` for dev."""
+    from .build_source import latest_name
+    return feed_dir() / latest_name(line)
+
+
+def machine_line(observation: dict | None) -> str:
+    """The line a machine reported in its heartbeat; main when it names none,
+    which is every machine whose updater predates lines."""
+    value = (observation or {}).get("line")
+    if value == "stable":
+        return releases.STABLE_CHANNEL
+    return value if value in releases.LINES else releases.STABLE_CHANNEL
+
+
+def pre_lines_offer(line: str) -> Path | None:
+    """A hub that predated lines wrote whatever it built, dev included, into
+    the one `latest.json`. When such a hub moves onto lines while following
+    dev, that file is still dev's offer — its manifest names the line it was
+    built from — until the hub builds again and dev gets its own file. Read
+    where it is, so the hub's own row is not "not_published" the moment it
+    lands on this code (hub/update, 2026-09-26)."""
+    if line == releases.STABLE_CHANNEL:
+        return None
+    path = latest_path(releases.STABLE_CHANNEL)
     if not path.exists():
         return None
+    try:
+        envelope = json.loads(path.read_text())
+    except ValueError:
+        return None
+    manifest = envelope.get("manifest") if isinstance(envelope, dict) else None
+    channel = (manifest or {}).get("channel") or {}
+    return path if isinstance(channel, dict) and channel.get("name") == line else None
+
+
+def offer(line: str = releases.STABLE_CHANNEL) -> dict | None:
+    path = latest_path(line)
+    if not path.exists():
+        path = pre_lines_offer(line)
+        if path is None:
+            return None
     envelope = json.loads(path.read_text())
     settings = config()
     manifest = releases.verify(envelope, settings.get("public_key", ""),
@@ -160,10 +200,22 @@ class FleetStore:
             db.execute("INSERT OR REPLACE INTO reports VALUES (?,?,?)",
                        (machine, time.time(), encoded))
 
-    def inventory(self, machine: str, name: str, desired: str | None) -> dict:
+    def observed(self, machine: str) -> dict:
+        """The last report a machine sent, or `{}` if it never sent one."""
+        with self.connection() as db:
+            row = db.execute("SELECT report FROM reports WHERE machine=?", (machine,)).fetchone()
+        return json.loads(row["report"]) if row else {}
+
+    def line(self, machine: str) -> str:
+        """The line a machine is on, as its own last heartbeat said."""
+        return machine_line(self.observed(machine))
+
+    def inventory(self, machine: str, name: str, desired: str | None,
+                  line: str | None = None) -> dict:
         with self.connection() as db:
             row = db.execute("SELECT * FROM reports WHERE machine=?", (machine,)).fetchone()
         report = json.loads(row["report"]) if row else {}
+        line = line or machine_line(report)
         job = self.latest(machine)
         if job and job["authority"] != "local" and job["state"] in {"pending", "downloading"}:
             from . import devices, managed_access
@@ -195,7 +247,7 @@ class FleetStore:
               and (report.get("release") != desired or
                    report.get("verified") is not True)):
             state = "available" if desired else "not_published"
-        return {"machine": machine, "name": name, "desired": desired, "state": state,
+        return {"machine": machine, "name": name, "line": line, "desired": desired, "state": state,
                 "last_contact": row["seen"] if row else None, "observed": report,
                 "job": public_job(job), "supervisor": report.get("supervisor") == 1,
                 "contact_status": "online" if fresh else "offline" if row else "not_observed"}

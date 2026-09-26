@@ -40,12 +40,19 @@ def team_identifier(app: Path) -> str:
 
 
 def spawned(label: str, seconds: float = 20.0) -> bool:
-    """launchd holds a live process for `label`.
+    """launchd holds `label` and has not refused to spawn it.
 
     SMAppService answering `enabled` means the item is registered, not that
     the job runs. On Work Main (macOS 27.0, 2026-09-25) every role read
     `enabled` while launchd sat at `spawn failed`, exit 78, for half an hour
     (#182). Registered is not running; this asks launchd for the pid.
+
+    A pid is the answer only for a service that stays up. The automation
+    roles run on a calendar or an interval and sit at `state = not running`
+    with no pid between runs; the home hub's self-update of 2026-09-25 19:11
+    waited on each of the seven, re-registered them, and failed the job over
+    services launchd held correctly (#203). For a scheduled job the answer is
+    launchd's own: it is held, and its state is not `spawn failed`.
     """
     import re
     import time
@@ -53,11 +60,24 @@ def spawned(label: str, seconds: float = 20.0) -> bool:
     deadline = time.time() + seconds
     while True:
         proc = _launchctl("print", f"{_domain()}/{label}")
-        if proc.returncode == 0 and re.search(r"^\s*pid = \d+", proc.stdout or "", re.M):
-            return True
+        record = proc.stdout or ""
+        if proc.returncode == 0:
+            if re.search(r"^\s*pid = \d+", record, re.M):
+                return True
+            if scheduled(record) and not re.search(r"^\s*state = spawn failed", record, re.M):
+                return True
         if time.time() >= deadline:
             return False
         time.sleep(1.0)
+
+
+def scheduled(record: str) -> bool:
+    """`launchctl print` shows a job launchd runs on its own clock — a
+    `run interval` (StartInterval) or a calendar-interval event stream
+    (StartCalendarInterval) — rather than one it keeps alive."""
+    import re
+    return bool(re.search(r"^\s*run interval = \d+", record, re.M)
+                or "com.apple.launchd.calendarinterval" in record)
 
 
 def _own_release() -> str:

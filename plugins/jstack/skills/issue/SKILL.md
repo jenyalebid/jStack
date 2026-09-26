@@ -10,7 +10,7 @@ argument-hint: "<owner/repo#N>"
 
 Take the issue to a verified PR. Read the user's current instructions and record the outcome on the issue.
 
-Two contracts hold the machinery together. **The branch is `issue-<N>`**, exactly: closing the issue merges the open PR whose head is `issue-<N>`, and nothing else records which branch belonged to which issue. And **never switch branches in the shared checkout** — every agent on this machine shares one working tree per repo, so `git checkout -b` moves the branch under other sessions mid-edit. Use a worktree, with no exception for a small change.
+Two contracts hold the machinery together. **The branch is `issue-<N>`**, exactly: closing the issue merges the open PR whose head is `issue-<N>`. And **never switch branches in the shared checkout** — every agent on this machine shares one working tree per repo, so `git checkout -b` moves the branch under other sessions mid-edit. Use a worktree, with no exception for a small change.
 
 ## 1. Read the issue, all of it
 
@@ -18,7 +18,7 @@ Two contracts hold the machinery together. **The branch is `issue-<N>`**, exactl
 gh issue view <N> --repo <owner/repo> --json title,body,labels,state,url,comments
 ```
 
-Comments matter: a re-assignment or resume means a conversation may already be above you, and the last comment is usually the live instruction.
+Comments matter: on a resume the last one is usually the live instruction.
 
 The type label sets the ask: `bug` = restore the claimed behaviour · `optimization` = same behaviour, faster or clearer · `feature` = build what does not exist. A body naming no symptom, surface, or ask is unactionable — go to **Blocked** rather than guessing.
 
@@ -32,9 +32,10 @@ Beside the repo's checkout, never inside it. Never judge first-run against resum
 WT=<your-seat>/pad/issue-<N>
 issue-worktree --repo <owner/repo> --issue <N> --path "$WT" --repo-root <repo-root>
 cd "$WT"
+P=$(jstack-host plan current) && jstack-host plan set "$P" --branch issue-<N> --issue <owner/repo>#<N>
 ```
 
-Exit 0 hands you the tree and says how it got it. **Exit 3 refuses**: another session already holds this issue — **Blocked**.
+Exit 0 hands you the tree. **Exit 3 refuses**: another session holds this issue — **Blocked**.
 
 Repo not on this machine → clone it into the pad and work there.
 
@@ -55,6 +56,7 @@ git push -u origin issue-<N>
 gh pr create --repo <owner/repo> --head issue-<N> --title "<title>" --body "Fixes #<N>
 
 <what changed and why, in a few lines>"
+P=$(jstack-host plan current) && jstack-host plan set "$P" --pr <PR URL>
 ```
 
 `Fixes #<N>` ties the PR to its issue. Without explicit landing authorization, do not merge or close: this installation may treat closing as a merge request. With authorization, run the required gates, merge through the repository's workflow, and verify the requested runtime outcome before closing. Authorization to merge is not authorization to publish a release unless the user requested that too.

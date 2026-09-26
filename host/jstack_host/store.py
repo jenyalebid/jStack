@@ -407,6 +407,11 @@ CREATE TABLE IF NOT EXISTS agent_env (
 -- column on `plans`: configuration belongs to the session, and a plan reads
 -- whichever session is driving it. Recording the snapshot answers "how was
 -- this run" without pretending the setting was the plan's own.
+--
+-- `branch`, `issue` and `pr` are where the plan's work lands, NULL until
+-- something knows: the plan's own header lines, the checkout it was approved
+-- in, or a later `jstack-host plan set`. Nullable, unlike the rest of the row:
+-- a reader asking "which branch" needs "nobody knows" to be null, not ''.
 CREATE TABLE IF NOT EXISTS plans (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL DEFAULT '',
@@ -416,7 +421,10 @@ CREATE TABLE IF NOT EXISTS plans (
   repo TEXT NOT NULL DEFAULT '',
   created_at REAL NOT NULL DEFAULT 0,
   updated_at REAL NOT NULL DEFAULT 0,
-  deleted INTEGER NOT NULL DEFAULT 0
+  deleted INTEGER NOT NULL DEFAULT 0,
+  branch TEXT,
+  issue TEXT,
+  pr TEXT
 );
 CREATE INDEX IF NOT EXISTS plans_updated ON plans(updated_at DESC);
 CREATE TABLE IF NOT EXISTS plan_sessions (

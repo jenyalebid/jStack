@@ -77,6 +77,13 @@ _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 # read — see rule 2 in `plugins/jstack/rules-stage/execution-gates.md`.
 _ORPHAN_VERIFICATION = re.compile(r"^verif(?:y|ication)\b", re.IGNORECASE)
 
+# `Branch: issue-12`, `**Issue:** owner/repo#12`, `- PR: #40` above the first
+# stage. The key is case-sensitive and the value one token, because a plan's
+# Context section is prose and "Issue: the login flow drops…" is a sentence.
+_HEADER = re.compile(
+    r"^[ \t>]*(?:[-*+][ \t]+)?(?:\*\*|__)?(Branch|Issue|PR)(?:\*\*|__)?[ \t]*:"
+    r"(?:\*\*|__)?[ \t]*(.*?)[ \t]*$")
+
 
 @dataclass(frozen=True)
 class Stage:
@@ -100,6 +107,10 @@ class ParsedPlan:
     title: str = ""
     stages: list[Stage] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
+    #: Where the work lands, from the header lines; "" when the plan says nothing.
+    branch: str = ""
+    issue: str = ""
+    pr: str = ""
 
 
 def _label(ordinal: int, title: str) -> str:
@@ -143,6 +154,21 @@ def _split_verify(rest: str) -> tuple[str, str]:
     if span:
         spec = span.group(1).strip()
     return kind, spec
+
+
+def _header(lines: list[str], fenced: list[bool], end: int) -> dict[str, str]:
+    """`Branch:` / `Issue:` / `PR:` before line `end`, first of each wins."""
+    found: dict[str, str] = {}
+    for i in range(end):
+        if fenced[i]:
+            continue
+        m = _HEADER.match(lines[i])
+        if not m or m.group(1).lower() in found:
+            continue
+        value = m.group(2).replace("**", "").replace("__", "").strip().strip("`").strip()
+        if value and not any(c.isspace() for c in value):
+            found[m.group(1).lower()] = value
+    return found
 
 
 def parse(markdown: str) -> ParsedPlan:
@@ -259,7 +285,10 @@ def parse(markdown: str) -> ParsedPlan:
             )
         )
 
-    return ParsedPlan(title=doc_title, stages=stages, problems=problems)
+    header = _header(lines, fenced, found[0][3] - 1 if found else len(lines))
+    return ParsedPlan(title=doc_title, stages=stages, problems=problems,
+                      branch=header.get("branch", ""), issue=header.get("issue", ""),
+                      pr=header.get("pr", ""))
 
 
 def _ordinal_suffix(n: int) -> str:

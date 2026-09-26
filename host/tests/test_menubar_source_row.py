@@ -64,18 +64,23 @@ assert(current.summary == "Could not check dev: 404 no such ref")
 current.check = nil
 assert(current.summary == "Not checked yet.")
 
-// `stable` is the config's name for main; the control shows the name a person
-// picking it knows, and offers exactly the two it can set.
-assert(HubSource.offered == ["stable", "dev"])
-assert(HubSource.label("stable") == "main" && HubSource.label("dev") == "dev")
+// The control offers exactly the two lines. `stable` is what main was called
+// before lines, and a hub that predates the rename still reports it as main.
+assert(HubSource.offered == ["main", "dev"])
+assert(HubSource.label("stable") == "main" && HubSource.label("main") == "main")
+assert(HubSource.label("dev") == "dev")
 var arbitrary = try hub(base)
 arbitrary.ref = "feature/lab"
 assert(!arbitrary.switchable, "a CLI-set ref must not be rewritten by the control")
 assert(HubSource.label("feature/lab") == "feature/lab")
+var legacy = try hub(base)
+legacy.ref = "stable"
+assert(legacy.switchable, "main under its old name is still a line")
 
+// A managed Mac picks its line too; it only never builds.
 var managed = try hub(base)
 managed.managed = true
-assert(!managed.switchable)
+assert(managed.switchable)
 
 // A hub with adopted machines gets the reason, not a button that errors.
 let blocked = try hub(#"""
@@ -97,17 +102,19 @@ app.setActivationPolicy(.accessory)
 var picked: [String] = []
 var rebuilds = 0
 let window = HostInfoWindow()
-window.render(HostInfoForm(machine: "Lab Mac", status: "Running", version: "0.75.0",
-    source: "abcdef", hubSource: current, sourceBusy: false,
+window.render(HostInfoForm(machine: "Lab Mac", status: "Running", version: "26.09.01",
+    source: "abcdef", release: "2026-09-22-abcdef12", hubSource: current, sourceBusy: false,
     follow: { picked.append($0) }, rebuild: { rebuilds += 1 },
     app: InfoAppSnapshot(), updateStatus: "No update published", error: nil,
     localCommand: nil, machines: [], commands: [:], allCommand: nil,
     open: {}, download: {}))
 let hosting = window.contentView as! NSHostingView<HostInfoForm>
 assert(hosting.rootView.hubSource?.ref == "dev")
-hosting.rootView.follow("stable")
+// Both lines can carry one short version; the release id tells them apart.
+assert(hosting.rootView.release == "2026-09-22-abcdef12")
+hosting.rootView.follow("main")
 hosting.rootView.rebuild()
-assert(picked == ["stable"] && rebuilds == 1)
+assert(picked == ["main"] && rebuilds == 1)
 print("source row renders")
 ''')
     binary = tmp_path / "source-row"
@@ -119,3 +126,11 @@ print("source row renders")
     assert result.returncode == 0, result.stderr
     assert "source row contract passed" in result.stdout
     assert "source row renders" in result.stdout
+
+
+def test_the_info_window_says_nothing_installs_unless_queued_and_the_menu_offers_no_update():
+    source = (Path(__file__).resolve().parents[1] / "menubar" / "JStackHostBar.swift").read_text()
+    assert 'Text("Nothing installs until it is queued here.")' in source
+    assert "Update Available" not in source and "localUpdate" not in source
+    assert 'LabeledContent("Line", value: HubSource.label(line))' in source
+    assert 'LabeledContent("Release", value: release)' in source

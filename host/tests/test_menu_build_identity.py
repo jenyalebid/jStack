@@ -76,10 +76,30 @@ def test_an_empty_recorded_commit_is_not_a_commit(tmp_path):
     assert identity.reserve(repo)["version"].endswith(".nosource")
 
 
-def test_the_bundle_version_is_the_day_and_sorts(tmp_path):
+def test_the_bundle_version_leads_with_the_day_so_it_sorts(tmp_path):
+    # Nothing to place the tree: the day, release 0 (1.2.3 is not YY.M.N),
+    # and no commit.
     built = identity.reserve(tree(tmp_path / "repo"))
-    assert built["bundle"] == built["date"].replace("-", "")
-    assert built["bundle"].isdigit() and len(built["bundle"]) == 8
+    assert built["bundle"] == built["date"].replace("-", "") + ".0.0"
+    day, number, commit = built["bundle"].split(".")
+    assert day.isdigit() and len(day) == 8 and number == commit == "0"
+
+
+def test_the_bundle_version_is_the_formula_the_hub_build_uses(tmp_path):
+    """Two definitions, because this script runs before the package is
+    importable; they must never disagree about one build."""
+    from datetime import date
+    from jstack_host import build_hub
+    repo = tree(tmp_path / "repo")
+    manifest = repo / "plugins/jstack/.claude-plugin/plugin.json"
+    for version in ("1.2.3", "26.9.1", "26.12.14"):
+        manifest.write_text(json.dumps({"version": version}))
+        (repo / "host/release-identity.json").write_text(json.dumps({"sha": "0badf00d" + "0" * 32}))
+        built = identity.reserve(repo)
+        assert built["bundle"] == build_hub.bundle_version(
+            {"date": built["date"], "sha": built["sha"]}, version)
+    assert built["bundle"].endswith(f".14.{int('0badf00d', 16)}")
+    assert identity.bundle_number(date(2026, 9, 25), "26.9.3", "") == "20260925.3.0"
 
 
 def test_installer_embeds_identity_not_placeholder():

@@ -20,6 +20,7 @@ drift from a tree it does not have"), and the old code's unhandled
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from datetime import date
@@ -54,6 +55,27 @@ def source(repo: Path) -> tuple[str, bool]:
     return "", False
 
 
+#: `build_hub.RELEASE_VERSION`, restated: this script runs before any package
+#: is importable, so the formula is defined twice and a test holds them equal.
+RELEASE_VERSION = re.compile(r"(\d{2})\.(\d{1,2})\.(\d+)\Z")
+
+
+def bundle_number(day: date, version: str, sha: str) -> str:
+    """`YYYYMMDD.N.<int(sha8, 16)>` — `build_hub.bundle_version`'s formula.
+
+    The day alone let two builds of different commits on one day share a
+    CFBundleVersion. N is the month's release count out of a `YY.M.N`
+    version, 0 for any other shape; the commit rides as a number because
+    CFBundleVersion is digits and dots.
+    """
+    match = RELEASE_VERSION.fullmatch(str(version))
+    try:
+        commit = int(sha[:8], 16) if sha else 0
+    except ValueError:
+        commit = 0
+    return f"{day.strftime('%Y%m%d')}.{int(match[3]) if match else 0}.{commit}"
+
+
 def reserve(repo: Path, state: Path | None = None) -> dict:
     """The identity to stamp into the bundle being built out of `repo`.
 
@@ -69,9 +91,9 @@ def reserve(repo: Path, state: Path | None = None) -> dict:
         "sha": sha,
         "date": day.isoformat(),
         # CFBundleVersion has to sort, and this bundle never sees the App
-        # Store — the day it was built is both orderable and true. jRemote is
-        # the one product that still owes TestFlight a counter.
-        "bundle": day.strftime("%Y%m%d"),
+        # Store — the day it was built leads, so it is both orderable and
+        # true. jRemote is the one product that still owes TestFlight a counter.
+        "bundle": bundle_number(day, version, sha),
         "version": f"{version}+{day.isoformat()}.{stamp}" + (".dirty" if dirty else ""),
     }
 

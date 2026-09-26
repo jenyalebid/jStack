@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -85,11 +86,38 @@ def bundle_version(identity: dict, version: str) -> str:
     candidate died in staging with "menubar bundle version differs from
     release" — after signing and notarisation, on the installing machine.
 
-    The date the release was cut, digits only: macOS wants a monotonic
-    CFBundleVersion and this is the honest one. A dev build has no date and
-    falls back to the version, exactly as it did before.
+    `YYYYMMDD.N.<sha>`: the day the release was cut, its place in that
+    month's releases, and its commit. The day alone let two builds of
+    different commits on one day share a CFBundleVersion. N is the third
+    component of a `YY.M.N` version (0 for any other shape); the commit is
+    `int(sha8, 16)`, because CFBundleVersion is digits and dots and the hex
+    cannot ride verbatim. `build_identity.reserve()` is the second definition,
+    for the menu bar's own installer. A dev build has no date and falls back
+    to the version, exactly as it did before.
     """
-    return str(identity.get("date") or version).replace("-", "")
+    day = str(identity.get("date") or "").replace("-", "")
+    if not day:
+        return str(version).replace("-", "")
+    return f"{day}.{release_number(version)}.{sha_number(identity.get('sha'))}"
+
+
+#: A release version: two-digit year, month, and the month's release count.
+#: Semver-legal, so the plugin CLI still orders it above every 0.x before it.
+RELEASE_VERSION = re.compile(r"(\d{2})\.(\d{1,2})\.(\d+)\Z")
+
+
+def release_number(version: str) -> int:
+    """N of a `YY.M.N` version; 0 for any version not of that shape."""
+    match = RELEASE_VERSION.fullmatch(str(version))
+    return int(match[3]) if match else 0
+
+
+def sha_number(sha) -> int:
+    """The commit's first eight hex digits as a number; 0 where none is known."""
+    try:
+        return int(str(sha or "")[:8], 16)
+    except ValueError:
+        return 0
 
 
 def hub_info(version: str, identity: dict) -> dict:
@@ -142,7 +170,7 @@ def relocate(path: Path, source: Path, target: Path):
 
 
 def release_identity(source_sha: str, version: str, *, release_id=None, github_repo=None,
-                     date=None, channel=None, origin=None) -> dict:
+                     date=None, channel=None, origin=None, debug=False) -> dict:
     """A Hub release is its source hash and the day it was cut — never a counter.
 
     The Hub is not App Store distributed, so nothing requires a monotonically
@@ -159,7 +187,9 @@ def release_identity(source_sha: str, version: str, *, release_id=None, github_r
     stable. `origin` is the marker that says a machine built this for itself,
     which is what lets the installer's bundle gate ask the pinned key instead
     of a signing team no such machine holds. Both are sealed by the signature
-    over the bundle, which is the only reason either can be believed.
+    over the bundle, which is the only reason either can be believed. So is
+    `debug`: a build of a branch that is not a line, or of a commit no bump
+    covers, says so wherever its identity is read.
     """
     from .release_manifest import SOURCE_BUILD, identifier
     from .build_source import channel_ref, repository
@@ -169,7 +199,7 @@ def release_identity(source_sha: str, version: str, *, release_id=None, github_r
         identity = {"sha": source_sha, "release": identifier(release_id), "version": version,
                     "date": date, "github_repo": repository(github_repo)}
         if channel is not None:
-            # `channel_ref` reads an empty ref as `stable`, which is right for a
+            # `channel_ref` reads an empty ref as main, which is right for a
             # config written before refs existed and wrong for a caller naming
             # one: silently following main is the defect this field exists to
             # close, not an acceptable default for a build that asked.
@@ -180,6 +210,8 @@ def release_identity(source_sha: str, version: str, *, release_id=None, github_r
             if not isinstance(origin, dict) or origin.get("kind") != SOURCE_BUILD:
                 raise ValueError("a bundle records no origin but the one its manifest records")
             identity["origin"] = origin
+        if debug:
+            identity["debug"] = True
         return identity
     if channel is not None or origin is not None:
         raise ValueError("a dev build follows no release line and has no release origin")
@@ -355,14 +387,14 @@ def stage_mesh_tools(stack: Path, packages: Path) -> Path:
 
 def build(stack: Path, output: Path, version: str, config: dict | None = None, *, catalog=None,
           release_id=None, github_repo=None, date=None, trust_key=None,
-          channel=None, origin=None) -> Path:
+          channel=None, origin=None, debug=False) -> Path:
     # Build one immutable git snapshot. A clean-tree check alone does not
     # exclude untracked package files or concurrent changes during pip/build.
     command(["git", "-C", str(stack), "diff", "--quiet", "HEAD", "--", "host"])
     source_sha = command(["git", "-C", str(stack), "rev-parse", "HEAD"]).strip()
     identity = release_identity(source_sha, version, release_id=release_id,
                                 github_repo=github_repo, date=date,
-                                channel=channel, origin=origin)
+                                channel=channel, origin=origin, debug=debug)
     with tempfile.TemporaryDirectory(prefix="jstack-source-") as temporary:
         root = Path(temporary)
         archive = root / "source.tar"
@@ -538,7 +570,7 @@ def main():
     parser.add_argument("--release-id")
     parser.add_argument("--github-repo")
     parser.add_argument("--date", help="ISO day this release is cut, e.g. 2026-09-21")
-    parser.add_argument("--channel", help="the ref these bytes are built from; absent means stable")
+    parser.add_argument("--channel", help="the ref these bytes are built from; absent means main")
     parser.add_argument("--trust-key", help="base64 Ed25519 public key this Hub will verify its updates against")
     parser.add_argument("--signing-config", type=Path)
     parser.add_argument("--notarize", action="store_true")
