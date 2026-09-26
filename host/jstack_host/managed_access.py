@@ -26,12 +26,21 @@ def is_leaf() -> bool:
 
 
 def console(request) -> bool:
-    from . import mode
+    """The hub's own menu bar: loopback on a machine that is not a leaf.
+
+    Not `mode.is_hub()`. That is mesh ownership — `wg0.conf` or the gateway
+    address — and a fresh install has neither (mode `local`, where every hub
+    starts). Gating on it hid "Pair a Device…" from the one machine that had
+    nothing else to offer, while `jstack-host pair` on the same Mac minted a
+    device code without a mesh at all: a phone pairs over the LAN, and the
+    mesh is provisioned on the first *adopt*, not before. What the console
+    must never be is a leaf's loopback — that is the parent's decision.
+    """
     try:
         local = ipaddress.ip_address(request.client.host).is_loopback
     except (AttributeError, ValueError):
         return False
-    return local and not is_leaf() and mode.is_hub()
+    return local and not is_leaf()
 
 
 def require_console(request) -> None:
