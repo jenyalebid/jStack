@@ -30,6 +30,7 @@ import os
 import shutil
 import re
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -85,6 +86,22 @@ def link(cwd: Path, sid: str) -> str:
     return f"linked -> {pad}"
 
 
+def record(sid: str, cwd: Path, outcome: str) -> None:
+    """One line per session start, so a pad that is not linked can be read
+    back: whether this ran at all, and what it decided. hub/agent-tools went
+    red four times on 2026-09-26 with plain directories where links should
+    have been, and the hook had left no trace to tell a silent skip from a
+    hook the engine never ran."""
+    log = Path(os.environ.get("JSTACK_PAD_LOG") or
+               Path.home() / ".claude" / "jstack" / "pad-link.log")
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a") as stream:
+            stream.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {sid} {cwd} {outcome}\n")
+    except OSError:
+        pass
+
+
 def main() -> int:
     raw = sys.stdin.read() if not sys.stdin.isatty() else ""
     try:
@@ -96,9 +113,10 @@ def main() -> int:
     if not sid:
         return 0
     try:
-        link(cwd, sid)
-    except OSError:
-        pass        # a session must start whether or not its pad could be wired
+        outcome = link(cwd, sid)
+    except OSError as exc:
+        outcome = f"failed: {exc}"   # a session must start whether or not its pad could be wired
+    record(sid, cwd, outcome)
     return 0
 
 
