@@ -686,7 +686,21 @@ def _cmd_adopt(args) -> int:
     # offline path it is worse than that — `_adopt_offline` writes the code
     # into the machine's bundle on its way past, so a refusal printed
     # afterwards would arrive over a JOIN.md that had already been rewritten.
-    if offline:
+    reinstall = getattr(args, "reinstall", False)
+    if reinstall and not offline:
+        print("--reinstall is for the carried file: pass it with --offline. "
+              "A Mac that is staying installed redeems the printed line from "
+              "where it stands.", file=sys.stderr)
+        return 2
+    if offline and reinstall:
+        # The operator has said what the peer table cannot know: the named Mac
+        # is live now and is about to be purged. After the purge it has no
+        # jStack and no route here, so the carried file is exactly what it will
+        # need, and the only moment to mint it without a round trip is while the
+        # tunnel is still up (#178). `_adopt_offline` reuses a live peer's keys
+        # (`relift`), so the standing tunnel is untouched until the purge.
+        pass
+    elif offline:
         from . import presence
         live = presence.live_on_mesh(args.name)
         if live is not None:
@@ -703,7 +717,10 @@ def _cmd_adopt(args) -> int:
                 "here.\n\nIf that Mac has genuinely lost the tunnel — "
                 "reinstalled, or its keys gone — take\nits peer out first "
                 f"(`{tunnel.PEER_SCRIPT} remove {live['peer']}`), and this "
-                "flow is\nthe right one again.", file=sys.stderr)
+                "flow is\nthe right one again. If it is about to be purged and "
+                "reinstalled, mint the file\nnow, while the tunnel is up:\n\n"
+                f"    jstack-host adopt {shlex.quote(args.name)} --offline "
+                "--reinstall", file=sys.stderr)
             return 1
     elif not any(a["kind"] in ("lan", "mesh") for a in found):
         # Loopback only, and no mesh to fall back to: nothing another machine
@@ -1715,6 +1732,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--offline", action="store_true",
                    help="write a folder to carry to a Mac that cannot reach "
                         "this hub yet (off-LAN, never on the mesh)")
+    p.add_argument("--reinstall", action="store_true",
+                   help="with --offline: the named Mac is live on the mesh now "
+                        "and about to be purged and reinstalled — mint the "
+                        "carried file while the tunnel is still up instead of "
+                        "refusing because it answers")
     p.add_argument("--ttl", type=int, default=None,
                    help="seconds the code stays good (default 600, at most "
                         "3600; with --offline default 3600, at most 7 days)")

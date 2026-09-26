@@ -43,14 +43,26 @@ def verify(app: Path, identifier="live.jstack.hub"):
 
     Two questions, and only the second has ever had more than one answer. The
     seal has to hold over every byte, on every path, and `--verify --deep
-    --strict` below is that check whichever requirement it carries — which is
-    also why reading the marker off an unverified bundle is safe: a forged one
-    fails the very call it selected. Then: who applied the seal. A published
-    Hub answers with the publisher's Developer ID team. A Hub this Mac
-    compiled for itself cannot — there is no such identity on it — and answers
-    the way its manifest already does: the key this machine minted and pinned
-    signed the release naming these bytes. The bundle identifier is demanded
-    either way; only the signing identity moves.
+    --strict` below is that check whichever requirement it carries. Then: who
+    applied the seal. A published Hub answers with the publisher's Developer
+    ID team. A Hub this Mac compiled for itself cannot — there is no such
+    identity on it — and answers to its identifier alone. The bundle
+    identifier is demanded either way; only the signing identity moves.
+
+    What the seal proves, exactly: that the bundle is intact and who signed
+    it. It does NOT make the `origin` marker trustworthy — the marker selects
+    the requirement, and a bundle built from scratch with the marker already
+    inside and an ad-hoc seal over it satisfies `=identifier` perfectly; that
+    is simply the attacker's seal (#149). A marker added to a published bundle
+    after signing does fail the call it selected, and that is the only case
+    the seal covers. The marker is trusted by something else on each path:
+    on update, the manifest naming these bytes is re-verified against the key
+    this machine minted and pinned (`MacBackend._built_here`); on a fresh
+    install, `install.sh` hands `install_signed.identity` the archive its own
+    `build_source bootstrap` wrote minutes earlier on this machine — nothing
+    downloaded stands in for it, and `host/tests/test_install_build.py` pins
+    that shape. A bundle that arrived over the network with this marker inside
+    has no credential but the claim it makes about itself.
     """
     requirement = f'=identifier "{identifier}"' if source_built(app) else (
         f'=anchor apple generic and certificate leaf[subject.OU] = "MZ95H77RQQ" '
