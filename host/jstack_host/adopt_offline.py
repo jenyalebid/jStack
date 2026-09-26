@@ -46,7 +46,27 @@ HUB_MESH_IP = "10.66.0.1"
 JOIN_SCRIPT = "join.sh"
 
 
-def _installer_url() -> str:
+def _hub_ref() -> str:
+    """The ref this hub follows — what `jstack-host updates channel` prints.
+
+    A hub moved onto a branch other than main mints joiners for that branch:
+    the installer is fetched from it and the install line names it, so the
+    joined Mac lands on the hub's commit and not main's (#161). Read from the
+    updater config in the state dir, the way `updates channel` reads it; no
+    config, or one written before refs existed, is main — `channel_ref` says
+    so — and a config that cannot be read is treated the same rather than
+    refusing to mint.
+    """
+    import json
+    from . import build_source, hostenv
+    try:
+        config = json.loads((hostenv.state_dir() / "updates" / "config.json").read_text())
+    except (OSError, ValueError):
+        config = {}
+    return build_source.channel_ref(config if isinstance(config, dict) else {})
+
+
+def _installer_url(ref: str) -> str:
     """Use this distribution's origin, never a private host's repository.
 
     Asked of the source stamp, not of git: a Hub that has been installed is a
@@ -54,6 +74,8 @@ def _installer_url() -> str:
     is a question that can only fail — and it failed on the one machine that
     matters, the hub, every time someone asked it for a joiner file. The
     published origin travels inside the bundle in `release-identity.json`.
+    The installer is taken from `ref`, the hub's own, so a hub following dev
+    hands out dev's installer; `JSTACK_INSTALL_URL` overrides the whole URL.
     """
     import os
     if value := os.environ.get("JSTACK_INSTALL_URL"):
@@ -62,7 +84,7 @@ def _installer_url() -> str:
     repo = sourcestamp.github_repo()
     if not repo:
         raise ValueError("set JSTACK_INSTALL_URL to this distribution's installer URL")
-    return f"https://raw.githubusercontent.com/{repo}/main/install.sh"
+    return f"https://raw.githubusercontent.com/{repo}/{ref}/install.sh"
 
 
 def _hub_release() -> str:
@@ -108,13 +130,20 @@ def _join_body(name: str, code: str, port: int, hub: str) -> str:
     """
     parent = f"http://{hub}:{port}"
     import shlex
-    installer = shlex.quote(_installer_url())
+    from . import release_manifest
+    ref = _hub_ref()
+    installer = shlex.quote(_installer_url(ref))
     hub_release = shlex.quote(_hub_release())
+    # install.sh refuses a ref that is not a release line unless the install is
+    # declared a debug build — which is what a hub on such a ref is running.
+    install_ref = shlex.quote(ref) + ("" if ref in release_manifest.LINES else " --debug")
     return f'''
 CODE="{code}"
 PARENT="{parent}"
 HUB="{hub}"
 INSTALLER={installer}
+# The ref the hub follows; the far Mac is put on the same one (#161).
+INSTALL_REF="{install_ref}"
 # What the hub runs, as of minting. A Mac on any other release is reinstalled
 # BEFORE it attaches — see step 3.
 HUB_RELEASE={hub_release}
@@ -213,7 +242,9 @@ if [ -n "$needs_install" ]; then
     fi
     HOMEBREW_NO_ANALYTICS=1 brew install python3 tmux \\
         || die "the host dependencies did not install"
-    /bin/bash "$SRC/jstack-install.sh" --yes || die "jStack did not finish installing"
+    # shellcheck disable=SC2086 — INSTALL_REF may carry --debug as a second word
+    /bin/bash "$SRC/jstack-install.sh" --yes --ref $INSTALL_REF \\
+        || die "jStack did not finish installing"
     hash -r
 fi
 
