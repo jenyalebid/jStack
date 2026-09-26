@@ -319,12 +319,20 @@ def log_path():
 #: `footer` is a string only the live TUI draws, in every mode it can be in — proof that a
 #: CLI, and not a launching shell or a dialog, owns this pane. For claude it was one
 #: literal ("bypass permissions on") until shift+tab proved that is one keystroke away from
-#: false: the CLI redraws the footer as auto / accept edits / plan mode, or drops it for
-#: "? for shortcuts" in manual mode, and from that keystroke on `pane_is_ready` answered
-#: False for the rest of the session's life. Two declared seams on one session logged
-#: `busy` twenty seconds later against a pane sitting idle. The labels and not the
+#: false: the CLI redraws the footer per mode, and from that keystroke on `pane_is_ready`
+#: answered False for the rest of the session's life. Two declared seams on one session
+#: logged `busy` twenty seconds later against a pane sitting idle. The labels and not the
 #: `(shift+tab to cycle)` chrome after them: a narrow pane truncates the footer mid-phrase
 #: and the label is the part that survives.
+#:
+#: THE MODES ARE NOT ENUMERATED. The list was one short twice: shift+tab above, and on
+#: 2026-09-25 `why_not_ready` run against the seven live panes on this Mac answered
+#: `no-footer` for a session nine minutes idle at an empty box whose last line read
+#: "⏸ manual mode on · ← for agents" — the list said manual mode drew no banner and fell
+#: back to "? for shortcuts". The CLI builds these strings rather than storing them whole,
+#: so no list read off its binary can be trusted complete; `[a-z]+ mode on` takes any mode,
+#: and the two footers without the word stay named. Which mode a footer names was never a
+#: readiness fact.
 #:
 #: `working` is the CLI's own spinner line — a word, an ellipsis, then a parenthesised
 #: payload. The elapsed time is deliberately NOT part of it: the CLI drops the timer
@@ -356,7 +364,8 @@ ENGINES = {
     "claude": {
         "prompt": "❯",
         "footer": re.compile(
-            r"(?:bypass permissions|auto mode|accept edits|plan mode) on\b|\? for shortcuts"),
+            r"(?:bypass permissions|accept edits) on\b|\b[a-z]+ mode on\b"
+            r"|\? for shortcuts"),
         "working": re.compile(r"…\s*\("),
         "busy": ("Compacting conversation", "Press up to edit queued messages"),
         "placeholder": (),
@@ -878,6 +887,65 @@ def pane_is_ready(screen, engine="claude", turn=""):
     return pane_idle(screen, engine, turn) and composer_line(screen, engine) == ""
 
 
+def why_not_ready(screen, engine="claude", turn=""):
+    """Which gate refused, as one short label — "" for a pane a send would run in.
+
+    `pane_is_ready` answers the question the sends ask. This answers the one every
+    post-mortem asks: `busy` named the outcome and never the cause, so four abandoned seams
+    (244ca668, 27df58cc, fe02ed56, 2dec5785) left no way to tell a pane holding somebody's
+    half-typed message from one whose footer had gone missing — a fault that has happened
+    eleven times in one session and was found by hand.
+
+    The branches mirror `pane_idle` and `pane_is_ready` in their order; a parity test holds
+    the two together so a gate added to either cannot go unnamed here.
+    """
+    if not screen:
+        return "no-pane"
+    spec = grammar(engine)
+    plain = _ANSI.sub("", screen)
+    if spec["footer"] is not None:
+        if not spec["footer"].search(plain):
+            return "no-footer"
+    elif composer_line(screen, engine) is None:
+        return "no-composer"
+    for mark in spec["busy"]:
+        if mark in plain:
+            return "busy-mark: " + mark
+    if spec["screen_idle"]:
+        if spec["working"].search(plain):
+            return "working"
+    elif turn != "idle":
+        return "turn: " + (turn or "unknown")
+    line = composer_line(screen, engine)
+    if line is None:
+        return "no-composer"
+    if line != "":
+        # The text is the person's, not this log's to keep. Its length is enough to tell
+        # "somebody is writing" from a `/compact` left armed in the box.
+        return f"composer-holds: {len(line)} chars"
+    return ""
+
+
+#: What the pane refused on, set where a wait gives up and read by the line that records
+#: the outcome. A module slot rather than a return value because every wait here answers
+#: with one string that a dozen call sites and tests compare against.
+_LAST_BLOCK = {}
+
+
+def note_block(name, engine, turn, waited):
+    """Read the pane once more, at the moment of giving up, and remember why."""
+    _LAST_BLOCK.clear()
+    _LAST_BLOCK.update(blocked=why_not_ready(pane(name), engine, turn) or "unknown",
+                       waited=int(waited))
+
+
+def block_note():
+    """The note, once. Cleared on read, so it can never be attached to a later outcome."""
+    note = dict(_LAST_BLOCK)
+    _LAST_BLOCK.clear()
+    return note
+
+
 def was_aborted(screen, text, engine="claude", turn=""):
     """True when the CLI has handed our own command straight back to the composer.
 
@@ -1137,24 +1205,35 @@ def compacts_when_done(agent):
 
 # --- across the boundary -----------------------------------------------------------------
 
-def persist(sid, stage, attempt):
+def persist(sid, stage, attempt, patient=True):
     """`attempt(window)` until it answers anything but `busy`, then `gave-up`.
 
     One row per retry, so a stall is read off the log instead of inferred from a missing
-    line. The give-up is the caller's own outcome row.
+    line, and each row carries what the pane refused on (`note_block`). The give-up is the
+    caller's own outcome row.
+
+    `patient` is the promise the decision made. A declared seam gets the whole schedule:
+    the session parked, so no next Stop is coming. A finished delivery nobody is waiting on
+    gets the first window only — for it "the next Stop retries" is true, and every `busy`
+    the decision log has ever carried (244ca668, 27df58cc, fe02ed56, 2dec5785) sat under a
+    `resume: true` line, never under the other kind.
     """
     outcome = attempt(MAX_WAIT_SECS)
+    if not patient:
+        return outcome
     for n, window in enumerate(RETRY_WINDOWS, 1):
         if outcome != "busy":
             return outcome
-        record(sid=sid[:8], stage=stage, outcome="busy", retry=n, window=window)
+        record(sid=sid[:8], stage=stage, outcome="busy", retry=n, window=window,
+               **block_note())
         outcome = attempt(window)
     return "gave-up" if outcome == "busy" else outcome
 
 
 def wait_and_send(name, path, threshold, size_at_stop, engine, window=None):
     """Poll until it is provably safe, then compact. Silence on every other outcome."""
-    deadline = time.time() + (window or MAX_WAIT_SECS)
+    started = time.time()
+    deadline = started + (window or MAX_WAIT_SECS)
     while time.time() < deadline:
         keepalive()
         if not os.path.exists(path):
@@ -1167,6 +1246,7 @@ def wait_and_send(name, path, threshold, size_at_stop, engine, window=None):
                 return "already-compacted"
             return "sent" if send_compact(name, engine, path) else "not-taken"
         time.sleep(POLL_SECS)
+    note_block(name, engine, turn_state(path, engine), time.time() - started)
     return "busy"
 
 
@@ -1183,8 +1263,9 @@ def wait_and_continue(name, path, offset, wants_resume, has_rows=False, engine="
     A boundary taken WITHOUT the marker is the opted-in delivery case: the Compact When Done
     switch took it, the work is finished, and there is nothing to step across for.
     """
-    deadline = time.time() + BOUNDARY_WAIT_SECS
-    ceiling = time.time() + MAX_BOUNDARY_WAIT_SECS
+    started = time.time()
+    deadline = started + BOUNDARY_WAIT_SECS
+    ceiling = started + MAX_BOUNDARY_WAIT_SECS
     landed_at, signs = None, 0
     while time.time() < min(deadline, ceiling):
         keepalive()
@@ -1213,6 +1294,7 @@ def wait_and_continue(name, path, offset, wants_resume, has_rows=False, engine="
             # The TUI redraws for a moment after a compaction, and somebody may have started
             # typing during it. Give the box a chance to settle, then leave it to them.
             if time.time() - landed_at > (window or MAX_WAIT_SECS):
+                note_block(name, engine, turn, time.time() - landed_at)
                 return "busy"
         elif was_aborted(pane(name), COMPACT_CMD, engine, turn):
             # Killed mid-run. No boundary is ever coming, and the command is sitting armed
@@ -1221,6 +1303,7 @@ def wait_and_continue(name, path, offset, wants_resume, has_rows=False, engine="
             clear_line(name)
             return "aborted"
         time.sleep(POLL_SECS)
+    note_block(name, engine, turn_state(path, engine), time.time() - started)
     return "no-boundary"
 
 
@@ -1236,7 +1319,8 @@ def continue_in_place(name, path, sid, offset, has_rows=False, engine="claude"):
     A busy pane is retried by `persist`: the session parked, so no next Stop is coming.
     """
     def attempt(window):
-        deadline = time.time() + window
+        started = time.time()
+        deadline = started + window
         while time.time() < deadline:
             keepalive()
             if not os.path.exists(path):
@@ -1247,10 +1331,11 @@ def continue_in_place(name, path, sid, offset, has_rows=False, engine="claude"):
                 text = CONTINUE_IN_PLACE + (DOCKET_LINE if has_rows else "")
                 return "continued" if submit(name, text, engine, path) else "not-taken"
             time.sleep(POLL_SECS)
+        note_block(name, engine, turn_state(path, engine), time.time() - started)
         return "busy"
 
     outcome = persist(sid, "in-place", attempt)
-    record(sid=sid[:8], outcome=f"in-place/{outcome}")
+    record(sid=sid[:8], outcome=f"in-place/{outcome}", **block_note())
     return f"in-place/{outcome}"
 
 
@@ -1492,11 +1577,11 @@ def run(name, path, sid, threshold, size_at_stop, wants_resume, has_rows=False,
     of the same decision, and a second delivery FROM THIS SESSION must not start its own
     half of it. Another session's delivery is not a conflict and never was."""
     outcome = persist(sid, "compact", lambda window: wait_and_send(
-        name, path, threshold, size_at_stop, engine, window))
+        name, path, threshold, size_at_stop, engine, window), patient=wants_resume)
     if outcome == "sent":
         outcome += "/" + persist(sid, "continue", lambda window: wait_and_continue(
             name, path, size_at_stop, wants_resume, has_rows, engine, window))
-    record(sid=sid[:8], outcome=outcome)
+    record(sid=sid[:8], outcome=outcome, **block_note())
     return outcome
 
 
