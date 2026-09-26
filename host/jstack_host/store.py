@@ -918,8 +918,14 @@ class SessionStore:
                         continue
                     agent_id = base
                     if rel.parts:
+                        # Same spelling as the Claude branch below: Claude's
+                        # project-dir encoding has already flattened every
+                        # `/` to `-` before _display_sub_mode sees it, so a
+                        # Codex cwd flattens the same way first. Otherwise one
+                        # seat is stored as `chat/pad` by one engine and
+                        # `chat-pad` by the other and neither query finds both.
                         from .board import _display_sub_mode
-                        sub_mode = _display_sub_mode("/".join(rel.parts))
+                        sub_mode = _display_sub_mode("-".join(rel.parts))
                     break
                 native_sid = meta.get("session_id") or meta.get("id") or ""
                 # Managed Codex sessions keep jRemote's board handle as their
