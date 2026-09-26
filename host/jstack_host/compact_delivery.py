@@ -328,12 +328,33 @@ def log_path():
 #: `footer` is a string only the live TUI draws, in every mode it can be in — proof that a
 #: CLI, and not a launching shell or a dialog, owns this pane. For claude it was one
 #: literal ("bypass permissions on") until shift+tab proved that is one keystroke away from
-#: false: the CLI redraws the footer as auto / accept edits / plan mode, or drops it for
-#: "? for shortcuts" in manual mode, and from that keystroke on `pane_is_ready` answered
-#: False for the rest of the session's life. Two declared seams on one session logged
-#: `busy` twenty seconds later against a pane sitting idle. The labels and not the
+#: false: the CLI redraws the footer per mode, and from that keystroke on `pane_is_ready`
+#: answered False for the rest of the session's life. Two declared seams on one session
+#: logged `busy` twenty seconds later against a pane sitting idle. The labels and not the
 #: `(shift+tab to cycle)` chrome after them: a narrow pane truncates the footer mid-phrase
 #: and the label is the part that survives.
+#:
+#: MANUAL MODE DRAWS A FOOTER. This list said it did not — that the CLI dropped the banner
+#: for "? for shortcuts" there — and so every mode but that one was enumerated. On
+#: 2026-09-25 a sweep of the seven live panes on this Mac through `why_not_ready` answered
+#: `no-footer` for a session parked at an empty box, nine minutes idle, whose last line read
+#:
+#:     ⏸ manual mode on · ← for agents
+#:
+#: One keystroke puts a session there and nothing takes it out, so that session could not
+#: have been compacted at any seam for as long as it lived — the identical shape to the
+#: shift+tab bug above, left by the same assumption that the enumeration was complete. It
+#: is worth saying what found it: not a fixture and not a transcript, but the new
+#: diagnostic run against the real panes. A bare `busy` never could have.
+#:
+#: SO THE MODES ARE NO LONGER ENUMERATED. Twice now the list has been one short, and the
+#: CLI builds these strings rather than storing them whole — grepping its binary for
+#: "<word> mode on" returns auto, plan, and three unrelated features, so no list read off
+#: it can be trusted complete. `[a-z]+ mode on` takes any of them, present or future, and
+#: the two footers that do not use the word ("bypass permissions on", "accept edits on")
+#: stay named. The claim this pattern has to support is only "a live TUI is drawing here";
+#: which mode it names was never a readiness fact, and the enumeration was precision this
+#: check had no use for and could not keep.
 #:
 #: `working` is the CLI's own spinner line — a word, an ellipsis, then a parenthesised
 #: payload. The elapsed time is deliberately NOT part of it: the CLI drops the timer
@@ -365,7 +386,8 @@ ENGINES = {
     "claude": {
         "prompt": "❯",
         "footer": re.compile(
-            r"(?:bypass permissions|auto mode|accept edits|plan mode) on\b|\? for shortcuts"),
+            r"(?:bypass permissions|accept edits) on\b|\b[a-z]+ mode on\b"
+            r"|\? for shortcuts"),
         "working": re.compile(r"…\s*\("),
         "busy": ("Compacting conversation", "Press up to edit queued messages"),
         "placeholder": (),

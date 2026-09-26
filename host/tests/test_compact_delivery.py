@@ -147,8 +147,14 @@ def test_an_empty_box_is_not_an_idle_cli(pane, why):
 
 
 #: Every footer the CLI draws in place of the one this hook used to be pinned to, lifted
-#: from claude 2.1.220's own strings. shift+tab cycles between them, so all five are one
-#: keystroke away from any session at any moment.
+#: from claude 2.1.220's own strings. shift+tab cycles between them, so every one of them
+#: is one keystroke away from any session at any moment.
+#:
+#: `manual mode on` was missing from this list until 2026-09-25, on the belief that manual
+#: mode drew no banner and fell back to "? for shortcuts". It draws one. A live pane on this
+#: Mac, idle at an empty box for nine minutes, was reading `no-footer` — see the `ENGINES`
+#: comment. An enumeration that is one short is not a weaker check, it is no check at all
+#: for the mode it omits, and a session left in that mode could not be compacted again.
 @pytest.mark.parametrize("footer", [
     pytest.param("  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
                  id="bypass-permissions"),
@@ -156,7 +162,10 @@ def test_an_empty_box_is_not_an_idle_cli(pane, why):
     pytest.param("  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents",
                  id="accept-edits"),
     pytest.param("  ⏵⏵ plan mode on (shift+tab to cycle) · ← for agents", id="plan"),
-    pytest.param("  ? for shortcuts", id="manual-has-no-banner-at-all"),
+    pytest.param("  ⏸ manual mode on · ← for agents", id="manual"),
+    pytest.param("  ⏸ manual mode on (shift+tab to cycle) · ← for agents",
+                 id="manual-with-the-cycle-hint"),
+    pytest.param("  ? for shortcuts", id="shortcuts-hint-instead-of-a-banner"),
     pytest.param("  ⏵⏵ auto mode on (shift+tab to  · ←…", id="truncated-on-a-narrow-pane"),
 ])
 def test_an_idle_pane_is_idle_in_every_permission_mode(footer):
