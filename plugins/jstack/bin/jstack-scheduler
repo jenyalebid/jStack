@@ -775,10 +775,37 @@ def probe_api(port: int) -> "tuple[str, bool]":
     return f"answering on 127.0.0.1:{port} but not ok: {payload}", False
 
 
+def status_diagnosis(owner: str, running: bool, ok: bool, port: int,
+                     label: str) -> "list[str]":
+    """Read the probe PAIR, not only the probes (#47).
+
+    Each probe is honest alone; combined they prove states neither can name:
+      dead job + answering API  → an unmanaged process holds the port. It is
+                                  why the job exits 1 on every load, and why
+                                  `restart` (which moves the job, not the
+                                  process) cannot fix it.
+      running job + silent API  → the managed process is up and not serving.
+    Returned as lines for the caller to print; empty when the pair is plain."""
+    notes = []
+    if owner == "ours" and not running and ok:
+        notes.append(f"note: the installed job is not running, yet something IS "
+                     f"answering 127.0.0.1:{port} — an unmanaged scheduler holds "
+                     f"the port, which is also why the job cannot start.")
+        notes.append(f"      fix: lsof -ti :{port}  (the holder) → stop that pid → "
+                     f"jstack-scheduler restart")
+    elif owner == "ours" and running and not ok:
+        notes.append(f"note: the job {label!r} is running but nothing answers "
+                     f"127.0.0.1:{port} — the process is up and not serving; "
+                     f"read `jstack-scheduler logs`, then `jstack-scheduler restart`.")
+    return notes
+
+
 def cmd_status(args) -> int:
     """Three separate probes, reported separately: the plist existing is not
     the daemon running, and the process being up is not the API serving. Any
-    one can be true without the next, and each gap names its own fix."""
+    one can be true without the next, and each gap names its own fix — and the
+    pair is read too, because two honest probes can together prove a state
+    neither names alone (an orphan holding the port)."""
     hub = owning_hub(args)
     if hub is not None:
         return hub_status(hub, getattr(args, "port", None))
@@ -807,6 +834,8 @@ def cmd_status(args) -> int:
         print(f"note: something IS serving 127.0.0.1:{port}, but it is not a "
               f"service installed under {r.label!r} — another install owns "
               f"that daemon.")
+    for line in status_diagnosis(owner, running, ok, port, r.label):
+        print(line)
     if owner == "absent":
         return 3
     return 0 if (owner == "ours" and running and ok) else 1
