@@ -1658,8 +1658,21 @@ if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ] \
         # installed and verified. Without it the build still produces a Hub —
         # a release manifest needs all three components, so the feed stays
         # empty instead of carrying a component this Mac does not have.
+        # And only a client that records the commit it was built from. The
+        # manifest names a client revision so a later build carries it forward,
+        # and `build_source.client_component` refuses a bundle without one —
+        # which every developer build is: `mac.sh` and a bare xcodebuild stamp
+        # nothing, only `release-mac.sh` writes JStackSourceCommit. Handing that
+        # bundle over killed the whole install at the Hub build (#187); a Hub
+        # without a client is what the comment above already says is fine.
         if [ -d "/Applications/jRemote.app" ]; then
-            build_args+=(--client /Applications/jRemote.app)
+            client_commit="$(/usr/libexec/PlistBuddy -c 'Print :JStackSourceCommit' \
+                /Applications/jRemote.app/Contents/Info.plist 2>/dev/null || true)"
+            if printf '%s' "$client_commit" | grep -Eq '^[0-9a-f]{40}$'; then
+                build_args+=(--client /Applications/jRemote.app)
+            else
+                warn "jRemote.app is installed but does not record the commit it was built from (no JStackSourceCommit in its Info.plist — a developer build; release-mac.sh stamps it) — building the Hub without it, so the feed carries no client until a stamped one is installed"
+            fi
         fi
         if [ -n "$SIGNING_CONFIG" ]; then
             build_args+=(--signing "$SIGNING_CONFIG")

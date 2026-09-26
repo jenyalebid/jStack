@@ -349,6 +349,22 @@ def test_install_sh_replaces_a_published_hub_rather_than_naming_a_verb_it_lacks(
     assert 'rm -rf "/Applications/jStack Hub.app"' in guard
 
 
+def test_install_sh_hands_the_build_only_a_client_that_records_its_commit():
+    """`build_source.client_component` refuses a jRemote.app without a 40-hex
+    JStackSourceCommit, and every developer build (mac.sh, a bare xcodebuild)
+    is one — only release-mac.sh stamps it. Passing the bundle on its presence
+    alone ended the whole install at the Hub build (#187). The stamp is read
+    first; without it the Hub is built alone and the installer says why."""
+    at = CODE.index("--client /Applications/jRemote.app")
+    span = CODE[CODE.rindex('if [ -d "/Applications/jRemote.app" ]', 0, at):at]
+    assert "JStackSourceCommit" in span, "the client is handed over unread"
+    assert "/Applications/jRemote.app/Contents/Info.plist" in span
+    assert re.search(r"grep -Eq '\^\[0-9a-f\]\{40\}\$'", span), \
+        "the stamp is not held to the 40-hex shape client_component demands"
+    after = CODE[at:CODE.index('run_long "building the Hub from', at)]
+    assert re.search(r'warn "jRemote.app is installed but does not record the commit', after)
+
+
 def test_the_runtime_gate_does_not_demand_a_team_a_self_built_hub_cannot_have():
     """The Hub's C runtime validates the seal before importing any module, and
     it asked for the publisher's Developer ID team unconditionally. A Hub
