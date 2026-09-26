@@ -148,7 +148,16 @@ func waitUntil(_ condition: () -> Bool) {
     }
     assert(condition(), "menu did not reach expected state")
 }
-waitUntil { statusItem.menu?.items.contains { $0.title == "1 Device" || $0.title == "Info" } == true }
+// Ready is the fixture's whole state drawn, not the first item: "Info" is on
+// the menu before the first poll lands, and the devices after it.
+let openFixture = ProcessInfo.processInfo.environment["FIXTURE_MODE"] == "open"
+waitUntil {
+    guard let items = statusItem.menu?.items,
+          statusItem.button?.accessibilityLabel() == "jStack · Needs attention",
+          items.contains(where: { $0.title == "Info" }) else { return false }
+    return !openFixture || (items.contains { $0.title == "1 Device" }
+                            && items.contains { $0.title == "1 Managed Mac" })
+}
 let menu = statusItem.menu!
 // No update item on the menu: an update is queued from Info, per machine.
 assert(!menu.items.contains { $0.title == "Update Available" || $0.title.hasPrefix("Update") })
