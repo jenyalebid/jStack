@@ -837,6 +837,39 @@ def test_the_hub_runs_what_it_built_before_any_journey(runner, subject, tmp_path
     assert scripted.queued[0] == "machine-hub", "the hub takes its own build before any leaf is cast"
 
 
+def feed(tmp_path, channel, files):
+    """A hub's updates config and feed: `files` maps feed name -> release."""
+    feed_dir = tmp_path / "feed"; feed_dir.mkdir(exist_ok=True)
+    for name, release in files.items():
+        (feed_dir / name).write_text(json.dumps({"manifest": {
+            "release": release, "components": {"client": {"version": 70}}}}))
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"channel": channel, "feed_dir": str(feed_dir)}))
+    return config
+
+
+def served(runner, config):
+    out = subprocess.run([sys.executable, "-c", runner.SERVED_PY, str(config)],
+                         capture_output=True, text=True, check=True).stdout
+    return json.loads(out)
+
+
+def test_the_served_probe_reads_the_one_feed_a_hub_before_lines_keeps(runner, tmp_path):
+    """The run's first probe lands on the prior hub, told to follow dev and
+    to build it. A prior that predates lines has no `latest-dev.json`: what it
+    built is in `latest.json`, and the probe reads it there — 26.9.1's proof
+    died on the missing file before any receipt (2026-09-26)."""
+    config = feed(tmp_path, "dev", {"latest.json": PRIOR})
+    assert served(runner, config) == {"build": PRIOR, "client": "70"}
+
+
+def test_the_served_probe_prefers_the_lines_own_feed_where_the_hub_has_one(runner, tmp_path):
+    config = feed(tmp_path, "dev", {"latest.json": PRIOR, "latest-dev.json": CANDIDATE})
+    assert served(runner, config)["build"] == CANDIDATE
+    config = feed(tmp_path, "main", {"latest.json": PRIOR, "latest-dev.json": CANDIDATE})
+    assert served(runner, config)["build"] == PRIOR
+
+
 def test_the_hub_is_driven_through_the_refusal_older_code_raises(runner, subject):
     """A hub on code before a9fe663 refuses to build over adopted machines;
     its own hatch is the variable, which a hub past the fix ignores."""
