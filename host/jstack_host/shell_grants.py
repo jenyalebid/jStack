@@ -145,3 +145,48 @@ def refresh_hub_config(path: Path | None = None) -> None:
     from . import shell_access
     shell_access.write_ssh_config(
         Path(path) if path else Path.home() / ".ssh" / "config", hub_peers())
+
+
+def _is_hub() -> bool:
+    """A leaf's two ssh blocks are its parent's answer (`/shell/refresh`); a
+    hub-side rewrite there would erase them. Only a machine that owns the mesh
+    and has no parent writes them from its own store."""
+    from . import managed_access, mode
+    return mode.is_hub() and not managed_access.is_leaf()
+
+
+def hub_drift(home: Path | None = None) -> list[str]:
+    """Which of the hub's two managed blocks disagree with the store — read
+    only. The hosts block must be exactly `hub_peers()`; the keys block must be
+    empty, because nothing grants a shell *into* the hub (it rides no row), so
+    any key there was put by something other than a grant."""
+    from . import shell_access
+    ssh = (Path(home) if home else Path.home()) / ".ssh"
+    drift = []
+    if (shell_access.read_config_block(ssh / "config")
+            != shell_access.config_block(hub_peers())):
+        drift.append("config")
+    if shell_access.read_authorized_block(ssh / "authorized_keys"):
+        drift.append("authorized_keys")
+    return drift
+
+
+def reconcile_hub(home: Path | None = None) -> dict:
+    """Put the hub's ssh blocks back to what its store says, whatever emptied
+    them. Enrolment, a grant change and a forget each rewrite the config as a
+    side effect; nothing else did, so a config emptied from outside stayed
+    empty until the next adoption (#186). Run at host startup and from
+    `jstack-host shell-grants refresh`; a no-op when nothing drifted, and never
+    on a leaf."""
+    from . import shell_access
+    if not _is_hub():
+        return {"ok": True, "hub": False, "fixed": [],
+                "note": "not a hub — this machine's ssh blocks come from its parent"}
+    ssh = (Path(home) if home else Path.home()) / ".ssh"
+    drift = hub_drift(home)
+    if "config" in drift:
+        refresh_hub_config(ssh / "config")
+    if "authorized_keys" in drift:
+        shell_access.write_authorized_block(ssh / "authorized_keys", [])
+    return {"ok": True, "hub": True, "fixed": drift,
+            "note": f"{len(hub_peers())} reachable machine(s)"}
