@@ -2,8 +2,8 @@
 """`ExitPlanMode` — the moment a plan becomes rows, and the only gate in this build.
 
 The CLI's `normalizeToolInput` puts the whole approved markdown on `tool_input.plan`
-and its path on `planFilePath`; this reads them, writes the stages, and flips the
-plan to `active`. Claude only: Codex has no such tool, and `codex_hooks` drops the
+and its path on `planFilePath`; this reads them, writes the stages, flips the
+plan to `active`, and records its branch, issue and PR. Claude only: Codex has no such tool, and `codex_hooks` drops the
 matcher rather than registering a hook that can never fire.
 
 THE BLOCKING BRANCH IS NARROW ON PURPOSE. Every agent on this machine passes
@@ -175,6 +175,13 @@ def main() -> int:
             # is the cost, wedging the tool call is not.
             pass
     plans.activate(plan_id)
+    try:
+        # `Branch:`/`Issue:`/`PR:` header lines, else the branch checked out
+        # where the plan was approved. After `activate` so a git or store
+        # failure here can cost the binding and never the activation.
+        plans.bind_authored(plan_id, parsed, str(payload.get("cwd") or ""))
+    except Exception:
+        pass
     # No `permissionDecision` on the way through: allowing here would approve
     # the plan on the user's behalf, which is the one thing plan mode is for.
     return 0
