@@ -23,6 +23,8 @@ Loop guards (both required):
 
 User-engaged sessions (typed prompt / TUI attach — same signals as the review
 engine) are skipped: they get real reviews, which own their timeline entries.
+A session that made no tool call is skipped too — it only answered, and the
+block would replace that answer on a `-p` caller's stdout.
 
 Kill switch: JSTACK_TIMELINE_REMIND_DISABLED=1. Review spawns and other
 plumbing set SKIP_SESSION_HOOK=1 — honored here.
@@ -87,6 +89,36 @@ def agent_source(cwd: str) -> str:
     return "auto"
 
 
+def made_a_tool_call(jsonl_path: Path) -> bool:
+    """Did this session do anything, or only answer?
+
+    The byte floor was the no-op test, and it stopped being one: a fresh
+    install's SessionStart injections put a one-reply `-p` session past
+    20 KB before the model wrote a word. Blocking such a session replaces
+    the answer its caller is reading on stdout with "nothing to log"
+    (plugin/commands, 2026-09-26). Work leaves tool calls; a session with none
+    shipped, fixed and replied nothing.
+    """
+    try:
+        with jsonl_path.open() as stream:
+            for line in stream:
+                if '"tool_use"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("type") != "assistant":
+                    continue
+                content = (row.get("message") or {}).get("content")
+                if isinstance(content, list) and any(
+                        isinstance(b, dict) and b.get("type") == "tool_use" for b in content):
+                    return True
+    except OSError:
+        return True   # unreadable: treat as work, the same side every guard errs on
+    return False
+
+
 def main():
     if os.environ.get("SKIP_SESSION_HOOK") == "1":
         allow()
@@ -117,6 +149,9 @@ def main():
             allow()
     except OSError:
         allow()
+
+    if not made_a_tool_call(jsonl_path):
+        allow()   # answered and left — nothing happened that a line could name
 
     if is_user_engaged(jsonl_path):
         allow()   # user sessions get real reviews — those own the timeline
