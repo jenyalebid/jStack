@@ -71,10 +71,43 @@ def test_the_report_exits_with_the_worst_grade(machine, monkeypatch):
     assert doctor.report(out) == 1
     text = out.getvalue()
     assert "warn  b" in text and "→ do this" in text and "some screens wait" in text
-    monkeypatch.setattr(doctor, "CHECKS", (lambda: doctor._check("c", doctor.FAIL, "no"),))
+    monkeypatch.setattr(doctor, "CHECKS", (lambda: doctor._check("token", doctor.FAIL, "no"),))
     assert doctor.report(io.StringIO()) == 2
     monkeypatch.setattr(doctor, "CHECKS", (lambda: doctor._check("d", doctor.OK, "yes"),))
     assert doctor.report(io.StringIO()) == 0
+
+
+def test_a_failed_optional_surface_does_not_claim_the_host_cannot_serve_chats(machine, monkeypatch):
+    """#90. The closing line is read from WHICH checks failed. A Files-share
+    finding on a serving host used to print the chat-outage sentence; now it
+    names the surface, says chats stand, and still exits 2."""
+    monkeypatch.setattr(doctor, "CHECKS", (
+        lambda: doctor._check("token", doctor.OK, "present"),
+        lambda: doctor._check("files", doctor.FAIL, "undeclared SMB share point(s): x",
+                              "run `jstack-host files status`"),
+    ))
+    out = io.StringIO()
+    assert doctor.report(out) == 2
+    text = out.getvalue()
+    assert "cannot serve chats" not in text
+    assert "files failed" in text and "chats are unaffected" in text
+
+
+def test_a_failed_serve_blocking_check_names_itself_in_the_verdict(machine, monkeypatch):
+    monkeypatch.setattr(doctor, "CHECKS", (
+        lambda: doctor._check("files", doctor.FAIL, "drifted"),
+        lambda: doctor._check("token", doctor.FAIL, "missing"),
+    ))
+    out = io.StringIO()
+    assert doctor.report(out) == 2
+    assert "the host cannot serve chats until the failures above are fixed (token)" in out.getvalue()
+
+
+def test_every_serve_blocking_name_is_a_real_check():
+    """A name in SERVE_BLOCKING that no check produces is a gate that never
+    fires — pin the set to the checks that exist."""
+    names = {fn.__name__.removeprefix("check_").replace("_", " ") for fn in doctor.CHECKS}
+    assert doctor.SERVE_BLOCKING <= names, doctor.SERVE_BLOCKING - names
 
 
 # ── the source check: does the running host serve the bytes the tree holds ──

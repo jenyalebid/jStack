@@ -562,7 +562,7 @@ def _adopt_offline(name: str, row: dict, port: int, as_json: bool = False) -> in
     return 0
 
 
-def _become_hub_for_adopt(m, open_mode, tunnel) -> None:
+def _become_hub_for_adopt(m, open_mode, tunnel, as_json: bool = False) -> None:
     """Provision the mesh on first adopt so a standalone hub can mint a leaf.
 
     Only from a standalone (`local`) hub — a managed leaf was already turned
@@ -573,7 +573,12 @@ def _become_hub_for_adopt(m, open_mode, tunnel) -> None:
     `install_hub.sh` is idempotent and needs root for the tunnel daemons, so it
     is `sudo`; on failure we say nothing here and let the detailed refusal that
     follows stand. `rebind()` re-reads the table so `can_pair()` sees the conf
-    this just wrote."""
+    this just wrote.
+
+    With `--json` the caller owns stdout for one document, so the progress
+    line and everything the installer prints go to stderr instead — a parser
+    reading stdout otherwise meets a keypair and a wg0.conf before the JSON
+    (#206)."""
     if m.get("mode") != "local":
         return
     script = hostenv.peer_script().parent / "install_hub.sh"
@@ -585,12 +590,14 @@ def _become_hub_for_adopt(m, open_mode, tunnel) -> None:
               "leaf dials — connect it to the network and adopt again.",
               file=sys.stderr)
         return
+    progress = sys.stderr if as_json else sys.stdout
     print(f"making this Mac a mesh hub so it can hand out a leaf tunnel "
           f"(endpoint {endpoint}:51820) — this needs your password once.",
-          flush=True)
+          file=progress, flush=True)
     try:
         subprocess.run(["sudo", "bash", str(script), "--endpoint",
-                        f"{endpoint}:51820"], check=False)
+                        f"{endpoint}:51820"], check=False,
+                       stdout=sys.stderr if as_json else None)
     except OSError as exc:
         print(f"could not run the hub installer: {exc}", file=sys.stderr)
         return
@@ -638,7 +645,8 @@ def _cmd_adopt(args) -> int:
         # Mac a hub" — so do it, once, here, instead of handing the user a
         # dead-end. Provisioning brings up the tunnel daemons (root) with this
         # Mac's own LAN address as the endpoint the leaf will dial.
-        _become_hub_for_adopt(m, open_mode, tunnel)
+        _become_hub_for_adopt(m, open_mode, tunnel,
+                              as_json=bool(getattr(args, "json", False)))
     if not tunnel.can_pair():
         # `can_pair()` and not the mode's hub test, deliberately: the mode will
         # call a machine a hub on the strength of holding `10.66.0.1`, which is

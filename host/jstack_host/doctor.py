@@ -589,9 +589,39 @@ def worst(results: list[dict]) -> str:
     return max((r["grade"] for r in results), key=lambda g: _RANK[g], default=OK)
 
 
+#: The checks without which the host cannot serve a chat at all: the runtime,
+#: the credential it authenticates with, the socket the terminal streams over,
+#: and the service that answers. Serve-blocking is a property of the CHECK, not
+#: of its grade — a FAIL on an optional surface (the Files share, the app, the
+#: source stamp) is that surface down, with chats unaffected (#90).
+SERVE_BLOCKING = frozenset({"python", "token", "websocket", "service", "fd limit"})
+
+
+def closing_line(results: list[dict]) -> str:
+    """The one line a hurried reader reads, derived from WHICH checks failed.
+
+    Only a failed serve-blocking check may say the host cannot serve chats;
+    any other FAIL names its own surface and says chats stand. The old flat
+    map over `worst()` printed the chat sentence for a Files-share finding on
+    a host that was serving, which read as an outage and trained readers to
+    discount the verdict."""
+    grade = worst(results)
+    if grade == OK:
+        return "every check passed"
+    if grade == WARN:
+        return "serving; some screens wait on the warnings above"
+    failed = [r["name"] for r in results if r["grade"] == FAIL]
+    blocking = [n for n in failed if n in SERVE_BLOCKING]
+    if blocking:
+        return ("the host cannot serve chats until the failures above are fixed "
+                f"({', '.join(blocking)})")
+    return (f"serving; {', '.join(failed)} failed — that surface is down, "
+            "chats are unaffected")
+
+
 def report(out=None) -> int:
-    """Print the table; exit status 0 ok, 1 warnings only, 2 something the
-    host cannot serve without."""
+    """Print the table; exit status 0 ok, 1 warnings only, 2 a failure — the
+    closing line says whether that failure stops chats or one surface."""
     out = out or sys.stdout
     results = checks()
     mark = {OK: "ok  ", WARN: "warn", FAIL: "FAIL"}
@@ -599,11 +629,8 @@ def report(out=None) -> int:
         print(f"{mark[r['grade']]}  {r['name']:<12} {r['detail']}", file=out)
         if r["hint"] and r["grade"] != OK:
             print(f"      → {r['hint']}", file=out)
-    grade = worst(results)
-    summary = {OK: "every check passed", WARN: "serving; some screens wait on the warnings above",
-               FAIL: "the host cannot serve chats until the failures above are fixed"}
-    print(f"\n{summary[grade]}", file=out)
-    return _RANK[grade]
+    print(f"\n{closing_line(results)}", file=out)
+    return _RANK[worst(results)]
 
 
 if __name__ == "__main__":
