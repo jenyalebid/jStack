@@ -98,15 +98,19 @@ PARENT_URL = ("f=$HOME/.local/state/jremote/parent.json; [ ! -f \"$f\" ] || "
 #: The build a hub last offered its fleet, as the hub's own feed states it:
 #: which build, and which client it carries. Read after `updates build`, whose
 #: answer names the build but not its parts. The offer is the followed line's:
-#: dev has its own file beside main's `latest.json`.
+#: dev has its own file beside main's `latest.json` — on a hub that knows
+#: lines. The first read of a run lands on the prior hub, and a prior before
+#: lines wrote whatever it built, dev included, into the one `latest.json`;
+#: it is read where it is, not where this commit would have put it.
+SERVED_PY = ("import json,os,sys; c=json.load(open(sys.argv[1])); "
+             "n='latest-dev.json' if c.get('channel')=='dev' else 'latest.json'; "
+             "p=c['feed_dir'] + '/' + n; "
+             "p=p if os.path.exists(p) else c['feed_dir'] + '/latest.json'; "
+             "m=json.load(open(p))['manifest']; "
+             "print(json.dumps({'build': m['release'], "
+             "'client': str(m['components']['client']['version'])}))")
 SERVED = ("f=$HOME/.local/state/jremote/updates/config.json; "
-          + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(
-              "import json,sys; c=json.load(open(sys.argv[1])); "
-              "n='latest-dev.json' if c.get('channel')=='dev' else 'latest.json'; "
-              "m=json.load(open(c['feed_dir'] + '/' + n))['manifest']; "
-              "print(json.dumps({'build': m['release'], "
-              "'client': str(m['components']['client']['version'])}))")
-          + " \"$f\"")
+          + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(SERVED_PY) + " \"$f\"")
 #: One request under a bearer the runner holds rather than the machine's own
 #: token — a hub device, a projection — answered with its status, refusals
 #: included. The token rides the environment; a path is resolved against the
