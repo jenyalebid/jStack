@@ -127,8 +127,11 @@ def _source() -> dict:
         "managed": managed_access.is_leaf(),
         # The same four keys `/host` reports its source with, so the window
         # renders a build here exactly as it renders one there.
+        # `debug` rides along only on a debug build, which the window's Build
+        # row marks — the version alone reads the same as a release's.
         "running": {"release": running.get("release", ""), "sha": running.get("sha", ""),
-                    "version": running.get("version", ""), "dirty": bool(running.get("dirty"))},
+                    "version": running.get("version", ""), "dirty": bool(running.get("dirty")),
+                    **({"debug": True} if running.get("debug") else {})},
         "check": {"status": status.get("status", "unknown"),
                   "head": status.get("head", ""),
                   "checked": status.get("checked", 0),

@@ -79,6 +79,14 @@ def test_reading_the_source_reports_the_last_answer_and_asks_for_no_new_one(rig,
     assert not (root / "build.json").exists()
 
 
+def test_a_debug_build_says_so_where_the_window_reads_its_build(rig, monkeypatch):
+    _, console, _, _ = rig
+    _airgap(monkeypatch)
+    monkeypatch.setattr(sourcestamp, "capture", lambda: {
+        "sha": "a" * 40, "dirty": False, "release": "r", "version": "26.9.1", "debug": True})
+    assert console.get(SOURCE).json()["running"]["debug"] is True
+
+
 def test_a_hub_that_never_checked_says_so_rather_than_checking(rig, monkeypatch):
     root, console, _, _ = rig
     (root / "channel.json").unlink()
