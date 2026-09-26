@@ -147,8 +147,14 @@ def test_an_empty_box_is_not_an_idle_cli(pane, why):
 
 
 #: Every footer the CLI draws in place of the one this hook used to be pinned to, lifted
-#: from claude 2.1.220's own strings. shift+tab cycles between them, so all five are one
-#: keystroke away from any session at any moment.
+#: from claude 2.1.220's own strings. shift+tab cycles between them, so every one of them
+#: is one keystroke away from any session at any moment.
+#:
+#: `manual mode on` was missing from this list until 2026-09-25, on the belief that manual
+#: mode drew no banner and fell back to "? for shortcuts". It draws one. A live pane on this
+#: Mac, idle at an empty box for nine minutes, was reading `no-footer` — see the `ENGINES`
+#: comment. An enumeration that is one short is not a weaker check, it is no check at all
+#: for the mode it omits, and a session left in that mode could not be compacted again.
 @pytest.mark.parametrize("footer", [
     pytest.param("  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
                  id="bypass-permissions"),
@@ -156,7 +162,10 @@ def test_an_empty_box_is_not_an_idle_cli(pane, why):
     pytest.param("  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents",
                  id="accept-edits"),
     pytest.param("  ⏵⏵ plan mode on (shift+tab to cycle) · ← for agents", id="plan"),
-    pytest.param("  ? for shortcuts", id="manual-has-no-banner-at-all"),
+    pytest.param("  ⏸ manual mode on · ← for agents", id="manual"),
+    pytest.param("  ⏸ manual mode on (shift+tab to cycle) · ← for agents",
+                 id="manual-with-the-cycle-hint"),
+    pytest.param("  ? for shortcuts", id="shortcuts-hint-instead-of-a-banner"),
     pytest.param("  ⏵⏵ auto mode on (shift+tab to  · ←…", id="truncated-on-a-narrow-pane"),
 ])
 def test_an_idle_pane_is_idle_in_every_permission_mode(footer):
@@ -426,6 +435,7 @@ def spy(monkeypatch):
     monkeypatch.setattr(cod, "send_compact", compacts)
     monkeypatch.setattr(cod, "POLL_SECS", 0.01)
     monkeypatch.setattr(cod, "MAX_WAIT_SECS", 0.05)
+    monkeypatch.setattr(cod, "SEAM_WAIT_SECS", 0.05)
     return sent
 
 
@@ -914,6 +924,7 @@ def typed(monkeypatch):
     monkeypatch.setattr(cod, "submit", submit)
     monkeypatch.setattr(cod, "POLL_SECS", 0.01)
     monkeypatch.setattr(cod, "MAX_WAIT_SECS", 0.05)
+    monkeypatch.setattr(cod, "SEAM_WAIT_SECS", 0.05)
     return out
 
 
@@ -1124,6 +1135,7 @@ def nudged(monkeypatch):
     monkeypatch.setattr(cod, "send_continue", continues)
     monkeypatch.setattr(cod, "POLL_SECS", 0.01)
     monkeypatch.setattr(cod, "MAX_WAIT_SECS", 0.05)
+    monkeypatch.setattr(cod, "SEAM_WAIT_SECS", 0.05)
     monkeypatch.setattr(cod, "BOUNDARY_WAIT_SECS", 0.5)
     return sent
 
@@ -1476,6 +1488,75 @@ def test_a_compaction_that_never_fired_never_continues(near_ceiling, spy, nudged
     assert spy == [] and nudged == []
 
 
+# --- how long a promise is waited out --------------------------------------------------
+
+
+def test_a_declared_seam_outlasts_the_short_wait(near_ceiling, spy, monkeypatch):
+    """The regression, and the whole of it. Every `busy` row the real decision log has ever
+    carried — 244ca668, 27df58cc, fe02ed56, 2dec5785 — sits directly under a `resume: true`
+    decision: the pane was unready for twenty seconds, the child walked away, and a session
+    that had asked to be carried sat at its seam. It ends no further turn, so the Stop that
+    twenty seconds counts on to retry never fires."""
+    monkeypatch.setattr(cod, "MAX_WAIT_SECS", 0.02)
+    panes = itertools.chain([screen("half a sentence")] * 6, itertools.repeat(screen()))
+    monkeypatch.setattr(cod, "pane", lambda name: next(panes))
+    size = os.path.getsize(near_ceiling)
+    assert cod.wait_and_send("jr-x", near_ceiling, 1000, size, "claude", 5.0) == "sent"
+    assert spy == ["jr-x"]
+
+
+def test_the_budget_is_the_promise_the_decision_made(near_ceiling, monkeypatch):
+    """Patience is the seam's, not every delivery's: a finished turn nobody is waiting on
+    still gets the short window, because for it the next Stop really does reconsider."""
+    seen = []
+    monkeypatch.setattr(cod, "wait_and_send",
+                        lambda *args: seen.append(args[-1]) or "gone")
+    size = os.path.getsize(near_ceiling)
+    cod.run("jr-x", near_ceiling, "sid-x", 1000, size, True)
+    cod.run("jr-x", near_ceiling, "sid-x", 1000, size, False)
+    assert seen == [cod.SEAM_WAIT_SECS, cod.MAX_WAIT_SECS]
+
+
+@pytest.mark.parametrize("captured,gate", [
+    pytest.param(screen(), "", id="ready"),
+    pytest.param(WORKING_PANE, "working", id="a-turn-is-running"),
+    pytest.param(COMPACTING_PANE, "busy-mark: Compacting conversation", id="compacting"),
+    pytest.param("\n".join(["⏺ done", RULE, "❯ Press up to edit queued messages", RULE,
+                            "", FOOTER]),
+                 "busy-mark: Press up to edit queued messages", id="holding-a-queue"),
+    pytest.param(screen("half a sentence"),
+                 f"composer-holds: {len('half a sentence')} chars", id="somebody-typing"),
+    pytest.param("\n".join(["⏺ done", RULE, "❯ ", RULE]), "no-footer", id="no-live-tui"),
+    pytest.param(None, "no-pane", id="no-session"),
+])
+def test_why_not_ready_names_the_gate_that_refused(captured, gate):
+    """The label and the readiness answer come from the same walk, in the same order — a
+    gate added to one and not the other is a `busy` nobody can explain."""
+    assert cod.why_not_ready(captured) == gate
+    assert cod.pane_is_ready(captured) == (gate == "")
+
+
+def test_the_outcome_line_says_what_the_pane_refused_on(near_ceiling, spy, monkeypatch):
+    """`busy` named the outcome and never the cause, so every one of the four cost an
+    afternoon of reading transcripts by hand to guess at a screen nobody kept."""
+    monkeypatch.setattr(cod, "pane", lambda name: screen("wait, first check the"))
+    size = os.path.getsize(near_ceiling)
+    assert cod.run("jr-x", near_ceiling, "sid-x", 1000, size, True) == "busy"
+    rows = [json.loads(line) for line in
+            open(os.environ["JSTACK_COMPACT_LOG"]).read().splitlines() if line.strip()]
+    assert rows[-1]["outcome"] == "busy"
+    assert rows[-1]["blocked"].startswith("composer-holds:")
+    assert rows[-1]["waited"] >= 0
+
+
+def test_the_note_never_lands_on_a_later_outcome(near_ceiling, spy, monkeypatch):
+    """One note, one outcome. A stale `blocked` on a delivery that worked would be a
+    diagnostic lying about the one thing it exists to explain."""
+    monkeypatch.setattr(cod, "pane", lambda name: screen("wait, first check the"))
+    cod.run("jr-x", near_ceiling, "sid-x", 1000, os.path.getsize(near_ceiling), True)
+    assert cod.block_note() == {}
+
+
 # --- the send has to prove it landed --------------------------------------------------
 
 @pytest.fixture
@@ -1521,6 +1602,7 @@ def test_a_failed_send_is_reported_as_not_sent(near_ceiling, keys, monkeypatch):
     _, box = keys
     box["sticks"] = "/compact"
     monkeypatch.setattr(cod, "MAX_WAIT_SECS", 0.05)
+    monkeypatch.setattr(cod, "SEAM_WAIT_SECS", 0.05)
     size = os.path.getsize(near_ceiling)
     assert cod.wait_and_send("jr-x", near_ceiling, 1000, size, "claude") == "not-taken"
 
