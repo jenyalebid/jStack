@@ -134,17 +134,19 @@ check("JREMOTE_STATE_DIR outranks the embed marker",
 
 # --- no marker at all: a standalone Hub's own state dir, never the checkout --
 # A plain `install.sh` Mac has no embed marker. The hook then has to land where
-# `jstack-host where` says the Hub keeps state (`~/.local/state/jremote`), not in
-# a `state/` directory beside the package source (#207).
+# `jstack-host where` says the Hub keeps state — the Hub's one directory under
+# `~/.local/state` — not in a `state/` directory beside the package source (#207).
 home = TMP / "standalone-home"
 home.mkdir()
 r = run("set", {"session_id": "sid-standalone", "hook_event_name": "PreToolUse",
                 "tool_name": "AskUserQuestion"},
         env_extra={"HOME": str(home),
                    "JREMOTE_EMBED_MARKER": str(TMP / "no-marker-here.json")})
-standalone = home / ".local/state/jremote"
-check("no marker: the dot lands in the standalone Hub's state dir",
-      r.returncode == 0 and dot("sid-standalone", standalone).is_file())
+state_dirs = sorted((home / ".local" / "state").glob("*")) if (home / ".local" / "state").is_dir() else []
+standalone = state_dirs[0] if state_dirs else home / "nowhere"
+check("no marker: the dot lands in the standalone Hub's one state dir",
+      r.returncode == 0 and len(state_dirs) == 1
+      and dot("sid-standalone", standalone).is_file())
 check("no marker: nothing is written beside the served tree",
       not dot("sid-standalone").exists())
 run("clear", {"session_id": "sid-standalone", "hook_event_name": "UserPromptSubmit"},

@@ -114,7 +114,7 @@ def _windows(monkeypatch, attached):
 
 
 def test_a_failing_client_read_does_not_discard_the_pane_map(monkeypatch, capsys):
-    """#135 (Boss). One try around both tmux reads threw away a good pane map
+    """#135. One try around both tmux reads threw away a good pane map
     when the attached-clients read raised, so a Codex pane — whose only
     identity IS its pane — read as an anonymous pid- orphan beside its real
     row. Each read is caught on its own now, and the failure is logged."""
