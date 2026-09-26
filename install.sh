@@ -1341,6 +1341,15 @@ else
     esac
 fi
 
+# What step 10 needs to know is whether there is an app to pair, not whether
+# THIS run put it there. The flag only ever meant the latter, so a Mac that
+# already had jRemote — a --no-app install over an existing one, or an app
+# install that reported a problem with a working bundle still on the disk —
+# took the "no app on this Mac yet" branch: a pairing code printed by hand for
+# a device sitting on that same disk, and the app never opened. Asked of the
+# disk, which is the only place the answer lives.
+if [ -d "/Applications/jRemote.app" ]; then APP_INSTALLED=1; fi
+
 
 # ── 9. the host and its menu bar icon ───────────────────────────────────────
 #
