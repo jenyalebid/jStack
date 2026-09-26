@@ -392,6 +392,27 @@ def test_install_sh_exits_with_the_doctors_verdict():
     assert re.search(r'case "\$rc" in\s+0\|1\) exit 0 ;;\s+\*\)\s+exit 2 ;;', tail)
 
 
+def test_install_sh_installs_only_the_hub_it_built_here():
+    """The source-build exemption in `app_services.verify` lets a bundle whose
+    sealed identity says `origin: source-build` answer to its identifier alone
+    — and anyone can seal such a bundle ad hoc. On the update path the pinned
+    key vouches for the marker; on a fresh install nothing does but provenance:
+    the bundle `install_signed.identity` is handed is the archive
+    `build_source bootstrap` wrote on this Mac moments before (#149). That
+    invariant lives in the shape of install.sh, so it is pinned here: between
+    the build and the sealed installer the only bundle landed is the build's
+    own archive, and nothing is fetched."""
+    start = CODE.index('run_long "building the Hub from')
+    end = CODE.index('run_long "running the Hub\'s sealed installer"', start)
+    span = CODE[start:end]
+    assert 'HUB_ZIP="$BUILD_OUT/menubar-notarized.zip"' in span
+    assert re.search(r'ditto -x -k "\$HUB_ZIP" /Applications', span)
+    for fetched in ("curl ", "releases/download", "JSTACK_HUB_URL", "http"):
+        assert fetched not in span, f"a Hub can arrive from elsewhere before the seal is read: {fetched}"
+    assert len(re.findall(r"ditto -x -k", span)) == 1, "more than one bundle is landed in the span"
+    assert 'hub_install_args=(--app "/Applications/jStack Hub.app"' in span
+
+
 def test_the_runtime_gate_does_not_demand_a_team_a_self_built_hub_cannot_have():
     """The Hub's C runtime validates the seal before importing any module, and
     it asked for the publisher's Developer ID team unconditionally. A Hub
