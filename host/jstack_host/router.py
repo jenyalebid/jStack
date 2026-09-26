@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -749,19 +749,59 @@ def rename_device(device_id: str, body: DeviceRenameRequest, request: Request,
     return {"renamed": device_id}
 
 
-@router.post("/devices/{device_id}/revoke")
+#
+# `revoke_router` carries exactly one route, and it is not outside the bearer
+# gate: `_revoking_device` below IS that gate — `current_device`, which runs
+# `require_token` with its lockout and denial log — plus one answer the
+# router-wide dependency cannot give, for one token on one route. `/revoke`
+# cannot sit on `router`, whose `require_token` answers 401 before any route's
+# own dependency runs. Nothing else goes here: a second route on this router is
+# a route a retired credential can reach.
+revoke_router = APIRouter(prefix="/api/jremote/v1")
+
+
+async def _revoking_device(device_id: str, request: Request,
+                           authorization: str = Header(default="")) -> str:
+    """The caller of a revoke — `current_device`, with one more answer.
+
+    A leaf's detach runs `parent-forget` then `parent-revoke`. Since 5da4fad
+    the hub's forget revokes the machine's own credential in the same call, so
+    a leaf on an older release follows up with a credential that no longer
+    exists and ended a clean detach on a false 401 (#179). Old leaves cannot
+    be changed; the hub knows the dead token is exactly the credential named
+    in the path, and says so instead. The lockout and the denial log run
+    first, as for any other caller — this is read only after they let a 401
+    through, and it grants nothing: the route returns before touching a row.
+    """
+    try:
+        return await current_device(request, authorization)
+    except HTTPException as exc:
+        if exc.status_code != 401:
+            raise
+        prefix = "Bearer "
+        presented = authorization[len(prefix):] if authorization.startswith(prefix) else ""
+        if not devices.retired(presented, device_id):
+            raise
+        request.state.already_revoked = True
+        return device_id
+
+
+@revoke_router.post("/devices/{device_id}/revoke")
 def revoke_device(device_id: str, request: Request,
-                  caller: str = Depends(current_device)):
+                  caller: str = Depends(_revoking_device)):
     """Revoke a device — from this moment its token opens nothing, and its
     live connections (PTY terminal, SSE streams) are cut, not left to drain.
     Idempotent-safe: revoking an already-revoked device answers 404 and
-    changes nothing.
+    changes nothing — except a device presenting its OWN retired credential,
+    which is told 200 `already`: the detach step that sent it is complete.
 
     A caller may revoke ITSELF from anywhere — that is the remote's one device
     action, "disconnect this device". Revoking ANOTHER device is
     a hub menu-bar action: a remote must not reach across and cut a device that
     is not it ("It should NOT ... kill other DEVICES"). Enforced here so the
     refusal holds whatever the app shows."""
+    if getattr(request.state, "already_revoked", False):
+        return {"revoked": device_id, "self": True, "already": True}
     if not _hub_console(request) and (
             device_id != caller or not managed_access.can_disconnect(caller)):
         raise HTTPException(

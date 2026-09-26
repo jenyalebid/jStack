@@ -222,7 +222,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     from .pty import ws_router
-    from .router import grant_router, router, unauthenticated_router
+    from .router import grant_router, revoke_router, router, unauthenticated_router
 
     app = FastAPI(title="jRemote host", lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
@@ -231,6 +231,9 @@ def create_app() -> FastAPI:
     # and a standalone host needs it more than the dashboard does, because a
     # leaf is exactly the machine that can never be on the hub's LAN.
     app.include_router(unauthenticated_router)
+    # Device revocation, gated on the bearer like `router` — plus the one
+    # answer for a device presenting its own already-retired credential.
+    app.include_router(revoke_router)
     # Delegated minting, gated on a grant this machine issued to a named parent.
     # A managed host is the one that needs it; it mounts everywhere because a
     # host cannot be told at install time which role it will end up in.
