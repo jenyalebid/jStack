@@ -38,25 +38,23 @@ assert(SessionSignal.collective([idle, working]) == .working)
 assert(SessionSignal.collective([working, unread]) == .unread)
 assert(SessionSignal.collective([unread, working, waiting]) == .attention)
 assert(SessionSignal.collective([error, working]) == .attention)
-let inventoryJSON = #"{"release":"client-or-stack-release","machines":[{"machine":"home","name":"Home","desired":"client-or-stack-release","state":"current","supervisor":true},{"machine":"leaf","name":"Leaf","desired":"client-or-stack-release","state":"available","supervisor":true}]}"#
+let inventoryJSON = #"{"release":"client-or-stack-release","lines":{"main":"client-or-stack-release","dev":"dev-release"},"machines":[{"machine":"home","name":"Home","line":"main","desired":"client-or-stack-release","state":"current","supervisor":true},{"machine":"leaf","name":"Leaf","line":"dev","desired":"dev-release","state":"available","supervisor":true},{"machine":"old","name":"Old","desired":"client-or-stack-release","state":"available","supervisor":true}]}"#
 var inventory = try decoder.decode(UpdateInventory.self, from: Data(inventoryJSON.utf8))
-assert(inventory.localUpdate(hostID: "leaf")?.machine == "leaf")
-assert(inventory.localUpdate(hostID: "home") == nil, "a leaf update isn't a local update")
-assert(inventory.localUpdate(hostID: nil) == nil)
+assert(inventory.machines.map(\.line) == ["main", "dev", nil],
+       "each machine carries its line; a hub that predates lines names none")
+assert(inventory.machines[1].canUpdate && !inventory.machines[0].canUpdate)
 for state in ["pending", "pending/offline", "downloading", "applying", "verifying", "current"] {
     inventory.machines[1].state = state
-    assert(inventory.localUpdate(hostID: "leaf") == nil, "duplicate update offered for \(state)")
+    assert(!inventory.machines[1].canUpdate, "duplicate update offered for \(state)")
 }
 inventory.machines[1].state = "available"
-inventory.release = nil
-assert(inventory.localUpdate(hostID: "leaf") == nil, "no release is not an available update")
+inventory.machines[1].desired = nil
+assert(!inventory.machines[1].canUpdate, "no release on its line is not an available update")
 let bootstrapJSON = #"{"release":"new","machines":[{"machine":"local","name":"This Mac","desired":"new","state":"unknown/offline","supervisor":false}]}"#
 var bootstrap = try decoder.decode(UpdateInventory.self, from: Data(bootstrapJSON.utf8))
 assert(!bootstrap.machines[0].canUpdate, "an absent supervisor cannot consume a queued job")
 assert(bootstrap.machines[0].needsBootstrap)
 assert(bootstrap.machines[0].summary == "Updater setup required")
-assert(bootstrap.localUpdate(hostID: "local") != nil,
-       "the local menu must repair a missing supervisor instead of drawing a dead button")
 bootstrap.machines[0].state = "pending"
 assert(bootstrap.machines[0].needsBootstrap,
        "a job already stranded pending still needs the local recovery action")
@@ -69,6 +67,13 @@ assert(!identity.source!.displayVersion.contains("74"),
 // -- never by the counter, which is exactly what the identity replaced.
 let legacyIdentity = try decoder.decode(HostIdentity.self, from: Data(#"{"host_id":"local","source":{"sha":"abcdef","version":"0.69.3","build":74}}"#.utf8))
 assert(legacyIdentity.source?.displayVersion == "0.69.3")
+// A release version names the build by itself: year, month, the month's release.
+let releaseIdentity = try decoder.decode(HostIdentity.self, from: Data(#"{"host_id":"local","source":{"sha":"abcdef","version":"26.9.1","release":"2026-09-26-abcdef12-0000"}}"#.utf8))
+assert(releaseIdentity.source?.displayVersion == "26.09.01")
+let debugBuild = try decoder.decode(HostIdentity.self, from: Data(#"{"host_id":"local","source":{"version":"26.9.1","release":"r","debug":true}}"#.utf8))
+assert(debugBuild.source?.displayVersion == "26.09.01 (debug)")
+assert(UpdateSource.short("26.12.14") == "26.12.14" && UpdateSource.short("0.85.0") == nil)
+assert(UpdateSource.short("26.9") == nil && UpdateSource.short("126.9.1") == nil)
 func device(_ json: String) throws -> Device {
     try decoder.decode(Device.self, from: Data(json.utf8))
 }
@@ -143,8 +148,10 @@ func waitUntil(_ condition: () -> Bool) {
     }
     assert(condition(), "menu did not reach expected state")
 }
-waitUntil { statusItem.menu?.items.contains { $0.title == "Update Available" } == true }
+waitUntil { statusItem.menu?.items.contains { $0.title == "1 Device" || $0.title == "Info" } == true }
 let menu = statusItem.menu!
+// No update item on the menu: an update is queued from Info, per machine.
+assert(!menu.items.contains { $0.title == "Update Available" || $0.title.hasPrefix("Update") })
 if ProcessInfo.processInfo.environment["FIXTURE_MODE"] == "open" {
     let devices = menu.items.first { $0.title == "1 Device" }!
     let machines = menu.items.first { $0.title == "1 Managed Mac" }!
@@ -165,11 +172,15 @@ assert(app.windows.filter { $0.title == "jStack Info" && $0.isVisible }.count ==
 firstInfo.close()
 controller.showUpdates() // The jstack://updates entry uses this exact method.
 assert(firstInfo.isVisible)
-firstInfo.close()
-let available = statusItem.menu!.items.first { $0.title == "Update Available" }!
-NSApp.sendAction(available.action!, to: available.target, from: available)
-assert(firstInfo.isVisible, "a direct update must open its progress window")
-waitUntil { statusItem.menu?.items.contains { $0.title == "Update Available" } == false }
+// The one place this Mac's update is queued: its own row's command in Info.
+let infoForm = firstInfo.contentView as! NSHostingView<HostInfoForm>
+waitUntil { infoForm.rootView.localCommand != nil }
+let own = infoForm.rootView.localCommand!
+assert(own.accessibilityIdentifier() == "updates_tap_lab")
+NSApp.sendAction(own.action!, to: own.target, from: own)
+assert(firstInfo.isVisible, "a queued update keeps its progress window")
+waitUntil { infoForm.rootView.localCommand == nil }
+assert(!statusItem.menu!.items.contains { $0.title == "Update Available" })
 firstInfo.close()
 print("live menu actions passed")
 ''')
@@ -241,5 +252,5 @@ print("live menu actions passed")
     assert "info window contract passed" in result.stdout
     assert "live menu actions passed" in result.stdout
     assert len(queued) == 1
-    assert queued[0]["target"] == "self"
+    assert queued[0]["target"] == "lab"
     assert queued[0]["request_id"]

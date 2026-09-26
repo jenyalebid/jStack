@@ -581,6 +581,9 @@ struct UpdateJobStatus: Decodable {
 struct UpdateMachine: Decodable {
     var machine: String
     var name: String
+    /// The release line this machine is on — whose offer `desired` is. Nil
+    /// from a hub that predates lines, where every machine was on main.
+    var line: String?
     var desired: String?
     var state: String
     var lastContact: Double?
@@ -627,15 +630,29 @@ struct UpdateSource: Decodable {
     var version: String?
     var release: String?
     var build: Int?
+    /// A build of a branch that is not a line, or of a commit no bump covers.
+    var debug: Bool?
 
-    /// What identifies a release is its hash and date — never a counter, and
-    /// never the package semver. `version` still exists because the plugin
-    /// manifest and CFBundleVersion require one, but it says nothing about
-    /// which build this is: two different releases share it. `build` is the
-    /// retired counter and is deliberately not rendered.
+    /// A release version, `YY.M.N`, reads as `26.09.01` — the year, the month
+    /// and that month's release — with ` (debug)` on a debug build. Any other
+    /// version says nothing about which build this is (0.x was shared by
+    /// every build between two bumps), so there the release id is shown, as
+    /// before. `build` is the retired counter and is deliberately not rendered.
     var displayVersion: String {
+        if let version, let short = Self.short(version) {
+            return short + (debug == true ? " (debug)" : "")
+        }
         if let release, !release.isEmpty { return release }
         return version ?? "Version not reported"
+    }
+
+    /// `26.9.1` → `26.09.01`; nil for a version not of the `YY.M.N` shape.
+    static func short(_ version: String) -> String? {
+        guard version.range(of: #"^\d{2}\.\d{1,2}\.\d+$"#, options: .regularExpression) != nil
+        else { return nil }
+        let parts = version.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 3 else { return nil }
+        return String(format: "%02d.%02d.%02d", parts[0], parts[1], parts[2])
     }
 }
 
@@ -674,17 +691,20 @@ struct HubSource: Decodable {
     var canBuild: Bool
     var blocked: String?
 
-    /// The refs this window offers. A hub can be pointed at any branch, but
-    /// only from a terminal: a two-way control that rewrote a feature branch
-    /// to `main` on the next click would lose the ref nobody else records.
-    static let offered = ["stable", "dev"]
+    /// The refs this window offers: the two release lines. A hub can be
+    /// pointed at any branch, but only from a terminal: a two-way control that
+    /// rewrote a feature branch to `main` on the next click would lose the ref
+    /// nobody else records.
+    static let offered = ["main", "dev"]
 
-    /// `stable` is the name main answers to in the config; `main` is the name
-    /// the person picking it knows.
+    /// `stable` is what main was called before every machine had a line, and a
+    /// hub that predates the rename still reports it; it is main.
     static func label(_ ref: String) -> String { ref == "stable" ? "main" : ref }
 
     var building: Bool { build?.state == "building" }
-    var switchable: Bool { enabled && managed != true && Self.offered.contains(ref) }
+    /// A managed Mac picks its line too — which of its parent's offers it
+    /// takes. It never builds, which `canBuild` says on its own.
+    var switchable: Bool { enabled && Self.offered.contains(Self.label(ref)) }
 
     /// One line for the whole state. Order matters: the build half is newer
     /// than any check, so a finished build is reported over a check that still
@@ -717,13 +737,6 @@ struct HubSource: Decodable {
 struct UpdateInventory: Decodable {
     var release: String?
     var machines: [UpdateMachine]
-
-    func localUpdate(hostID: String?) -> UpdateMachine? {
-        guard release != nil, let hostID else { return nil }
-        return machines.first {
-            $0.machine == hostID && ($0.canUpdate || $0.needsBootstrap)
-        }
-    }
 }
 
 /// One snapshot of the machine, as the menu will render it.
@@ -1792,11 +1805,18 @@ struct InfoHubSection: View {
     let status: String
     let version: String
     let source: String?
+    /// The build id. Both lines can carry one short version at once, so the
+    /// line and this are what tell two builds of it apart.
+    var release: String? = nil
     var body: some View {
         Section {
             LabeledContent("Mac", value: name)
             LabeledContent("Status", value: status)
             LabeledContent("Version", value: version)
+            if let release, !release.isEmpty {
+                LabeledContent("Release", value: release)
+                    .textSelection(.enabled)
+            }
             if let source {
                 DisclosureGroup("Technical details") {
                     LabeledContent("Source", value: source)
@@ -1850,6 +1870,9 @@ struct InfoMachineSection: View {
     var body: some View {
         Section(machine.name) {
             LabeledContent("Updates", value: machine.summary)
+            if let line = machine.line {
+                LabeledContent("Line", value: HubSource.label(line))
+            }
             if let version = machine.observed?.hostSource?.version {
                 LabeledContent("jStack", value: version)
             }
@@ -1892,7 +1915,8 @@ struct InfoSourceSection: View {
                     .textSelection(.enabled)
             }
             if source.switchable {
-                Picker("Follows", selection: Binding(get: { source.ref }, set: follow)) {
+                Picker("Follows", selection: Binding(get: { HubSource.label(source.ref) },
+                                                     set: follow)) {
                     ForEach(HubSource.offered, id: \.self) { ref in
                         Text(HubSource.label(ref)).tag(ref)
                     }
@@ -1927,6 +1951,7 @@ struct HostInfoForm: View {
     let status: String
     let version: String
     let source: String?
+    var release: String? = nil
     let hubSource: HubSource?
     let sourceBusy: Bool
     let follow: (String) -> Void
@@ -1943,10 +1968,15 @@ struct HostInfoForm: View {
 
     var body: some View {
         Form {
-            InfoHubSection(name: machine, status: status, version: version, source: source)
+            InfoHubSection(name: machine, status: status, version: version, source: source,
+                           release: release)
             InfoClientSection(app: app, open: open, download: download)
             Section("Software Updates") {
                 LabeledContent("Status", value: updateStatus)
+                // Nothing on any machine installs by itself: a build is an
+                // offer, and only a press here turns an offer into a job.
+                Text("Nothing installs until it is queued here.")
+                    .font(.callout).foregroundStyle(.secondary)
                 if let error {
                     Text(error).foregroundStyle(.secondary).textSelection(.enabled)
                 }
@@ -2119,15 +2149,9 @@ final class StatusController: NSObject {
         // about this hub that shows its devices but not its machines is a menu
         // that stops just short of what the hub actually is.
         if let machines = machinesItem() { menu.addItem(machines) }
-        if updateError == nil,
-           updateInventory?.localUpdate(hostID: state.identity?.hostId) != nil {
-            let update = Self.action("Update Available", #selector(doUpdate), self,
-                                     symbol: "arrow.down.circle")
-            update.setAccessibilityIdentifier("updates_available")
-            update.representedObject = "self"
-            update.isEnabled = !updateRequestInFlight
-            menu.addItem(update)
-        }
+        // No update item here. An update is queued from Info, per machine, on
+        // purpose — a top-level button one click from installing was the one
+        // way a machine took a build nobody chose for it.
         let info = Self.action("Info", #selector(doInfo), self, symbol: "info.circle")
         info.setAccessibilityIdentifier("host_info")
         menu.addItem(info)
@@ -2309,6 +2333,7 @@ final class StatusController: NSObject {
             status: state.isUp ? (state.identity?.mode?.isManaged == true ? "Running · Managed Mac" : "Running") : "Not running",
             version: source?.displayVersion ?? "Version not reported",
             source: source?.sha,
+            release: source?.release,
             hubSource: hubSource,
             sourceBusy: sourceBusy,
             follow: { [weak self] ref in self?.followRef(ref) },
