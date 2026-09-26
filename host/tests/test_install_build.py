@@ -365,6 +365,22 @@ def test_install_sh_hands_the_build_only_a_client_that_records_its_commit():
     assert re.search(r'warn "jRemote.app is installed but does not record the commit', after)
 
 
+def test_install_sh_does_not_replace_a_published_hub_whose_state_lives_elsewhere():
+    """The replacement is provisioned at the default state dir, and the sealed
+    installer refuses over a dir that holds anything — so a published Hub whose
+    services load JREMOTE_STATE_DIR from somewhere else would come back empty,
+    fleet, devices and tokens orphaned, with the old app already booted out
+    (#167). The dir is read from the Hub's own service settings and a hub not
+    at the default stops the run before anything is removed."""
+    guard = CODE[CODE.index("Hub already installed and answering"):]
+    guard = guard[:guard.index("jStack Hub app is present but its host")]
+    refusal = guard[:guard.index("cannot build itself forward")]
+    assert "service-settings.json" in refusal and "JREMOTE_STATE_DIR" in refusal
+    assert re.search(r'die "the installed Hub keeps its state in \$declared_state, not \$HUB_STATE', refusal)
+    assert 'rm -rf "/Applications/jStack Hub.app"' not in refusal
+    assert "launchctl bootout" not in refusal, "the old Hub is booted out before the refusal"
+
+
 def test_the_runtime_gate_does_not_demand_a_team_a_self_built_hub_cannot_have():
     """The Hub's C runtime validates the seal before importing any module, and
     it asked for the publisher's Developer ID team unconditionally. A Hub

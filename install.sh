@@ -1562,6 +1562,19 @@ if [ "$(uname -s)" = "Darwin" ] && [ "$WANT_HOST" != "0" ]; then
             elif [ "$DRY_RUN" = "1" ]; then
                 would "replace the ${installed_release:-published} Hub with one built from $REF"
             else
+                # Where that Hub keeps its state decides whether a replacement
+                # is the same hub. The sealed installer provisions the built Hub
+                # at $HUB_STATE and refuses over a state dir that already holds
+                # anything, so a Hub whose services load JREMOTE_STATE_DIR from
+                # somewhere else would come back empty — no fleet, no devices,
+                # no tokens — with the old app already booted out (#167). Its
+                # service settings name that dir; a hub not at the default stops
+                # here, before anything is removed.
+                declared_state="$(sed -nE 's/.*"JREMOTE_STATE_DIR": *"([^"]+)".*/\1/p' \
+                    "$HOME/.local/state/jremote/service-settings.json" 2>/dev/null | head -1)"
+                if [ -n "$declared_state" ] && [ "${declared_state%/}" != "${HUB_STATE%/}" ]; then
+                    die "the installed Hub keeps its state in $declared_state, not $HUB_STATE — a Hub built here would be provisioned empty beside it and the running hub's fleet, devices and tokens would be orphaned. Nothing was removed. Move that hub forward from its own updater (\`jstack-host updates build\` on a Hub that has it), or point this run at its state before re-running."
+                fi
                 warn "the installed Hub is a published release${installed_release:+ ($installed_release)} and cannot build itself forward — replacing it with a build from $REF"
                 for role in host menu updater scheduler; do
                     launchctl bootout "gui/$(id -u)/live.jstack.hub.$role" >/dev/null 2>&1 || true
