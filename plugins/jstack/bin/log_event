@@ -24,6 +24,7 @@ Query / admin (first positional is the subcommand):
     log_event grep "<substring>" [--seat <seat>] [--since YYYY-MM-DD] [--json]
     log_event recall <YYYY-MM-DD[..YYYY-MM-DD]> [<seat>|all] [--full] [--json]
     log_event show <id>
+    log_event where
     log_event verdict <agent[/submode]> <shipped|drift|blocked|empty> --note "..."
         Stamp the seat's LATEST entry with an independent verdict (meta review's
         "do not repeat" loop). Verdicts ride tail/injection output.
@@ -80,7 +81,7 @@ except ImportError:
 
 _VALID_VERDICTS = {"shipped", "drift", "blocked", "empty"}
 _VALID_ORIGINS = {"direct", "indirect"}
-_SUBCOMMANDS = {"tail", "verdict", "grep", "show", "recall", "tag"}
+_SUBCOMMANDS = {"tail", "verdict", "grep", "show", "recall", "tag", "where"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS entries (
@@ -996,7 +997,8 @@ def _write_usage() -> str:
             '[<agent[/submode]>|all] [--full] [--json]\n'
             '   or: log_event show <id>\n'
             '   or: log_event verdict <agent[/submode]> '
-            '<shipped|drift|blocked|empty> --note "..."')
+            '<shipped|drift|blocked|empty> --note "..."\n'
+            '   or: log_event where          (the db this writer resolves)')
 
 
 def _cmd_tail(rest: list[str]) -> int:
@@ -1347,6 +1349,24 @@ def _cmd_verdict(rest: list[str]) -> int:
     return 0
 
 
+def _cmd_where(argv: list[str]) -> int:
+    """Print the database this writer resolves — one line, no side effects.
+
+    Every other reader of the timeline derives the path a second time, and a
+    derivation that disagrees with this one is invisible: both sides succeed,
+    against different files. A host rooted outside $HOME read an empty store
+    for weeks while sessions logged correctly into the real one, and the only
+    thing that could have caught it was asking the writer where it writes.
+    So it answers, and `mkdir` is deliberately not called — a probe that
+    creates the directory it is asking about has answered its own question.
+    """
+    if argv:
+        print("log_event where: takes no arguments", file=sys.stderr)
+        return 2
+    print(timeline_dir() / "timeline.db")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         print(_write_usage(), file=sys.stderr)
@@ -1366,6 +1386,8 @@ def main(argv: list[str]) -> int:
             return _cmd_verdict(rest)
         if cmd == "tag":
             return _cmd_tag(rest)
+        if cmd == "where":
+            return _cmd_where(rest)
 
     if len(argv) < 2:
         print(_write_usage(), file=sys.stderr)
