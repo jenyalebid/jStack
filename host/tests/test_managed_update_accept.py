@@ -12,6 +12,7 @@ What these tests own is the logic between the observations.
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -31,9 +32,21 @@ CANDIDATE = "2026-09-16-11111111-1111111111111111"
 REPO = "https://github.com/jenyalebid/jStack.git"
 
 
-def dated(build_id: str) -> str:
-    """The menu bar's CFBundleVersion: the build's own date, digits only."""
-    return "".join(build_id.split("-")[:3])
+def dated(build_id: str, version: str = "0.69.3") -> str:
+    """The menu bar's CFBundleVersion: `YYYYMMDD.N.<int(sha8, 16)>` — the
+    build's own date, the month's release out of a `YY.M.N` version (0 for
+    any other), and its commit as a number."""
+    parts = build_id.split("-")
+    release = re.fullmatch(r"\d{2}\.\d{1,2}\.(\d+)", version)
+    return f"{''.join(parts[:3])}.{int(release[1]) if release else 0}.{int(parts[3], 16)}"
+
+
+def test_the_menu_bar_version_is_read_back_by_the_one_formula(runner):
+    from jstack_host import build_hub
+    for version in ("0.69.3", "26.9.4"):
+        expected = build_hub.bundle_version({"date": "2026-09-16", "sha": "1" * 40}, version)
+        assert runner.menubar_version(CANDIDATE, version) == expected == dated(CANDIDATE, version)
+    assert runner.menubar_version("not-a-build", "26.9.4") == ""
 
 
 def test_off_network_requires_a_working_lan_before_isolation(runner, monkeypatch):
@@ -843,6 +856,30 @@ def test_the_hub_is_driven_through_the_refusal_older_code_raises(runner, subject
     # The build's answer names no parts; the client it carries is read off
     # the feed the hub now serves, and it is the hub's, not this run's.
     assert fleet.served["dev"] == "68" and subject.version("client") == "70"
+
+
+@pytest.mark.parametrize("help_text,flag", [("  --debug  a debug build", " --debug"),
+                                            ("  --ref REF", "")])
+def test_a_feature_branch_is_built_as_a_debug_build_where_the_hub_knows_one(
+        runner, subject, help_text, flag):
+    """A hub builds a release only off main or dev; the branch under test is
+    a debug build. A hub whose CLI predates the flag builds any ref without it."""
+    class Building(ScriptedFleet):
+        def __call__(self, argv, **kwargs):
+            command = argv[3] if len(argv) > 3 else ""
+            if "updates build --help" in command:
+                return subprocess.CompletedProcess(argv, 0, help_text, "")
+            if "updates build" in command:
+                self.calls.append(list(argv))
+                return subprocess.CompletedProcess(argv, 0, json.dumps({"release": CANDIDATE}), "")
+            return super().__call__(argv, **kwargs)
+
+    scripted = Building()
+    subject.ref = "feature/x"
+    fleet = build(runner, scripted)
+    fleet.offer(subject)
+    built = next(c[3] for c in scripted.calls if "updates build --ref" in c[3])
+    assert built.endswith("updates build --ref feature/x" + flag)
 
 
 def test_a_hub_whose_feed_does_not_serve_what_it_built_fails_the_offer(runner, subject):

@@ -42,6 +42,10 @@ from urllib.parse import urlsplit
 
 from jstack_host.acceptance import HarnessFault
 
+#: The release lines. Any other ref under test is a feature branch, which a
+#: hub builds — and the installer installs — only as a debug build.
+LINES = ("main", "dev")
+
 GUEST_HOME = "/Users/admin"
 GUEST_TOOL = GUEST_HOME + "/update-vm.py"
 GUEST_FAULT = GUEST_HOME + "/update-fault.py"
@@ -763,8 +767,14 @@ class Fleet:
                 f"refusing to build {build.slug} on {LOCAL_HUB}: the hub is this Mac, and a "
                 "build replaces what its feed offers the fleet it really manages")
         self.hub.sh(host_cli(f"updates channel {shlex.quote(build.ref)}"), timeout=120)
+        # A feature branch is a debug build: a hub builds a release only off a
+        # line. A hub whose CLI predates the flag builds any ref without it.
+        debug = ""
+        if build.ref not in LINES and "--debug" in self.hub.sh(
+                host_cli("updates build --help"), timeout=120):
+            debug = " --debug"
         output = self.hub.sh("JSTACK_BUILD_DESPITE_LEAVES=1 "
-                             + host_cli(f"updates build --ref {shlex.quote(build.ref)}"),
+                             + host_cli(f"updates build --ref {shlex.quote(build.ref)}{debug}"),
                              timeout=3600)
         try:
             built = json.loads(output[output.index("{"):])
@@ -810,13 +820,14 @@ def component_check(journey, check: str, state: dict, build: Build, *, client: s
     if client:
         expect(str(state["client"]) == client,
                f"client is {state['client']}, the build this Mac took carries {client}")
-    # The menu bar's CFBundleVersion is the build's own date, digits only —
-    # the one thing `build_hub.bundle_version` says may not be derived twice.
-    # It is not knowable before a machine builds, so it is read back against
-    # the build id that machine is running.
-    day = str(state["build"] or "").split("-")[:3]
-    expect(len(day) == 3 and str(state["menubar"]) == "".join(day),
-           f"menu bar is {state['menubar']}, which is not the date in {state['build']}")
+    # The menu bar's CFBundleVersion is `YYYYMMDD.N.<int(sha8, 16)>` — the
+    # one thing `build_hub.bundle_version` says may not be derived twice. It
+    # is not knowable before a machine builds, so it is read back against the
+    # build id that machine is running and the version the commit declares.
+    expected = menubar_version(str(state["build"] or ""), build.version("stack"))
+    expect(bool(expected) and str(state["menubar"]) == expected,
+           f"menu bar is {state['menubar']}, which is not {expected or 'derivable'} "
+           f"for {state['build']}")
     expect(state["menubar_pids"], "the menu bar is installed but not running")
     expect(state["plugins"], "no installed plugin versions were observed")
     for name, version in state["plugins"].items():
@@ -824,6 +835,19 @@ def component_check(journey, check: str, state: dict, build: Build, *, client: s
                f"plugin {name} is {version}, the commit declares {build.version('stack')}")
     journey.observe(check, {"client": state["client"], "menubar": state["menubar"],
                             "plugins": state["plugins"]})
+
+
+def menubar_version(build_id: str, version: str) -> str:
+    """The CFBundleVersion a build id and a declared version make, or "".
+
+    A build id is `<YYYY-MM-DD>-<sha8>-<fp16>`; the version's third component
+    is N when it has the `YY.M.N` shape, else 0 — `build_hub.bundle_version`.
+    """
+    parts = build_id.split("-")
+    if len(parts) < 5 or not re.fullmatch(r"[0-9a-f]{8}", parts[3]):
+        return ""
+    match = re.fullmatch(r"\d{2}\.\d{1,2}\.(\d+)", version)
+    return f"{''.join(parts[:3])}.{int(match[1]) if match else 0}.{int(parts[3], 16)}"
 
 
 def identity_check(journey, check: str, state: dict, build: Build) -> None:
@@ -1979,9 +2003,15 @@ def install_build(guest: Guest, build: Build, *, fresh: bool = False) -> None:
         guest.sh(f"/usr/bin/ditto -x -k {remote}/jRemote.zip /Applications", timeout=600)
     guest.sh(f"/usr/bin/curl -fsSL {shlex.quote(build.raw_url)} -o {remote}/install.sh",
              timeout=300)
+    # A feature branch installs as a debug build; an installer from before
+    # lines has no such flag and builds any ref.
+    debug = ""
+    if build.ref not in LINES and guest.sh(
+            f"/usr/bin/grep -c -e '--debug)' {remote}/install.sh || true").strip() not in ("", "0"):
+        debug = " --debug"
     guest.sh(f"JSTACK_REPO_URL={shlex.quote(build.repo_url)} "
              f"/bin/bash {remote}/install.sh --yes --no-claude --no-app "
-             f"--ref {shlex.quote(build.ref)}", timeout=3600)
+             f"--ref {shlex.quote(build.ref)}{debug}", timeout=3600)
     if build.client:
         guest.sh("/usr/bin/open -a /Applications/jRemote.app")
     lab_guest(guest)

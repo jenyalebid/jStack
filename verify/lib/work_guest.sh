@@ -32,7 +32,8 @@ hub_at_ref() {
     echo "== install the Hub from $REF, the README way with --ref =="
     # refs/heads/ keeps a ref with a slash in it (release/…) unambiguous.
     curl -fsSL "https://raw.githubusercontent.com/jenyalebid/jStack/refs/heads/$REF/install.sh" \
-        | bash -s -- --yes --ref "$REF" --agent Alpha 2>&1 | tail -25
+        | bash -s -- --yes --ref "$REF" $(case "$REF" in main|dev) ;; *) echo --debug ;; esac) \
+            --agent Alpha 2>&1 | tail -25
     [ -f ~/jStack/host/jstack_host/plans.py ] && [ -f ~/jStack/plugins/jstack/hooks/plan-exit.py ] \
         || bail "ref $REF carries no work harness — nothing here would be under test"
     (cd ~/jStack && git log -1 --format='  head: %h %s')

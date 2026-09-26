@@ -93,10 +93,12 @@ def installing(tmp_path, monkeypatch, sealed):
         # the fixture. The compiler itself is what is out of reach here.
         packages = app / "Contents/Resources/packages"
         packages.mkdir(parents=True)
+        sealed.clear()
         sealed.update(build_hub.release_identity(
             HEAD, version, release_id=kwargs["release_id"],
             github_repo=kwargs["github_repo"], date=kwargs["date"],
-            channel=kwargs.get("channel"), origin=kwargs.get("origin")))
+            channel=kwargs.get("channel"), origin=kwargs.get("origin"),
+            debug=kwargs.get("debug", False)))
         (packages / "release-identity.json").write_text(json.dumps(sealed))
         return app
 
@@ -178,17 +180,20 @@ def test_the_built_hub_records_the_ref_it_was_built_from(installing, sealed):
     """#148. `install_signed.provision` reads the hub's channel out of this
     file and nothing else knows it — a fresh install refuses to find anything
     in the state dir, and the caller is not asked. While the bundle recorded
-    no ref, every branch install was provisioned to follow stable."""
-    built(installing, ref="feature/x")
-    assert sealed["channel"] == "feature/x"
+    no ref, every branch install was provisioned to follow stable. A branch
+    that is not a line installs only as a debug build, and says so."""
+    built(installing, ref="feature/x", debug=True)
+    assert sealed["channel"] == "feature/x" and sealed["debug"] is True
     assert build_source.channel_ref(sealed) == "feature/x"
+    built(installing, ref="dev")
+    assert sealed["channel"] == "dev" and "debug" not in sealed
 
 
 def test_a_no_app_install_records_its_ref_too(installing, sealed):
     """The half the workaround in `seed()` could never reach: without a client
     there is no manifest and no first offer, so nothing ran after the install
     to correct the channel it had been provisioned with."""
-    assert built(installing, client=None, ref="feature/x")["offer"] is False
+    assert built(installing, client=None, ref="feature/x", debug=True)["offer"] is False
     assert sealed["channel"] == "feature/x"
 
 

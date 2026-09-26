@@ -30,12 +30,15 @@ cat >> "$RECEIPTS/payload.sh" <<'EOF'
 export JSTACK_ROOT=/Users/admin/Desktop/Alpine
 mkdir -p "$JSTACK_ROOT"
 URL="https://raw.githubusercontent.com/jenyalebid/jStack/$REF/install.sh"
+# A branch that is not a release line installs only as a debug build.
+DEBUG=""
+case "$REF" in main|dev) ;; *) DEBUG=--debug ;; esac
 
 bars()   { pgrep -f JStackHostBar | wc -l | tr -d ' '; }
 agents() { launchctl list | awk '{print $3}' | grep -c '^com\.jremote\.' || true; }
 
 echo "== first install ($REF) =="
-curl -fsSL "$URL" | bash -s -- --agent Jarvis --ref "$REF"
+curl -fsSL "$URL" | bash -s -- --agent Jarvis --ref "$REF" $DEBUG
 
 FIRST_BARS="$(bars)"
 HUB_ID="/Applications/jStack Hub.app/Contents/Resources/packages/release-identity.json"
@@ -43,7 +46,7 @@ FIRST_REL="$(sed -n 's/.*"release": "\([^"]*\)".*/\1/p' "$HUB_ID" 2>/dev/null)"
 echo "   after one install: $FIRST_BARS menu bar process(es), release ${FIRST_REL:-none}"
 
 echo "== second install, same Mac, same command =="
-curl -fsSL "$URL" | bash -s -- --agent Jarvis --ref "$REF"
+curl -fsSL "$URL" | bash -s -- --agent Jarvis --ref "$REF" $DEBUG
 
 echo "== verdict =="
 # One process and one registration. Counted, not probed for presence: the old

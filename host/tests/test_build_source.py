@@ -335,6 +335,9 @@ def builder(tmp_path, publisher, monkeypatch):
     monkeypatch.setattr(build_hub, "build", compile_hub)
     monkeypatch.setattr(build_source, "fetch", lambda *args: HEAD)
     monkeypatch.setattr(build_source.subprocess, "run", lambda *a, **k: None)
+    # The bump gate is the repo's own script, proven against real git below;
+    # here it records that a release asked it and a debug build did not.
+    monkeypatch.setattr(build_source, "bump_gate", lambda stack: calls.append(["bump-gate"]))
     # The grid this hub adopted into, per test. The package-level store is one
     # file for the whole session, so a leaf another module enrolled would
     # otherwise decide whether these builds are allowed to run.
@@ -374,7 +377,7 @@ def test_a_machine_with_nowhere_to_build_from_says_so_instead_of_raising_a_key_e
 def test_a_build_lands_an_offer_this_hub_signed_itself(builder, publisher):
     root, feed, config, _ = builder
     atomic_json(root / "config.json", dict(config))
-    result = build_source.build(root, config, ref="feature/x")
+    result = build_source.build(root, config, ref="feature/x", debug=True)
     _, public = build_source.build_key(root)
     envelope = json.loads((feed / "latest.json").read_text())
     manifest = releases.verify(envelope, public)
@@ -404,6 +407,7 @@ def test_a_build_lands_the_shape_stage_already_consumes(builder):
     # stage() reads exactly these three facts back out of the tarball.
     assert identity["release"] == release and identity["sha"] == manifest["sources"]["stack"]
     assert identity["package_sha256"] and identity["channel"] == "main"
+    assert "debug" not in identity
     assert trust["public_key"] == build_source.build_key(root)[1]
 
 
@@ -501,7 +505,7 @@ def test_a_ref_force_pushed_behind_the_held_build_is_refused(builder, publisher)
         build_source.build(root, config)
     # A different ref is a rollback, not a downgrade: its count means nothing
     # against the line this hub was on.
-    assert build_source.build(root, config, ref="feature/x")["release"]
+    assert build_source.build(root, config, ref="feature/x", debug=True)["release"]
 
 
 @pytest.mark.parametrize("excluded", ["managed", "parent_record"])
@@ -516,7 +520,94 @@ def test_a_leaf_never_builds(builder, excluded):
     assert not calls
 
 
-# ── Lines ───────────────────────────────────────────────────────────────────
+# ── Lines, debug builds and the bump gate ───────────────────────────────────
+
+def test_a_release_off_a_branch_that_is_not_a_line_is_refused_before_anything_runs(builder):
+    root, _, config, calls = builder
+    with pytest.raises(releases.ReleaseError, match="release procedure"):
+        build_source.build(root, config, ref="feature/x")
+    assert not calls and not (root / "build.json").exists()
+    with pytest.raises(releases.ReleaseError, match="not a release line"):
+        build_source.bootstrap(root, root / "out", root / "keys", repo="example/stack",
+                               ref="feature/x")
+
+
+def test_a_debug_build_says_so_skips_the_bump_and_never_shares_a_release_name(builder, monkeypatch):
+    from jstack_host import build_hub
+    root, feed, config, calls = builder
+    compile_hub, seen = build_hub.build, []
+
+    def compile_recording(stack, output, version, signing, **kwargs):
+        seen.append(kwargs.get("debug"))
+        return compile_hub(stack, output, version, signing, **kwargs)
+
+    monkeypatch.setattr(build_hub, "build", compile_recording)
+    release = build_source.build(root, config)["release"]
+    assert ["bump-gate"] in calls and seen == [False]
+    calls.clear()
+    debug = build_source.build(root, config, debug=True)["release"]
+    assert ["bump-gate"] not in calls and seen == [False, True]
+    # Same commit, same client, same day: still two names, so a rebuild can
+    # never re-offer a debug build as the release or the other way round.
+    assert debug != release
+    with tarfile.open(feed / debug / "stack.tar.gz") as bundle:
+        identity = json.loads(bundle.extractfile("host/release-identity.json").read())
+    assert identity["debug"] is True
+
+
+def test_a_debug_identity_is_sealed_into_the_bundle():
+    from jstack_host import build_hub
+    kwargs = dict(release_id="r-1", github_repo="example/stack", date="2026-09-25",
+                  channel="feature/x")
+    assert build_hub.release_identity("a" * 40, "26.9.1", debug=True, **kwargs)["debug"] is True
+    assert "debug" not in build_hub.release_identity("a" * 40, "26.9.1", **kwargs)
+
+
+def _git(repo, *args):
+    import subprocess
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                          text=True).stdout
+
+
+def _plugin_repo(tmp_path, version):
+    """A repo carrying the real version-bump gate and one bumped manifest."""
+    repo = tmp_path / "stack"
+    gate = Path(__file__).resolve().parents[2] / "plugins/jstack/tests/version-bump.sh"
+    (repo / "plugins/jstack/tests").mkdir(parents=True)
+    (repo / "plugins/jstack/.claude-plugin").mkdir(parents=True)
+    (repo / "plugins/jstack/tests/version-bump.sh").write_text(gate.read_text())
+    (repo / "plugins/jstack/.claude-plugin/plugin.json").write_text(json.dumps({"version": version}))
+    (repo / "plugins/jstack/hook.sh").write_text("echo one\n")
+    _git(tmp_path, "init", "-q", str(repo))
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", f"chore(release): {version}")
+    return repo
+
+
+def test_a_commit_whose_plugin_changes_no_bump_covers_is_refused(tmp_path):
+    repo = _plugin_repo(tmp_path, "26.9.1")
+    build_source.bump_gate(repo)  # the bump commit itself is covered
+    (repo / "plugins/jstack/hook.sh").write_text("echo two\n")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "fix: unbumped")
+    with pytest.raises(releases.ReleaseError, match="run the release procedure on dev"):
+        build_source.bump_gate(repo)
+    # The release tool's bump covers it again; 26.9.2 after 0.85.0-era history
+    # is compared by value, never by semver order.
+    (repo / "plugins/jstack/.claude-plugin/plugin.json").write_text('{"version": "26.9.2"}')
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "chore(release): 26.9.2")
+    build_source.bump_gate(repo)
+
+
+def test_a_bump_from_the_old_scheme_to_the_new_one_is_a_bump(tmp_path):
+    repo = _plugin_repo(tmp_path, "0.85.0")
+    (repo / "plugins/jstack/hook.sh").write_text("echo two\n")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "fix: shipped")
+    with pytest.raises(releases.ReleaseError):
+        build_source.bump_gate(repo)
+    (repo / "plugins/jstack/.claude-plugin/plugin.json").write_text('{"version": "26.9.1"}')
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "chore(release): 26.9.1")
+    build_source.bump_gate(repo)
+
 
 def test_building_the_lines_skips_a_line_already_built_at_its_tip(builder, monkeypatch):
     root, feed, config, _ = builder
@@ -565,7 +656,9 @@ def test_a_first_build_that_rotates_the_key_withdraws_the_other_lines_stale_offe
 
 @pytest.mark.parametrize("argv,expected", [
     ([], ("lines",)),
-    (["--ref", "dev"], ("build", "dev")),
+    (["--ref", "dev"], ("build", "dev", False)),
+    (["--ref", "feature/x", "--debug"], ("build", "feature/x", True)),
+    (["--debug"], ("build", None, True)),
 ])
 def test_updates_build_builds_the_lines_unless_told_one_ref(tmp_path, monkeypatch, capsys,
                                                              argv, expected):
@@ -577,8 +670,8 @@ def test_updates_build_builds_the_lines_unless_told_one_ref(tmp_path, monkeypatc
     seen = []
     monkeypatch.setattr(build_source, "build_lines",
                         lambda root, config: seen.append(("lines",)) or {"main": {}})
-    monkeypatch.setattr(build_source, "build", lambda root, config, ref=None:
-                        seen.append(("build", ref)) or {"release": "r"})
+    monkeypatch.setattr(build_source, "build", lambda root, config, ref=None, debug=False:
+                        seen.append(("build", ref, debug)) or {"release": "r"})
     monkeypatch.setattr("sys.argv", ["jstack-host", "updates", "build", *argv])
     assert cli.main() in (0, None) and seen == [expected]
     assert json.loads(capsys.readouterr().out)

@@ -89,6 +89,8 @@ say "== nothing installed to begin with =="
 say "  no client, no hub, no root"
 
 INSTALL_ARGS=(--yes --ref "$REF" --agent Jarvis)
+# A branch that is not a release line installs only as a debug build.
+case "$REF" in main|dev) ;; *) INSTALL_ARGS+=(--debug) ;; esac
 if [ "$STAGED" = 1 ]; then
     tar -xzf /Users/admin/client-app.tgz -C /Applications
     [ -d /Applications/jRemote.app ] || bail "the staged client did not unpack"
