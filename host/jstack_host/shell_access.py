@@ -157,15 +157,19 @@ def write_authorized_block(path: Path, lines: list[str]) -> None:
 
 
 def read_authorized_block(path: Path) -> list[str]:
+    return _read_marked(path, MARK_BEGIN, MARK_END)
+
+
+def _read_marked(path: Path, begin: str, end: str) -> list[str]:
     try:
         text = path.read_text()
     except OSError:
         return []
     out, inside = [], False
     for line in text.splitlines():
-        if line.strip() == MARK_BEGIN:
+        if line.strip() == begin:
             inside = True
-        elif line.strip() == MARK_END:
+        elif line.strip() == end:
             inside = False
         elif inside:
             out.append(line)
@@ -176,6 +180,14 @@ def write_ssh_config(path: Path, peers: list[dict],
                      key_path: Path | None = None) -> None:
     """`ssh <name>` for every reachable peer — HostName, user, this machine's
     identity, keepalives tuned for a mesh that drops idle flows."""
+    _write_marked(path, CONFIG_BEGIN, CONFIG_END, config_block(peers, key_path))
+
+
+def read_config_block(path: Path) -> list[str]:
+    return _read_marked(path, CONFIG_BEGIN, CONFIG_END)
+
+
+def config_block(peers: list[dict], key_path: Path | None = None) -> list[str]:
     key_path = key_path or hostenv.state_dir() / KEY_FILE
     block: list[str] = []
     for peer in peers:
@@ -188,7 +200,7 @@ def write_ssh_config(path: Path, peers: list[dict],
             "  ServerAliveCountMax 4",
             "  StrictHostKeyChecking accept-new",
         ]
-    _write_marked(path, CONFIG_BEGIN, CONFIG_END, block)
+    return block
 
 
 def root_step_spent(state: Path | None = None) -> bool:

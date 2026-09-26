@@ -531,6 +531,94 @@ def test_adopting_a_machine_lands_it_in_the_hubs_ssh_config(hub, monkeypatch):
     assert "Host work-mac" in text and "10.66.0.44" in text
 
 
+@pytest.fixture
+def as_hub(monkeypatch):
+    from jstack_host import managed_access, mode
+    monkeypatch.setattr(mode, "is_hub", lambda: True)
+    monkeypatch.setattr(managed_access, "is_leaf", lambda: False)
+
+
+def test_an_emptied_hub_config_is_rebuilt_from_the_store(fleet, as_hub):
+    """#186: a test run truncated the hub's ~/.ssh/config to 0 bytes and
+    planted a key in its authorized_keys, and nothing put either back — the
+    blocks were only ever rewritten on enrolment, a grant flip or a forget."""
+    from jstack_host import shell_grants
+    ssh = Path(os.environ["HOME"]) / ".ssh"
+    ssh.mkdir(parents=True, exist_ok=True)
+    (ssh / "config").write_text("")
+    (ssh / "authorized_keys").write_text("ssh-ed25519 AAAAmine me@laptop\n")
+    shell_access.write_authorized_block(ssh / "authorized_keys", [LINE_A])
+
+    assert shell_grants.hub_drift() == ["config", "authorized_keys"]
+    out = shell_grants.reconcile_hub()
+
+    assert out["fixed"] == ["config", "authorized_keys"]
+    text = (ssh / "config").read_text()
+    assert "Host work-main" in text and "Host work-temp" in text
+    assert (ssh / "authorized_keys").read_text() == "ssh-ed25519 AAAAmine me@laptop\n", \
+        "the managed block goes; the owner's own key stays"
+    assert shell_grants.hub_drift() == []
+    assert shell_grants.reconcile_hub()["fixed"] == []
+
+
+def test_a_current_config_is_left_byte_for_byte(fleet, as_hub):
+    from jstack_host import shell_grants
+    cfg = Path(os.environ["HOME"]) / ".ssh" / "config"
+    shell_grants.refresh_hub_config()
+    # The owner's own entry, spaced in a way `_splice` would normalise.
+    cfg.write_text("Host mine\n  User me\n\n\n" + cfg.read_text())
+    before = cfg.read_text()
+    assert shell_grants.reconcile_hub()["fixed"] == []
+    assert cfg.read_text() == before
+
+
+def test_a_leaf_never_rewrites_what_its_parent_gave_it(fleet, monkeypatch):
+    from jstack_host import managed_access, mode, shell_grants
+    monkeypatch.setattr(mode, "is_hub", lambda: False)
+    monkeypatch.setattr(managed_access, "is_leaf", lambda: True)
+    home = Path(os.environ["HOME"])
+    shell_access.apply_material(
+        {"authorized": [LINE_A],
+         "peers": [{"name": "work-temp", "address": "10.66.0.21", "user": "alex"}]},
+        home)
+    before = {f: (home / ".ssh" / f).read_text() for f in ("config", "authorized_keys")}
+
+    out = shell_grants.reconcile_hub()
+    assert out["hub"] is False and out["fixed"] == []
+    assert {f: (home / ".ssh" / f).read_text() for f in before} == before
+
+
+def test_the_host_rebuilds_the_hub_config_at_startup(fleet, as_hub, monkeypatch):
+    import asyncio
+    from jstack_host import server
+    monkeypatch.setattr(server, "_provisioned", lambda: True)
+    for name in ("jstack_host.managed.reconcile", "jstack_host.store.start_indexer",
+                 "jstack_host.feed.start_indexer"):
+        monkeypatch.setattr(name, lambda: [])
+
+    async def _noop():
+        return None
+    monkeypatch.setattr("jstack_host.board_watch.ensure_running", _noop)
+    monkeypatch.setattr("jstack_host.board_watch.add_consumer", lambda fn: None)
+    cfg = Path(os.environ["HOME"]) / ".ssh" / "config"
+
+    async def boot():
+        async with server.lifespan(None):
+            pass
+    asyncio.run(boot())
+    assert "Host work-main" in cfg.read_text()
+
+
+def test_the_refresh_verb_rebuilds_and_reports(fleet, as_hub, monkeypatch, capsys):
+    import json
+    from jstack_host import cli
+    monkeypatch.setattr(cli, "_adopt", lambda args: None)
+    assert cli.main(["shell-grants", "refresh", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["fixed"] == ["config"]
+    assert "Host work-temp" in (Path(os.environ["HOME"]) / ".ssh" / "config").read_text()
+
+
 # ── a poked machine pulls and applies without root ──────────────────────────
 
 def test_apply_material_writes_both_files_and_needs_no_runner(tmp_path):
