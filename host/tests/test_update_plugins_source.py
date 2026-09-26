@@ -31,6 +31,10 @@ from jstack_host import update_plugins
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    # `local_checkout` looks at ~/jStack. The real one on a developer's Mac
+    # is nobody's fixture — and never to be moved by a test.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("JSTACK_CHECKOUT", raising=False)
     return tmp_path
 
 
@@ -299,6 +303,64 @@ def test_an_uncommitted_change_refuses_the_move_by_name(tmp_path, monkeypatch):
     assert _git("rev-parse", "HEAD", cwd=clone) == first and asked == []
 
 
+# ── a registration left on a stage goes back to the checkout (#163) ─────────
+
+def test_a_stage_registration_is_re_adopted_by_the_checkout_beside_it(home, tmp_path, monkeypatch):
+    """The Mac a pre-564f571 update left behind: the registration on a shipped
+    stage copy, `~/jStack` a clean clone nothing has moved since install. The
+    update moves the clone to its commit and points the registration at it."""
+    clone, first, second = _origin_and_clone(tmp_path)          # tmp_path/jStack == ~/jStack
+    shipped = _shipped(home)
+    _claude(home, shipped)
+    asked, moved = [], []
+    monkeypatch.setattr(update_plugins, "run", lambda argv: asked.append(argv) or "[]")
+    monkeypatch.setattr(update_plugins, "replace_references", lambda *a: moved.append(a))
+    monkeypatch.setattr(update_plugins, "move_shell_references", lambda *a: moved.append(a))
+    update_plugins.install(update_plugins.discover(), shipped.parent / "next", second)
+    assert _git("rev-parse", "HEAD", cwd=clone) == second
+    assert moved and all(a[-2] == str(shipped) and a[-1] == str(clone) for a in moved), moved
+    assert asked[0][1:] == ["plugin", "update", "jstack@jStack", "--scope", "user"]
+
+
+def test_a_dirty_checkout_is_not_re_adopted_and_the_stage_still_moves(home, tmp_path, monkeypatch, capsys):
+    """What `advance` refuses, re-adoption refuses — by name — and the update
+    still lands the way it did before: onto the stage."""
+    clone, first, second = _origin_and_clone(tmp_path)
+    (clone / "plugins/jstack/.claude-plugin/plugin.json").write_text('{"version": "hand-edited"}')
+    shipped = _shipped(home)
+    stage = shipped.parent / "next"
+    _codex(home, shipped)
+    asked, moved = [], []
+    monkeypatch.setattr(update_plugins, "run", lambda argv: asked.append(argv) or "[]")
+    monkeypatch.setattr(update_plugins, "replace_references", lambda *a: moved.append(a))
+    monkeypatch.setattr(update_plugins, "move_shell_references", lambda *a: moved.append(a))
+    update_plugins.install(update_plugins.discover(), stage, second)
+    assert _git("rev-parse", "HEAD", cwd=clone) == first
+    assert moved and all(a[-1] == str(stage) for a in moved)
+    assert str(stage) in asked[0]
+    assert "uncommitted changes" in capsys.readouterr().err
+
+
+def test_without_a_commit_or_a_checkout_the_stage_moves_as_before(home, tmp_path, monkeypatch):
+    """No sha: nothing to advance a checkout to, so nothing is re-adopted. No
+    checkout — a bare .git or a plugin without git is not one — same."""
+    clone, first, second = _origin_and_clone(tmp_path)
+    shipped = _shipped(home)
+    stage = shipped.parent / "next"
+    _codex(home, shipped)
+    moved = []
+    monkeypatch.setattr(update_plugins, "run", lambda argv: "[]")
+    monkeypatch.setattr(update_plugins, "replace_references", lambda *a: moved.append(a))
+    monkeypatch.setattr(update_plugins, "move_shell_references", lambda *a: moved.append(a))
+    update_plugins.install(update_plugins.discover(), stage, None)
+    assert moved and all(a[-1] == str(stage) for a in moved)
+    assert _git("rev-parse", "HEAD", cwd=clone) == first
+    (clone / "plugins/jstack/.claude-plugin/plugin.json").unlink()
+    moved.clear()
+    update_plugins.install(update_plugins.discover(), stage, second)
+    assert moved and all(a[-1] == str(stage) for a in moved)
+
+
 def test_a_checkout_already_on_the_commit_and_a_shipped_copy_are_not_touched(home, tmp_path, monkeypatch):
     clone, first, second = _origin_and_clone(tmp_path)
     _git("reset", "--quiet", "--hard", second, cwd=clone)
@@ -311,6 +373,10 @@ def test_a_checkout_already_on_the_commit_and_a_shipped_copy_are_not_touched(hom
     shipped = _shipped(home)
     fetched = []
     monkeypatch.setattr(update_plugins, "advance", lambda *a: fetched.append(a))
+    # A shipped copy on a Mac with no checkout: the clone above IS ~/jStack
+    # here, and beside it a stage registration would be re-adopted (#163) —
+    # so the checkout is pointed elsewhere for this leaf case.
+    monkeypatch.setenv("JSTACK_CHECKOUT", str(tmp_path / "nowhere"))
     update_plugins.install([{**_provider(shipped), "checkout": False}], tmp_path / "stack", second)
     update_plugins.install([_provider(clone)], tmp_path / "stack", None)
     assert fetched == []
