@@ -54,14 +54,62 @@ def channel_ref(config: dict) -> str:
     """Which ref this hub follows.
 
     Absent from the config on every hub installed before a ref could be
-    chosen, and what those hubs hold came off main — so absent is `stable`,
-    not "unset". `stable` is the name main answers to; anything else is a
-    branch this hub was deliberately moved onto.
+    chosen, and what those hubs hold came off main — so absent is main, not
+    "unset". `stable` is the name main answered to before every machine could
+    pick a line, and it still reads as main: every config and every sealed
+    identity written before then says `stable`, and this is the one place
+    that migrates them. Anything else is a branch this hub was deliberately
+    moved onto.
     """
     name = str(config.get("channel") or releases.STABLE_CHANNEL).strip()
     if not CHANNEL.fullmatch(name) or ".." in name:
         raise releases.ReleaseError("release channel must name a branch")
-    return name
+    return releases.STABLE_CHANNEL if name == "stable" else name
+
+
+def line(config: dict) -> str:
+    """The release line this machine is on: its ref when that is a line, else
+    main. A hub moved onto a feature branch for a debug build still has a
+    line — the one whose offer its feed serves when nobody names another."""
+    ref = channel_ref(config)
+    return ref if ref in releases.LINES else releases.STABLE_CHANNEL
+
+
+def release_ref(ref: str, *, debug: bool) -> None:
+    """Refuse a release build off anything but a line.
+
+    A release is what a machine installs as the next version of its line, so
+    it is made from main or dev and nothing else; any other branch is a debug
+    build, which the caller asks for in as many words.
+    """
+    if debug or ref in releases.LINES:
+        return
+    raise releases.ReleaseError(
+        f"{ref} is not a release line: a release is built only off "
+        f"{' or '.join(releases.LINES)}, after the release procedure has run on dev. "
+        "Build it with --debug to make a debug build of this branch")
+
+
+def bump_gate(stack: Path) -> None:
+    """Refuse a release of a commit whose plugin changes no version bump covers.
+
+    The bump commit is the only fact about a release every hub agrees on —
+    builds are local events with no shared ledger — so the version a release
+    carries means something only while every shipped change sits under a bump.
+    The check is the repo's own push gate, run in the tree being built.
+    """
+    gate = stack / "plugins/jstack/tests/version-bump.sh"
+    if not gate.is_file():
+        raise releases.ReleaseError(f"{gate.name} is missing from the tree being built")
+    environment = {**os.environ, "JSTACK_PUSH_TO_MAIN": "1",
+                   "PATH": os.environ.get("PATH", "") + ":/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
+    result = subprocess.run(["/bin/bash", str(gate)], cwd=stack, env=environment,
+                            capture_output=True, text=True, timeout=300)
+    if result.returncode:
+        raise releases.ReleaseError(
+            "this commit ships plugin changes no version bump covers — run the release "
+            "procedure on dev (release bump) before building a release: "
+            + (result.stdout + result.stderr).strip()[-1500:])
 
 
 def source_origin(machine: str) -> dict:
@@ -78,7 +126,7 @@ def source_origin(machine: str) -> dict:
 
 def branch(ref: str) -> str:
     """The git branch a ref name selects. `stable` is this repo's main."""
-    return "main" if ref == releases.STABLE_CHANNEL else ref
+    return "main" if ref in ("stable", releases.STABLE_CHANNEL) else ref
 
 
 def release_date() -> str:
@@ -87,16 +135,20 @@ def release_date() -> str:
     return date.today().isoformat()
 
 
-def source_identity(date: str, stack: str, client: str, dependencies: dict) -> str:
+def source_identity(date: str, stack: str, client: str, dependencies: dict, *,
+                    debug: bool = False) -> str:
     """The build's name: the day, the commit, and a hash of every source in it.
 
     Lives here rather than in `publish_release`, which is the only other
     caller, because a build now happens on the hub and a publication does not
     happen at all — one definition, so the two can never name the same sources
     differently. Fleet jobs key by release: a client-only fix must not look
-    already installed.
+    already installed. A debug build is a different input from a release of
+    the same commit, so it is a different name — a rebuild would otherwise
+    re-offer one as the other.
     """
-    sources = {"stack": stack, "client": client, "dependencies": dependencies}
+    sources = {"stack": stack, "client": client, "dependencies": dependencies,
+               **({"debug": True} if debug else {})}
     fingerprint = hashlib.sha256(releases.canonical(sources)).hexdigest()[:16]
     return f"{date}-{stack[:8]}-{fingerprint}"
 
@@ -123,8 +175,23 @@ def head(client: httpx.Client, repo: str, ref: str) -> str:
     return value
 
 
-def held(config: dict) -> tuple[str, str]:
-    """The build this hub already holds: its release ID and its source commit.
+def latest_name(ref: str) -> str:
+    """The file in a feed holding a line's offer. Main keeps `latest.json`, so
+    a leaf that predates lines reads exactly the offer it always read; dev has
+    its own. A debug build of any other branch lands in main's, where a hub
+    moved onto a branch has always put what it built."""
+    return "latest-dev.json" if ref == "dev" else "latest.json"
+
+
+def built_from(manifest: dict) -> str:
+    """The ref a signed manifest says it was built from — main for one that
+    predates the field or still spells it `stable`."""
+    return channel_ref({"channel": (manifest.get("channel") or {}).get("name")})
+
+
+def held(config: dict, ref: str | None = None) -> tuple[str, str]:
+    """The build this hub already holds on a line: its release ID and its
+    source commit. The line is `ref`'s, or the followed ref's when none is named.
 
     Read through the same signature check every other reader of this feed
     uses, so a feed this hub cannot verify surfaces as a failed check rather
@@ -133,7 +200,7 @@ def held(config: dict) -> tuple[str, str]:
     feed = config.get("feed_dir")
     if not feed:
         raise releases.ReleaseError("no feed directory is configured")
-    latest = Path(feed) / "latest.json"
+    latest = Path(feed) / latest_name(ref or channel_ref(config))
     if not latest.exists():
         return "", ""
     manifest = releases.verify(json.loads(latest.read_text()), config.get("public_key", ""),
@@ -164,7 +231,7 @@ def check(root: Path, config: dict, *, client=None, now=None) -> dict | None:
     client = client or httpx.Client(timeout=30, follow_redirects=True, trust_env=False)
     try:
         sha = head(client, repo, branch(ref))
-        release, installed = held(config)
+        release, installed = held(config, ref)
         answer = {"checked": now, "ref": ref, "head": sha, "release": release,
                   "status": "current" if installed == sha else "behind"}
         atomic_json(status_file, answer)
@@ -235,20 +302,25 @@ def component(path: Path, version: str) -> dict:
             "sha256": releases.digest(path)}
 
 
-def inherited(config: dict) -> dict:
+def inherited(config: dict, ref: str | None = None) -> dict:
     """The client artifact this build carries forward, and where it lives.
 
     jRemote's Mac app is closed source and is not built here. What a hub can
     honestly do is keep serving the exact client bytes it already holds and
     already verified, so a locally built Hub names that same artifact and the
     same client commit. A hub with nothing in its feed has no client to carry
-    and cannot produce a complete release.
+    and cannot produce a complete release. The line's own offer when it has
+    one; another line's for a line's first build, which is how dev gets its
+    client on a hub that only ever built main, and main on one installed off dev.
     """
     feed = Path(config["feed_dir"])
-    if not (feed / "latest.json").exists():
+    names = [latest_name(ref or channel_ref(config))]
+    names += [latest_name(name) for name in releases.LINES if latest_name(name) not in names]
+    latest = next((feed / name for name in names if (feed / name).exists()), None)
+    if latest is None:
         raise releases.ReleaseError(
             "this hub holds no release to carry a client artifact forward from")
-    manifest = releases.verify(json.loads((feed / "latest.json").read_text()),
+    manifest = releases.verify(json.loads(latest.read_text()),
                                config.get("public_key", ""),
                                promoted=not config.get("candidate_test", False))
     item = manifest["components"]["client"]
@@ -319,23 +391,27 @@ def build_refusal(root: Path, config: dict) -> str:
     return ""
 
 
-def build(root: Path, config: dict, *, ref: str | None = None, now=None) -> dict:
+def build(root: Path, config: dict, *, ref: str | None = None, debug: bool = False,
+          now=None) -> dict:
     """Build the Hub from the newest commit on this hub's ref, and offer it.
 
     Explicit by construction: nothing in the supervisor's tick reaches here.
     The result lands in the feed in the shape a downloaded release landed in,
-    so stage/install/verify take over from here unchanged.
+    so stage/install/verify take over from here unchanged. A release is built
+    only off a line and only from a bumped commit; `debug` is the one way past
+    both, and the build it makes says so in its identity.
     """
     from .update_supervisor import atomic_json
     refusal = build_refusal(root, config)
     if refusal:
         raise releases.ReleaseError(refusal)
     ref = channel_ref({"channel": ref} if ref else config)
+    release_ref(ref, debug=debug)
     progress = root / "build.json"
     atomic_json(progress, {"state": "building", "ref": ref,
                            "started": time.time() if now is None else now})
     try:
-        result = _build(root, config, ref)
+        result = _build(root, config, ref, debug=debug)
         atomic_json(progress, {"state": "built", "ref": ref, "release": result["release"],
                                "finished": time.time()})
         return result
@@ -366,7 +442,7 @@ def archive_hub(app: Path, output: Path, signing: dict | None) -> Path:
 
 def catalog_variant(config: dict, stack: Path, work: Path, release_id: str, *,
                     version: str, repo: str, date: str, public: str, ref: str,
-                    built_by: dict) -> Path | None:
+                    built_by: dict, debug: bool = False) -> Path | None:
     """The equal-identity Hub carrying this machine's private capabilities.
 
     A Hub that runs catalogued capabilities refuses the catalog-free bundle a
@@ -391,7 +467,7 @@ def catalog_variant(config: dict, stack: Path, work: Path, release_id: str, *,
     destination.mkdir()
     app = build_hub.build(stack, destination, version, config.get("signing"), catalog=catalog,
                           release_id=release_id, github_repo=repo, date=date,
-                          trust_key=public, channel=ref, origin=built_by)
+                          trust_key=public, channel=ref, origin=built_by, debug=debug)
     archive = archive_hub(app, destination, config.get("signing"))
     shutil.rmtree(app, ignore_errors=True)
     store = Path(config["local_components"]) / release_id
@@ -412,7 +488,35 @@ def variant_present(config: dict, release_id: str) -> None:
             f"private capability build for {release_id} is missing: {target}")
 
 
-def _build(root: Path, config: dict, ref: str) -> dict:
+def build_lines(root: Path, config: dict, *, client=None) -> dict:
+    """Build each line whose tip moved since the build this hub holds for it.
+
+    One question per line — the tip's sha, the same forty bytes a check asks
+    for — and a build only where it differs from the line's own offer. What
+    `updates build` does when nobody names a ref.
+    """
+    refusal = build_refusal(root, config)
+    if refusal:
+        raise releases.ReleaseError(refusal)
+    repo = repository(config["github_repo"])
+    owned = client is None
+    client = client or httpx.Client(timeout=30, follow_redirects=True, trust_env=False)
+    results = {}
+    try:
+        for name in releases.LINES:
+            sha = head(client, repo, branch(name))
+            release, installed = held(config, name)
+            if installed == sha:
+                results[name] = {"skipped": "current", "release": release, "sha": sha}
+                continue
+            results[name] = build(root, config, ref=name)
+    finally:
+        if owned:
+            client.close()
+    return results
+
+
+def _build(root: Path, config: dict, ref: str, *, debug: bool = False) -> dict:
     from . import build_hub
     from .update_macos import command
     from .update_supervisor import atomic_json
@@ -421,11 +525,11 @@ def _build(root: Path, config: dict, ref: str) -> dict:
     private, public = build_key(root)
     source = Path(config.get("source_dir") or root / "source")
     sha = fetch(source, repo, branch(ref))
-    previous = inherited(config)
+    previous = inherited(config, ref)
     client_sha = previous["sources"]["client"]
     dependencies = previous.get("client_packages", {})
     date = release_date()
-    release_id = source_identity(date, sha, client_sha, dependencies)
+    release_id = source_identity(date, sha, client_sha, dependencies, debug=debug)
     envelope_path = feed / release_id / "manifest.json"
     if envelope_path.exists():
         # This hub already built these exact sources today. Re-offer those
@@ -435,7 +539,7 @@ def _build(root: Path, config: dict, ref: str) -> dict:
         for item in manifest["components"].values():
             releases.check_artifact(feed / release_id / item["file"], item)
         variant_present(config, release_id)
-        return _offer(root, config, feed, envelope, public)
+        return _offer(root, config, feed, envelope, public, ref)
     work = Path(tempfile.mkdtemp(prefix="build-", suffix=".noindex", dir=root))
     stack, output = work / "stack", work / release_id
     output.mkdir(parents=True)
@@ -444,6 +548,8 @@ def _build(root: Path, config: dict, ref: str) -> dict:
                 timeout=600)
         version = json.loads(
             (stack / "plugins/jstack/.claude-plugin/plugin.json").read_text())["version"]
+        if not debug:
+            bump_gate(stack)
         # The only ordering a hub has. The identity is a date and two hashes,
         # and neither of those orders; this is the number of commits behind
         # this one on its own line, compared only against a build from the
@@ -455,23 +561,23 @@ def _build(root: Path, config: dict, ref: str) -> dict:
         # switch is not a downgrade — its old count means nothing on the new
         # line. What this does catch is a ref force-pushed backwards under a
         # hub that is following it.
-        if (previous.get("channel", {}).get("name") or releases.STABLE_CHANNEL) == ref and (
+        if built_from(previous) == ref and (
                 isinstance(previous.get("sequence"), int) and sequence < previous["sequence"]):
             raise releases.ReleaseError(f"{ref} is behind the build this hub already holds")
         built_by = source_origin(config.get("machine", ""))
         identity = {"release": release_id, "sha": sha, "version": version, "date": date,
                     "github_repo": repo, "sequence": sequence, "channel": ref,
-                    "origin": built_by}
+                    "origin": built_by, **({"debug": True} if debug else {})}
         app = build_hub.build(stack, output, version, config.get("signing"),
                               release_id=release_id, github_repo=repo, date=date,
-                              trust_key=public, channel=ref, origin=built_by)
+                              trust_key=public, channel=ref, origin=built_by, debug=debug)
         menu = archive_hub(app, output, config.get("signing"))
         shutil.rmtree(app, ignore_errors=True)
         # Before the identity files below: both bundles archive HEAD of the
         # same clean tree, and the variant is the same identity plus the
         # catalog. Stored beside the feed, not in it.
         catalog_variant(config, stack, work, release_id, version=version, repo=repo,
-                        date=date, public=public, ref=ref, built_by=built_by)
+                        date=date, public=public, ref=ref, built_by=built_by, debug=debug)
         # After the Hub is built, because `build_hub` archives HEAD and
         # refuses a dirty `host/`: these two files exist only in the tarball
         # the installing machine unpacks, and `stage()` reads the identity
@@ -500,15 +606,16 @@ def _build(root: Path, config: dict, ref: str) -> dict:
             compatibility=previous["compatibility"])
         envelope = releases.sign(manifest, private)
         land(feed, output, envelope)
-        return _offer(root, config, feed, envelope, public)
+        return _offer(root, config, feed, envelope, public, ref)
     finally:
         subprocess.run(["git", "-C", str(source), "worktree", "remove", "--force", str(stack)],
                        capture_output=True, timeout=300)
         shutil.rmtree(work, ignore_errors=True)
 
 
-def _offer(root: Path, config: dict, feed: Path, envelope: dict, public: str) -> dict:
-    """Pin this hub's trust to its own key, then offer what it built.
+def _offer(root: Path, config: dict, feed: Path, envelope: dict, public: str,
+           ref: str) -> dict:
+    """Pin this hub's trust to its own key, then offer what it built on its line.
 
     One pinned key at a time, rotated at the one moment a hub stops taking
     someone else's bytes and starts producing its own. The order matters: a
@@ -523,8 +630,19 @@ def _offer(root: Path, config: dict, feed: Path, envelope: dict, public: str) ->
         if saved.get("public_key") != public:
             atomic_json(config_path, {**saved, "public_key": public})
     config["public_key"] = public
-    atomic_json(feed / "latest.json", envelope)
-    return {"release": envelope["manifest"]["release"], "public_key": public}
+    atomic_json(feed / latest_name(ref), envelope)
+    # Another line's offer signed by the key just rotated out is one every
+    # route would now refuse to verify — a feed that reads as broken. It is
+    # withdrawn instead, and that line's next build offers it again.
+    for other in {latest_name(name) for name in releases.LINES} - {latest_name(ref)}:
+        path = feed / other
+        try:
+            if path.exists():
+                releases.verify(json.loads(path.read_text()), public,
+                                promoted=not config.get("candidate_test", False))
+        except (releases.ReleaseError, ValueError):
+            path.unlink(missing_ok=True)
+    return {"release": envelope["manifest"]["release"], "public_key": public, "ref": ref}
 
 
 def compatibility_of(hub: Path, client: Path) -> dict:
@@ -589,7 +707,7 @@ def installable(app: Path) -> None:
 
 def bootstrap(checkout: Path, output: Path, key_dir: Path, *, repo: str, ref: str,
               client: Path | None = None, signing: dict | None = None,
-              machine: str = "") -> dict:
+              machine: str = "", debug: bool = False) -> dict:
     """Build the release the installer running this is about to install.
 
     `_build` is the same act on a hub that already exists: it fetches the ref
@@ -608,6 +726,7 @@ def bootstrap(checkout: Path, output: Path, key_dir: Path, *, repo: str, ref: st
     from .update_supervisor import atomic_json
     repo = repository(repo)
     ref = channel_ref({"channel": ref})
+    release_ref(ref, debug=debug)
     private, public = build_key(key_dir)
     sha = command(["git", "-C", str(checkout), "rev-parse", "HEAD"]).strip()
     if not SHA.fullmatch(sha):
@@ -625,14 +744,14 @@ def bootstrap(checkout: Path, output: Path, key_dir: Path, *, repo: str, ref: st
         version = json.loads(
             (stack / "plugins/jstack/.claude-plugin/plugin.json").read_text())["version"]
         item, client_sha = client_component(client, output) if client else (None, "")
-        release_id = source_identity(date, sha, client_sha, {})
+        release_id = source_identity(date, sha, client_sha, {}, debug=debug)
         built_by = source_origin(machine)
         identity = {"release": release_id, "sha": sha, "version": version, "date": date,
                     "github_repo": repo, "sequence": sequence, "channel": ref,
-                    "origin": built_by}
+                    "origin": built_by, **({"debug": True} if debug else {})}
         app = build_hub.build(stack, output, version, signing, release_id=release_id,
                               github_repo=repo, date=date, trust_key=public,
-                              channel=ref, origin=built_by)
+                              channel=ref, origin=built_by, debug=debug)
         menu = archive_hub(app, output, signing)
         installable(app)
         compatibility = compatibility_of(app, client) if item else None
@@ -692,7 +811,7 @@ def seed(root: Path, output: Path) -> dict:
                                promoted=not config.get("candidate_test", False))
     feed = Path(config["feed_dir"])
     land(feed, output, envelope)
-    atomic_json(feed / "latest.json", envelope)
+    atomic_json(feed / latest_name(built_from(manifest)), envelope)
     return {"release": manifest["release"], "feed": str(feed)}
 
 
@@ -708,6 +827,8 @@ def main():
     build_args.add_argument("--repo", required=True)
     build_args.add_argument("--ref", required=True)
     build_args.add_argument("--machine", default="")
+    build_args.add_argument("--debug", action="store_true",
+                            help="a debug build: any branch, no bump required, never a release")
     build_args.add_argument("--signing", type=Path,
                             help="release configuration carrying a signing block")
     seed_args = actions.add_parser("seed")
@@ -717,7 +838,8 @@ def main():
     if args.action == "bootstrap":
         signing = json.loads(args.signing.read_text()).get("signing") if args.signing else None
         result = bootstrap(args.checkout, args.output, args.key_dir, repo=args.repo, ref=args.ref,
-                           client=args.client, signing=signing, machine=args.machine)
+                           client=args.client, signing=signing, machine=args.machine,
+                           debug=args.debug)
     else:
         result = seed(args.root, args.output)
     print(json.dumps(result))

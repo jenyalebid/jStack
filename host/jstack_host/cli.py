@@ -116,10 +116,13 @@ def _cmd_updates_channel(args) -> int:
 
 
 def _cmd_updates_build(args) -> int:
-    """Build this hub's ref into an offer. The only door that builds.
+    """Build into an offer. The only door that builds.
 
     Explicit because it is minutes of work and megabytes of output — the
     supervisor's 300s tick asks GitHub for one commit sha and stops there.
+    With no ref, every line whose tip moved since its last build is built;
+    `--ref` builds that one ref. A release is made only off main or dev, from
+    a commit a version bump covers; `--debug` builds anything else and says so.
     """
     import json
     from . import build_source, release_manifest
@@ -128,7 +131,12 @@ def _cmd_updates_build(args) -> int:
     if config_path is None:
         return 1
     try:
-        print(json.dumps(build_source.build(config_path.parent, config, ref=args.ref)))
+        if args.ref is None and not args.debug:
+            result = build_source.build_lines(config_path.parent, config)
+        else:
+            result = build_source.build(config_path.parent, config, ref=args.ref,
+                                        debug=args.debug)
+        print(json.dumps(result))
     except release_manifest.ReleaseError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1727,12 +1735,15 @@ def build_parser() -> argparse.ArgumentParser:
     up = updates.add_parser(
         "channel", help="read or set the ref this hub follows")
     up.add_argument("name", nargs="?", default=None,
-                    help="a branch name, or 'stable' for main (omit to read)")
+                    help="main or dev, or any branch for debug builds (omit to read)")
     up.add_argument("--state-dir", default=None)
     up.set_defaults(fn=_cmd_updates_channel)
     up = updates.add_parser(
-        "build", help="build this hub's ref and offer the result")
-    up.add_argument("--ref", default=None, help="build this ref instead of the configured one")
+        "build", help="build each line that moved (or --ref) and offer the result")
+    up.add_argument("--ref", default=None,
+                    help="build this ref only; without it every line whose tip moved is built")
+    up.add_argument("--debug", action="store_true",
+                    help="a debug build: any branch, no version bump required, never a release")
     up.add_argument("--state-dir", default=None)
     up.set_defaults(fn=_cmd_updates_build)
 

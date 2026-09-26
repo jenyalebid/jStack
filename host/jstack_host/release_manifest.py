@@ -21,8 +21,16 @@ RECEIPTS = {"fresh_install", "upgrade", "fleet", "offline_catchup", "session_sur
             "shell_adopt", "shell_flip", "upgrade_shell", "shell_detach", "delegate_leaf"}
 #: The line a hub follows when nobody chose one. Named rather than empty so a
 #: manifest built before channels existed can be read as belonging to it: the
-#: releases already published came off main, which is what this names.
-STABLE_CHANNEL = "stable"
+#: releases already published came off main, which is what this names. It was
+#: spelled `stable` until every machine could choose its line; `channel_ref`
+#: still reads that spelling, as main, wherever a config or a sealed identity
+#: carries it.
+STABLE_CHANNEL = "main"
+#: The release lines. Every machine is on exactly one; a release build is made
+#: only off one of these, and each has its own offer in a hub's feed. Any other
+#: branch is a debug build: it can be built and installed on purpose, never
+#: released.
+LINES = ("main", "dev")
 #: A manifest a hub built for itself from a commit, rather than one a
 #: publisher cut. It has no publication and so no acceptance evidence; the
 #: marker is inside the signed manifest so only the pinned key can grant the

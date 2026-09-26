@@ -555,6 +555,17 @@ class MacBackend:
         except (OSError, ValueError, httpx.HTTPError, KeyError, subprocess.SubprocessError):
             return False
 
+    def line(self) -> str:
+        """The release line this machine is on, carried on every heartbeat so
+        its hub knows which offer is this machine's. Main where the config
+        names no line — a debug branch included, whose builds land in main's
+        offer."""
+        from .build_source import line
+        try:
+            return line(self.config)
+        except releases.ReleaseError:
+            return releases.STABLE_CHANNEL
+
     def observe(self, job: dict) -> dict:
         from . import sourcestamp
         components = {}
@@ -596,5 +607,5 @@ class MacBackend:
             verified = verified and bool(components["menubar"]["running_pids"])
         return {"components": components, "host_source": source,
                 "updater_source": sourcestamp.capture(),
-                "release": source.get("release"),
+                "release": source.get("release"), "line": self.line(),
                 "verified": verified, "job": {k: job.get(k) for k in ("id", "state", "detail")}}

@@ -13,6 +13,7 @@ import tarfile
 import time
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -99,7 +100,7 @@ def test_a_check_compares_head_against_the_build_this_hub_holds(tmp_path, publis
         build_source.check(root, config, client=client, now=1000)
     status = json.loads((root / "channel.json").read_text())
     assert status["status"] == expected and status["release"] == "published-1"
-    assert status["ref"] == "stable" and status["checked"] == 1000
+    assert status["ref"] == "main" and status["checked"] == 1000
 
 
 def test_a_check_keeps_the_three_hundred_second_floor(tmp_path, publisher):
@@ -162,9 +163,23 @@ def test_a_ref_that_is_not_a_branch_is_refused(name):
 
 
 def test_no_ref_configured_is_the_stable_line_and_stable_is_main():
-    assert build_source.channel_ref({}) == releases.STABLE_CHANNEL
+    assert build_source.channel_ref({}) == releases.STABLE_CHANNEL == "main"
     assert build_source.branch(releases.STABLE_CHANNEL) == "main"
     assert build_source.branch("feature/x") == "feature/x"
+    # Every config and sealed identity written before lines says `stable`.
+    assert build_source.channel_ref({"channel": "stable"}) == "main"
+    assert build_source.branch("stable") == "main"
+    assert releases.LINES == ("main", "dev")
+
+
+def test_a_machine_is_on_a_line_even_when_it_follows_a_branch():
+    assert build_source.line({}) == "main"
+    assert build_source.line({"channel": "stable"}) == "main"
+    assert build_source.line({"channel": "dev"}) == "dev"
+    assert build_source.line({"channel": "feature/x"}) == "main"
+    assert build_source.latest_name("main") == "latest.json"
+    assert build_source.latest_name("dev") == "latest-dev.json"
+    assert build_source.latest_name("feature/x") == "latest.json"
 
 
 def test_the_publisher_and_the_builder_share_one_ref_vocabulary():
@@ -320,6 +335,9 @@ def builder(tmp_path, publisher, monkeypatch):
     monkeypatch.setattr(build_hub, "build", compile_hub)
     monkeypatch.setattr(build_source, "fetch", lambda *args: HEAD)
     monkeypatch.setattr(build_source.subprocess, "run", lambda *a, **k: None)
+    # The bump gate is the repo's own script, proven against real git below;
+    # here it records that a release asked it and a debug build did not.
+    monkeypatch.setattr(build_source, "bump_gate", lambda stack: calls.append(["bump-gate"]))
     # The grid this hub adopted into, per test. The package-level store is one
     # file for the whole session, so a leaf another module enrolled would
     # otherwise decide whether these builds are allowed to run.
@@ -359,7 +377,7 @@ def test_a_machine_with_nowhere_to_build_from_says_so_instead_of_raising_a_key_e
 def test_a_build_lands_an_offer_this_hub_signed_itself(builder, publisher):
     root, feed, config, _ = builder
     atomic_json(root / "config.json", dict(config))
-    result = build_source.build(root, config, ref="feature/x")
+    result = build_source.build(root, config, ref="feature/x", debug=True)
     _, public = build_source.build_key(root)
     envelope = json.loads((feed / "latest.json").read_text())
     manifest = releases.verify(envelope, public)
@@ -388,7 +406,8 @@ def test_a_build_lands_the_shape_stage_already_consumes(builder):
         trust = json.loads(bundle.extractfile("host/jstack_host/release-trust.json").read())
     # stage() reads exactly these three facts back out of the tarball.
     assert identity["release"] == release and identity["sha"] == manifest["sources"]["stack"]
-    assert identity["package_sha256"] and identity["channel"] == "stable"
+    assert identity["package_sha256"] and identity["channel"] == "main"
+    assert "debug" not in identity
     assert trust["public_key"] == build_source.build_key(root)[1]
 
 
@@ -415,7 +434,7 @@ def test_a_hub_with_private_capabilities_builds_their_variant_beside_the_feed(bu
     public = build_source.build_key(root)[1]
     # The public bundle first, then the same identity with the catalog in it.
     assert [item[0] for item in built] == [None, {"tunnel": {"argv": ["/bin/true"]}}]
-    assert {item[1:] for item in built} == {(release, public, build_source.release_date(), "stable")}
+    assert {item[1:] for item in built} == {(release, public, build_source.release_date(), "main")}
     variant = store / release / "hub-catalog.zip"
     assert zipfile.ZipFile(variant).namelist() == ["jStack Hub.app/Contents/Info.plist"]
     # Machine-local only: the feed carries the public bundle and nothing else.
@@ -486,7 +505,7 @@ def test_a_ref_force_pushed_behind_the_held_build_is_refused(builder, publisher)
         build_source.build(root, config)
     # A different ref is a rollback, not a downgrade: its count means nothing
     # against the line this hub was on.
-    assert build_source.build(root, config, ref="feature/x")["release"]
+    assert build_source.build(root, config, ref="feature/x", debug=True)["release"]
 
 
 @pytest.mark.parametrize("excluded", ["managed", "parent_record"])
@@ -499,3 +518,160 @@ def test_a_leaf_never_builds(builder, excluded):
     with pytest.raises(releases.ReleaseError, match="from its parent"):
         build_source.build(root, config)
     assert not calls
+
+
+# ── Lines, debug builds and the bump gate ───────────────────────────────────
+
+def test_a_release_off_a_branch_that_is_not_a_line_is_refused_before_anything_runs(builder):
+    root, _, config, calls = builder
+    with pytest.raises(releases.ReleaseError, match="release procedure"):
+        build_source.build(root, config, ref="feature/x")
+    assert not calls and not (root / "build.json").exists()
+    with pytest.raises(releases.ReleaseError, match="not a release line"):
+        build_source.bootstrap(root, root / "out", root / "keys", repo="example/stack",
+                               ref="feature/x")
+
+
+def test_a_debug_build_says_so_skips_the_bump_and_never_shares_a_release_name(builder, monkeypatch):
+    from jstack_host import build_hub
+    root, feed, config, calls = builder
+    compile_hub, seen = build_hub.build, []
+
+    def compile_recording(stack, output, version, signing, **kwargs):
+        seen.append(kwargs.get("debug"))
+        return compile_hub(stack, output, version, signing, **kwargs)
+
+    monkeypatch.setattr(build_hub, "build", compile_recording)
+    release = build_source.build(root, config)["release"]
+    assert ["bump-gate"] in calls and seen == [False]
+    calls.clear()
+    debug = build_source.build(root, config, debug=True)["release"]
+    assert ["bump-gate"] not in calls and seen == [False, True]
+    # Same commit, same client, same day: still two names, so a rebuild can
+    # never re-offer a debug build as the release or the other way round.
+    assert debug != release
+    with tarfile.open(feed / debug / "stack.tar.gz") as bundle:
+        identity = json.loads(bundle.extractfile("host/release-identity.json").read())
+    assert identity["debug"] is True
+
+
+def test_a_debug_identity_is_sealed_into_the_bundle():
+    from jstack_host import build_hub
+    kwargs = dict(release_id="r-1", github_repo="example/stack", date="2026-09-25",
+                  channel="feature/x")
+    assert build_hub.release_identity("a" * 40, "26.9.1", debug=True, **kwargs)["debug"] is True
+    assert "debug" not in build_hub.release_identity("a" * 40, "26.9.1", **kwargs)
+
+
+def _git(repo, *args):
+    import subprocess
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                          text=True).stdout
+
+
+def _plugin_repo(tmp_path, version):
+    """A repo carrying the real version-bump gate and one bumped manifest."""
+    repo = tmp_path / "stack"
+    gate = Path(__file__).resolve().parents[2] / "plugins/jstack/tests/version-bump.sh"
+    (repo / "plugins/jstack/tests").mkdir(parents=True)
+    (repo / "plugins/jstack/.claude-plugin").mkdir(parents=True)
+    (repo / "plugins/jstack/tests/version-bump.sh").write_text(gate.read_text())
+    (repo / "plugins/jstack/.claude-plugin/plugin.json").write_text(json.dumps({"version": version}))
+    (repo / "plugins/jstack/hook.sh").write_text("echo one\n")
+    _git(tmp_path, "init", "-q", str(repo))
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", f"chore(release): {version}")
+    return repo
+
+
+def test_a_commit_whose_plugin_changes_no_bump_covers_is_refused(tmp_path):
+    repo = _plugin_repo(tmp_path, "26.9.1")
+    build_source.bump_gate(repo)  # the bump commit itself is covered
+    (repo / "plugins/jstack/hook.sh").write_text("echo two\n")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "fix: unbumped")
+    with pytest.raises(releases.ReleaseError, match="run the release procedure on dev"):
+        build_source.bump_gate(repo)
+    # The release tool's bump covers it again; 26.9.2 after 0.85.0-era history
+    # is compared by value, never by semver order.
+    (repo / "plugins/jstack/.claude-plugin/plugin.json").write_text('{"version": "26.9.2"}')
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "chore(release): 26.9.2")
+    build_source.bump_gate(repo)
+
+
+def test_a_bump_from_the_old_scheme_to_the_new_one_is_a_bump(tmp_path):
+    repo = _plugin_repo(tmp_path, "0.85.0")
+    (repo / "plugins/jstack/hook.sh").write_text("echo two\n")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "fix: shipped")
+    with pytest.raises(releases.ReleaseError):
+        build_source.bump_gate(repo)
+    (repo / "plugins/jstack/.claude-plugin/plugin.json").write_text('{"version": "26.9.1"}')
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "chore(release): 26.9.1")
+    build_source.bump_gate(repo)
+
+
+def test_building_the_lines_skips_a_line_already_built_at_its_tip(builder, monkeypatch):
+    root, feed, config, _ = builder
+    # main's offer is a build of OLD this hub signed; dev has never been built.
+    private, public = build_source.build_key(root)
+    published(feed, SimpleNamespace(private_bytes_raw=lambda: private))
+    config["public_key"] = public
+    tips = {"main": OLD, "dev": HEAD}
+    monkeypatch.setattr(build_source, "head", lambda client, repo, ref: tips[ref])
+    built = []
+    real = build_source.build
+
+    def recording(where, settings, **kwargs):
+        built.append(kwargs.get("ref"))
+        return real(where, settings, **kwargs)
+
+    monkeypatch.setattr(build_source, "build", recording)
+    main_before = (feed / "latest.json").read_bytes()
+    result = build_source.build_lines(root, config, client=object())
+    assert built == ["dev"]
+    assert result["main"] == {"skipped": "current", "release": "published-1", "sha": OLD}
+    assert result["dev"]["ref"] == "dev"
+    # Each line has its own offer; main's is untouched by a dev build, and dev
+    # carried main's client forward for its first one.
+    assert (feed / "latest.json").read_bytes() == main_before
+    dev = releases.verify(json.loads((feed / "latest-dev.json").read_text()),
+                          build_source.build_key(root)[1])
+    assert dev["channel"]["name"] == "dev" and dev["sources"]["stack"] == HEAD
+    assert build_source.held(config, "dev") == (dev["release"], HEAD)
+    built.clear()
+    tips["dev"] = HEAD
+    assert build_source.build_lines(root, config, client=object())["dev"]["skipped"] == "current"
+    assert built == []
+
+
+def test_a_first_build_that_rotates_the_key_withdraws_the_other_lines_stale_offer(builder):
+    """One pinned key at a time. main's offer is the publisher's; the first
+    dev build pins this hub's key, and an offer only the old key signed would
+    read as a broken feed on every route that serves main."""
+    root, feed, config, _ = builder
+    build_source.build(root, config, ref="dev")
+    assert not (feed / "latest.json").exists()
+    assert build_source.held(config, "main") == ("", "")
+    releases.verify(json.loads((feed / "latest-dev.json").read_text()), config["public_key"])
+
+
+@pytest.mark.parametrize("argv,expected", [
+    ([], ("lines",)),
+    (["--ref", "dev"], ("build", "dev", False)),
+    (["--ref", "feature/x", "--debug"], ("build", "feature/x", True)),
+    (["--debug"], ("build", None, True)),
+])
+def test_updates_build_builds_the_lines_unless_told_one_ref(tmp_path, monkeypatch, capsys,
+                                                             argv, expected):
+    from jstack_host import cli, hostenv
+    state = tmp_path / "state"
+    (state / "updates").mkdir(parents=True)
+    (state / "updates/config.json").write_text('{"github_repo": "example/stack"}')
+    monkeypatch.setattr(hostenv, "state_dir", lambda: state)
+    seen = []
+    monkeypatch.setattr(build_source, "build_lines",
+                        lambda root, config: seen.append(("lines",)) or {"main": {}})
+    monkeypatch.setattr(build_source, "build", lambda root, config, ref=None, debug=False:
+                        seen.append(("build", ref, debug)) or {"release": "r"})
+    monkeypatch.setattr("sys.argv", ["jstack-host", "updates", "build", *argv])
+    assert cli.main() in (0, None) and seen == [expected]
+    assert json.loads(capsys.readouterr().out)

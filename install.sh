@@ -22,6 +22,9 @@ CHECKOUT="${JSTACK_CHECKOUT:-$HOME/jStack}"
 # Hub this Mac runs is the commit at the tip of this branch, compiled here.
 REF="${JSTACK_REF:-main}"
 AGENT_ROOT="${JSTACK_AGENT_ROOT:-$HOME/Agents}"
+# A release is built only off main or dev. Any other branch installs as a
+# debug build, asked for in as many words, and says so wherever it is shown.
+DEBUG_BUILD=0
 # The seat a new agent gets, and the one name the rest of the stack knows by
 # heart: `board._chat_scoped_id` looks for exactly this sub-mode, and an agent
 # without it is driven at its root. Not a flag — a second spelling would only
@@ -65,7 +68,9 @@ usage: install.sh [options]
   --agent NAME        create this agent workspace (default: ask, or "Jarvis" with --yes)
   --agent-root DIR    where agent workspaces live (default: <root>/Agents)
   --checkout DIR      where to clone jStack (default: ~/jStack)
-  --ref REF           branch to build and install (default: main)
+  --ref REF           branch to build and install (default: main); main and
+                      dev are release lines, anything else needs --debug
+  --debug             build --ref as a debug build: any branch, never a release
   --no-scheduler      don't register the Hub's scheduler service (no recurring wakes)
   --no-claude         don't install Claude Code even if it is missing
   --no-host           use the client with another Hub; no local Hub or menu
@@ -99,6 +104,7 @@ while [ $# -gt 0 ]; do
         --agent-root)  AGENT_ROOT="${2:-}"; shift ;;
         --checkout)    CHECKOUT="${2:-}"; shift ;;
         --ref)         REF="${2:-}"; shift ;;
+        --debug)       DEBUG_BUILD=1 ;;
         # ROOT_FROM_FLAG separates "someone asked for this root, now" from "this
         # shell happens to export one". Both arrive as $JSTACK_ROOT and they
         # need opposite handling: an exported root is already declared
@@ -123,6 +129,15 @@ case "$REF" in
     ""|-*|*" "*|*".."*|*"~"*|*"^"*|*":"*)
         echo "--ref must name a branch, got: ${REF:-<empty>}" >&2; exit 2 ;;
 esac
+# Said here rather than after the clone and the build interpreter: the Hub
+# build refuses a release off anything but a line, and so does this.
+if [ "$DEBUG_BUILD" = 0 ] && [ "$WANT_HOST" = 1 ] && [ "$DO_UNINSTALL" = 0 ]; then
+    case "$REF" in
+        main|dev|stable) ;;
+        *) echo "--ref $REF is not a release line (main or dev); add --debug to install it as a debug build" >&2
+           exit 2 ;;
+    esac
+fi
 
 # The one installer. Sub-installers check this and refuse direct invocation.
 export JSTACK_INSTALLER=1
@@ -1648,6 +1663,9 @@ if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ] \
         fi
         if [ -n "$SIGNING_CONFIG" ]; then
             build_args+=(--signing "$SIGNING_CONFIG")
+        fi
+        if [ "$DEBUG_BUILD" = 1 ]; then
+            build_args+=(--debug)
         fi
         run_long "building the Hub from $REF" \
             "$BUILD_VENV/bin/python3" -m jstack_host.build_source bootstrap "${build_args[@]}" \
