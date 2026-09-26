@@ -16,6 +16,10 @@
 #     → None; content past the offset doesn't move it); delta note lands in
 #     the selfwrite prompt only when a boundary exists
 #   - stale-dub sweep: dead-owner selfwrite dubs reaped, live-owner dubs kept
+#   - host hooks: selfwrite_extra_prompt rides the one turn verbatim;
+#     post_selfwrite_cmd runs after SELFWRITE_DONE only, with the session id and
+#     the self-write's still-present transcript, logs ok|fail|timeout, and never
+#     changes the self-write's own outcome
 #
 # Exit 0 = all pass, exit 1 = any fail.
 
@@ -445,6 +449,99 @@ check("selfwrite: deliberate skip → SELFWRITE_NOENTRY", "SELFWRITE_NOENTRY" in
 
 _r = _selfwrite_case("", False)
 check("selfwrite: silent empty output → SELFWRITE_NOENTRY", "SELFWRITE_NOENTRY" in _r)
+
+# ---- host hooks around the self-write ----------------------------------
+# selfwrite_extra_prompt is appended verbatim to the one turn's prompt;
+# post_selfwrite_cmd runs as <cmd> <sid> <transcript> after SELFWRITE_DONE,
+# while the dub (the self-write's own transcript) still exists to be read.
+_SID = "11111111-2222-3333-4444-555555555555"
+_hook_out = tmp / "post-hook.out"
+_hook = tmp / "post hook.sh"
+_hook.write_text('#!/bin/sh\n'
+                 'printf "%s|%s|%s|%s\\n" "$1" "$2" "$3" "$(cat "$3")" >> "$HOOK_OUT"\n'
+                 'echo hooked\n')
+_hook.chmod(0o755)
+_fail_hook = tmp / "fail-hook.sh"
+_fail_hook.write_text("#!/bin/sh\necho nope >&2\nexit 3\n"); _fail_hook.chmod(0o755)
+_slow_hook = tmp / "slow-hook.sh"
+_slow_hook.write_text("#!/bin/sh\nsleep 5\n"); _slow_hook.chmod(0o755)
+os.environ["HOOK_OUT"] = str(_hook_out)
+
+def _hook_case(stdout, writes_row, extra_prompt=None, post_cmd=None):
+    """spawn_selfwrite with the hook keys set; returns (result, prompt, log lines)."""
+    (_proj / f"{_DUB}.jsonl").write_text('{"reply":"DECISIONS: none"}\n')
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        if "dub-session" in str(cmd[0]):
+            return _sp.CompletedProcess(cmd, 0, _DUB, "")
+        if cmd[0] == "claude":
+            seen["prompt"] = cmd[cmd.index("-p") + 1]
+            if writes_row:
+                c = _sq.connect(_tldir / "timeline.db")
+                c.execute("INSERT INTO entries (headline) VALUES ('written')")
+                c.commit(); c.close()
+            return _sp.CompletedProcess(cmd, 0, stdout, "")
+        return _real_run(cmd, **kw)       # the host command runs for real
+
+    saved = {k: eng.CFG.get(k) for k in ("selfwrite_extra_prompt", "post_selfwrite_cmd")}
+    eng.CFG["selfwrite_extra_prompt"] = extra_prompt
+    eng.CFG["post_selfwrite_cmd"] = post_cmd
+    before = len(eng.CFG["log_file"].read_text().splitlines())
+    eng.subprocess.run = fake_run
+    try:
+        res = eng.spawn_selfwrite(_SID, "alpha", "Alpha", "chat", _jsonl)
+    finally:
+        eng.subprocess.run = _real_run
+        eng.CFG.update(saved)
+    lines = eng.CFG["log_file"].read_text().splitlines()[before:]
+    return res, seen.get("prompt", ""), lines
+
+check("hook keys are known config (not dropped by load_config)",
+      "selfwrite_extra_prompt" in eng.DEFAULTS and "post_selfwrite_cmd" in eng.DEFAULTS)
+
+_EXTRA = "4. HOST STEP — end with a line `MARK: yes`."
+_res, _prompt, _lines = _hook_case("log_event done", True, extra_prompt=_EXTRA)
+check("extra prompt appended verbatim at the end of the self-write prompt",
+      _prompt.rstrip().endswith(_EXTRA) or (_EXTRA in _prompt and _prompt.index(_EXTRA) > _prompt.index("That is every step")))
+check("no post cmd configured → no POST_SELFWRITE line",
+      not any("POST_SELFWRITE" in l for l in _lines))
+_res, _prompt, _ = _hook_case("log_event done", True)
+check("unset extra prompt leaves the prompt as shipped", "HOST STEP" not in _prompt)
+
+_hook_out.unlink(missing_ok=True)
+_res, _, _lines = _hook_case("log_event done", True, post_cmd=f"'{_hook}' --flag")
+_got = _hook_out.read_text().strip() if _hook_out.exists() else ""
+check("post cmd ran after SELFWRITE_DONE",
+      any("SELFWRITE_DONE" in l for l in _lines) and bool(_got))
+check("post cmd argv = <cmd args> <session_id> <transcript>",
+      _got.startswith(f"--flag|{_SID}|{_proj / (_DUB + '.jsonl')}|"))
+check("post cmd read the self-write transcript before the dub was dropped",
+      _got.endswith("DECISIONS: none\"}"))
+check("POST_SELFWRITE ok <sid8> logged", any(f"POST_SELFWRITE ok {_SID[:8]}" in l for l in _lines))
+check("dub still deleted after the post cmd", not (_proj / f"{_DUB}.jsonl").exists())
+check("self-write outcome unchanged by an ok hook", _res is True)
+
+_res, _, _lines = _hook_case("log_event done", True, post_cmd=str(_fail_hook))
+check("failing post cmd → POST_SELFWRITE fail", any(f"POST_SELFWRITE fail {_SID[:8]}" in l for l in _lines))
+check("failing post cmd does not change the self-write outcome", _res is True)
+
+_saved_to = eng.POST_SELFWRITE_TIMEOUT_SECS
+eng.POST_SELFWRITE_TIMEOUT_SECS = 1
+try:
+    _res, _, _lines = _hook_case("log_event done", True, post_cmd=str(_slow_hook))
+finally:
+    eng.POST_SELFWRITE_TIMEOUT_SECS = _saved_to
+check("slow post cmd → POST_SELFWRITE timeout", any(f"POST_SELFWRITE timeout {_SID[:8]}" in l for l in _lines))
+check("timed-out post cmd does not change the self-write outcome", _res is True)
+check("post cmd timeout is 120s", _saved_to == 120)
+
+_hook_out.unlink(missing_ok=True)
+_res, _, _lines = _hook_case("Nothing timeline-worthy.", False, post_cmd=str(_hook))
+check("no entry filed (SELFWRITE_NOENTRY) → post cmd not run",
+      not _hook_out.exists() and not any("POST_SELFWRITE" in l for l in _lines))
+_res, _, _lines = _hook_case("I ran log_event.", False, post_cmd=str(_hook))
+check("SELFWRITE_NOROW → post cmd not run", not _hook_out.exists())
 
 # ---- black-hole detection ----------------------------------------------
 # A session dir with no transcript = the CLI never persisted the session

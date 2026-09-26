@@ -378,5 +378,39 @@ assert "PreToolUse[ExitPlanMode]" in dropped, f"dropped silently: {dropped}"
 EOF
 pass "codex-matchers"
 
+# (12) Where the work lands. Header lines are the author's word; without a
+#      `Branch:` line the branch checked out in the approving session's cwd is
+#      recorded; a cwd that is no repo records nothing and blocks nothing.
+exiting_in() {  # exiting_in <sid> <plan-markdown-file> <cwd>
+  "$PY" - "$1" "$2" "$CLAUDE_T" "$3" <<'EOF' | "$PY" "$EXIT_HOOK"
+import json, sys
+print(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "ExitPlanMode",
+                  "session_id": sys.argv[1], "cwd": sys.argv[4],
+                  "permission_mode": "plan", "transcript_path": sys.argv[3],
+                  "tool_input": {"plan": open(sys.argv[2]).read(),
+                                 "planFilePath": sys.argv[2]}}))
+EOF
+}
+REPO="$TMP/repo"
+git init -q -b feature/tracked "$REPO" && git -C "$REPO" -c user.email=t@t -c user.name=t \
+  commit -q --allow-empty -m seed || fail "tracking" "could not make a test repo"
+{ printf '# Tracked\n\nBranch: `issue-12`\nIssue: owner/repo#12\n\n'; sed 1d "$TMP/good.md"; } > "$TMP/tracked.md"
+T1=tracked-$$
+prompt $T1 plan "$CLAUDE_T" >/dev/null
+[[ -z "$(exiting_in $T1 "$TMP/tracked.md" "$REPO")" ]] || fail "tracking" "a tracked plan was blocked"
+[[ "$(query $T1 '(p["branch"], p["issue"], p["pr"])')" == "('issue-12', 'owner/repo#12', None)" ]] \
+  || fail "tracking" "header lines not recorded: $(query $T1 '(p["branch"], p["issue"], p["pr"])')"
+T2=checkout-$$
+prompt $T2 plan "$CLAUDE_T" >/dev/null
+exiting_in $T2 "$TMP/good.md" "$REPO" >/dev/null
+[[ "$(query $T2 'p["branch"]')" == "feature/tracked" ]] \
+  || fail "tracking" "checkout branch not recorded: $(query $T2 'p["branch"]')"
+T3=norepo-$$
+prompt $T3 plan "$CLAUDE_T" >/dev/null
+[[ -z "$(exiting_in $T3 "$TMP/good.md" "$TMP/state")" ]] || fail "tracking" "a cwd outside git blocked the tool"
+[[ "$(query $T3 '(p["status"], p["branch"])')" == "('active', None)" ]] \
+  || fail "tracking" "no-repo cwd: $(query $T3 '(p["status"], p["branch"])')"
+pass "branch-issue-recorded"
+
 echo ""
 echo "ALL PASS — plan mode captured as rows, and the gate contained"
