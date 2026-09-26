@@ -40,7 +40,7 @@ def _history(*targets):
 def test_forget_route_records_tile_and_grant_with_the_calling_device(client, monkeypatch):
     monkeypatch.setattr(managed_access, "console", lambda _: True)
     _adopted()
-    row, token = devices.mint("boss-phone")
+    row, token = devices.mint("owner-phone")
     resp = client.post("/api/jremote/v1/hosts/leaf-mac-01/forget", json={},
                        headers={"Authorization": f"Bearer {token}",
                                 "User-Agent": "jRemote/1.0",
@@ -50,7 +50,7 @@ def test_forget_route_records_tile_and_grant_with_the_calling_device(client, mon
     assert {r["action"] for r in rows} == {"host.forget", "host_grant.revoke"}
     for r in rows:
         assert r["target_name"] == "work"
-        assert r["actor"] == row["id"] and r["actor_name"] == "boss-phone"
+        assert r["actor"] == row["id"] and r["actor_name"] == "owner-phone"
         assert r["via"] == "POST /api/jremote/v1/hosts/leaf-mac-01/forget"
         assert r["user_agent"] == "jRemote/1.0"
         assert r["detail"] == {"build": "1.0 (104)"}
@@ -121,7 +121,7 @@ def test_history_shows_a_forgotten_machine_with_its_credential(capsys, monkeypat
     s = _adopted()
     dev, _ = devices.mint("work")
     s.bind_host_device("leaf-mac-01", dev["id"])
-    with audit.acting({"via": "POST /x", "actor": "d1", "actor_name": "boss-phone",
+    with audit.acting({"via": "POST /x", "actor": "d1", "actor_name": "owner-phone",
                        "origin": "10.66.0.2"}):
         s.forget_host("leaf-mac-01")
         grants.forget("leaf-mac-01")
@@ -131,7 +131,7 @@ def test_history_shows_a_forgotten_machine_with_its_credential(capsys, monkeypat
     assert cli.main(["history", "work"]) == 0
     out = capsys.readouterr().out
     assert "host.forget" in out and "host_grant.revoke" in out
-    assert "device.revoke" in out and "by boss-phone via POST /x from 10.66.0.2" in out
+    assert "device.revoke" in out and "by owner-phone via POST /x from 10.66.0.2" in out
 
     assert cli.main(["history", "leaf-mac-01", "--json"]) == 0
     rows = json.loads(capsys.readouterr().out)
