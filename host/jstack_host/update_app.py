@@ -122,12 +122,24 @@ class AppBackend(MacBackend):
         return job["transaction"]["services"].get(self._host_role()) == "enabled"
 
     def verify(self, job: dict) -> bool:
+        """Every role the snapshot held is back in the state it was in.
+
+        A role that reads otherwise is named in `unverified`, which the
+        supervisor carries into the job's failure. Unnamed, a verification
+        failure over a dropped automation role read the same as one over the
+        bundle, and a machine missing its tunnel had nothing to say which (#197).
+        """
+        self.unverified = ""
         if not super().verify(job):
             return False
         try:
             observed = self._statuses(Path(self.config["menubar_path"]))
-            if any(observed.get(role) != expected
-                   for role, expected in job["transaction"]["services"].items()):
+            diverged = {role: expected for role, expected in job["transaction"]["services"].items()
+                        if observed.get(role) != expected}
+            if diverged:
+                self.unverified = "; ".join(
+                    f"{role} service is {observed.get(role, 'absent')}, was {expected} before the update"
+                    for role, expected in sorted(diverged.items()))
                 return False
             if not self._host_required(job):
                 from .app_services import specification

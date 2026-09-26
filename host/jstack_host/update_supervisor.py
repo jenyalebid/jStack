@@ -280,7 +280,8 @@ class Supervisor:
                 return
             if time.time() - self.current["verify_started"] < 120:
                 return
-            self.abandon("updated components failed verification")
+            named = getattr(self.backend, "unverified", "")
+            self.abandon("updated components failed verification" + (f": {named}" if named else ""))
             self.heartbeat()
             return
         try:
