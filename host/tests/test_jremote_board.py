@@ -113,6 +113,49 @@ def _windows(monkeypatch, attached):
     monkeypatch.setattr(board, "_window_truth", lambda: (_PANES, set(attached)))
 
 
+def test_a_failing_client_read_does_not_discard_the_pane_map(monkeypatch, capsys):
+    """#135 (Boss). One try around both tmux reads threw away a good pane map
+    when the attached-clients read raised, so a Codex pane — whose only
+    identity IS its pane — read as an anonymous pid- orphan beside its real
+    row. Each read is caught on its own now, and the failure is logged."""
+    from jstack_host import managed
+    monkeypatch.setattr(managed, "pane_ttys", lambda: dict(_PANES))
+
+    def boom():
+        raise PermissionError("AccessDenied reading a hardened client's environ")
+
+    monkeypatch.setattr(managed, "attached_names", boom)
+    panes, attached = board._window_truth()
+    assert panes == _PANES
+    assert attached == set()
+    assert "attached_names failed" in capsys.readouterr().err
+
+
+def test_a_failing_pane_read_keeps_the_attached_set(monkeypatch, capsys):
+    from jstack_host import managed
+
+    def boom():
+        raise OSError("tmux gone")
+
+    monkeypatch.setattr(managed, "pane_ttys", boom)
+    monkeypatch.setattr(managed, "attached_names", lambda: {"jr-aaaa0001"})
+    panes, attached = board._window_truth()
+    assert panes == {} and attached == {"jr-aaaa0001"}
+    assert "pane_ttys failed" in capsys.readouterr().err
+
+
+def test_a_codex_pane_with_a_good_pane_map_is_one_row_not_two(monkeypatch):
+    """The visible defect: with the pane map intact, the Codex process on a
+    managed pane's tty resolves to its registry sid and no pid- orphan is
+    emitted for it."""
+    from jstack_host import managed
+    sid = "f1dc7c6a-ca8f-448e-9125-ca13edac306e"
+    monkeypatch.setattr(managed, "open_registry",
+                        lambda: {sid: {"agent": "atlas", "engine": "codex"}})
+    sids = board._pane_sids({"/dev/ttys001": "jr-f1dc7c6a"})
+    assert sids == {"/dev/ttys001": sid}
+
+
 def test_tmux_pane_without_client_is_not_a_window():
     """THE bug: the pane tty outlives the window. No client → no window."""
     assert board._has_window("/dev/ttys002", _PANES, set()) is False
