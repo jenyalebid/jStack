@@ -136,6 +136,62 @@ def update_plan_meta(plan_id: str, *, title: str | None = None,
                    " WHERE id = ?", (*vals, _now(), plan_id))
 
 
+#: Where a plan's work lands. Order is the order `plan list` prints them in.
+TRACKING = ("branch", "issue", "pr")
+
+
+def set_tracking(plan_id: str, *, branch: str | None = None,
+                 issue: str | None = None, pr: str | None = None) -> None:
+    """Bind a plan to its branch, issue or PR.
+
+    `update_plan_meta`'s convention: `None` leaves a field alone. `""` clears
+    it back to NULL — unknown — rather than storing an empty string a reader
+    would have to treat as unknown anyway.
+    """
+    given = {"branch": branch, "issue": issue, "pr": pr}
+    sets = [(k, v.strip() or None) for k, v in given.items() if v is not None]
+    if not sets:
+        raise ValueError("set_tracking: name branch, issue or pr")
+    with store.get_store().conn() as db:
+        _require_plan(db, plan_id)
+        db.execute(f"UPDATE plans SET {', '.join(f'{k} = ?' for k, _ in sets)},"
+                   " updated_at = ? WHERE id = ?",
+                   (*(v for _, v in sets), _now(), plan_id))
+
+
+def checkout_branch(cwd: str) -> str:
+    """The branch checked out at `cwd`, or "" — detached, not a repo, no git."""
+    if not cwd or not os.path.isdir(cwd):
+        return ""
+    try:
+        done = subprocess.run(["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
+                              capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    name = done.stdout.strip() if done.returncode == 0 else ""
+    return "" if name == "HEAD" else name
+
+
+def bind_authored(plan_id: str, parsed, cwd: str = "") -> None:
+    """Record what the plan's markdown says about where it lands.
+
+    Header lines are the author's word and always win. Absent a `Branch:`
+    line, the branch checked out where the plan was approved fills the column
+    only while it is empty — a later `plan set` is a deliberate binding, and a
+    re-approval from another checkout must not overwrite it with a guess.
+    """
+    authored = {k: str(_field(parsed, k, "") or "") for k in TRACKING}
+    given = {k: v for k, v in authored.items() if v}
+    if not authored["branch"]:
+        row = plan(plan_id)
+        if row is not None and not row.get("branch"):
+            guessed = checkout_branch(cwd)
+            if guessed:
+                given["branch"] = guessed
+    if given:
+        set_tracking(plan_id, **given)
+
+
 def _require_plan(db, plan_id: str) -> None:
     """Refuse a plan id nothing answers to, the way the stage writers do.
 
@@ -649,6 +705,20 @@ def list_plans(*, limit: int = 50, include_done: bool = True) -> list[dict]:
     args.append(max(1, min(int(limit), MAX_LIST)))
     with store.get_store().conn() as db:
         return _rows(db.execute(sql, args))
+
+
+def session_ids(plan_ids) -> dict[str, list[str]]:
+    """`{plan_id: [session_id, …]}` in join order — the author first."""
+    ids = list(plan_ids)
+    out: dict[str, list[str]] = {i: [] for i in ids}
+    if not ids:
+        return out
+    with store.get_store().conn() as db:
+        for r in db.execute(
+                "SELECT plan_id, session_id FROM plan_sessions WHERE plan_id IN"
+                f" ({','.join('?' * len(ids))}) ORDER BY joined_at, rowid", ids):
+            out[r["plan_id"]].append(r["session_id"])
+    return out
 
 
 def plans_for_session(session_id: str) -> list[dict]:
