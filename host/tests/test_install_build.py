@@ -457,6 +457,16 @@ def test_install_sh_never_deletes_uncommitted_work_in_the_checkout():
     assert "has uncommitted work (above)" in CODE
 
 
+def test_the_unsealed_host_and_menubar_installers_are_gone():
+    """#192: the sealed Hub owns host, menu bar and updater; the unsealed pair
+    that could put a second icon on a Mac (host/install.sh,
+    host/menubar/install.sh) is deleted, not merely bypassed."""
+    assert not (REPO / "host/install.sh").exists()
+    assert not (REPO / "host/menubar/install.sh").exists()
+    assert "host/install.sh" not in CODE
+    assert "HOST_INSTALLER" not in CODE
+
+
 def test_install_sh_puts_this_checkouts_adapters_on_path_not_merely_some():
     """It asked whether `log_event` resolved at all. On a Mac moved off a
     release install the answer was yes and wrong: the profile pointed into a
