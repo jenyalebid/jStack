@@ -127,6 +127,27 @@ def test_artifact_paths_are_bare_safe_names(release, filename):
         releases.validate(release[2]["manifest"])
 
 
+def test_artifact_verifies_a_release_against_the_key_that_signed_it(tmp_path, monkeypatch, release):
+    """#144 part 2: a hub that later builds its own source rotates its
+    configured key to that build's — an older release still sitting in the
+    feed, signed by a different (publisher's) key, must not 404 for it."""
+    from jstack_host import releases as app_releases
+    key, public, envelope = release
+    monkeypatch.setattr(app_releases, "RELEASE_DIR", tmp_path / "releases/mac")
+    monkeypatch.setattr(hostenv, "state_dir", lambda: tmp_path / "state")
+    fleet.root().mkdir(parents=True)
+    rotated = base64.b64encode(Ed25519PrivateKey.generate().public_key().public_bytes_raw()).decode()
+    atomic_json(fleet.root() / "config.json", {"public_key": rotated})
+    directory = fleet.feed_dir() / envelope["manifest"]["release"]
+    directory.mkdir(parents=True)
+    atomic_json(directory / "manifest.json", envelope)
+    atomic_json(directory / "trust.json", {"algorithm": "Ed25519", "public_key": public})
+    filename = next(iter(envelope["manifest"]["components"].values()))["file"]
+    (directory / filename).write_bytes(b"artifact")
+    response = update_routes.artifact(envelope["manifest"]["release"], filename)
+    assert response.status_code == 200
+
+
 def test_job_survives_reopen_duplicate_delivery_and_rejects_overlap(tmp_path, release):
     path = tmp_path / "jobs.sqlite"
     job = fleet.FleetStore(path).queue("leaf", "credential", release[2], "click-one")
