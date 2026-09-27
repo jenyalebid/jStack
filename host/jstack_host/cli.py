@@ -1978,13 +1978,13 @@ def build_parser() -> argparse.ArgumentParser:
     fs = files.add_parser("status", help="compare declared and observed sharing state")
     fs.set_defaults(fn=_cmd_files)
     fs = files.add_parser("setup", help="print or apply the selected-folder setup")
-    fs.add_argument("--agents-root", help="absolute installed Agents directory (required under sudo)")
+    fs.add_argument("--agents-root", help="absolute installed Agents directory (required when run as root)")
     fs.add_argument("--apply", action="store_true",
-                    help="apply as root (default: print a dry run)")
+                    help="apply through the administrator prompt (default: print a dry run)")
     fs.set_defaults(fn=_cmd_files)
     fs = files.add_parser("off", help="print or remove all SMB share points")
     fs.add_argument("--apply", action="store_true",
-                    help="remove as root (default: print a dry run)")
+                    help="remove through the administrator prompt (default: print a dry run)")
     fs.set_defaults(fn=_cmd_files)
     return ap
 
