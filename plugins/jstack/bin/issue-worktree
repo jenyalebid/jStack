@@ -76,6 +76,15 @@
 # unparseable scan, or a `ps` that will not run all read as OCCUPIED, never as
 # clear — a look that failed must not answer as a look that found nothing.
 #
+# THE CLAIM — argv and cwd are both readings of what is true NOW, so a session
+# that has adopted an issue but not yet moved into its worktree (or entered it
+# under a --resume that carries no ref at all) is invisible to both at the
+# exact moment a second dispatch scans (jStack#135). This tool also writes a
+# claim — pid + start time — the instant it takes a worktree, before the
+# caller does anything else; the next dispatch reads it as a third source of
+# ownership, alongside argv and cwd, and a claim whose pid is not running (or
+# was reissued to something else) is stale and blocks nothing.
+#
 # Last stdout line is machine-parseable:
 #   WORKTREE state=<created|resumed> path=<dir> branch=<issue-N>
 #   WORKTREE state=refused branch=<issue-N> owner=<pid> since=<start>
@@ -114,6 +123,17 @@ if [[ -z "$REPO_ROOT" ]]; then
 fi
 [[ -d "$REPO_ROOT" ]] || die "--repo-root '$REPO_ROOT' is not a directory"
 
+# The claim: recorded the instant THIS tool takes the worktree (see `succeed`
+# below), read by the next dispatch before it trusts a clear ps scan. One
+# file per branch, beside the objects every worktree of this repo already
+# shares — so a claim taken in one worktree is visible from any other.
+CLAIM_FILE=""
+GIT_COMMON_DIR="$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null || true)"
+if [[ -n "$GIT_COMMON_DIR" ]]; then
+  [[ "$GIT_COMMON_DIR" == /* ]] || GIT_COMMON_DIR="$REPO_ROOT/$GIT_COMMON_DIR"
+  CLAIM_FILE="$GIT_COMMON_DIR/jstack-claims/$BRANCH"
+fi
+
 # Absolute, so the cwd containment test below compares like with like. The
 # path need not exist yet, so only its parent is resolved.
 abspath() {
@@ -138,6 +158,28 @@ own_pids() {
     guard=$((guard + 1))
   done
   echo "$out "
+}
+
+# The nearest ancestor that IS a session — same identity rule the scan below
+# uses (argv[0] basename is claude/claude.exe/codex/codex.exe), so an
+# intermediate shell between this binary and the real session is walked past
+# rather than mistaken for one. A claim names this pid, never $$: its life is
+# what "still working this issue" means, and this binary's own pid is gone
+# before anything could ever check it. Empty when no ancestor qualifies —
+# nothing to name, so nothing is claimed.
+session_ancestor_pid() {
+  local p=$$ guard=0 cmd a0 base
+  while [[ -n "$p" && "$p" -gt 1 && $guard -lt 64 ]]; do
+    p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ "$p" =~ ^[0-9]+$ ]] || break
+    cmd="$(ps -o command= -p "$p" 2>/dev/null)"
+    a0="${cmd%% *}"; base="$(basename "${a0:-}" 2>/dev/null || true)"
+    if [[ "$base" == claude || "$base" == claude.exe || "$base" == codex || "$base" == codex.exe ]]; then
+      echo "$p"; return 0
+    fi
+    guard=$((guard + 1))
+  done
+  echo ""
 }
 
 # ── the scan ────────────────────────────────────────────────────────────────
@@ -213,6 +255,30 @@ if [[ -n "$CANDIDATES" ]]; then
   done <<< "$CANDIDATES"
 fi
 
+# ── the claim — closes what argv and cwd cannot see ─────────────────────────
+# Both observables above read what is true NOW. A session that adopted this
+# issue from a comment on a different one carries no ref in argv, and until
+# it actually cd's into the worktree its cwd says nothing either — so a second
+# dispatch racing in that gap sees a clear machine and legitimately creates
+# the tree (jStack#135). The claim is written the instant a dispatch TAKES a
+# worktree (see `succeed`), which is earlier than either observable can be,
+# so it is checked here as a third source of OWNERS, not a replacement for
+# the other two — a claim with no live process behind it is stale and must
+# not block a real resume.
+if [[ -n "$CLAIM_FILE" && -f "$CLAIM_FILE" ]]; then
+  IFS=$'\t' read -r c_pid c_start _ < "$CLAIM_FILE" 2>/dev/null || c_pid=""
+  if [[ "$c_pid" =~ ^[0-9]+$ ]] && [[ "$OWN" != *" $c_pid "* ]]; then
+    c_live="$(ps -o lstart= -p "$c_pid" 2>/dev/null | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+    # The pid must both exist AND still be the same process that claimed it —
+    # a bare `ps -p` pass would call a reissued pid a live owner, breaking the
+    # claim on nothing more than the OS having recycled a number.
+    if [[ -n "$c_live" && "$c_live" == "$c_start" ]]; then
+      c_cmd="$(ps -o command= -p "$c_pid" 2>/dev/null)"
+      OWNERS+="$c_pid"$'\t'"$c_start"$'\t'"the issue-level claim it recorded when it took this worktree"$'\t'"${c_cmd:-<claim recorded; command since unreadable>}"$'\n'
+    fi
+  fi
+fi
+
 # Where the branch is already checked out, if it is. Named in the refusal so
 # the human reading it does not have to go and find the tree.
 branch_worktree() {
@@ -262,8 +328,26 @@ refuse() {
   exit 3
 }
 
+# Record the claim the instant this dispatch takes the worktree — before the
+# caller does anything else, including moving into it. That timing is the
+# whole fix: the next dispatch's OWNERS scan above reads this file, not a
+# process it hopes has already moved.
+write_claim() {
+  [[ -n "$CLAIM_FILE" ]] || return 0
+  local pid start
+  pid="$(session_ancestor_pid)"
+  [[ -n "$pid" ]] || return 0   # no session ancestor found; nothing to name
+  start="$(ps -o lstart= -p "$pid" 2>/dev/null | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+  [[ -n "$start" ]] || return 0   # pid vanished between the two ps calls; skip
+  mkdir -p "$(dirname "$CLAIM_FILE")" 2>/dev/null || return 0
+  printf '%s\t%s\t%s\n' "$pid" "$start" "$(date +%s)" > "$CLAIM_FILE.tmp" 2>/dev/null \
+    && mv -f "$CLAIM_FILE.tmp" "$CLAIM_FILE" 2>/dev/null
+  return 0
+}
+
 succeed() {
   local state="$1" note="${2:-}"
+  write_claim
   if [[ "$JSON" == "1" ]]; then
     printf '{"state":"%s","branch":"%s","path":"%s","note":"%s"}\n' \
       "$state" "$BRANCH" "$WT_ABS" "$note"
