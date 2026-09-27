@@ -516,6 +516,37 @@ def test_revoking_removes_the_peer_and_the_client_files(hub):
     assert not (wg_dir / "clients" / "work-mac.conf").exists()
 
 
+def test_revoking_a_leaf_without_confirmation_is_refused(hub):
+    """jStack#55: a leaf's bundle is its only way back onto the mesh once it
+    is off the LAN — the 2026-09-11 incident. `remove` must not destroy that
+    silently; the keys and bundle stay until the caller says --yes."""
+    wg_dir, env = hub
+    _run_peer(env, "add", "--leaf", "studio")
+    r = _run_peer(env, "remove", "studio")
+    assert r.returncode != 0
+    assert "--yes" in r.stderr
+    assert "# device: studio" in (wg_dir / "wg0.conf").read_text()
+    assert (wg_dir / "clients" / "studio-leaf").is_dir()
+
+
+def test_revoking_a_leaf_with_confirmation_proceeds(hub):
+    wg_dir, env = hub
+    _run_peer(env, "add", "--leaf", "studio")
+    r = _run_peer(env, "remove", "studio", "--yes")
+    assert r.returncode == 0, r.stderr
+    assert "# device: studio" not in (wg_dir / "wg0.conf").read_text()
+    assert not (wg_dir / "clients" / "studio-leaf").exists()
+
+
+def test_revoking_an_ordinary_device_needs_no_confirmation(hub):
+    """The gate is specific to a leaf's bundle — an ordinary paired device
+    (a phone, re-pairable on the spot) is unchanged."""
+    wg_dir, env = hub
+    _run_peer(env, "add", "phone")
+    assert _run_peer(env, "remove", "phone").returncode == 0
+    assert "# device: phone" not in (wg_dir / "wg0.conf").read_text()
+
+
 def test_refresh_recopies_stale_bundle_scripts_and_keeps_the_key(hub):
     """A bundle is minted with a byte copy of the three bringup scripts and the
     folder ships wholesale — a script fixed after the mint leaves the old copy

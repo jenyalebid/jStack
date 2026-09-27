@@ -18,7 +18,8 @@ sync is down.
     wg_peer.py add <device-name>          pair a new device (prints QR path)
     wg_peer.py add --leaf <machine-name>  enrol a leaf host (emits an install bundle)
     wg_peer.py list                       show paired devices
-    wg_peer.py remove <device-name>       revoke a device
+    wg_peer.py remove <device-name>       revoke a device (a leaf needs --yes)
+    wg_peer.py remove <machine-name> --yes  revoke a leaf, having read the warning
     wg_peer.py refresh                    re-copy the bringup scripts into every leaf bundle
 
 A leaf is a machine that joins the mesh by dialing out — same peer entry in
@@ -302,11 +303,26 @@ def list_peers():
         print(f"{name}  {ip}  added {added}")
 
 
-def remove(name):
+def remove(name, confirmed=False):
+    """Revoke a peer — destroys its keys and client files, no un-revoke.
+
+    A leaf's bundle IS the machine's whole way back onto this mesh once it is
+    off the LAN (jStack#55): the 2026-09-11 incident revoked work-mac's peer
+    this way and recovery needed `adopt --offline` to be built first. `remove`
+    on a leaf now refuses without `--yes` — a plain device (a phone, re-pairable
+    on the spot) is unaffected, since losing it costs nothing this sharp.
+    """
     interface, peers = _peer_blocks()
     keep = [p for p in peers if p[0] != name]
     if len(keep) == len(peers):
         raise SystemExit(f"no device {name!r}")
+    if (CLIENTS / f"{name}-leaf").is_dir() and not confirmed:
+        raise SystemExit(
+            f"{name!r} is a leaf machine's own credential — its only way back "
+            f"onto this mesh once it is off this LAN. Revoking destroys the "
+            f"keys now, with no un-revoke; physical LAN access or "
+            f"`adopt --offline` is the way back after. Re-run with --yes to "
+            f"confirm.")
     out = interface
     for pname, added, pub, ip in keep:
         out += (
@@ -337,6 +353,8 @@ def main():
         list_peers()
     elif cmd == "remove" and len(sys.argv) == 3:
         remove(sys.argv[2])
+    elif cmd == "remove" and len(sys.argv) == 4 and sys.argv[3] == "--yes":
+        remove(sys.argv[2], confirmed=True)
     elif cmd == "refresh" and len(sys.argv) == 2:
         refresh()
     else:
