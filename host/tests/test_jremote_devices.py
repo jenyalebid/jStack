@@ -822,7 +822,7 @@ def test_pair_list_remove_is_the_bar_s_whole_device_story(client, store, on_cons
     remove it there, verify its token no longer works. The pieces were each
     tested alone; this walks the one path the menu bar's Remove item takes,
     end to end, on the API it calls."""
-    row, token = devices.mint("boss-iphone")
+    row, token = devices.mint("owner-iphone")
     listed = client.get("/api/jremote/v1/devices").json()["devices"]
     assert any(d["id"] == row["id"] and not d["revoked"] for d in listed)
 

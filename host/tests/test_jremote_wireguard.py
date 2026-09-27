@@ -687,7 +687,7 @@ def test_prune_never_touches_a_peer_it_cannot_read(hub, tmp_path):
 
 def test_prune_keeps_a_handshake_inside_the_window(hub, tmp_path):
     wg_dir, env = hub
-    _run_peer(env, "add", "boss-phone")
+    _run_peer(env, "add", "owner-phone")
     recent = int(time.time()) - 60
     env2 = {
         **env,
@@ -697,4 +697,4 @@ def test_prune_keeps_a_handshake_inside_the_window(hub, tmp_path):
     }
     r = _run_peer(env2, "prune", "--older-than", "30", "--yes")
     assert r.returncode == 0, r.stderr
-    assert "# device: boss-phone" in (wg_dir / "wg0.conf").read_text()
+    assert "# device: owner-phone" in (wg_dir / "wg0.conf").read_text()

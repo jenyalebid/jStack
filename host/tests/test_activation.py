@@ -1,4 +1,4 @@
-"""The convergence engine itself — jenyalebid/jStack#134.
+"""The convergence engine itself — issue 134.
 
 `plan()` is pure and `desired_from_systems()` only ever reads what a system
 declares, so both are tested here without a doctor, a fixture machine, or any

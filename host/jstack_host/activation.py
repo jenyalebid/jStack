@@ -1,4 +1,4 @@
-"""Convergence engine for `activation` declarations — jenyalebid/jStack#134.
+"""Convergence engine for `activation` declarations — issue 134.
 
 A shipped system and an ACTIVE one are different facts: user-scope config
 (a Claude `statusLine`, a Codex MCP entry) is never written back by an
