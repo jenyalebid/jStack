@@ -817,6 +817,26 @@ def test_the_hub_console_can_revoke_another_device(client, store, on_console):
     assert client.post(f"/api/jremote/v1/devices/{row['id']}/revoke").status_code == 404
 
 
+def test_pair_list_remove_is_the_bar_s_whole_device_story(client, store, on_console):
+    """jStack#27's own acceptance line: pair a device, see it in the roster,
+    remove it there, verify its token no longer works. The pieces were each
+    tested alone; this walks the one path the menu bar's Remove item takes,
+    end to end, on the API it calls."""
+    row, token = devices.mint("boss-iphone")
+    listed = client.get("/api/jremote/v1/devices").json()["devices"]
+    assert any(d["id"] == row["id"] and not d["revoked"] for d in listed)
+
+    r = client.post(f"/api/jremote/v1/devices/{row['id']}/revoke")
+    assert r.status_code == 200 and r.json()["self"] is False
+
+    dead = TestClient(app)
+    dead.headers.update({"Authorization": f"Bearer {token}"})
+    assert dead.get("/api/jremote/v1/devices").status_code == 401
+
+    listed = client.get("/api/jremote/v1/devices").json()["devices"]
+    assert any(d["id"] == row["id"] and d["revoked"] for d in listed)
+
+
 def test_a_revoked_device_cannot_use_the_registry(client, store):
     """Its own row included — revocation ends the credential everywhere."""
     row, token = devices.mint("my-old-phone")
