@@ -217,11 +217,16 @@ def _is_phone_client(pid: str) -> bool:
 
     Unknown answers say "window". Nothing's life depends on this call — it
     decides the board's honest "an iTerm window is showing this" display fact,
-    and which ttys `close_windows` closes when a session ends."""
+    and which ttys `close_windows` closes when a session ends. Logged rather
+    than silent: a hardened-runtime client (the app's own signed tmux binary)
+    is a live candidate for `environ()` raising `AccessDenied` here on every
+    call, and an unlogged swallow would hide that for good (#135)."""
     try:
         import psutil
         return psutil.Process(int(pid)).environ().get(PHONE_CLIENT_ENV) == "1"
-    except Exception:
+    except Exception as e:
+        _log(f"phone-client check failed for pid {pid}, counted as a window: "
+             f"{type(e).__name__}: {e}")
         return False
 
 
