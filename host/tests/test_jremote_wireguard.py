@@ -570,3 +570,131 @@ def test_refresh_recopies_stale_bundle_scripts_and_keeps_the_key(hub):
     again = _run_peer(env, "refresh")
     assert again.returncode == 0, again.stderr
     assert "studio-leaf: current" in again.stdout
+
+
+# --- 4. liveness and prune (jarvis#91) ---------------------------------------
+#
+# There is no real NOPASSWD sudoers grant to test against — this tool never
+# writes one — so a fake `sudo` stands in for the two answers the real one
+# can give: pass the read through, or refuse it the way an ungranted seat's
+# always does today.
+
+def _fake_wg_show(tmp_path, handshake_line):
+    """`hub`'s own fake `wg` has no `show` case — nothing else needs one."""
+    script = tmp_path / "fake-wg-show"
+    script.write_text(
+        "#!/bin/bash\n"
+        'case "$1" in\n'
+        '  genkey) echo "CLIENT-PRIVATE-KEY" ;;\n'
+        '  pubkey) cat >/dev/null; echo "CLIENT-PUBLIC-KEY" ;;\n'
+        f'  show) echo "{handshake_line}" ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n")
+    script.chmod(0o755)
+    return script
+
+
+def _fake_sudo_passthrough(tmp_path):
+    script = tmp_path / "fake-sudo"
+    script.write_text('#!/bin/bash\nshift\nexec "$@"\n')
+    script.chmod(0o755)
+    return script
+
+
+def _fake_sudo_refuses(tmp_path):
+    script = tmp_path / "fake-sudo-refuse"
+    script.write_text(
+        '#!/bin/bash\necho "sudo: a password is required" >&2\nexit 1\n')
+    script.chmod(0o755)
+    return script
+
+
+def test_list_shows_a_recent_handshake_when_sudo_grants_the_read(hub, tmp_path):
+    wg_dir, env = hub
+    _run_peer(env, "add", "work-mac")
+    recent = int(time.time()) - 60
+    env2 = {
+        **env,
+        "WG_BIN": str(_fake_wg_show(tmp_path, f"CLIENT-PUBLIC-KEY\t{recent}")),
+        "WG_SUDO_BIN": str(_fake_sudo_passthrough(tmp_path)),
+        "WG_NAME_FILE": str(_write_iface_file(tmp_path)),
+    }
+    out = _run_peer(env2, "list").stdout
+    assert "work-mac" in out and "last handshake:" in out
+    assert "unknown" not in out and "never" not in out
+
+
+def test_list_reads_unknown_never_dead_when_sudo_refuses(hub, tmp_path):
+    """jarvis#91: no NOPASSWD entry exists today, so this is the everyday
+    case — and the row must read `unknown`, not something that reads as
+    evidence the peer is gone."""
+    wg_dir, env = hub
+    _run_peer(env, "add", "work-mac")
+    env2 = {
+        **env,
+        "WG_SUDO_BIN": str(_fake_sudo_refuses(tmp_path)),
+        "WG_NAME_FILE": str(_write_iface_file(tmp_path)),
+    }
+    out = _run_peer(env2, "list").stdout
+    assert "work-mac" in out
+    assert "unknown" in out
+    assert "dead" not in out
+
+
+def _write_iface_file(tmp_path):
+    path = tmp_path / "iface-name"
+    path.write_text("utun9")
+    return path
+
+
+def test_prune_dry_runs_by_default_then_removes_with_yes(hub, tmp_path):
+    wg_dir, env = hub
+    _run_peer(env, "add", "old-phone")
+    stale = int(time.time()) - 40 * 86400
+    env2 = {
+        **env,
+        "WG_BIN": str(_fake_wg_show(tmp_path, f"CLIENT-PUBLIC-KEY\t{stale}")),
+        "WG_SUDO_BIN": str(_fake_sudo_passthrough(tmp_path)),
+        "WG_NAME_FILE": str(_write_iface_file(tmp_path)),
+    }
+
+    dry = _run_peer(env2, "prune", "--older-than", "30")
+    assert dry.returncode == 0, dry.stderr
+    assert "would remove" in dry.stdout
+    assert "# device: old-phone" in (wg_dir / "wg0.conf").read_text()
+
+    r = _run_peer(env2, "prune", "--older-than", "30", "--yes")
+    assert r.returncode == 0, r.stderr
+    assert "removed old-phone" in r.stdout
+    assert "# device: old-phone" not in (wg_dir / "wg0.conf").read_text()
+
+
+def test_prune_never_touches_a_peer_it_cannot_read(hub, tmp_path):
+    """jarvis#91's own guard: unreadable is not evidence of dead, so even
+    `--older-than 0` (everything qualifies by age) must skip it."""
+    wg_dir, env = hub
+    _run_peer(env, "add", "mystery")
+    env2 = {
+        **env,
+        "WG_SUDO_BIN": str(_fake_sudo_refuses(tmp_path)),
+        "WG_NAME_FILE": str(_write_iface_file(tmp_path)),
+    }
+    r = _run_peer(env2, "prune", "--older-than", "0", "--yes")
+    assert r.returncode == 0, r.stderr
+    assert "skip mystery" in r.stdout
+    assert "# device: mystery" in (wg_dir / "wg0.conf").read_text()
+
+
+def test_prune_keeps_a_handshake_inside_the_window(hub, tmp_path):
+    wg_dir, env = hub
+    _run_peer(env, "add", "boss-phone")
+    recent = int(time.time()) - 60
+    env2 = {
+        **env,
+        "WG_BIN": str(_fake_wg_show(tmp_path, f"CLIENT-PUBLIC-KEY\t{recent}")),
+        "WG_SUDO_BIN": str(_fake_sudo_passthrough(tmp_path)),
+        "WG_NAME_FILE": str(_write_iface_file(tmp_path)),
+    }
+    r = _run_peer(env2, "prune", "--older-than", "30", "--yes")
+    assert r.returncode == 0, r.stderr
+    assert "# device: boss-phone" in (wg_dir / "wg0.conf").read_text()
