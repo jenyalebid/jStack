@@ -487,6 +487,17 @@ enum DeviceMenu {
         else { return false }
         return body["detail"] == "unknown or already revoked device"
     }
+
+    /// jStack#55's confirm gate answers with a JSON `detail` naming the
+    /// machine; `post()` deliberately hands its caller the raw body — this is
+    /// the one place that pulls the sentence back out of it for an alert.
+    static func confirmDetail(_ raw: String) -> String {
+        guard let data = raw.data(using: .utf8),
+              let body = try? JSONDecoder().decode([String: String].self, from: data),
+              let detail = body["detail"]
+        else { return raw }
+        return detail
+    }
 }
 
 /// `/host` — the route that proves which machine this is. Behind the token by
@@ -1069,10 +1080,14 @@ final class HostProbe {
     /// route the client app uses, so the roster stays one list with one meaning
     /// of "removed", not two implementations that can disagree. From the 200 the
     /// token opens nothing and any live connection it held is already cut.
-    func revoke(deviceId: String, token: String,
+    func revoke(deviceId: String, token: String, confirm: Bool = false,
                 _ done: @escaping (Bool, String) -> Void) {
-        post("/devices/\(escaped(deviceId))/revoke", token: token, timeout: 10,
-             removal: true, done)
+        // `confirm` answers jStack#55's one extra gate: revoking an adopted
+        // machine's own credential 409s the first time, naming the machine,
+        // so this never carries the flag on a first attempt — only a caller
+        // that has already shown the warning and been told to proceed does.
+        post("/devices/\(escaped(deviceId))/revoke" + (confirm ? "?confirm=true" : ""),
+             token: token, timeout: 10, removal: true, done)
     }
 
     /// Clear a revoked row through the host's own `/devices/{id}/delete`
@@ -3075,18 +3090,59 @@ final class StatusController: NSObject {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         probe.revoke(deviceId: device.id, token: token) { [weak self] ok, detail in
-            if ok, let self {
+            guard let self else { return }
+            if ok {
                 self.removedDevices.insert(device.id)
                 self.state.devices.removeAll { $0.id == device.id }
                 self.build()
-            } else if !ok {
+                self.refresh()
+                return
+            }
+            // jStack#55: the host's one extra gate for an adopted machine's
+            // own credential — the first revoke named the consequence instead
+            // of just failing, and this is the one place that consequence is
+            // shown, before asking again with the flag that overrides it.
+            if detail.contains("confirm=true") {
+                self.confirmThenRevokeAnyway(device: device, token: token,
+                                             warning: DeviceMenu.confirmDetail(detail))
+            } else {
                 let failed = NSAlert()
                 failed.alertStyle = .warning
                 failed.messageText = "Could not remove \(device.name)"
                 failed.informativeText = detail
                 failed.runModal()
             }
-            self?.refresh()
+            self.refresh()
+        }
+    }
+
+    /// The second alert jStack#55 asks for: the host already named which
+    /// machine this strands and why; this is the one chance to back out
+    /// before the flag that overrides the gate is sent.
+    private func confirmThenRevokeAnyway(device: Device, token: String, warning: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "\(device.name) has no other way back onto this mesh"
+        alert.informativeText = warning
+        alert.addButton(withTitle: "Revoke Anyway")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        probe.revoke(deviceId: device.id, token: token, confirm: true) { [weak self] ok, detail in
+            guard let self else { return }
+            if ok {
+                self.removedDevices.insert(device.id)
+                self.state.devices.removeAll { $0.id == device.id }
+                self.build()
+            } else {
+                let failed = NSAlert()
+                failed.alertStyle = .warning
+                failed.messageText = "Could not remove \(device.name)"
+                failed.informativeText = detail
+                failed.runModal()
+            }
+            self.refresh()
         }
     }
 
