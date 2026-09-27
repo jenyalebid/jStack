@@ -192,6 +192,21 @@ def host_identity(api) -> dict:
 
 
 @pytest.fixture(scope="session")
+def console(host_identity) -> None:
+    """The console family (device mint/rename/revoke, enrolment codes) answers
+    only the hub's own menu bar (`managed_access.console`, loopback on a
+    non-leaf) — a suite calling in over the LAN sees 403 by construction, not
+    a defect in the route. Skip with the reason instead of failing: on-host
+    runs are not exercising anything, they are standing somewhere the console
+    family was never for. #171
+    """
+    from jstack_host import managed_access
+    if not managed_access.console_reachable(host_identity["features"]):
+        pytest.skip("the console family is loopback-on-hub only; this suite "
+                    "is not reachable off-host — #171")
+
+
+@pytest.fixture(scope="session")
 def agent_id(api) -> str:
     """An agent this host actually serves — the subject the roster, the tree,
     the Files pane and every session route need.
