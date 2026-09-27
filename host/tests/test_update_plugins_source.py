@@ -314,3 +314,53 @@ def test_a_checkout_already_on_the_commit_and_a_shipped_copy_are_not_touched(hom
     update_plugins.install([{**_provider(shipped), "checkout": False}], tmp_path / "stack", second)
     update_plugins.install([_provider(clone)], tmp_path / "stack", None)
     assert fetched == []
+
+
+# ── a registration reached through a symlink (#220) ──────────────────────────
+
+REFUSED = ("plugin installation failed: Error: marketplace 'jstack' is already added "
+           "from a different source; remove it before adding this source")
+
+
+def _codex_runner(asked, real: Path, refuse: bool):
+    def run(argv):
+        asked.append(argv)
+        if argv[1:4] == ["plugin", "marketplace", "add"] and refuse:
+            raise update_plugins.ReleaseError(REFUSED)
+        if argv[1:4] == ["plugin", "marketplace", "list"]:
+            return f"MARKETPLACE     ROOT\nopenai-curated  /x\njstack          {real}\n"
+        return "[]"
+    return run
+
+
+def test_a_codex_registration_naming_this_tree_through_a_symlink_is_accepted(home, monkeypatch):
+    """codex 0.157 refuses `marketplace add ~/jStack` when it stored the symlink
+    and canonicalizes what it is given. Same directory, so the update goes on."""
+    real = _checkout(home, "Projects/jStack-Project/jStack-Code")
+    link = home / "jStack"
+    link.symlink_to(real)
+    _codex(home, link)
+    asked = []
+    monkeypatch.setattr(update_plugins, "run", _codex_runner(asked, real, refuse=True))
+    update_plugins.install(update_plugins.discover(), _shipped(home))
+    assert ["plugin", "add", "jstack@jstack", "--json"] == asked[-1][1:]
+
+
+def test_a_codex_registration_of_another_tree_still_fails(home, monkeypatch):
+    repo = _checkout(home)
+    _codex(home, repo)
+    asked = []
+    monkeypatch.setattr(update_plugins, "run",
+                        _codex_runner(asked, home / "somewhere-else", refuse=True))
+    with pytest.raises(update_plugins.ReleaseError, match="different source"):
+        update_plugins.install(update_plugins.discover(), _shipped(home))
+    assert not any(a[1:3] == ["plugin", "add"] for a in asked)
+
+
+def test_an_accepted_add_asks_nothing_more(home, monkeypatch):
+    repo = _checkout(home)
+    _codex(home, repo)
+    asked = []
+    monkeypatch.setattr(update_plugins, "run", _codex_runner(asked, repo, refuse=False))
+    update_plugins.install(update_plugins.discover(), _shipped(home))
+    assert not any(a[1:4] == ["plugin", "marketplace", "list"] for a in asked)

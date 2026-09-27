@@ -159,8 +159,38 @@ def install(providers: list[dict], stack: Path, sha: str | None = None):
         if provider["kind"] == "claude":
             run([binary, "plugin", "update", "jstack@jStack", "--scope", "user"])
         else:
-            run([binary, "plugin", "marketplace", "add", source])
+            register_codex_marketplace(binary, source)
             run([binary, "plugin", "add", "jstack@jstack", "--json"])
+
+
+def registered_codex_root(binary: str) -> Path | None:
+    """The directory codex holds for the `jstack` marketplace, resolved."""
+    for line in run([binary, "plugin", "marketplace", "list"]).splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0] == "jstack":
+            return Path(parts[1].strip()).resolve()
+    return None
+
+
+def register_codex_marketplace(binary: str, source: str) -> None:
+    """`codex plugin marketplace add`, accepting a registration that already
+    names this directory.
+
+    codex-cli 0.157 canonicalizes the path it is given and compares that with
+    the string it stored, so a registration written before the checkout moved
+    behind a symlink (`~/jStack` -> jStack-Project/jStack-Code) is refused as
+    "a different source" although both name the same tree — which stopped the
+    hub's own 26.9.2 update (#220). The registration is left as it is: the
+    engine reads the plugin through it fine, and only a registration that
+    really names another directory is an error.
+    """
+    try:
+        run([binary, "plugin", "marketplace", "add", source])
+    except ReleaseError as exc:
+        if "already added from a different source" not in str(exc):
+            raise
+        if registered_codex_root(binary) != Path(source).resolve():
+            raise
 
 
 def observed(providers: list[dict]) -> dict:
