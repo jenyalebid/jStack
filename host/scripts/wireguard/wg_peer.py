@@ -19,6 +19,7 @@ sync is down.
     wg_peer.py add --leaf <machine-name>  enrol a leaf host (emits an install bundle)
     wg_peer.py list                       show paired devices
     wg_peer.py remove <device-name>       revoke a device
+    wg_peer.py refresh                    re-copy the bringup scripts into every leaf bundle
 
 A leaf is a machine that joins the mesh by dialing out — same peer entry in
 wg0.conf, but instead of a QR it gets a self-contained folder
@@ -183,13 +184,38 @@ def _emit_leaf_bundle(name, ip, client_key, server_pub):
         f"WG_HUB={SUBNET_PREFIX}.1\n"
         f"WG_MTU={MTU}\n",
     )
+    _copy_leaf_scripts(bundle)
+    _write_private(bundle / "README.md", _leaf_readme(name, ip))
+    return bundle
+
+
+def _copy_leaf_scripts(bundle):
     here = Path(__file__).resolve().parent
     for script in LEAF_SCRIPTS:
         target = bundle / script
         target.write_bytes((here / script).read_bytes())
         target.chmod(0o700)
-    _write_private(bundle / "README.md", _leaf_readme(name, ip))
-    return bundle
+
+
+def refresh():
+    """Bring every existing leaf bundle's script copies up to the hub's own.
+
+    A bundle is minted with a byte copy of the three bringup scripts, and the
+    folder ships wholesale — so a script fixed here after the mint leaves the
+    old copy waiting in every bundle on disk (the shipped-content scan grades
+    them for exactly that). Keys, conf and env are not touched; a re-install
+    from the bundle picks the refreshed scripts up, an installed leaf is not
+    changed by this.
+    """
+    for bundle in sorted(CLIENTS.glob("*-leaf")):
+        if not bundle.is_dir():
+            continue
+        stale = [s for s in LEAF_SCRIPTS
+                 if not (bundle / s).exists()
+                 or (bundle / s).read_bytes() != (Path(__file__).resolve().parent / s).read_bytes()]
+        if stale:
+            _copy_leaf_scripts(bundle)
+        print(f"{bundle.name}: {'refreshed ' + ', '.join(stale) if stale else 'current'}")
 
 
 def _write_qr(name, client_conf):
@@ -311,6 +337,8 @@ def main():
         list_peers()
     elif cmd == "remove" and len(sys.argv) == 3:
         remove(sys.argv[2])
+    elif cmd == "refresh" and len(sys.argv) == 2:
+        refresh()
     else:
         raise SystemExit(__doc__)
 
