@@ -834,7 +834,7 @@
       "kind": "system",
       "name": "Org-identity scrub gate",
       "status": "live",
-      "description": "The plugin was built inside one private operation before it shipped public, and its release history is squashed: whatever identity sits in the tree at a cut is permanent. This gate scans every git-tracked file (contents and paths) for the terms of that operation — its people, its principal's persona, its closed-source siblings, its machine paths — and fails naming file, line and term. One extensible term list; a per-(file, term) allowlist where each load-bearing wire literal (the shipped default board name, the commit-identity allowlist's own addresses) carries its reason; a stale allowlist entry fails too, so an exemption outlives its carrier by zero releases. Lowercase `boss`/`@boss` is deliberately off the list: the refused address and the `--from boss` convention are shipped behavior, only the capitalized persona is banned.",
+      "description": "The plugin was built inside one private operation before it shipped public, and its release history is squashed: whatever identity sits in the tree at a cut is permanent. This gate scans every file the working tree would ship — tracked, plus untracked files git does not ignore, since a new file is untracked exactly when its author runs the gate before `git add` — (contents and paths) for the terms of that operation — its people, its principal's persona, its closed-source siblings, its machine paths — and fails naming file, line and term. One extensible term list; a per-(file, term) allowlist where each load-bearing wire literal (the shipped default board name, the commit-identity allowlist's own addresses) carries its reason; a stale allowlist entry fails too, so an exemption outlives its carrier by zero releases. Lowercase `boss`/`@boss` is deliberately off the list: the refused address and the `--from boss` convention are shipped behavior, only the capitalized persona is banned.",
       "code": [
         "tests/scrub.sh"
       ],
@@ -842,7 +842,24 @@
         "type": "script",
         "path": "tests/scrub.sh",
         "description": "Runs the scan itself against the real tree: exit 0 with the scanned-file count when no org term appears outside the reasoned allowlist, exit 1 naming every file:line and term when one does."
-      }
+      },
+      "subsystems": [
+        {
+          "id": "identity-scrub-untracked",
+          "kind": "system",
+          "name": "Scrub reach into unstaged files",
+          "status": "live",
+          "description": "The scrub once listed only `git ls-files`, so a new file run through the gate before staging passed unread and reached public main. The scan now also lists `--others --exclude-standard`, and its count line splits tracked from untracked.",
+          "code": [
+            "tests/scrub.sh"
+          ],
+          "test": {
+            "type": "script",
+            "path": "tests/scrub-untracked.sh",
+            "description": "Throwaway shared clone of HEAD with the working copy's scrub.sh: the clean tree passes; an untracked file holding a banned term fails named file:line and is counted as untracked; an untracked file whose name holds a term fails; a .gitignore'd file is not scanned."
+          }
+        }
+      ]
     },
     {
       "id": "release-reachability",

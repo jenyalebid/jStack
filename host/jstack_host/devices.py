@@ -234,6 +234,27 @@ def orphaned(presented: str) -> bool:
     return _store().device(device_id) is None
 
 
+def retired(presented: str, device_id: str) -> bool:
+    """Is `presented` the credential `device_id` held before it was revoked?
+
+    Not an authentication — a revoked row opens nothing, and this never says
+    otherwise. It answers one question for one route: a self-revoke arriving
+    with a token this hub has already retired is the leaf's follow-up to a
+    forget that revoked the credential in the same call, and the hub is the
+    side that can tell that from a stranger's guess. Same constant-time compare
+    as `authenticate`; nothing is recorded as seen.
+    """
+    if not presented:
+        return False
+    claimed, secret = parse(presented)
+    if not claimed or claimed != device_id:
+        return False
+    row = _store().device(device_id)
+    if row is None or row["revoked_at"] is None:
+        return False
+    return hmac.compare_digest(row["token_hash"], _hash(secret))
+
+
 def authenticate(presented: str) -> str | None:
     """The device id this token proves, or None. The one auth answer.
 

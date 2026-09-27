@@ -514,3 +514,28 @@ def test_revoking_removes_the_peer_and_the_client_files(hub):
     assert _run_peer(env, "remove", "work-mac").returncode == 0
     assert "# device: work-mac" not in (wg_dir / "wg0.conf").read_text()
     assert not (wg_dir / "clients" / "work-mac.conf").exists()
+
+
+def test_refresh_recopies_stale_bundle_scripts_and_keeps_the_key(hub):
+    """A bundle is minted with a byte copy of the three bringup scripts and the
+    folder ships wholesale — a script fixed after the mint leaves the old copy
+    waiting in every bundle on disk. `refresh` brings those copies up to the
+    tool's own and touches nothing else: keys, conf and env stay as minted."""
+    wg_dir, env = hub
+    assert _run_peer(env, "add", "--leaf", "studio").returncode == 0
+    bundle = wg_dir / "clients" / "studio-leaf"
+    conf_before = (bundle / "jrleaf.conf").read_bytes()
+    env_before = (bundle / "leaf.env").read_bytes()
+    (bundle / "wg_up.sh").write_text("#!/bin/bash\n# stale copy from an older mint\n")
+
+    r = _run_peer(env, "refresh")
+    assert r.returncode == 0, r.stderr
+    assert "studio-leaf: refreshed wg_up.sh" in r.stdout
+    assert (bundle / "wg_up.sh").read_bytes() == (WG_ROOT / "wg_up.sh").read_bytes()
+    assert (bundle / "wg_up.sh").stat().st_mode & 0o777 == 0o700
+    assert (bundle / "jrleaf.conf").read_bytes() == conf_before
+    assert (bundle / "leaf.env").read_bytes() == env_before
+
+    again = _run_peer(env, "refresh")
+    assert again.returncode == 0, again.stderr
+    assert "studio-leaf: current" in again.stdout

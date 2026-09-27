@@ -490,12 +490,36 @@ def sync_from_scheduler(state_path: Path | None = None) -> bool:
     return True
 
 
+#: Per-rollout memo for `codex_rollout_sample`: path → ((mtime_ns, size), sample).
+#: Parsing every rollout under ~/.codex/sessions cost ~1.0s per /usage/caps
+#: request — the slowest call on the app's first screen by an order of
+#: magnitude, paid again on every foreground (#164). A rollout that has not
+#: changed since it was last read yields the same sample, so the stat is the
+#: whole test; an appended or rewritten file (new mtime or size) is re-read.
+_ROLLOUT_SAMPLES: dict[str, tuple[tuple[int, int], dict | None]] = {}
+
+
 def codex_rollout_sample() -> dict | None:
     """Newest account quota actually reported by Codex; no separate login."""
     from .codex_transcript import summary
     newest = None
+    seen = set()
     for path in CODEX_SESSIONS.glob("**/rollout-*.jsonl"):
-        sample = summary(path).get("rate_sample")
+        key = str(path)
+        seen.add(key)
+        try:
+            st = path.stat()
+            stamp = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            continue
+        cached = _ROLLOUT_SAMPLES.get(key)
+        if cached is not None and cached[0] == stamp:
+            sample = cached[1]
+        else:
+            sample = summary(path).get("rate_sample")
+            _ROLLOUT_SAMPLES[key] = (stamp, sample)
         if sample and (newest is None or sample["sampled_at"] > newest["sampled_at"]):
             newest = sample
+    for gone in set(_ROLLOUT_SAMPLES) - seen:
+        _ROLLOUT_SAMPLES.pop(gone, None)
     return newest

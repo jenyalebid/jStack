@@ -1562,6 +1562,19 @@ if [ "$(uname -s)" = "Darwin" ] && [ "$WANT_HOST" != "0" ]; then
             elif [ "$DRY_RUN" = "1" ]; then
                 would "replace the ${installed_release:-published} Hub with one built from $REF"
             else
+                # Where that Hub keeps its state decides whether a replacement
+                # is the same hub. The sealed installer provisions the built Hub
+                # at $HUB_STATE and refuses over a state dir that already holds
+                # anything, so a Hub whose services load JREMOTE_STATE_DIR from
+                # somewhere else would come back empty — no fleet, no devices,
+                # no tokens — with the old app already booted out (#167). Its
+                # service settings name that dir; a hub not at the default stops
+                # here, before anything is removed.
+                declared_state="$(sed -nE 's/.*"JREMOTE_STATE_DIR": *"([^"]+)".*/\1/p' \
+                    "$HOME/.local/state/jremote/service-settings.json" 2>/dev/null | head -1)"
+                if [ -n "$declared_state" ] && [ "${declared_state%/}" != "${HUB_STATE%/}" ]; then
+                    die "the installed Hub keeps its state in $declared_state, not $HUB_STATE — a Hub built here would be provisioned empty beside it and the running hub's fleet, devices and tokens would be orphaned. Nothing was removed. Move that hub forward from its own updater (\`jstack-host updates build\` on a Hub that has it), or point this run at its state before re-running."
+                fi
                 warn "the installed Hub is a published release${installed_release:+ ($installed_release)} and cannot build itself forward — replacing it with a build from $REF"
                 for role in host menu updater scheduler; do
                     launchctl bootout "gui/$(id -u)/live.jstack.hub.$role" >/dev/null 2>&1 || true
@@ -1658,8 +1671,21 @@ if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ] \
         # installed and verified. Without it the build still produces a Hub —
         # a release manifest needs all three components, so the feed stays
         # empty instead of carrying a component this Mac does not have.
+        # And only a client that records the commit it was built from. The
+        # manifest names a client revision so a later build carries it forward,
+        # and `build_source.client_component` refuses a bundle without one —
+        # which every developer build is: `mac.sh` and a bare xcodebuild stamp
+        # nothing, only `release-mac.sh` writes JStackSourceCommit. Handing that
+        # bundle over killed the whole install at the Hub build (#187); a Hub
+        # without a client is what the comment above already says is fine.
         if [ -d "/Applications/jRemote.app" ]; then
-            build_args+=(--client /Applications/jRemote.app)
+            client_commit="$(/usr/libexec/PlistBuddy -c 'Print :JStackSourceCommit' \
+                /Applications/jRemote.app/Contents/Info.plist 2>/dev/null || true)"
+            if printf '%s' "$client_commit" | grep -Eq '^[0-9a-f]{40}$'; then
+                build_args+=(--client /Applications/jRemote.app)
+            else
+                warn "jRemote.app is installed but does not record the commit it was built from (no JStackSourceCommit in its Info.plist — a developer build; release-mac.sh stamps it) — building the Hub without it, so the feed carries no client until a stamped one is installed"
+            fi
         fi
         if [ -n "$SIGNING_CONFIG" ]; then
             build_args+=(--signing "$SIGNING_CONFIG")
@@ -1957,4 +1983,11 @@ and run /jstack:work on any topic. Re-run this script any time to update;
 it changes only what has drifted.
 EOF
 
-exit 0
+# The exit code says what the verdict said. A joiner runs this script under
+# `|| die`, and an unconditional `exit 0` under a FAIL told it a broken install
+# had finished (#124). Warnings are capabilities not yet added — still a
+# working jStack; a failure is not.
+case "$rc" in
+    0|1) exit 0 ;;
+    *)   exit 2 ;;
+esac

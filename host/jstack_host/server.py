@@ -176,6 +176,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:                                 # noqa: BLE001
         _log(f"internal credential skipped ({type(e).__name__}: {e})")
 
+    # The hub's ssh blocks, back to what the store says (#186). Nothing else
+    # rewrites them unless a machine joins, changes grants or is forgotten.
+    try:
+        from . import shell_grants
+        out = shell_grants.reconcile_hub()
+        if out["fixed"]:
+            _log(f"hub ssh {', '.join(out['fixed'])} rebuilt — {out['note']}")
+    except Exception as e:                                 # noqa: BLE001
+        _log(f"hub ssh reconcile skipped ({type(e).__name__}: {e})")
+
     try:
         from . import managed
         for sid in managed.reconcile():
@@ -222,7 +232,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     from .pty import ws_router
-    from .router import grant_router, router, unauthenticated_router
+    from .router import grant_router, revoke_router, router, unauthenticated_router
 
     app = FastAPI(title="jRemote host", lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
@@ -231,6 +241,9 @@ def create_app() -> FastAPI:
     # and a standalone host needs it more than the dashboard does, because a
     # leaf is exactly the machine that can never be on the hub's LAN.
     app.include_router(unauthenticated_router)
+    # Device revocation, gated on the bearer like `router` — plus the one
+    # answer for a device presenting its own already-retired credential.
+    app.include_router(revoke_router)
     # Delegated minting, gated on a grant this machine issued to a named parent.
     # A managed host is the one that needs it; it mounts everywhere because a
     # host cannot be told at install time which role it will end up in.

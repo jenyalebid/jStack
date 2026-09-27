@@ -273,31 +273,31 @@ if command -v git >/dev/null 2>&1; then
     [ "$g" = "fail" ] || fail "a source that is not there should grade fail, got '$g'"
     [ "$g" = "fail" ] && pass "a registration pointing at nothing is a failure"
 
-    # ── and `versions` itself refuses a stage, where it can actually reach one ─
-    # Every case above leaves the guard in `versions` unreachable: PLUGIN_ROOT
-    # sits inside $VREPO, so `rev-parse --show-toplevel` answers first and the
-    # registration is never consulted. The case that DOES reach it is a leaf —
-    # the plugin unpacked outside any repo, where the registration is the only
-    # candidate checkout there is. That is precisely where trusting it costs:
-    # the cache was copied from the stage, so comparing the two agrees by
-    # construction and `versions` would report a healthy machine forever.
+    # ── a leaf: the plugin outside any repo, its registration on a stage ────
+    # Every case above has PLUGIN_ROOT inside $VREPO, a jStack checkout, so the
+    # checkout is never in question. The case that matters is a leaf — the
+    # plugin unpacked outside any repo, no checkout anywhere. There the release
+    # stage IS the registration (the updater relocates it release by release),
+    # and failing it graded every leaf broken for being installed the way
+    # leaves are (#120). The sealed Hub's updater lays its stages out as
+    # `app-stage-*`, which the matcher did not know at all.
     NOREPO="$TMP/norepo"
     mkdir -p "$NOREPO"
     cp -R "$VREPO/plugins/jstack" "$NOREPO/jstack"
     rm -rf "$NOREPO/jstack/__pycache__" "$NOREPO/jstack"/*/__pycache__
 
-    # The stage has to be a real git tree standing at the very sha the cache
-    # records. That agreement IS the trap, and it is the only fixture that
-    # tests the guard: point this at a stage with no git in it and `versions`
-    # warns "git cannot read it" for an unrelated reason, which passes whether
-    # the guard is there or not.
-    GSTAGE="$TMP/state/updates/releases/77-0ff57a9e/stage-qq31mb7k/stack"
-    mkdir -p "$GSTAGE"
+    # The stage is given a git tree standing at the very sha the cache records
+    # — the trap: git would answer, and the two shas would agree because the
+    # cache was copied from this copy. `versions` must grade it as the shipped
+    # copy it is, on its identity file, and never ask git.
+    GSTAGE="$TMP/state/updates/releases/2026-09-23-ae87a9a3-4710384de5c26738/app-stage-qq31mb7k/stack"
+    mkdir -p "$GSTAGE/host"
     printf 'stage\n' > "$GSTAGE/marker"
     git -C "$GSTAGE" init -q
     git -C "$GSTAGE" -c user.email=t@t -c user.name=t add -A
     git -C "$GSTAGE" -c user.email=t@t -c user.name=t commit -qm stage
     GSHA=$(git -C "$GSTAGE" rev-parse HEAD)
+    printf '{"release":"2026-09-23-ae87a9a3","sha":"%s"}\n' "$GSHA" > "$GSTAGE/host/release-identity.json"
 
     vdoctor_norepo() {
         HOME="$TMP/home" JSTACK_ROOT="$TMP/root" \
@@ -307,29 +307,101 @@ if command -v git >/dev/null 2>&1; then
     }
 
     if [ -n "$(git -C "$NOREPO" rev-parse --show-toplevel 2>/dev/null)" ]; then
-        fail "the no-repo fixture is inside a git repo — the guard stays unreachable"
+        fail "the no-repo fixture is inside a git repo — the leaf cases cannot run"
     else
         ledger "$GSHA"
         marketplace "$GSTAGE"
         vdoctor_norepo > "$TMP/vstage.json" 2>/dev/null
-        g=$(grade_of "$TMP/vstage.json" versions)
-        [ "$g" = "warn" ] || fail "versions took a release stage as its checkout, got '$g'"
-        [ "$g" = "warn" ] && pass "versions refuses a stage even when every sha agrees"
-        if grep -q "would mean nothing" "$TMP/vstage.json"; then
-            pass "the refusal says why agreeing there would prove nothing"
+        g=$(grade_of "$TMP/vstage.json" marketplace)
+        [ "$g" = "ok" ] || fail "a leaf served from its release stage should grade ok, got '$g'"
+        [ "$g" = "ok" ] && pass "a leaf's app-stage registration is the healthy case, not a finding"
+        if grep -q "no checkout on this machine" "$TMP/vstage.json"; then
+            pass "the ok says why: there is no checkout the stage could be passed over for"
         else
-            fail "versions refused without naming the comparison as empty"
+            fail "the leaf's stage passed without naming the fact that makes it fine"
+        fi
+        g=$(grade_of "$TMP/vstage.json" versions)
+        [ "$g" = "ok" ] || fail "versions on a leaf's stage should grade ok on its identity file, got '$g'"
+        if grep -q "release stage 2026-09-23-ae87a9a3" "$TMP/vstage.json"; then
+            pass "versions names the stage by its release identity"
+        else
+            fail "versions did not report the stage's release identity"
+        fi
+        if grep -q "in step with the checkout" "$TMP/vstage.json"; then
+            fail "versions asked git of a release stage and called the agreement a checkout"
+        else
+            pass "git is never asked of a stage, even one that would answer"
         fi
 
-        # The guard must cost nothing on a leaf whose source is honest: same
-        # no-repo plugin, shipped copy instead of a stage, and `versions` goes
-        # back to grading the cache on its own terms.
+        # The same leaf on a shipped copy: graded, not refused.
         marketplace "$SHIPPED"
         vdoctor_norepo > "$TMP/vship.json" 2>/dev/null
-        if grep -q "would mean nothing" "$TMP/vship.json"; then
-            fail "the stage refusal fired on a shipped copy"
+        if grep -q "would mean nothing\|release stage" "$TMP/vship.json"; then
+            fail "the stage handling fired on a shipped copy"
         else
             pass "a leaf on a shipped copy is still graded, not refused"
+        fi
+
+        # ── now give the machine a checkout: the stage becomes the fault ────
+        # ~/jStack is where the installer clones. A registration left on a
+        # stage while that sits there is the frozen-registration trap, and the
+        # FAIL has to name the checkout it should point at.
+        CKOUT="$TMP/home/jStack"
+        mkdir -p "$CKOUT/plugins"
+        cp -R "$VREPO/plugins/jstack" "$CKOUT/plugins/jstack"
+        rm -rf "$CKOUT/plugins/jstack/__pycache__" "$CKOUT/plugins/jstack"/*/__pycache__
+        printf '__pycache__/\n' > "$CKOUT/.gitignore"
+        git -C "$CKOUT" init -q
+        git -C "$CKOUT" -c user.email=t@t -c user.name=t add -A
+        git -C "$CKOUT" -c user.email=t@t -c user.name=t commit -qm checkout
+        CSHA=$(git -C "$CKOUT" rev-parse HEAD)
+
+        marketplace "$GSTAGE"
+        vdoctor_norepo > "$TMP/vstage2.json" 2>/dev/null
+        g=$(grade_of "$TMP/vstage2.json" marketplace)
+        [ "$g" = "fail" ] || fail "a stage registration beside a checkout should grade fail, got '$g'"
+        [ "$g" = "fail" ] && pass "with a checkout present, a stage registration is a finding"
+        if grep -q "$CKOUT" "$TMP/vstage2.json"; then
+            pass "the finding names the checkout the registration should point at"
+        else
+            fail "the stage was failed without naming the checkout on the machine"
+        fi
+        ledger "$CSHA"
+        vdoctor_norepo > "$TMP/vck.json" 2>/dev/null
+        g=$(grade_of "$TMP/vck.json" versions)
+        [ "$g" = "ok" ] || fail "versions should grade ~/jStack against the cache, got '$g'"
+        if grep -q "in step with the checkout (${CSHA:0:12})" "$TMP/vck.json"; then
+            pass "versions compares against ~/jStack, not the registered stage"
+        else
+            fail "versions did not grade the checkout at ~/jStack"
+        fi
+
+        # ── #86: the enclosing repo is not the checkout ──────────────────────
+        # An installed plugin cache lives under ~/.claude/plugins/cache; on a
+        # Mac whose home is itself a git repo, `rev-parse --show-toplevel` from
+        # there answers the HOME repo, and the census compared a jStack sha
+        # against the home tree's HEAD. Only a repo that carries this plugin
+        # is a checkout; the rest of the machine is looked at instead.
+        HOMEREPO="$TMP/homerepo"
+        mkdir -p "$HOMEREPO/.claude/plugins/cache"
+        cp -R "$VREPO/plugins/jstack" "$HOMEREPO/.claude/plugins/cache/jstack"
+        rm -rf "$HOMEREPO/.claude/plugins/cache/jstack/__pycache__" \
+               "$HOMEREPO/.claude/plugins/cache/jstack"/*/__pycache__
+        printf 'home\n' > "$HOMEREPO/README.md"
+        git -C "$HOMEREPO" init -q
+        git -C "$HOMEREPO" -c user.email=t@t -c user.name=t add -A
+        git -C "$HOMEREPO" -c user.email=t@t -c user.name=t commit -qm home
+        rm -f "$TMP/home/.claude/plugins/known_marketplaces.json"
+        HOME="$TMP/home" JSTACK_ROOT="$TMP/root" \
+        SCHEDULER_INSTALL_FILE="$TMP/root/absent-scheduler.json" \
+        SCHEDULER_API_PORT=59992 \
+        "$PY" "$HOMEREPO/.claude/plugins/cache/jstack/bin/jstack-doctor" --json > "$TMP/vhome.json" 2>/dev/null
+        g=$(grade_of "$TMP/vhome.json" versions)
+        [ "$g" = "ok" ] || fail "versions from a cache inside a foreign repo should grade ~/jStack ok, got '$g'"
+        if grep -q "in step with the checkout (${CSHA:0:12})" "$TMP/vhome.json"; then
+            pass "a cache inside another repo grades ~/jStack, not the repo around it"
+        else
+            fail "versions took the enclosing repo for the jStack checkout (#86)"
         fi
         ledger "$SHA1"
     fi

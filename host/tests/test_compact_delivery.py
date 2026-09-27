@@ -77,6 +77,7 @@ def quarantined_state(tmp_path, monkeypatch):
     monkeypatch.setenv("JSTACK_COMPACT_LOG", str(tmp_path / "decisions.jsonl"))
     locks = tmp_path / "locks"
     monkeypatch.setenv("JSTACK_COMPACT_LOCK_DIR", str(locks))
+    monkeypatch.setattr(cod, "RETRY_WINDOWS", (0.05, 0.05))  # the real schedule is ~15 min
 
 
 def screen(composer="", body="⏺ Building it."):
@@ -147,8 +148,12 @@ def test_an_empty_box_is_not_an_idle_cli(pane, why):
 
 
 #: Every footer the CLI draws in place of the one this hook used to be pinned to, lifted
-#: from claude 2.1.220's own strings. shift+tab cycles between them, so all five are one
-#: keystroke away from any session at any moment.
+#: from claude 2.1.220's own strings. shift+tab cycles between them, so every one of them
+#: is one keystroke away from any session at any moment.
+#:
+#: `manual mode on` was missing until 2026-09-25, on the belief that manual mode drew no
+#: banner and fell back to "? for shortcuts". It draws one; a live pane on this Mac, idle at
+#: an empty box for nine minutes, read `no-footer` — see the `ENGINES` comment.
 @pytest.mark.parametrize("footer", [
     pytest.param("  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
                  id="bypass-permissions"),
@@ -156,7 +161,10 @@ def test_an_empty_box_is_not_an_idle_cli(pane, why):
     pytest.param("  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents",
                  id="accept-edits"),
     pytest.param("  ⏵⏵ plan mode on (shift+tab to cycle) · ← for agents", id="plan"),
-    pytest.param("  ? for shortcuts", id="manual-has-no-banner-at-all"),
+    pytest.param("  ⏸ manual mode on · ← for agents", id="manual"),
+    pytest.param("  ⏸ manual mode on (shift+tab to cycle) · ← for agents",
+                 id="manual-with-the-cycle-hint"),
+    pytest.param("  ? for shortcuts", id="shortcuts-hint-instead-of-a-banner"),
     pytest.param("  ⏵⏵ auto mode on (shift+tab to  · ←…", id="truncated-on-a-narrow-pane"),
 ])
 def test_an_idle_pane_is_idle_in_every_permission_mode(footer):
@@ -885,7 +893,7 @@ def test_the_child_compacts_a_declared_wrap(near_ceiling, monkeypatch):
     monkeypatch.setattr(cod, "SETTLE_SECS", 0.5)
     monkeypatch.setattr(cod, "pane", lambda name: screen())
     monkeypatch.setattr(cod, "wait_and_send", lambda *a: "sent")
-    monkeypatch.setattr(cod, "wait_and_continue", lambda n, p, o, wants, rows=False, engine="claude":
+    monkeypatch.setattr(cod, "wait_and_continue", lambda n, p, o, wants, rows=False, engine="claude", window=None:
                         "continued" if wants else pytest.fail("the declaration was lost"))
     offset = os.path.getsize(near_ceiling)
     append(near_ceiling, {"type": "assistant", "message": {"id": "final", "content": [
@@ -963,7 +971,49 @@ def test_an_in_place_continue_never_types_over_a_half_written_message(
     the sweep picks up; a prompt appended to somebody's sentence is not recoverable."""
     monkeypatch.setattr(cod, "pane", lambda name: screen("wait, first check the"))
     assert cod.continue_in_place("jr-x", near_ceiling, "ad79f32f-1111",
-                                 os.path.getsize(near_ceiling)) == "in-place/busy"
+                                 os.path.getsize(near_ceiling)) == "in-place/gave-up"
+    assert typed == []
+
+
+def test_an_in_place_continue_waits_out_a_busy_pane(near_ceiling, typed, monkeypatch):
+    """244ca668: the pane was not ready for the first window and idle twelve minutes later.
+    A parked session has no next Stop, so the child that owns the seam has to look again."""
+    panes = itertools.chain([screen("wait, first check the")] * 10, itertools.repeat(screen()))
+    monkeypatch.setattr(cod, "pane", lambda name: next(panes))
+    assert cod.continue_in_place("jr-x", near_ceiling, "ad79f32f-1111",
+                                 os.path.getsize(near_ceiling)) == "in-place/continued"
+    assert [name for name, _ in typed] == ["jr-x"]
+    rows = [json.loads(line) for line in open(cod.log_path())]
+    assert [r for r in rows if r.get("outcome") == "busy" and r.get("retry")], \
+        f"the retry happened but the log cannot show it: {rows}"
+
+
+def test_a_pane_that_stays_busy_is_given_up_on_in_the_log(near_ceiling, typed, monkeypatch):
+    """Bounded, and never silent: one row per retry, then the give-up as the outcome."""
+    monkeypatch.setattr(cod, "pane", lambda name: screen("wait, first check the"))
+    cod.continue_in_place("jr-x", near_ceiling, "ad79f32f-1111",
+                          os.path.getsize(near_ceiling))
+    rows = [json.loads(line) for line in open(cod.log_path())]
+    assert [r["retry"] for r in rows if r.get("outcome") == "busy"] == \
+        list(range(1, len(cod.RETRY_WINDOWS) + 1))
+    assert rows[-1]["outcome"] == "in-place/gave-up"
+    assert typed == []
+
+
+def test_a_person_typing_ends_the_retry(near_ceiling, typed, monkeypatch):
+    """The retry holds this session's lock, so it must let go the moment a real turn lands —
+    that turn's own Stop needs the lock."""
+    offset = os.path.getsize(near_ceiling)
+    calls = itertools.count()
+
+    def pane(name):
+        if next(calls) == 10:
+            append(near_ceiling, PROMPT)
+        return screen("wait, first check the")
+
+    monkeypatch.setattr(cod, "pane", pane)
+    assert cod.continue_in_place("jr-x", near_ceiling, "ad79f32f-1111", offset) \
+        == "in-place/taken"
     assert typed == []
 
 
@@ -1178,7 +1228,7 @@ def test_the_store_is_read_once_and_the_answer_passed_down(near_ceiling, monkeyp
     monkeypatch.setattr(cod, "pane", lambda name: screen())
     monkeypatch.setattr(cod, "wait_and_send", lambda *a: "sent")
     monkeypatch.setattr(cod, "wait_and_continue",
-                        lambda n, p, o, wants, rows=False, engine="claude":
+                        lambda n, p, o, wants, rows=False, engine="claude", window=None:
                         "continued" if rows else
                         pytest.fail("the docket answer was dropped on the way down"))
     offset = os.path.getsize(near_ceiling)
@@ -1472,8 +1522,132 @@ def test_a_compaction_that_never_fired_never_continues(near_ceiling, spy, nudged
     """Every abort in the first phase is also an abort in the second."""
     monkeypatch.setattr(cod, "pane", lambda name: screen("someone is typing"))
     assert cod.run("jr-x", near_ceiling, "sid-x", 1000,
-                   os.path.getsize(near_ceiling), True) == "busy"
+                   os.path.getsize(near_ceiling), True) == "gave-up"
     assert spy == [] and nudged == []
+
+
+def test_a_busy_pane_at_the_seam_is_compacted_once_it_clears(near_ceiling, nudged,
+                                                             monkeypatch):
+    """244ca668's exact path: decided `compact`, pane not ready for twenty seconds, and the
+    session parked for good. The compaction and the continue across it both still happen."""
+    panes = itertools.chain([screen("wait, first check the")] * 10, itertools.repeat(screen()))
+    monkeypatch.setattr(cod, "pane", lambda name: next(panes))
+    sent = []
+
+    def compacts(name, engine="claude", path=None):
+        sent.append(name)
+        append(near_ceiling, BOUNDARY, *ARTIFACTS)
+        return True
+
+    monkeypatch.setattr(cod, "send_compact", compacts)
+    assert cod.run("jr-x", near_ceiling, "sid-x", 1000,
+                   os.path.getsize(near_ceiling), True) == "sent/continued"
+    assert sent == ["jr-x"] and nudged == ["jr-x"]
+    rows = [json.loads(line) for line in open(cod.log_path())]
+    assert [r for r in rows if r.get("stage") == "compact" and r.get("outcome") == "busy"]
+
+
+def test_a_busy_pane_after_the_boundary_still_gets_its_continue(near_ceiling, nudged,
+                                                                monkeypatch):
+    """The third `busy` exit: the boundary landed, the TUI was still settling — and the
+    session that asked to be handed back sat compacted and abandoned."""
+    panes = itertools.repeat(screen())
+
+    def compacts(name, engine="claude", path=None):
+        nonlocal panes
+        append(near_ceiling, BOUNDARY, *ARTIFACTS)
+        panes = itertools.chain([screen("wait, first check the")] * 10,
+                                itertools.repeat(screen()))
+        return True
+
+    monkeypatch.setattr(cod, "pane", lambda name: next(panes))
+    monkeypatch.setattr(cod, "send_compact", compacts)
+    assert cod.run("jr-x", near_ceiling, "sid-x", 1000,
+                   os.path.getsize(near_ceiling), True) == "sent/continued"
+    assert nudged == ["jr-x"]
+    rows = [json.loads(line) for line in open(cod.log_path())]
+    assert [r for r in rows if r.get("stage") == "continue" and r.get("outcome") == "busy"]
+
+
+# --- how long a promise is waited out, and what a refusal says ---------------------------
+
+
+def test_a_declared_seam_outlasts_the_short_wait(near_ceiling, spy, monkeypatch):
+    """Every `busy` row the real decision log has ever carried — 244ca668, 27df58cc,
+    fe02ed56, 2dec5785 — sits directly under a `resume: true` decision: the pane was unready
+    for twenty seconds, the child walked away, and a session that had asked to be carried
+    sat at its seam. A longer window given to the send outlasts the typing."""
+    monkeypatch.setattr(cod, "MAX_WAIT_SECS", 0.02)
+    panes = itertools.chain([screen("half a sentence")] * 6, itertools.repeat(screen()))
+    monkeypatch.setattr(cod, "pane", lambda name: next(panes))
+    size = os.path.getsize(near_ceiling)
+    assert cod.wait_and_send("jr-x", near_ceiling, 1000, size, "claude", 5.0) == "sent"
+    assert spy == ["jr-x"]
+
+
+def test_the_patience_is_the_promise_the_decision_made(near_ceiling, monkeypatch):
+    """Patience is the seam's, not every delivery's: a finished turn nobody is waiting on
+    gets the first window only, because for it the next Stop really does reconsider."""
+    calls = []
+    monkeypatch.setattr(cod, "wait_and_send", lambda *args: calls.append(args[-1]) or "busy")
+    monkeypatch.setattr(cod, "pane", lambda name: screen("half a sentence"))
+    size = os.path.getsize(near_ceiling)
+    assert cod.run("jr-x", near_ceiling, "sid-x", 1000, size, True) == "gave-up"
+    assert calls == [cod.MAX_WAIT_SECS, *cod.RETRY_WINDOWS]
+    calls.clear()
+    assert cod.run("jr-x", near_ceiling, "sid-x", 1000, size, False) == "busy"
+    assert calls == [cod.MAX_WAIT_SECS]
+
+
+@pytest.mark.parametrize("captured,gate", [
+    pytest.param(screen(), "", id="ready"),
+    pytest.param(WORKING_PANE, "working", id="a-turn-is-running"),
+    pytest.param(COMPACTING_PANE, "busy-mark: Compacting conversation", id="compacting"),
+    pytest.param("\n".join(["⏺ done", RULE, "❯ Press up to edit queued messages", RULE,
+                            "", FOOTER]),
+                 "busy-mark: Press up to edit queued messages", id="holding-a-queue"),
+    pytest.param(screen("half a sentence"),
+                 f"composer-holds: {len('half a sentence')} chars", id="somebody-typing"),
+    pytest.param("\n".join(["⏺ done", RULE, "❯ ", RULE]), "no-footer", id="no-live-tui"),
+    pytest.param(None, "no-pane", id="no-session"),
+])
+def test_why_not_ready_names_the_gate_that_refused(captured, gate):
+    """The label and the readiness answer come from the same walk, in the same order — a
+    gate added to one and not the other is a `busy` nobody can explain."""
+    assert cod.why_not_ready(captured) == gate
+    assert cod.pane_is_ready(captured) == (gate == "")
+
+
+def test_the_outcome_line_says_what_the_pane_refused_on(near_ceiling, spy, monkeypatch):
+    """`busy` named the outcome and never the cause, so every one of the four cost an
+    afternoon of reading transcripts by hand to guess at a screen nobody kept. Every retry
+    row and the give-up carry the gate that refused and the seconds waited."""
+    monkeypatch.setattr(cod, "pane", lambda name: screen("wait, first check the"))
+    size = os.path.getsize(near_ceiling)
+    assert cod.run("jr-x", near_ceiling, "sid-x", 1000, size, True) == "gave-up"
+    rows = [json.loads(line) for line in
+            open(os.environ["JSTACK_COMPACT_LOG"]).read().splitlines() if line.strip()]
+    assert rows[-1]["outcome"] == "gave-up"
+    refused = [r for r in rows if r.get("outcome") in ("busy", "gave-up")]
+    assert len(refused) == len(cod.RETRY_WINDOWS) + 1
+    for row in refused:
+        assert row["blocked"].startswith("composer-holds:"), row
+        assert row["waited"] >= 0
+
+
+def test_the_note_never_lands_on_a_later_outcome(near_ceiling, typed, monkeypatch):
+    """One note, one outcome. A stale `blocked` on a delivery that worked would be a
+    diagnostic lying about the one thing it exists to explain."""
+    offset = os.path.getsize(near_ceiling)
+    monkeypatch.setattr(cod, "pane", lambda name: screen("wait, first check the"))
+    assert cod.continue_in_place("jr-x", near_ceiling, "sid-x", offset) == "in-place/gave-up"
+    assert cod.block_note() == {}
+    panes = itertools.chain([screen("half a sentence")] * 10, itertools.repeat(screen()))
+    monkeypatch.setattr(cod, "pane", lambda name: next(panes))
+    assert cod.continue_in_place("jr-x", near_ceiling, "sid-x", offset) == "in-place/continued"
+    rows = [json.loads(line) for line in open(cod.log_path())]
+    assert rows[-1]["outcome"] == "in-place/continued" and "blocked" not in rows[-1], rows[-1]
+    assert rows[-2]["outcome"] == "busy" and "blocked" in rows[-2], rows[-2]
 
 
 # --- the send has to prove it landed --------------------------------------------------

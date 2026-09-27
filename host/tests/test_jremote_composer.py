@@ -212,3 +212,67 @@ def test_a_lift_hands_over_the_buffer_and_not_the_clis_own_preamble(tmp_path, mo
     assert out["lifted"] is True
     assert out["text"] == typed
     assert prompt.read_text() == ""
+
+
+# ── the handoff is atomic, and an empty park is not a park (#96) ─────────────
+
+def test_the_shim_never_leaves_an_empty_park_file(tmp_path):
+    """`> "$park"` created the file empty before printf filled it; a host poll
+    in that gap read "" as the handed-over path. The shim now writes beside
+    and renames into place, so every observation of the park file has its
+    content — sampled with a zero-delay poll from the moment it appears."""
+    park_dir = tmp_path / "park"
+    prompt = tmp_path / "claude-prompt-abc.md"
+    prompt.write_text("hello")
+    env = {**os.environ, "JREMOTE_COMPOSE_DIR": str(park_dir),
+           "JREMOTE_SID": "sid-atomic"}
+    park = park_dir / "sid-atomic.park"
+    seen_empty = []
+    proc = subprocess.Popen([str(SHIM), str(prompt)], env=env,
+                            stdout=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if park.exists():
+                try:
+                    if park.read_text().strip() == "":
+                        seen_empty.append(True)
+                    else:
+                        break
+                except OSError:
+                    pass
+        assert park.exists(), "the shim never parked"
+        assert not seen_empty, "the park file was observed empty"
+        assert not (park_dir / "sid-atomic.park.tmp").exists()
+    finally:
+        (park_dir / "sid-atomic.release").touch()
+        proc.wait(timeout=10)
+
+
+def test_an_empty_park_file_is_waited_out_not_read_as_a_path(tmp_path, monkeypatch):
+    """The reader's half: a park file that exists but is still empty is a shim
+    mid-write. `lift` used to take exists() as the handoff, open Path("") —
+    the current directory — and fail with IsADirectoryError."""
+    monkeypatch.setattr(composer, "COMPOSE_DIR", tmp_path / "park")
+    (tmp_path / "park").mkdir()
+    monkeypatch.setattr(managed, "is_open", lambda sid: True)
+    monkeypatch.setattr(managed, "open_names", lambda: {managed._name("sid-1234")})
+    monkeypatch.setattr(composer, "_pane_has_shim", lambda name: True)
+    monkeypatch.setattr(subprocess, "run",
+                        lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", ""))
+    prompt = tmp_path / "claude-prompt-xyz.md"
+    prompt.write_text("the words")
+    park = tmp_path / "park" / "sid-1234.park"
+
+    def slow_shim():
+        park.write_text("")            # the old shim's gap, held open
+        time.sleep(0.3)
+        park.write_text(str(prompt) + "\n")
+        while not (tmp_path / "park" / "sid-1234.release").exists():
+            time.sleep(0.02)
+        park.unlink()
+
+    threading.Thread(target=slow_shim, daemon=True).start()
+    out = composer.lift("sid-1234", replacement="")
+    assert out["lifted"] is True, out
+    assert out["text"] == "the words"

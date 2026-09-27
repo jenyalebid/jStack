@@ -349,6 +349,70 @@ def test_install_sh_replaces_a_published_hub_rather_than_naming_a_verb_it_lacks(
     assert 'rm -rf "/Applications/jStack Hub.app"' in guard
 
 
+def test_install_sh_hands_the_build_only_a_client_that_records_its_commit():
+    """`build_source.client_component` refuses a jRemote.app without a 40-hex
+    JStackSourceCommit, and every developer build (mac.sh, a bare xcodebuild)
+    is one — only release-mac.sh stamps it. Passing the bundle on its presence
+    alone ended the whole install at the Hub build (#187). The stamp is read
+    first; without it the Hub is built alone and the installer says why."""
+    at = CODE.index("--client /Applications/jRemote.app")
+    span = CODE[CODE.rindex('if [ -d "/Applications/jRemote.app" ]', 0, at):at]
+    assert "JStackSourceCommit" in span, "the client is handed over unread"
+    assert "/Applications/jRemote.app/Contents/Info.plist" in span
+    assert re.search(r"grep -Eq '\^\[0-9a-f\]\{40\}\$'", span), \
+        "the stamp is not held to the 40-hex shape client_component demands"
+    after = CODE[at:CODE.index('run_long "building the Hub from', at)]
+    assert re.search(r'warn "jRemote.app is installed but does not record the commit', after)
+
+
+def test_install_sh_does_not_replace_a_published_hub_whose_state_lives_elsewhere():
+    """The replacement is provisioned at the default state dir, and the sealed
+    installer refuses over a dir that holds anything — so a published Hub whose
+    services load JREMOTE_STATE_DIR from somewhere else would come back empty,
+    fleet, devices and tokens orphaned, with the old app already booted out
+    (#167). The dir is read from the Hub's own service settings and a hub not
+    at the default stops the run before anything is removed."""
+    guard = CODE[CODE.index("Hub already installed and answering"):]
+    guard = guard[:guard.index("jStack Hub app is present but its host")]
+    refusal = guard[:guard.index("cannot build itself forward")]
+    assert "service-settings.json" in refusal and "JREMOTE_STATE_DIR" in refusal
+    assert re.search(r'die "the installed Hub keeps its state in \$declared_state, not \$HUB_STATE', refusal)
+    assert 'rm -rf "/Applications/jStack Hub.app"' not in refusal
+    assert "launchctl bootout" not in refusal, "the old Hub is booted out before the refusal"
+
+
+def test_install_sh_exits_with_the_doctors_verdict():
+    """The last thing the installer does is run `jstack-doctor` and print its
+    verdict — and then it exited 0 whatever that verdict was (#124). A joiner
+    runs this script under `|| die` and could not tell a broken install from a
+    clean one. Warnings (1) are still a working jStack; a FAIL is not."""
+    tail = CODE[CODE.rindex('"$BIN/jstack-doctor" | tee'):]
+    assert "rc=${PIPESTATUS[0]}" in tail
+    assert not tail.rstrip().endswith("exit 0"), "install.sh exits 0 whatever the doctor said"
+    assert re.search(r'case "\$rc" in\s+0\|1\) exit 0 ;;\s+\*\)\s+exit 2 ;;', tail)
+
+
+def test_install_sh_installs_only_the_hub_it_built_here():
+    """The source-build exemption in `app_services.verify` lets a bundle whose
+    sealed identity says `origin: source-build` answer to its identifier alone
+    — and anyone can seal such a bundle ad hoc. On the update path the pinned
+    key vouches for the marker; on a fresh install nothing does but provenance:
+    the bundle `install_signed.identity` is handed is the archive
+    `build_source bootstrap` wrote on this Mac moments before (#149). That
+    invariant lives in the shape of install.sh, so it is pinned here: between
+    the build and the sealed installer the only bundle landed is the build's
+    own archive, and nothing is fetched."""
+    start = CODE.index('run_long "building the Hub from')
+    end = CODE.index('run_long "running the Hub\'s sealed installer"', start)
+    span = CODE[start:end]
+    assert 'HUB_ZIP="$BUILD_OUT/menubar-notarized.zip"' in span
+    assert re.search(r'ditto -x -k "\$HUB_ZIP" /Applications', span)
+    for fetched in ("curl ", "releases/download", "JSTACK_HUB_URL", "http"):
+        assert fetched not in span, f"a Hub can arrive from elsewhere before the seal is read: {fetched}"
+    assert len(re.findall(r"ditto -x -k", span)) == 1, "more than one bundle is landed in the span"
+    assert 'hub_install_args=(--app "/Applications/jStack Hub.app"' in span
+
+
 def test_the_runtime_gate_does_not_demand_a_team_a_self_built_hub_cannot_have():
     """The Hub's C runtime validates the seal before importing any module, and
     it asked for the publisher's Developer ID team unconditionally. A Hub

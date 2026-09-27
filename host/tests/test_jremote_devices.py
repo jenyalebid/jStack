@@ -750,6 +750,40 @@ def test_a_device_can_always_revoke_itself(store):
     assert devices.authenticate(token) is None
 
 
+def test_a_credential_already_revoked_by_its_own_forget_may_still_revoke_itself(store):
+    """A leaf on a release before 5da4fad detaches as `parent-forget` then
+    `parent-revoke`; the hub's forget now revokes the machine's credential in
+    the same call, so the follow-up arrived with a dead token and ended a clean
+    detach on a false 401 (#179). The hub knows that token is exactly the
+    credential it retired: 200, `already`, and nothing changes."""
+    row, token = devices.mint("work-mac")
+    assert devices.revoke(row["id"])
+    c = TestClient(app)
+    c.headers.update({"Authorization": f"Bearer {token}"})
+    r = c.post(f"/api/jremote/v1/devices/{row['id']}/revoke")
+    assert r.status_code == 200
+    assert r.json() == {"revoked": row["id"], "self": True, "already": True}
+    assert devices.authenticate(token) is None
+    # The answer is for that one route and that one row: the dead token still
+    # opens nothing else, and reaches no other device's revoke.
+    assert c.get("/api/jremote/v1/devices").status_code == 401
+    other, other_token = devices.mint("phone")
+    assert c.post(f"/api/jremote/v1/devices/{other['id']}/revoke").status_code == 401
+    assert devices.authenticate(other_token) == other["id"]
+
+
+def test_a_guess_at_a_revoked_devices_secret_is_still_refused(store):
+    """`already` is earned by holding the retired credential, not by naming a
+    revoked row: the wrong secret for it is the 401 it always was."""
+    row, token = devices.mint("work-mac")
+    devices.revoke(row["id"])
+    head, _, secret = token.rpartition(".")
+    wrong = f"{head}.{'x' * len(secret)}"
+    c = TestClient(app)
+    c.headers.update({"Authorization": f"Bearer {wrong}"})
+    assert c.post(f"/api/jremote/v1/devices/{row['id']}/revoke").status_code == 401
+
+
 def test_a_remote_cannot_revoke_another_device(client, store):
     """A remote must not revoke another device. Off the hub console
     a revoke of anything but the caller itself is refused, and the target's

@@ -439,6 +439,19 @@ def test_failed_verification_fails_the_job(tmp_path, release):
     assert daemon.current["detail"].startswith("updated components failed verification")
 
 
+def test_a_failed_verification_names_what_the_backend_found(tmp_path, release):
+    """A dropped role must say which one in the job's failure (#197)."""
+    daemon, job = supervisor(tmp_path, release)
+    daemon.tick()
+    daemon.backend.healthy = False
+    daemon.backend.unverified = "tunnel service is not_registered, was enabled before the update"
+    daemon.save(verify_started=time.time() - 150)
+    daemon.tick()
+    assert daemon.current["state"] == "failed"
+    assert daemon.current["detail"].startswith(
+        "updated components failed verification: tunnel service is not_registered")
+
+
 def test_tampered_download_never_reaches_apply(tmp_path, release):
     daemon, job = supervisor(tmp_path, release)
     original = daemon.client
