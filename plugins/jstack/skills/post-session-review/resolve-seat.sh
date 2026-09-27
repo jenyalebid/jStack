@@ -4,18 +4,18 @@ set -u
 SID="${1:?usage: resolve-seat.sh <session-id> [session-cwd]}"
 REVIEW_PLUGIN_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 python3 - "$SID" "$REVIEW_PLUGIN_DIR" <<'PYTHON'
-import json, os, shlex, sys
+import json, shlex, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[2])
 from session_runtime import metadata, transcripts
 import root
+import review_config
 paths = transcripts(sys.argv[1])
 if len(paths) != 1:
     print("JSONL=\nSEAT=")
     raise SystemExit(1)
 p = paths[0]
-config = Path(os.environ.get("JSTACK_REVIEW_CONFIG", Path.home() / ".claude/jstack/review.json"))
-cfg = json.loads(config.read_text()) if config.is_file() else {}
+cfg = review_config.load()
 cwd = metadata(p).get("cwd")
 if not cwd:
     for line in p.read_text().splitlines():

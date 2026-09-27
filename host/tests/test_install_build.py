@@ -292,7 +292,7 @@ def test_one_writer_lands_both_a_hubs_build_and_an_installers(installing, tmp_pa
     built release is, and only one of them is what `stage()` consumes."""
     import inspect
     source = inspect.getsource(build_source._build)
-    assert "land(feed, output, envelope)" in source
+    assert "land(feed, output, envelope, public)" in source
     assert "assemble(" in source and "os.rename" not in source
 
 
@@ -455,6 +455,16 @@ def test_install_sh_never_deletes_uncommitted_work_in_the_checkout():
                         "-source-$(date"):
         assert destructive not in CODE, f"install.sh still discards work: {destructive}"
     assert "has uncommitted work (above)" in CODE
+
+
+def test_the_unsealed_host_and_menubar_installers_are_gone():
+    """#192: the sealed Hub owns host, menu bar and updater; the unsealed pair
+    that could put a second icon on a Mac (host/install.sh,
+    host/menubar/install.sh) is deleted, not merely bypassed."""
+    assert not (REPO / "host/install.sh").exists()
+    assert not (REPO / "host/menubar/install.sh").exists()
+    assert "host/install.sh" not in CODE
+    assert "HOST_INSTALLER" not in CODE
 
 
 def test_install_sh_puts_this_checkouts_adapters_on_path_not_merely_some():

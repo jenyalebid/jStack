@@ -322,6 +322,14 @@ def promote(candidate: Path, receipts_dir: Path, feed: Path, private_key: bytes,
             shutil.copy2(candidate / item["file"], staging / item["file"])
         shutil.copytree(receipts_dir, staging / "receipts")
         atomic_json(staging / "manifest.json", envelope)
+        # Recorded beside the manifest (#144): a hub that later builds its own
+        # source rotates its configured key to that build's, and a
+        # publisher-signed release already in the feed must still verify
+        # against the key that actually signed it, not the hub's current one.
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        public = base64.b64encode(
+            Ed25519PrivateKey.from_private_bytes(private_key).public_key().public_bytes_raw()).decode()
+        atomic_json(staging / "trust.json", {"algorithm": "Ed25519", "public_key": public})
         os.rename(staging, destination)
     variant = candidate / "hub-catalog.zip"
     if variant.is_file():

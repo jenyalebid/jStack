@@ -46,6 +46,7 @@ from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_ROOT))
+import review_config  # noqa: E402 — stdlib-only, safe ahead of the bootstrap guard
 
 _BOOTSTRAP_ERROR = None
 try:
@@ -500,9 +501,7 @@ def check_injection() -> dict:
         return _check("injection", FAIL, f"injector will not load: {e}",
                       f"run {hook} --explain <agent/seat> by hand for the traceback")
 
-    cfg_path = Path(os.environ.get(
-        "JSTACK_REVIEW_CONFIG",
-        str(Path.home() / ".claude" / "jstack" / "review.json"))).expanduser()
+    cfg_path = review_config.path()
     if os.environ.get("JSTACK_TIMELINE_INJECT_DISABLED") == "1":
         return _check("injection", WARN,
                       "JSTACK_TIMELINE_INJECT_DISABLED=1 — no session reads its "

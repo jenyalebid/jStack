@@ -45,6 +45,7 @@
     "hooks": "the Claude Code hook scripts — SessionStart, Stop, UserPromptSubmit, PreToolUse",
     "prompts": "model-bound text the hooks inject — file-sourced per the prompt-sourcing rule, loaded by hooks/_prompts.py",
     "repo_seat.py": "repo→seat resolution shared by the hooks and bin adapters",
+    "review_config.py": "the one place review.json's location is decided — every hook and bin reader resolves it here",
     "root.py": "the one declaration an install derives its tree from",
     "rules-stage": "portable rules staged for symlink into a host's ~/.claude/rules",
     "scheduler": "the scheduler daemon and its install plumbing",

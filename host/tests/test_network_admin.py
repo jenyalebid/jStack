@@ -44,12 +44,13 @@ def test_malformed_or_off_plan_is_rejected_before_approval(change, monkeypatch, 
     assert not (tmp_path / "private").exists()
 
 
-def test_a_client_that_still_sends_the_retired_hub_grant_can_still_install():
+def test_the_retired_hub_grant_is_refused():
     """The watchdog the `recovery` field armed is deleted and the installer
-    ignores the field. A jRemote client from the era that sends it must not be
-    refused on it — that refusal is what strands a machine (#123)."""
-    admin.validate_request({**plan(), "recovery": {"bundle": "/Applications/jStack Hub.app",
-                                                   "state": "/Users/x/state"}})
+    ignores the field. No shipped client sends it any more, so the exemption
+    that used to tolerate it is gone — the request shape is closed again."""
+    with pytest.raises(ValueError, match="invalid Network staging request"):
+        admin.validate_request({**plan(), "recovery": {"bundle": "/Applications/jStack Hub.app",
+                                                       "state": "/Users/x/state"}})
     with pytest.raises(ValueError, match="invalid Network staging request"):
         admin.validate_request({**plan(), "unknown": 1})
 

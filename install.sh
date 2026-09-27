@@ -258,40 +258,28 @@ uninstall() {
         note "no app installer in the checkout — skipping the Mac app"
     fi
 
-    # 2. the host LaunchAgent; the menu bar icon comes off with it. --purge also
-    #    deletes the state, token and credentials it keeps.
-    if [ -f "$CHECKOUT/host/install.sh" ]; then
-        if [ -n "$purge" ]; then
-            # A machine that was adopted as a managed leaf keeps that
-            # attachment in /Library — root-owned, beyond every rm below.
-            # Left there, the next install reads the daemon's presence and
-            # calls itself "managed · offline" forever, and the app shows no
-            # local instance. Detach now, while the host still holds the
-            # parent record it needs to tell the hub; it asks for admin
-            # rights itself and reports any step it could not do.
-            if [ -f /Library/LaunchDaemons/com.jremote.leaf.plist ]; then
-                if command -v jstack-host >/dev/null 2>&1; then
-                    run jstack-host detach || warn "leaf detach reported a problem — finish with \`jstack-host detach\` by hand"
-                elif [ -x "$HOME/.local/bin/jstack-host" ]; then
-                    run "$HOME/.local/bin/jstack-host" detach || warn "leaf detach reported a problem — finish with \`jstack-host detach\` by hand"
-                fi
-            fi
-            # The host's own confirmation ("type the word purge") cannot be
-            # answered when this script arrives through a pipe; asking for
-            # --uninstall here IS the consent, so forward it as --yes.
-            run bash "$CHECKOUT/host/install.sh" --purge --yes || warn "host purge reported a problem"
-        else
-            run bash "$CHECKOUT/host/install.sh" --uninstall || warn "host uninstall reported a problem"
+    # 2. the leaf attachment, gracefully, before the sweep below removes it by
+    #    force. It keeps that attachment in /Library — root-owned, beyond
+    #    every rm below. Left there, the next install reads the daemon's
+    #    presence and calls itself "managed · offline" forever, and the app
+    #    shows no local instance. Detach now, while the host still holds the
+    #    parent record it needs to tell the hub; it asks for admin rights
+    #    itself and reports any step it could not do. (#192: the unsealed
+    #    host/install.sh this used to delegate to is gone — the sealed Hub
+    #    and its LaunchAgent come off in the sweep below instead.)
+    if [ -n "$purge" ] && [ -f /Library/LaunchDaemons/com.jremote.leaf.plist ]; then
+        if command -v jstack-host >/dev/null 2>&1; then
+            run jstack-host detach || warn "leaf detach reported a problem — finish with \`jstack-host detach\` by hand"
+        elif [ -x "$HOME/.local/bin/jstack-host" ]; then
+            run "$HOME/.local/bin/jstack-host" detach || warn "leaf detach reported a problem — finish with \`jstack-host detach\` by hand"
         fi
-    else
-        note "no host installer in the checkout — skipping the host"
     fi
 
-    # 2b. Direct sweep. The two steps above delegate to installers inside the
-    #     checkout — and a machine mid-wreckage, where uninstall matters most,
-    #     often has no checkout or a broken one, turning both into silent
-    #     no-ops that leave the menu bar running. Remove the sealed pieces
-    #     directly, unregistering through the bundle first (a Background Task
+    # 2b. Direct sweep. Step 1 delegates to an installer inside the checkout —
+    #     and a machine mid-wreckage, where uninstall matters most, often has
+    #     no checkout or a broken one, turning it into a silent no-op that
+    #     leaves the menu bar running. Remove the sealed pieces directly,
+    #     unregistering through the bundle first (a Background Task
     #     Management approval outlives both launchctl bootout and the bundle).
     if [ "$(uname -s)" = "Darwin" ] && [ "$DRY_RUN" != "1" ]; then
         # A bundle new enough carries its own journal-driven uninstall verb —
@@ -1381,12 +1369,11 @@ if [ -d "/Applications/jRemote.app" ]; then APP_INSTALLED=1; fi
 #
 # The host binds 0.0.0.0 by design (a host only 127.0.0.1 can see is not a
 # host) and every route but /api/health requires its bearer token. --no-host
-# skips it; `host/install.sh --uninstall` removes it later without touching
-# the state or the token.
+# skips it; `install.sh --uninstall` removes it later without touching the
+# state or the token.
 
 step "Host and menu bar"
 
-HOST_INSTALLER="$CHECKOUT/host/install.sh"
 LEGACY_APPS_DIR="${JSTACK_APPS_DIR:-$HOME/Library/Application Support/jStack}"
 
 # This script is also the repairer. A machine that already has a Hub answering
@@ -1596,11 +1583,7 @@ if [ "$(uname -s)" = "Darwin" ] && [ "$WANT_HOST" != "0" ]; then
     if [ "$JSTACK_HUB_CURRENT" != "1" ]; then
         if ls "$HOME"/Library/LaunchAgents/com.jremote.*.plist >/dev/null 2>&1; then
             warn "legacy jStack services found — purging them so the sealed install can proceed"
-            if [ "$DRY_RUN" = "1" ]; then
-                would "$HOST_INSTALLER --purge --yes"
-            elif [ -f "$HOST_INSTALLER" ]; then
-                bash "$HOST_INSTALLER" --purge --yes || warn "legacy purge reported a problem"
-            fi
+            [ "$DRY_RUN" = "1" ] && would "unregister the legacy com.jremote.* services and move their state aside"
         fi
         # The sealed installer refuses over any of these three leftovers, and a
         # deleted plist does NOT unload its registration — a machine can carry
@@ -1786,17 +1769,17 @@ if [ "$WANT_HOST" != "0" ] && [ "$(uname -s)" = "Darwin" ] \
     fi
 elif [ "${JSTACK_HUB_CURRENT:-0}" = "1" ]; then
     # The sealed Hub is up, and it owns all four services: host, menu, updater,
-    # scheduler. There is nothing here for the unsealed installer to add — and
-    # running it anyway is what put a SECOND icon in the menu bar. Before this
-    # branch existed, a current Hub failed the sealed condition above and fell
-    # all the way through to the unsealed `host/install.sh` below, which
-    # registers `com.jremote.menubar` (its own `JStack Host.app`) beside the
-    # Hub's `live.jstack.hub.menu`, re-registers `com.jremote.host` against the
-    # port the Hub already holds, and replaces the sealed `jstack-host` wrapper
-    # with a link into `host/.venv`. So a first install showed one icon and
-    # every re-run of this script — including the one the leaf joiner runs when
-    # a Mac's release does not match the hub's — showed two. Moving a
-    # source-build Hub forward is `jstack-host updates build`.
+    # scheduler. There is nothing here to add. Before this branch existed, a
+    # current Hub failed the sealed condition above and fell all the way
+    # through to the unsealed `host/install.sh` (#192, deleted), which
+    # registered `com.jremote.menubar` (its own `JStack Host.app`) beside the
+    # Hub's `live.jstack.hub.menu`, re-registered `com.jremote.host` against
+    # the port the Hub already held, and replaced the sealed `jstack-host`
+    # wrapper with a link into `host/.venv`. So a first install showed one
+    # icon and every re-run of this script — including the one the leaf
+    # joiner runs when a Mac's release does not match the hub's — showed two.
+    # The legacy sweep below cleans up any Mac still carrying that residue.
+    # Moving a source-build Hub forward is `jstack-host updates build`.
     note "the sealed Hub owns the host, its menu bar and its updater — nothing to add"
 
     # And the residue of every earlier re-run that did take that branch. Agents
@@ -1823,9 +1806,9 @@ elif [ "${JSTACK_HUB_CURRENT:-0}" = "1" ]; then
             ok "the second icon and the unsealed host agent are gone"
         fi
     fi
-    # The wrapper the sealed CLI is reached through. `host/install.sh` replaces
-    # it with a link into host/.venv, which leaves a Mac driving the unsealed
-    # CLI against the sealed Hub's state.
+    # The wrapper the sealed CLI is reached through. The deleted unsealed
+    # installer used to replace it with a link into host/.venv, which left a
+    # Mac driving the unsealed CLI against the sealed Hub's state.
     if [ "$DRY_RUN" != "1" ] \
        && ! grep -q JStackCLI "$HOME/.local/bin/jstack-host" 2>/dev/null; then
         mkdir -p "$HOME/.local/bin"
@@ -1834,28 +1817,10 @@ elif [ "${JSTACK_HUB_CURRENT:-0}" = "1" ]; then
         chmod +x "$HOME/.local/bin/jstack-host"
         ok "jstack-host points at the sealed Hub's CLI again"
     fi
-elif [ ! -f "$HOST_INSTALLER" ]; then
-    note "no host installer in this checkout — skipped"
 elif [ "$WANT_HOST" = "0" ]; then
-    note "skipped by --no-host — run $HOST_INSTALLER any time"
-else
-    # Not a question. The host is the machine's reachability and the icon is
-    # the only surface that ever says whether it is running — asking makes
-    # both read as extras, and a "no" here produces an install that looks
-    # complete and answers nothing. --no-host is the way out, stated in
-    # --help, rather than a prompt that has one sensible answer.
-    # --no-pair: pairing is step 10, once both halves exist and the host can
-    # introduce itself to the app installed in the previous step.
-    host_args=(--yes --no-pair)
-    [ "$WANT_MENUBAR" = "0" ] && host_args+=(--no-menubar)
-    if [ "$DRY_RUN" = "1" ]; then
-        would "$HOST_INSTALLER ${host_args[*]}"
-    elif bash "$HOST_INSTALLER" "${host_args[@]}"; then
-        ok "host installed"
-        HOST_INSTALLED=1
-    else
-        warn "host install reported a problem — re-run $HOST_INSTALLER to see it"
-    fi
+    note "skipped by --no-host"
+elif [ "$(uname -s)" != "Darwin" ]; then
+    note "the host only installs on macOS — skipped"
 fi
 
 # ── 10. introducing the two halves ──────────────────────────────────────────

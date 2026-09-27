@@ -188,6 +188,31 @@ def test_unreadable_client_counts_as_a_window(sock, monkeypatch):
     assert managed.attached_names() == {"jr-aaaaaaaa"}
 
 
+def test_a_raising_phone_client_check_is_logged(sock, monkeypatch, capsys):
+    """#135. `_is_phone_client` used to swallow every exception silently, so a
+    hardened-runtime client raising `AccessDenied` off `environ()` — the
+    issue's own candidate cause — left no trace anywhere the whole call lived.
+    The unknown-answer default is unchanged; only its visibility is new."""
+    monkeypatch.setattr(managed.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(
+                            a[0], 0, stdout="jr-aaaaaaaa\t4242\n", stderr=""))
+
+    class _BoomProcess:
+        def __init__(self, pid):
+            pass
+
+        def environ(self):
+            raise PermissionError("AccessDenied reading a hardened client's environ")
+
+    monkeypatch.setitem(sys.modules, "psutil",
+                        type("M", (), {"Process": _BoomProcess})())
+
+    assert managed.attached_names() == {"jr-aaaaaaaa"}
+    err = capsys.readouterr().err
+    assert "phone-client check failed for pid 4242" in err
+    assert "PermissionError" in err
+
+
 # ── detaching ends nothing ──────────────────────────────────────────────────
 
 def test_last_client_detach_leaves_the_session_running(sock, clients, no_iterm):

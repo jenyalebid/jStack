@@ -52,7 +52,7 @@ def test_the_device_roster_lists_the_caller(api):
     assert _ids(devices), "a host serving an authenticated request has ≥1 device"
 
 
-def test_a_minted_device_appears_then_renames_then_revokes(api, scratch_name):
+def test_a_minted_device_appears_then_renames_then_revokes(api, scratch_name, console):
     """The whole lifecycle in one test, deliberately.
 
     Split into three, a failure in the middle leaves a live credential on the
@@ -81,7 +81,7 @@ def test_a_minted_device_appears_then_renames_then_revokes(api, scratch_name):
     api.ok("POST", "/devices/{device_id}/revoke", fmt={"device_id": new_id})
 
 
-def test_a_revoked_token_stops_opening_the_door(api, scratch_name):
+def test_a_revoked_token_stops_opening_the_door(api, scratch_name, console):
     """Revocation is only real if the credential stops working — a row flagged
     dead while its token still authenticates is the exact shape of a security
     control that reports success and does nothing. In-process tests check the
@@ -103,7 +103,7 @@ def test_a_revoked_token_stops_opening_the_door(api, scratch_name):
         f"flagged a row and left the door open")
 
 
-def test_an_enrolment_code_is_minted_listed_and_revoked(api, scratch_name):
+def test_an_enrolment_code_is_minted_listed_and_revoked(api, scratch_name, console):
     """The off-LAN pairing path's management half. The code itself appears in
     the mint response and nowhere else, so the listing is checked for the
     *record* — who minted it, what it is for — never for the secret."""
@@ -123,7 +123,7 @@ def test_an_enrolment_code_is_minted_listed_and_revoked(api, scratch_name):
     api.ok("POST", "/enrolment/codes/revoke", json={"code": code})
 
 
-def test_a_code_mint_refuses_a_kind_it_does_not_serve(api, scratch_name):
+def test_a_code_mint_refuses_a_kind_it_does_not_serve(api, scratch_name, console):
     """`kind` is fixed at mint and never re-asserted at redemption, so an
     unrecognised one accepted here would be a code that means nothing later."""
     r = api.post("/enrolment/codes",
@@ -133,7 +133,7 @@ def test_a_code_mint_refuses_a_kind_it_does_not_serve(api, scratch_name):
         f"never checked again after this point")
 
 
-def test_redeeming_a_code_pairs_a_real_device(api, scratch_name):
+def test_redeeming_a_code_pairs_a_real_device(api, scratch_name, console):
     """The pairing round trip, end to end, over the wire.
 
     This is what the phone does at the pairing screen, and the one test here
@@ -161,7 +161,7 @@ def test_redeeming_a_code_pairs_a_real_device(api, scratch_name):
         api.ok("POST", "/devices/{device_id}/revoke", fmt={"device_id": device_id})
 
 
-def test_a_spent_code_cannot_be_spent_twice(api, scratch_name):
+def test_a_spent_code_cannot_be_spent_twice(api, scratch_name, console):
     """One-time means one time. A code that survives its redemption is a
     long-lived shared secret nobody thinks they have.
 

@@ -232,3 +232,16 @@ def test_an_open_stream_rechecks_parent_authority(rig, monkeypatch):
         await asyncio.wait_for(watcher, timeout=3)
         assert store.device(row["id"])["revoked_at"] is None
     asyncio.run(verify())
+
+
+def test_console_reachable_reads_the_feature_flag_a_caller_actually_gets(rig):
+    """A caller off the hub console cannot build a `Request` to hand `console()`
+    — it only ever sees what `/host` told it. `console_reachable` is the same
+    verdict, read back off that answer, so a live suite decides whether the
+    console routes are reachable from where it stands before calling them."""
+    _, _, _, console, remote = rig
+    on = console.get("/api/jremote/v1/host").json()["features"]
+    off = remote.get("/api/jremote/v1/host").json()["features"]
+    assert managed_access.console_reachable(on) is True
+    assert managed_access.console_reachable(off) is False
+    assert managed_access.console_reachable({}) is False

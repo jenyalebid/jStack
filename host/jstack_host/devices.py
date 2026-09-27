@@ -513,6 +513,16 @@ def revoke(device_id: str) -> bool:
     return True
 
 
+def delete(device_id: str) -> bool:
+    """Clear a revoked row from the roster outright (jStack#35) — a test
+    fixture, a typo, a duplicate pairing that should never have accumulated
+    a permanent line on the one screen a person checks who can reach their
+    Mac. False for unknown id or a live row: `store.delete_device` refuses
+    the latter itself (jStack#60), so this can never cut a live session's
+    trust out from under it."""
+    return _store().delete_device(device_id)
+
+
 def notify_revoked(device_id: str) -> None:
     """Wake streams after a revocation committed by this or another workflow."""
     with _watch_lock:

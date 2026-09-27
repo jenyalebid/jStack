@@ -207,6 +207,21 @@ def install(providers: list[dict], stack: Path, sha: str | None = None):
         else:
             register_codex_marketplace(binary, source)
             run([binary, "plugin", "add", "jstack@jstack", "--json"])
+            # A release can change hooks/hooks.json, and nothing before this
+            # ever re-ran the install-time write of the operator-owned config
+            # (#141) — so a managed machine kept trusting hooks that no
+            # longer matched what the plugin now ships. Best-effort: a
+            # machine with no passwordless path to /etc/codex logs the same
+            # message `codex_setup.py` would print and is left exactly where
+            # it was; `jstack-doctor`'s `codex hooks` check already catches
+            # that drift and names the manual re-run that clears it. Never
+            # fatal to the update itself, on the same reasoning as the doctor
+            # check reading this same manifest.
+            from .codex_hooks import install_managed_config
+            try:
+                print(install_managed_config(Path(source) / "plugins/jstack"))
+            except OSError as exc:
+                print(f"codex hooks not refreshed: {exc}")
 
 
 def registered_codex_root(binary: str) -> Path | None:

@@ -992,10 +992,18 @@ def was_aborted(screen, text, engine="claude", turn=""):
 
 # --- typing into it ----------------------------------------------------------------------
 
-def send_text(name, text):
-    """Type `text` into the session's input box and submit it."""
+def send_text(name, text, pre_enter_delay=0.0):
+    """Type `text` into the session's input box and submit it.
+
+    `pre_enter_delay` — only ever nonzero for a Codex pane: it needs a beat to
+    finish drawing a pasted burst before Enter lands, or the paste itself is
+    still settling when the send fires. Zero for every other caller, and zero
+    changes nothing about this function's behavior before it existed.
+    """
     for argv in managed._type_argv(name, text):
         subprocess.run(argv, check=True, timeout=5)
+    if pre_enter_delay:
+        time.sleep(pre_enter_delay)
     subprocess.run(managed._t("send-keys", "-t", name, "Enter"), check=True, timeout=5)
 
 
@@ -1039,7 +1047,7 @@ def took_effect(screen, engine="claude", turn=""):
     return turn == "working"  # no spinner to match: the rollout is the only witness
 
 
-def submit(name, text, engine="claude", path=None):
+def submit(name, text, engine="claude", path=None, pre_enter_delay=0.0):
     """Type it, submit it, and prove it went — or take it back out.
 
     An Enter is not a submission. Typing a slash command opens the CLI's autocomplete
@@ -1053,7 +1061,12 @@ def submit(name, text, engine="claude", path=None):
     Failing that, a box no longer holding our text is gone. Only when neither is true for
     the whole window is it really stuck, and then it gets wiped.
     """
-    send_text(name, text)
+    # The 2-arg call is kept for `pre_enter_delay=0.0` (every caller but Codex's
+    # `send_input`) — it is the shape every existing fake of `send_text` mocks.
+    if pre_enter_delay:
+        send_text(name, text, pre_enter_delay)
+    else:
+        send_text(name, text)
     deadline = time.time() + SUBMIT_CHECK_SECS
     while time.time() < deadline:
         time.sleep(POLL_SECS)

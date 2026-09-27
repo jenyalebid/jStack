@@ -749,6 +749,23 @@ def rename_device(device_id: str, body: DeviceRenameRequest, request: Request,
     return {"renamed": device_id}
 
 
+@router.post("/devices/{device_id}/delete")
+def delete_device(device_id: str, request: Request,
+                  caller: str = Depends(current_device)):
+    """Clear a revoked row from the roster outright — a hub-console action,
+    same footing as rename (jStack#35). Distinct from revoke: this is for a
+    row that should never have existed, not the record of a real device
+    someone actually removed — revoke stays the answer there, audit trail
+    intact. 404 covers both an unknown id and a row that is still live; the
+    store refuses to delete a live one (jStack#60), so the caller revokes
+    first if that is what it meant."""
+    managed_access.require_console(request)
+    if not devices.delete(device_id):
+        raise HTTPException(status_code=404,
+                            detail="unknown device, or not yet revoked")
+    return {"deleted": device_id}
+
+
 #
 # `revoke_router` carries exactly one route, and it is not outside the bearer
 # gate: `_revoking_device` below IS that gate — `current_device`, which runs
@@ -787,7 +804,7 @@ async def _revoking_device(device_id: str, request: Request,
 
 
 @revoke_router.post("/devices/{device_id}/revoke")
-def revoke_device(device_id: str, request: Request,
+def revoke_device(device_id: str, request: Request, confirm: bool = False,
                   caller: str = Depends(_revoking_device)):
     """Revoke a device — from this moment its token opens nothing, and its
     live connections (PTY terminal, SSE streams) are cut, not left to drain.
@@ -799,7 +816,16 @@ def revoke_device(device_id: str, request: Request,
     action, "disconnect this device". Revoking ANOTHER device is
     a hub menu-bar action: a remote must not reach across and cut a device that
     is not it ("It should NOT ... kill other DEVICES"). Enforced here so the
-    refusal holds whatever the app shows."""
+    refusal holds whatever the app shows.
+
+    One more gate before the console cuts SOMEONE ELSE's row (jStack#55): if
+    that row is bound to an adopted machine (`hosts.device_id` — the same
+    credential `wg_peer.py`'s leaf bundle carries), destroying it strands a
+    remote Mac with no way back short of physical LAN presence or
+    `adopt --offline`. `confirm=true` is the caller naming that it read the
+    warning, the same shape the CLI's confirmation prompt takes. A self-revoke
+    never asks: the machine choosing to detach already knows what it is doing.
+    """
     if getattr(request.state, "already_revoked", False):
         return {"revoked": device_id, "self": True, "already": True}
     if not _hub_console(request) and (
@@ -807,6 +833,13 @@ def revoke_device(device_id: str, request: Request,
         raise HTTPException(
             status_code=403,
             detail="a device can disconnect only itself; removing another device is a hub menu-bar action")
+    if device_id != caller and not confirm:
+        leaf = managed_access.leaf_for_device(device_id)
+        if leaf is not None and not leaf["deleted"]:
+            raise HTTPException(
+                status_code=409,
+                detail=(f"{leaf['name'] or leaf['key']} has no way back onto this mesh "
+                        "without this credential — resend with confirm=true to revoke anyway"))
     with audit.acting(audit.from_request(request, caller)):
         if not devices.revoke(device_id):
             raise HTTPException(status_code=404, detail="unknown or already revoked device")
@@ -3038,8 +3071,8 @@ def splitoff_session(sid: str):
             break
     if not key:
         raise HTTPException(status_code=404, detail="no transcript to fork")
-    # The dub is a jStack plugin binary, and `host/install.sh` installs the
-    # host without the plugins tree — so a standalone host does not have one.
+    # The dub is a jStack plugin binary, and a host installed without the
+    # plugins tree does not have one.
     # Asked for it anyway, `subprocess.run` raised FileNotFoundError straight
     # out of the route and the phone got a bare 500 for a feature the machine
     # simply does not carry. Every other optional tier here answers honestly
@@ -3124,8 +3157,12 @@ def input_session(sid: str, payload: InputBody):
     text = (payload.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="empty input")
-    if not managed.send_input(sid, text):
+    if not managed.is_open(sid):
         raise HTTPException(status_code=409, detail="session is not open (managed)")
+    if not managed.send_input(sid, text):
+        # Typed, submitted, and proven not to have run — the box is cleared
+        # back out, and the client hears it instead of a placeholder (#157).
+        raise HTTPException(status_code=409, detail="the session did not take the input")
     return {"ok": True}
 
 

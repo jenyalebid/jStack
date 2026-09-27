@@ -48,6 +48,16 @@ def require_console(request) -> None:
         raise HTTPException(403, "device and machine management belongs to the hub menu bar")
 
 
+def console_reachable(features: dict) -> bool:
+    """The same verdict `console()` gates the console routes on, read back off
+    the `features` block `/host` already answers with (`device_management`),
+    for a caller that has no `Request` of its own to test loopback against —
+    a live suite standing off the hub, deciding whether the routes it is
+    about to call are reachable from where it stands, or 403 by construction.
+    """
+    return bool(features.get("device_management"))
+
+
 def leaf_for_device(device_id: str) -> dict | None:
     from .store import get_store
     return get_store().host_for_device(device_id)

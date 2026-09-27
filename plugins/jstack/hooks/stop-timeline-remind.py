@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from session_runtime import user_engaged
 import root
+import review_config
 from _prompts import load as load_prompt  # noqa: E402 — sibling module
 
 PLUGIN_BIN = Path(__file__).resolve().parent.parent / "bin"
@@ -66,12 +67,7 @@ def agent_source(cwd: str) -> str:
     injector: the session dir's full path under the agent dir, "/"-joined —
     per-dir seats; at the agent root → chat)."""
     try:
-        config = Path(os.environ.get("JSTACK_REVIEW_CONFIG", str(
-            Path.home() / ".claude/jstack/review.json"))).expanduser()
-        try:
-            cfg = json.loads(config.read_text())
-        except (OSError, ValueError):
-            cfg = {}
+        cfg = review_config.load()
         agent, submode = root.seat_of(cwd, cfg)
         if agent:
             return f"{agent}/{submode}"

@@ -88,6 +88,7 @@ from pathlib import Path
 # answering exactly as it did before the derivation existed.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from session_runtime import transcripts
+import review_config
 try:
     import root as _root
 except ImportError:
@@ -159,15 +160,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, created_at
 
 def _config() -> dict:
     """Host config — shared with the timeline/review engine."""
-    path = Path(os.environ.get(
-        "JSTACK_REVIEW_CONFIG",
-        str(Path.home() / ".claude" / "jstack" / "review.json"),
-    )).expanduser()
-    try:
-        data = json.loads(path.read_text())
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError, ValueError):
-        return {}
+    return review_config.load()
 
 
 def _mail_config() -> dict:

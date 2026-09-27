@@ -217,11 +217,16 @@ def _is_phone_client(pid: str) -> bool:
 
     Unknown answers say "window". Nothing's life depends on this call — it
     decides the board's honest "an iTerm window is showing this" display fact,
-    and which ttys `close_windows` closes when a session ends."""
+    and which ttys `close_windows` closes when a session ends. Logged rather
+    than silent: a hardened-runtime client (the app's own signed tmux binary)
+    is a live candidate for `environ()` raising `AccessDenied` here on every
+    call, and an unlogged swallow would hide that for good (#135)."""
     try:
         import psutil
         return psutil.Process(int(pid)).environ().get(PHONE_CLIENT_ENV) == "1"
-    except Exception:
+    except Exception as e:
+        _log(f"phone-client check failed for pid {pid}, counted as a window: "
+             f"{type(e).__name__}: {e}")
         return False
 
 
@@ -1131,7 +1136,16 @@ def _nudge_when_ready(name: str, text: str, engine: str = "claude") -> None:
 
 
 def send_input(sid: str, text: str) -> bool:
-    """Type `text` + Enter into the managed session's stdin. False if not open."""
+    """Type `text` + Enter into the managed session's stdin. False if not open.
+
+    The Enter used to be the whole proof: this route typed the line, hit
+    Enter, and reported success whether or not the box actually took it — a
+    busy pane holds a send instead of running it, and the box then shows a
+    dim placeholder that reads exactly like a line that ran (#157). Routed
+    through `compact_delivery.submit` now — the same type-then-verify already
+    trusted for `/compact` and the continue nudge — so a send that does not
+    take is logged, and the box is cleared back out rather than left holding
+    a half-fired prompt for the next Enter to pick up."""
     if not is_open(sid):
         return False
     engine = (open_registry().get(sid) or {}).get("engine", "claude")
@@ -1139,12 +1153,15 @@ def send_input(sid: str, text: str) -> bool:
         from .codex_commands import translate, workspace
         text = translate(text, workspace(sid) if text.lstrip().startswith("/") else "")
     name = _name(sid)
-    for argv in _type_argv(name, text):
-        subprocess.run(argv, check=True)
-    if engine == "codex":
-        time.sleep(0.3)  # let Codex finish its paste burst before submitting
-    subprocess.run(_t("send-keys", "-t", name, "Enter"), check=True)
-    return True
+    from . import compact_delivery
+    # Codex gets a beat between typing and Enter to finish drawing its paste
+    # burst — `send_text`'s own `pre_enter_delay`, not a sleep before typing.
+    ok = compact_delivery.submit(name, text, engine,
+                                 pre_enter_delay=0.3 if engine == "codex" else 0.0)
+    if not ok:
+        _log(f"send_input: {sid} did not take — "
+             f"{compact_delivery.why_not_ready(compact_delivery.pane(name), engine)}")
+    return ok
 
 
 def send_input_after_compact(sid: str, text: str, transcript: str,

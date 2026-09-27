@@ -84,20 +84,11 @@ except ImportError:
     # so this is the one place degrading quietly is right: fall back to the
     # literal pre-root default at the use site.
     _root = None
+import review_config as _review_config  # noqa: E402 — sibling of root.py
 
 
 def _config() -> dict:
-    cfg_path = Path(
-        os.environ.get(
-            "JSTACK_REVIEW_CONFIG",
-            str(Path.home() / ".claude" / "jstack" / "review.json"),
-        )
-    ).expanduser()
-    try:
-        data = json.loads(cfg_path.read_text())
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError, ValueError):
-        return {}
+    return _review_config.load()
 
 
 def resolve(cwd: Path, root: Path) -> tuple[str | None, str | None]:
