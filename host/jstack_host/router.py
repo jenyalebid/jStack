@@ -749,6 +749,23 @@ def rename_device(device_id: str, body: DeviceRenameRequest, request: Request,
     return {"renamed": device_id}
 
 
+@router.post("/devices/{device_id}/delete")
+def delete_device(device_id: str, request: Request,
+                  caller: str = Depends(current_device)):
+    """Clear a revoked row from the roster outright — a hub-console action,
+    same footing as rename (jStack#35). Distinct from revoke: this is for a
+    row that should never have existed, not the record of a real device
+    someone actually removed — revoke stays the answer there, audit trail
+    intact. 404 covers both an unknown id and a row that is still live; the
+    store refuses to delete a live one (jStack#60), so the caller revokes
+    first if that is what it meant."""
+    managed_access.require_console(request)
+    if not devices.delete(device_id):
+        raise HTTPException(status_code=404,
+                            detail="unknown device, or not yet revoked")
+    return {"deleted": device_id}
+
+
 #
 # `revoke_router` carries exactly one route, and it is not outside the bearer
 # gate: `_revoking_device` below IS that gate — `current_device`, which runs

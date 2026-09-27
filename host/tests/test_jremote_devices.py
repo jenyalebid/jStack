@@ -874,6 +874,30 @@ def test_the_hub_console_renames_and_404s_the_unknown(client, store, on_console)
                        json={"name": "x"}).status_code == 404
 
 
+def test_a_remote_cannot_delete_a_device(client, store):
+    row, _ = devices.mint("junk-row")
+    devices.revoke(row["id"])
+    r = client.post(f"/api/jremote/v1/devices/{row['id']}/delete")
+    assert r.status_code == 403
+    assert store.device(row["id"]) is not None
+
+
+def test_the_hub_console_deletes_a_revoked_row_but_not_a_live_one(client, store, on_console):
+    """jStack#35: a junk or duplicate row is gone for good once revoked and
+    deleted; a live row is refused rather than silently vanishing (jStack#60
+    enforces the refusal, this pins the route surfaces it as a 404)."""
+    live, _ = devices.mint("still-paired")
+    assert client.post(f"/api/jremote/v1/devices/{live['id']}/delete").status_code == 404
+    assert store.device(live["id"]) is not None
+
+    junk, _ = devices.mint("e2e-tests")
+    devices.revoke(junk["id"])
+    r = client.post(f"/api/jremote/v1/devices/{junk['id']}/delete")
+    assert r.status_code == 200 and r.json()["deleted"] == junk["id"]
+    assert store.device(junk["id"]) is None
+    assert client.post(f"/api/jremote/v1/devices/{junk['id']}/delete").status_code == 404
+
+
 # ── why a 401 happened ───────────────────────────────────────────────────────
 #
 # The response body is deliberately one sentence for every failure — telling a

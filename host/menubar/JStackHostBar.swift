@@ -472,6 +472,14 @@ enum DeviceMenu {
             .sorted { $0.name < $1.name }
     }
 
+    /// Revoked rows still on the roster — the ones Delete clears (jStack#35).
+    /// A device someone actually removed, not the audit history revoke keeps
+    /// on purpose; deleting one is the console's call, made per row below.
+    static func revoked(_ devices: [Device], deleted: Set<String> = []) -> [Device] {
+        devices.filter { $0.revoked && $0.id != "host-internal" && !deleted.contains($0.id) }
+            .sorted { $0.name < $1.name }
+    }
+
     static func removalSucceeded(status: Int, data: Data?) -> Bool {
         if status == 200 { return true }
         guard status == 404, let data,
@@ -1065,6 +1073,16 @@ final class HostProbe {
                 _ done: @escaping (Bool, String) -> Void) {
         post("/devices/\(escaped(deviceId))/revoke", token: token, timeout: 10,
              removal: true, done)
+    }
+
+    /// Clear a revoked row through the host's own `/devices/{id}/delete`
+    /// (jStack#35) — distinct from `revoke`: the store refuses this on a row
+    /// that is not already revoked (jStack#60), so a live device can never be
+    /// cut this way, and a 404 here is a real failure, not the idempotent
+    /// "already gone" `removal: true` treats as success.
+    func delete(deviceId: String, token: String,
+                _ done: @escaping (Bool, String) -> Void) {
+        post("/devices/\(escaped(deviceId))/delete", token: token, timeout: 10, done)
     }
 
     /// Drop an adopted machine from the grid, through the host's own route.
@@ -2026,6 +2044,11 @@ final class StatusController: NSObject {
     private var timer: Timer?
     private var state = HostState()
     private var removedDevices: Set<String> = []
+    /// The raw roster from the last poll, revoked rows included — `state.devices`
+    /// is overwritten with the active-only view below, and a delete surface for
+    /// junk revoked rows (jStack#35) needs the ones that filter drops.
+    private var allDevices: [Device] = []
+    private var deletedDevices: Set<String> = []
     private var updateInventory: UpdateInventory?
     private var updateError: String?
     private var updateRequestInFlight = false
@@ -2077,6 +2100,8 @@ final class StatusController: NSObject {
         probe.poll { [weak self] state in
             guard let self else { return }
             self.state = state
+            // A poll started before a successful delete cannot resurrect it.
+            self.allDevices = state.devices.filter { !self.deletedDevices.contains($0.id) }
             // A poll started before a successful removal cannot resurrect it.
             self.state.devices = DeviceMenu.active(state.devices, removed: self.removedDevices)
             self.draw()
@@ -2657,7 +2682,8 @@ final class StatusController: NSObject {
         guard state.isUp, state.isProvisioned, !state.unauthorized,
               state.identity?.canManageDevices == true else { return nil }
         let active = DeviceMenu.active(state.devices, removed: removedDevices)
-        guard !active.isEmpty else { return nil }
+        let revoked = DeviceMenu.revoked(allDevices, deleted: deletedDevices)
+        guard !active.isEmpty || !revoked.isEmpty else { return nil }
 
         let sub = NSMenu()
         sub.autoenablesItems = false
@@ -2682,6 +2708,28 @@ final class StatusController: NSObject {
             actions.addItem(remove)
             row.submenu = actions
             sub.addItem(row)
+        }
+
+        // Revoked rows below a separator, distinct from the active roster
+        // above — the audit trail revoke leaves behind, with the one action
+        // (jStack#35) that clears a row that should never have accumulated
+        // there: a test fixture, a typo, a duplicate pairing.
+        if !revoked.isEmpty {
+            sub.addItem(.separator())
+            for device in revoked {
+                let row = NSMenuItem(title: device.name, action: nil, keyEquivalent: "")
+                row.image = Self.dot(live: false, idle: false)
+                row.attributedTitle = Self.twoLine(device.name, "revoked")
+
+                let actions = NSMenu()
+                actions.autoenablesItems = false
+                let delete = Self.action("Delete", #selector(doDeleteDevice), self,
+                                         symbol: "trash")
+                delete.representedObject = device
+                actions.addItem(delete)
+                row.submenu = actions
+                sub.addItem(row)
+            }
         }
 
         let title = "\(active.count) " + (active.count == 1 ? "Device" : "Devices")
@@ -2957,6 +3005,41 @@ final class StatusController: NSObject {
                 failed.alertStyle = .warning
                 failed.messageText = "\(failures.count) of \(sids.count) did not stop"
                 failed.informativeText = failures.joined(separator: "\n")
+                failed.runModal()
+            }
+            self?.refresh()
+        }
+    }
+
+    /// Clear a revoked row from the roster outright (jStack#35) — a test
+    /// fixture, a typo, a duplicate pairing, never a live device: this action
+    /// only ever appears on a row this menu already marked "revoked", and the
+    /// host's own store refuses the delete if that changed underneath it.
+    @objc private func doDeleteDevice(_ sender: NSMenuItem) {
+        guard state.identity?.canManageDevices == true,
+              let device = sender.representedObject as? Device,
+              !device.id.isEmpty, let token = HostAgent.token() else { return }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Delete \(device.name)?"
+        alert.informativeText = "Clears this revoked row from the roster for good. "
+            + "Pairing the device again mints a new row, not this one back."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        probe.delete(deviceId: device.id, token: token) { [weak self] ok, detail in
+            if ok, let self {
+                self.deletedDevices.insert(device.id)
+                self.allDevices.removeAll { $0.id == device.id }
+                self.build()
+            } else if !ok {
+                let failed = NSAlert()
+                failed.alertStyle = .warning
+                failed.messageText = "Could not delete \(device.name)"
+                failed.informativeText = detail
                 failed.runModal()
             }
             self?.refresh()
