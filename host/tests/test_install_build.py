@@ -292,7 +292,7 @@ def test_one_writer_lands_both_a_hubs_build_and_an_installers(installing, tmp_pa
     built release is, and only one of them is what `stage()` consumes."""
     import inspect
     source = inspect.getsource(build_source._build)
-    assert "land(feed, output, envelope)" in source
+    assert "land(feed, output, envelope, public)" in source
     assert "assemble(" in source and "os.rename" not in source
 
 
