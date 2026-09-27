@@ -3124,8 +3124,12 @@ def input_session(sid: str, payload: InputBody):
     text = (payload.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="empty input")
-    if not managed.send_input(sid, text):
+    if not managed.is_open(sid):
         raise HTTPException(status_code=409, detail="session is not open (managed)")
+    if not managed.send_input(sid, text):
+        # Typed, submitted, and proven not to have run — the box is cleared
+        # back out, and the client hears it instead of a placeholder (#157).
+        raise HTTPException(status_code=409, detail="the session did not take the input")
     return {"ok": True}
 
 
