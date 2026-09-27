@@ -72,6 +72,28 @@ precondition(actions == ["status", "unregister"], "explicit uninstall should sti
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("swiftc"), reason="requires macOS Swift toolchain")
+def test_status_never_reports_enabled_with_no_launchd_job(tmp_path):
+    """#173: `JStackHub status` used to report a role `enabled` straight off
+    the registration record, with no ask of launchd at all — so a bundle swap
+    that left the record behind and no job loaded still read `enabled`."""
+    source = (Path(__file__).resolve().parents[1] / "macos/ServiceControl.swift").read_text()
+    logic = source[source.index("func crossExamined("):source.index("func launchdLoaded(")]
+    fixture = logic + r'''
+precondition(crossExamined("enabled", loaded: false) == "not_registered",
+             "a role with no launchd job must never read enabled")
+precondition(crossExamined("enabled", loaded: true) == "enabled")
+precondition(crossExamined("not_registered", loaded: false) == "not_registered")
+precondition(crossExamined("requires_approval", loaded: false) == "requires_approval")
+'''
+    path = tmp_path / "main.swift"
+    path.write_text(fixture)
+    binary = tmp_path / "probe"
+    subprocess.run(["swiftc", "-o", str(binary), str(path)], check=True, capture_output=True, text=True, timeout=60)
+    result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.fixture(scope="module")
 def acl_probe(tmp_path_factory):
     if sys.platform != "darwin" or not shutil.which("swiftc"):

@@ -39,6 +39,29 @@ func statusName(_ value: SMAppService.Status) -> String {
     }
 }
 
+// #173: `enabled` is a registration record, not launchd's present state — a
+// bundle swap can leave the record behind while launchd holds no such job at
+// all. A role with no launchd job must never read enabled.
+func crossExamined(_ recorded: String, loaded: Bool) -> String {
+    recorded == "enabled" && !loaded ? "not_registered" : recorded
+}
+
+// The plist filename IS the launchd label (`serviceDefinitions` requires the
+// `live.jstack.` prefix and `.plist` suffix), so no plist read is needed to
+// ask launchd about it.
+func labelOf(_ plist: String) -> String { String(plist.dropLast(".plist".count)) }
+
+func launchdLoaded(_ label: String) -> Bool {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    process.arguments = ["print", "gui/\(getuid())/\(label)"]
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    guard (try? process.run()) != nil else { return false }
+    process.waitUntilExit()
+    return process.terminationStatus == 0
+}
+
 func emergencyStopped() -> Bool {
     let settings = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".local/state/jremote/service-settings.json")
@@ -59,7 +82,8 @@ func main() throws {
     let services = try serviceDefinitions()
     guard let action = args.first else {
         if privileged {
-            try emit(services.mapValues { statusName(appService($0).status) })
+            try emit(services.mapValues { crossExamined(statusName(appService($0).status),
+                                                        loaded: launchdLoaded(labelOf($0))) })
             return
         }
         let menu = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/JStackHostBar")
@@ -72,7 +96,8 @@ func main() throws {
     if action == "status" && args.count == 1 {
         var result: [String: String] = [:]
         for (key, plist) in services {
-            result[key] = statusName(appService(plist).status)
+            result[key] = crossExamined(statusName(appService(plist).status),
+                                        loaded: launchdLoaded(labelOf(plist)))
         }
         try emit(result)
         return
