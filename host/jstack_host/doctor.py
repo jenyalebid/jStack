@@ -418,6 +418,50 @@ def check_activation() -> dict:
     return _check("activation", WARN,
                   f"{len(actions)}/{n_declared} declared activation(s) not "
                   f"converged: {names}", hint)
+def check_git_hooks() -> dict:
+    """Are this checkout's commit-identity and push-reachability gates live?
+
+    Both ship as plain files under `plugins/jstack/githooks/`, wired only if a
+    human symlinked them into `.git/hooks` by hand — the install procedure is
+    a comment in the file's own header, nothing runs it. A clone that skipped
+    that step pushes with no identity check and no reachability check; the
+    identity gate's own history records what that let through once, cured
+    only by a history rewrite (#138). Graded on the real state a clone commits
+    and pushes through — `core.hooksPath`, or a hook's resolved symlink
+    target — never on whether the source files exist under `githooks/`,
+    which is true on every clone whether or not either gate is wired.
+    """
+    from . import plugin_paths
+    plugin = plugin_paths.jstack_root()
+    githooks = plugin / "githooks"
+    repo = plugin.parent.parent
+    if not (repo / ".git").exists():
+        return _check("git hooks", OK, "no jStack checkout here — nothing to gate")
+    try:
+        configured = subprocess.run(["git", "-C", str(repo), "config", "--get", "core.hooksPath"],
+                                    capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        configured = ""
+    if configured and (repo / configured).resolve() == githooks.resolve():
+        return _check("git hooks", OK, f"core.hooksPath points at {githooks}")
+    broken = []
+    for name in ("pre-commit", "pre-push"):
+        installed = repo / ".git" / "hooks" / name
+        if not installed.is_symlink():
+            broken.append(f"{name} (not installed)")
+            continue
+        try:
+            if installed.resolve() != (githooks / name).resolve():
+                broken.append(f"{name} (points elsewhere)")
+        except OSError as exc:
+            broken.append(f"{name} ({exc})")
+    if broken:
+        return _check("git hooks", WARN,
+                      f"the identity and reachability gates are not both live: {', '.join(broken)}",
+                      "from the checkout root: ln -s ../../plugins/jstack/githooks/pre-commit "
+                      ".git/hooks/pre-commit && ln -s ../../plugins/jstack/githooks/pre-push "
+                      ".git/hooks/pre-push")
+    return _check("git hooks", OK, "pre-commit and pre-push both live")
 
 
 def check_repos() -> dict:
@@ -614,6 +658,7 @@ CHECKS = (check_python, check_claude, check_tmux, check_websocket, check_fd_limi
           check_token, check_profile, check_agents, check_registry, check_timeline,
           check_transcripts, check_scheduler, check_allowance, check_codex_hooks,
           check_hook_owners, check_activation,
+          check_git_hooks,
           check_repos,
           check_service, check_source, check_app, check_file_sharing)
 

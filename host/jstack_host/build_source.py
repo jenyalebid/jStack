@@ -353,8 +353,13 @@ def assemble(*, release_id: str, notes: str, sequence: int, repo: str, ref: str,
         "receipts": {}}
 
 
-def land(feed: Path, output: Path, envelope: dict) -> Path:
-    """Put a signed build's artifacts in the feed under the release's name."""
+def land(feed: Path, output: Path, envelope: dict, public: str) -> Path:
+    """Put a signed build's artifacts in the feed under the release's name.
+
+    `public` is recorded beside the manifest (#144): a later build rotates
+    the hub's configured key to its own, and a release landed under an
+    earlier key must still verify against the key that actually signed it.
+    """
     from .update_supervisor import atomic_json
     manifest = envelope["manifest"]
     release_id = manifest["release"]
@@ -364,6 +369,7 @@ def land(feed: Path, output: Path, envelope: dict) -> Path:
         shutil.copy2(output / entry["file"], staging / entry["file"])
         releases.check_artifact(staging / entry["file"], entry)
     atomic_json(staging / "manifest.json", envelope)
+    atomic_json(staging / "trust.json", {"algorithm": "Ed25519", "public_key": public})
     # A directory here with no manifest is the wreckage of a build that died
     # between the rename and the write; it holds nothing anybody can verify,
     # so it is replaced rather than left to block this one.
@@ -605,7 +611,7 @@ def _build(root: Path, config: dict, ref: str, *, debug: bool = False) -> dict:
             # will run on is the previous manifest's answer, not a new claim.
             compatibility=previous["compatibility"])
         envelope = releases.sign(manifest, private)
-        land(feed, output, envelope)
+        land(feed, output, envelope, public)
         return _offer(root, config, feed, envelope, public, ref)
     finally:
         subprocess.run(["git", "-C", str(source), "worktree", "remove", "--force", str(stack)],
@@ -810,7 +816,7 @@ def seed(root: Path, output: Path) -> dict:
     manifest = releases.verify(envelope, public,
                                promoted=not config.get("candidate_test", False))
     feed = Path(config["feed_dir"])
-    land(feed, output, envelope)
+    land(feed, output, envelope, public)
     atomic_json(feed / latest_name(built_from(manifest)), envelope)
     return {"release": manifest["release"], "feed": str(feed)}
 

@@ -3071,8 +3071,8 @@ def splitoff_session(sid: str):
             break
     if not key:
         raise HTTPException(status_code=404, detail="no transcript to fork")
-    # The dub is a jStack plugin binary, and `host/install.sh` installs the
-    # host without the plugins tree — so a standalone host does not have one.
+    # The dub is a jStack plugin binary, and a host installed without the
+    # plugins tree does not have one.
     # Asked for it anyway, `subprocess.run` raised FileNotFoundError straight
     # out of the route and the phone got a bare 500 for a feature the machine
     # simply does not carry. Every other optional tier here answers honestly

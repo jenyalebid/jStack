@@ -238,10 +238,10 @@ def test_review_is_accepted_or_refused_cleanly(api, live_session):
 
 
 def test_splitoff_says_so_when_the_dub_is_not_installed(api, live_session):
-    """Splitoff shells out to a jStack plugin binary, and `host/install.sh`
-    installs the host without the plugins tree — so a standalone host has no
-    dub. It used to raise FileNotFoundError out of the route and hand the
-    phone a bare 500 for a feature the machine simply does not have.
+    """Splitoff shells out to a jStack plugin binary, and a host installed
+    without the plugins tree has no dub. It used to raise FileNotFoundError
+    out of the route and hand the phone a bare 500 for a feature the machine
+    simply does not have.
 
     This is the defect this whole suite was built to catch: invisible
     in-process, where the plugin tree is always present, and immediate on the

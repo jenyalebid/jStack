@@ -22,6 +22,14 @@ import httpx
 from . import fleet_updates as fleet, release_manifest as releases
 
 
+def log(message: str) -> None:
+    """launchd's own StandardOutPath for this process is supervisor.out, and
+    every line it held used to be bare text — an apply could not be lined up
+    against the outage it caused (#219). ISO/UTC, matching the release dirs'
+    own mtimes."""
+    print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {message}", flush=True)
+
+
 def atomic_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = path.with_name(path.name + ".tmp")
@@ -182,7 +190,7 @@ class Supervisor:
         stored["public_key"] = key
         atomic_json(path, stored)
         self.config["public_key"] = key
-        print("the parent hub signs with a new key; this machine now trusts it", flush=True)
+        log("the parent hub signs with a new key; this machine now trusts it")
 
     def authorize(self) -> None:
         response = self.heartbeat()
@@ -309,7 +317,7 @@ class Supervisor:
             raise
         except Exception as exc:
             if self.current.get("state") in {"applying", "verifying"}:
-                print(f"update application failed: {exc}", flush=True)
+                log(f"update application failed: {exc}")
                 self.abandon(str(exc))
             else:
                 self.save(state="failed", detail=str(exc))
@@ -328,7 +336,7 @@ class Supervisor:
                         # The supervisor's own bundle was replaced and the job
                         # is confirmed; exit so launchd relaunches this service
                         # from the new bundle instead of running old code on.
-                        print("update: supervisor restarting from the replaced bundle", flush=True)
+                        log("update: supervisor restarting from the replaced bundle")
                         prepare = getattr(self.backend, "prepare_restart", None)
                         if prepare:
                             prepare(self.current)
@@ -347,7 +355,7 @@ class Supervisor:
                     delay = 5
                 except Exception as exc:
                     self.last_error = str(exc)
-                    print(f"update reconciliation: {type(exc).__name__}: {exc}", flush=True)
+                    log(f"update reconciliation: {type(exc).__name__}: {exc}")
                     delay = min(60, delay * 2)
                 if once:
                     return
