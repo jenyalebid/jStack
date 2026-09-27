@@ -161,6 +161,26 @@ def test_a_shipped_copy_is_still_relocated_onto_the_stage(home, monkeypatch):
     assert str(stage) in asked[0]
 
 
+def test_install_refreshes_the_managed_codex_hooks(home, monkeypatch):
+    """#141: a release can change the plugin's hooks/hooks.json, and nothing
+    before this ever re-ran the install-time write of the operator-owned
+    config at MANAGED_CONFIG — so a managed machine kept trusting hooks that
+    no longer matched what the plugin now ships."""
+    from jstack_host import codex_hooks
+    stage = _shipped(home)
+    hooks_dir = stage / "plugins/jstack/hooks"
+    hooks_dir.mkdir(parents=True)
+    (hooks_dir / "hooks.json").write_text(json.dumps(
+        {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "true"}]}]}}))
+    _codex(home, stage)
+    managed = home / "etc-codex/managed_config.toml"
+    managed.parent.mkdir(parents=True)
+    monkeypatch.setattr(codex_hooks, "MANAGED_CONFIG", managed)
+    monkeypatch.setattr(update_plugins, "run", lambda argv: "[]")
+    update_plugins.install(update_plugins.discover(), stage)
+    assert "[[hooks.SessionStart]]" in managed.read_text()
+
+
 def test_a_non_directory_marketplace_still_refuses_before_the_checkout_test(home):
     """The existing contract: a github marketplace cannot be managed at all,
     and that refusal must not be reordered behind the new guard."""
