@@ -50,11 +50,14 @@ screen says "try these", never "these work".
 
 from __future__ import annotations
 
+import concurrent.futures
 import ipaddress
 import os
 import re
 import socket
 import subprocess
+import threading
+import time
 
 #: The mesh subnet, mirrored from `wg_peer.py`'s SUBNET_PREFIX the same way
 #: `devices.MESH_SUBNET` mirrors it. A host with no tunnel simply never has an
@@ -176,17 +179,67 @@ def _is_host_only(iface: str) -> bool:
     return iface.startswith(_HOST_ONLY_IFACES)
 
 
-def _resolve_local(name: str) -> str | None:
-    """What `name` resolves to right now, or None on any failure.
+#: How long one request may wait on the Bonjour lookup. mDNS answers in
+#: milliseconds when it answers at all; the sealed runtime's resolver fails the
+#: `.local` name and takes ~35s to say so, and `/host` — the first call every
+#: client makes, and the one the installer's health check waits on — hung for
+#: exactly that long behind it, so every fresh install read "did not become
+#: healthy" (26.9.3 proof). No lookup blocks a request past this.
+RESOLVE_DEADLINE = 1.0
+#: How long an answer stands before it is looked up again.
+RESOLVE_TTL = 300.0
+
+_RESOLVER = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mdns")
+_RESOLVE_LOCK = threading.Lock()
+_RESOLVED: dict[str, tuple[float, str | None]] = {}
+_PENDING: dict[str, concurrent.futures.Future] = {}
+
+
+def _lookup(name: str, resolver) -> str | None:
+    try:
+        return resolver(name)
+    except OSError:
+        return None
+
+
+def _resolve_local(name: str, *, resolver=socket.gethostbyname,
+                   deadline: float = RESOLVE_DEADLINE) -> str | None:
+    """What `name` resolves to right now, or None on any failure — bounded.
 
     A seam, like `_hostname`/`_inet_ifaces`: real mDNS resolution is network
     IO the classifier below stays free of. None is "no evidence either way",
     never grounds to drop the entry — only a resolved address this machine
-    itself holds on a host-only interface is (jStack#41)."""
+    itself holds on a host-only interface is (jStack#41).
+
+    The lookup runs off the request: one worker owns it, a call waits at most
+    `deadline` for it, and a lookup still running answers None now and serves
+    the calls that come after it lands. An answer is kept for `RESOLVE_TTL`,
+    so a resolver that takes 35s to fail costs one request one second every
+    five minutes, never every request its whole wait."""
+    now = time.monotonic()
+    with _RESOLVE_LOCK:
+        cached = _RESOLVED.get(name)
+        if cached and now - cached[0] < RESOLVE_TTL:
+            return cached[1]
+        pending = _PENDING.get(name)
+        if pending is None:
+            pending = _PENDING[name] = _RESOLVER.submit(_lookup, name, resolver)
     try:
-        return socket.gethostbyname(name)
-    except OSError:
+        answer = pending.result(timeout=deadline)
+    except concurrent.futures.TimeoutError:
         return None
+    with _RESOLVE_LOCK:
+        _RESOLVED[name] = (time.monotonic(), answer)
+        if _PENDING.get(name) is pending:
+            del _PENDING[name]
+    return answer
+
+
+def _forget_resolved() -> None:
+    """Drop every cached and pending answer — for tests."""
+    with _RESOLVE_LOCK:
+        _RESOLVED.clear()
+        _PENDING.clear()
 
 
 def classify(inets: list[str], hostname: str, port: int,
