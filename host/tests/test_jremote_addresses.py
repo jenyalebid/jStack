@@ -266,3 +266,75 @@ def test_mesh_port_defaults_to_the_reached_port():
     assert {a["url"] for a in out} == {
         "http://192.168.0.106:9595", "http://10.66.0.1:9595",
         "http://mac.local:9595"}
+
+
+def _fresh(monkeypatch):
+    addresses._forget_resolved()
+    monkeypatch.setattr(addresses, "RESOLVE_TTL", 300.0)
+
+
+def test_a_slow_lookup_cannot_hold_the_caller(monkeypatch):
+    """26.9.3: the sealed runtime's resolver took 35s to fail the `.local`
+    name, and `/host` — which the installer's health check waits on — hung
+    behind it, so every fresh install read "did not become healthy". A
+    lookup that has not answered within the deadline is no evidence, and
+    the caller gets that answer now, not when the resolver gives up."""
+    import threading
+    import time
+    _fresh(monkeypatch)
+    release = threading.Event()
+
+    def slow(name):
+        release.wait(5)
+        return "192.168.0.106"
+    started = time.monotonic()
+    assert addresses._resolve_local("slow.local", resolver=slow, deadline=0.05) is None
+    assert time.monotonic() - started < 1.0
+    release.set()
+
+
+def test_a_lookup_that_lands_serves_the_calls_after_it(monkeypatch):
+    """The first caller does not wait past the deadline; the answer still
+    lands, and the next caller reads it instead of resolving again."""
+    import threading
+    _fresh(monkeypatch)
+    release = threading.Event()
+    calls = []
+
+    def slow(name):
+        calls.append(name)
+        release.wait(5)
+        return "192.168.64.1"
+    assert addresses._resolve_local("late.local", resolver=slow, deadline=0.05) is None
+    release.set()
+    # The one pending lookup finishes; a call after it reads its answer.
+    for _ in range(50):
+        if addresses._resolve_local("late.local", resolver=slow, deadline=0.2) == "192.168.64.1":
+            break
+    assert addresses._resolve_local("late.local", resolver=slow, deadline=0.05) == "192.168.64.1"
+    assert calls == ["late.local"]
+
+
+def test_a_failed_lookup_is_none_and_cached(monkeypatch):
+    _fresh(monkeypatch)
+    calls = []
+
+    def failing(name):
+        calls.append(name)
+        raise OSError("nodename nor servname provided, or not known")
+    assert addresses._resolve_local("gone.local", resolver=failing, deadline=1.0) is None
+    assert addresses._resolve_local("gone.local", resolver=failing, deadline=1.0) is None
+    assert calls == ["gone.local"]
+
+
+def test_a_stale_answer_is_looked_up_again(monkeypatch):
+    _fresh(monkeypatch)
+    monkeypatch.setattr(addresses, "RESOLVE_TTL", 0.0)
+    calls = []
+
+    def fast(name):
+        calls.append(name)
+        return "192.168.0.106"
+    assert addresses._resolve_local("mac.local", resolver=fast, deadline=1.0) == "192.168.0.106"
+    assert addresses._resolve_local("mac.local", resolver=fast, deadline=1.0) == "192.168.0.106"
+    assert calls == ["mac.local", "mac.local"]
