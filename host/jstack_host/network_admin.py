@@ -39,10 +39,9 @@ def validate_request(request: dict) -> None:
             raise ValueError("recovery must use the protected staged request")
         return
     # `recovery` named the Hub bundle a root watchdog would restore. The
-    # watchdog is gone and the installer ignores the field, but a client from
-    # the era that sent it must still be able to install, so it is tolerated
-    # here rather than refused.
-    if action != "stage" or set(request) - {"recovery"} != common | {
+    # watchdog is gone and the installer ignores the field; no shipped client
+    # sends it any more, so the request shape is closed again.
+    if action != "stage" or set(request) != common | {
             "candidate", "candidateSeal", "candidateBinary", "policy", "legacy"}:
         raise ValueError("invalid Network staging request")
     if not isinstance(request["candidate"], str) or not Path(request["candidate"]).is_absolute():
