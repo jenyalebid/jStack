@@ -35,7 +35,7 @@ def test_every_check_answers_with_a_grade(machine):
     names = [r["name"] for r in results]
     assert names == ["python", "claude", "tmux", "websocket", "open files", "token",
                      "profile", "agents", "registry", "timeline", "transcripts",
-                     "scheduler", "allowance", "codex hooks", "hook owners", "repos",
+                     "scheduler", "allowance", "codex hooks", "hook owners", "git hooks", "repos",
                      "service", "source", "app", "files"]
     assert all(r["grade"] in (doctor.OK, doctor.WARN, doctor.FAIL) for r in results)
     by = {r["name"]: r for r in results}
@@ -318,6 +318,34 @@ def test_a_machine_with_no_user_settings_has_nothing_to_double(machine, monkeypa
     monkeypatch.setenv("HOME", str(machine / "bare"))
     r = doctor.check_hook_owners()
     assert r["grade"] == doctor.OK
+
+
+# ── the git identity/reachability gates only run if a clone wired them ──
+#
+# Both ship as plain files under githooks/, live only once a human symlinks
+# them into .git/hooks by hand (#138) — a fresh clone with no symlink pushes
+# with no identity check and no reachability check, silently.
+
+def _repo(tmp_path, monkeypatch):
+    import subprocess
+    repo = tmp_path / "checkout"
+    githooks = repo / "plugins" / "jstack" / "githooks"
+    githooks.mkdir(parents=True)
+    (githooks / "pre-commit").write_text("#!/bin/sh\n")
+    (githooks / "pre-push").write_text("#!/bin/sh\n")
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    from jstack_host import plugin_paths
+    monkeypatch.setattr(plugin_paths, "jstack_root", lambda: githooks.parent)
+    return repo, githooks
+
+
+def test_a_clone_with_no_symlinks_is_the_loaded_gun_the_issue_names(machine, monkeypatch):
+    _repo(machine, monkeypatch)
+    r = doctor.check_git_hooks()
+    assert r["grade"] == doctor.WARN
+    assert "pre-commit (not installed)" in r["detail"]
+    assert "pre-push (not installed)" in r["detail"]
+    assert "ln -s" in r["hint"]
 
 
 # ── the timeline check must not report agreement it cannot observe ──
