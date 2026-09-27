@@ -464,6 +464,7 @@ def test_an_orphaned_credential_never_locks_anything(store, monkeypatch):
     monkeypatch.setattr("jstack_host.hostenv.security_alert", alerts.append)
     ip = "10.66.0.4"
     row, token = devices.mint("wiped-mac")
+    store.revoke_device(row["id"])
     store.delete_device(row["id"])                # the row is gone, not revoked
     _, good = devices.mint("my-iphone")
     for i in range(60):                           # past _SPRAY_MAX, one id
@@ -473,6 +474,19 @@ def test_an_orphaned_credential_never_locks_anything(store, monkeypatch):
     assert auth._gate(ip, f"Bearer {good}")       # the live row never noticed
     time.sleep(0.1)                               # alert would be threaded
     assert alerts == [], f"an orphan's retries raised an alert: {alerts}"
+
+
+def test_delete_device_refuses_a_live_row(store):
+    """jStack#60: nothing shipped calls delete_device yet, but the day it does,
+    a caller that forgot to revoke first must not be able to make a live
+    credential vanish with no trace. The store enforces its own contract
+    instead of trusting every future caller to have read the docstring."""
+    row, _token = devices.mint("still-paired")
+    assert store.delete_device(row["id"]) is False
+    assert store.device(row["id"]) is not None     # unchanged, not silently gone
+    assert store.revoke_device(row["id"])
+    assert store.delete_device(row["id"]) is True
+    assert store.device(row["id"]) is None
 
 
 def test_spraying_many_device_ids_still_locks_the_address(store, monkeypatch):

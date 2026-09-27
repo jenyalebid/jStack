@@ -1336,7 +1336,7 @@ class SessionStore:
             return cur.rowcount > 0
 
     def delete_device(self, device_id: str) -> bool:
-        """Remove the row outright. False = there was no such row.
+        """Remove the row outright. False = no such row, or the row is live.
 
         Revoking stamps a row and keeps it forever, which is the right default
         for a device somebody actually paired — the roster should be able to
@@ -1347,15 +1347,16 @@ class SessionStore:
         uses to check who can reach their Mac, and no amount of revoking clears
         them.
 
-        The contract on every caller is that the row is ALREADY revoked, so
-        this can never be the thing that cuts a live session's trust out from
-        under it. Nothing calls it yet — it is the storage half of clearing
-        the permanent revoked rows, landed on its own so the route that
-        exposes it starts from a primitive that is already tested.
+        The WHERE clause is the enforcement, not just the docstring above it:
+        a live row's `revoked_at IS NULL` keeps it out of the DELETE entirely,
+        so a caller that skipped the revoke gets an unchanged row and a False
+        back — never a credential that silently stopped existing (jStack#60).
         """
         with self._write_lock, self._conn() as db:
             name = self._device_name(db, device_id)
-            cur = db.execute("DELETE FROM devices WHERE id=?", (device_id,))
+            cur = db.execute(
+                "DELETE FROM devices WHERE id=? AND revoked_at IS NOT NULL",
+                (device_id,))
             if cur.rowcount > 0:
                 self._audit(db, int(time.time()), "device.delete", "device",
                             [(device_id, name)])
