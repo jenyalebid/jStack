@@ -572,7 +572,7 @@ def test_refresh_recopies_stale_bundle_scripts_and_keeps_the_key(hub):
     assert "studio-leaf: current" in again.stdout
 
 
-# --- 4. liveness and prune (jarvis#91) ---------------------------------------
+# --- 4. liveness and prune (operator issue 91) ---------------------------------------
 #
 # There is no real NOPASSWD sudoers grant to test against — this tool never
 # writes one — so a fake `sudo` stands in for the two answers the real one
@@ -625,7 +625,7 @@ def test_list_shows_a_recent_handshake_when_sudo_grants_the_read(hub, tmp_path):
 
 
 def test_list_reads_unknown_never_dead_when_sudo_refuses(hub, tmp_path):
-    """jarvis#91: no NOPASSWD entry exists today, so this is the everyday
+    """operator issue 91: no NOPASSWD entry exists today, so this is the everyday
     case — and the row must read `unknown`, not something that reads as
     evidence the peer is gone."""
     wg_dir, env = hub
@@ -670,7 +670,7 @@ def test_prune_dry_runs_by_default_then_removes_with_yes(hub, tmp_path):
 
 
 def test_prune_never_touches_a_peer_it_cannot_read(hub, tmp_path):
-    """jarvis#91's own guard: unreadable is not evidence of dead, so even
+    """operator issue 91's own guard: unreadable is not evidence of dead, so even
     `--older-than 0` (everything qualifies by age) must skip it."""
     wg_dir, env = hub
     _run_peer(env, "add", "mystery")

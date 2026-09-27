@@ -320,7 +320,7 @@ def _iface() -> str:
 def _handshakes(iface: str) -> dict[str, int] | None:
     """pubkey -> latest handshake (unix seconds, 0 = never), via the one read
     this seat can make without a password: `sudo -n wg show <iface>
-    latest-handshakes` (jarvis#91). None on ANY failure — no iface, no
+    latest-handshakes` (operator issue 91). None on ANY failure — no iface, no
     NOPASSWD sudoers entry, `wg` missing — never `{}`: "could not ask" and
     "asked and heard nothing" must stay two different answers, or a caller
     reading None as empty would treat every peer as one it has evidence
@@ -379,7 +379,7 @@ def list_peers():
 
 def prune(older_than_days, confirmed=False):
     """List (or, confirmed, remove) every peer idle past the window — never
-    one this seat could not verify (jarvis#91). A peer this read cannot see
+    one this seat could not verify (operator issue 91). A peer this read cannot see
     is left alone regardless of age: "no sudoers entry yet" and "confirmed
     dead" must never be the same action, or the day that read is finally
     granted, its first act is deleting every peer prune had only ever been
