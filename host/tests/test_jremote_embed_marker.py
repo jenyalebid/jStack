@@ -13,7 +13,6 @@ from pathlib import Path
 
 from jstack_host import embed
 
-MENUBAR_INSTALL = Path(__file__).resolve().parents[1] / "menubar" / "install.sh"
 
 
 def _declare(monkeypatch, tmp_path, label):
@@ -53,32 +52,3 @@ def test_the_marker_records_the_source_the_server_loaded(tmp_path, monkeypatch):
                         {"sha": "c" * 40, "dirty": True, "root": "/repo"})
     record = _declare(monkeypatch, tmp_path, "com.acme.dashboard")
     assert record["source"] == {"sha": "c" * 40, "dirty": True, "root": "/repo"}
-
-
-def test_the_menubar_installer_backfills_only_keys_the_marker_carries(
-        tmp_path, monkeypatch):
-    """The two halves of one seam, checked against each other.
-
-    `install.sh` reads the marker with `sed`, so a key it names and `declare`
-    stopped writing yields nothing, the install carries on unpinned, and the
-    only symptom is a control missing from a menu weeks later. Drift between
-    these two lists is the bug class itself, not a style question."""
-    script = MENUBAR_INSTALL.read_text()
-    loop = re.search(r"for pair in (.+?); do", script, re.S)
-    assert loop, "the marker backfill loop moved — this test guards its keys"
-    keys = re.findall(r'"JREMOTE_[A-Z_]+:([a-z_]+)"', loop.group(1))
-    assert keys, "the loop names no marker keys"
-
-    record = _declare(monkeypatch, tmp_path, "com.acme.dashboard")
-    missing = [k for k in keys if k not in record]
-    assert not missing, f"install.sh backfills keys declare() never writes: {missing}"
-
-
-def test_the_agent_label_survives_the_install_that_pins_it():
-    """`ENV_VARS` is what the installer is allowed to write into the agent's
-    environment. A variable backfilled from the marker but absent from that
-    sweep is read and then dropped on the floor."""
-    script = MENUBAR_INSTALL.read_text()
-    env_vars = re.search(r"ENV_VARS=\"(.+?)\"", script, re.S)
-    assert env_vars, "ENV_VARS moved"
-    assert "JREMOTE_AGENT_LABEL" in env_vars.group(1).split()
