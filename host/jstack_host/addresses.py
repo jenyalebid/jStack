@@ -176,9 +176,23 @@ def _is_host_only(iface: str) -> bool:
     return iface.startswith(_HOST_ONLY_IFACES)
 
 
+def _resolve_local(name: str) -> str | None:
+    """What `name` resolves to right now, or None on any failure.
+
+    A seam, like `_hostname`/`_inet_ifaces`: real mDNS resolution is network
+    IO the classifier below stays free of. None is "no evidence either way",
+    never grounds to drop the entry — only a resolved address this machine
+    itself holds on a host-only interface is (jStack#41)."""
+    try:
+        return socket.gethostbyname(name)
+    except OSError:
+        return None
+
+
 def classify(inets: list[str], hostname: str, port: int,
              ifaces: dict[str, str] | None = None, domain: str = "",
-             mesh_port: int | None = None) -> list[dict]:
+             mesh_port: int | None = None,
+             resolve_local=None) -> list[dict]:
     """The address list, ordered lan → local → mesh. Pure, so the ordering
     and the exclusions are what the tests actually pin.
 
@@ -203,6 +217,13 @@ def classify(inets: list[str], hostname: str, port: int,
     bridge be told apart from the real LAN. Omitted, every address is treated
     as network-facing: an interface map is extra evidence for dropping an
     entry, never a precondition for keeping one.
+
+    `resolve_local` answers what the Bonjour name resolves to right now — the
+    same VM-bridge ambiguity `ifaces` resolves for a bare address applies to
+    the name too (jStack#41): a Mac running VMs can have its own `.local` name
+    answer from `bridge100`'s mDNS responder as easily as the real LAN one, and
+    the address alone cannot tell them apart. Omitted or unresolvable, the
+    entry is kept — no evidence is not evidence against it.
     """
     mesh_port = port if mesh_port is None else mesh_port
     out: list[dict] = []
@@ -265,7 +286,9 @@ def classify(inets: list[str], hostname: str, port: int,
     if name and name.lower() != "localhost":
         if not name.endswith(".local"):
             name = name.split(".")[0] + ".local"
-        if name.lower() != stable:
+        resolved = resolve_local(name) if resolve_local else None
+        on_bridge = resolved is not None and _is_host_only((ifaces or {}).get(resolved, ""))
+        if name.lower() != stable and not on_bridge:
             out.append({"kind": "local", "host": name,
                         "url": f"http://{name}:{port}",
                         "note": "survives this Mac changing address"})
@@ -282,4 +305,4 @@ def reachable(port: int = DEFAULT_PORT, mesh_port: int | None = None) -> list[di
     """Where a second machine could try to reach this one."""
     held = _inet_ifaces()
     return classify(list(held), _hostname(), port, held, hub_domain(),
-                    mesh_port=mesh_port)
+                    mesh_port=mesh_port, resolve_local=_resolve_local)
