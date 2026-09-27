@@ -80,6 +80,35 @@ def test_a_vm_bridge_is_not_the_lan():
     assert [a["host"] for a in out] == ["192.168.0.106", "mac.local"]
 
 
+def test_a_local_name_that_resolves_to_the_bridge_is_dropped():
+    """jStack#41: a Mac running VMs can have its own Bonjour name answered by
+    bridge100's mDNS responder as easily as the real LAN interface — the
+    address alone (`ifaces`) cannot tell these apart for the NAME the way it
+    does for a bare address, so the name has to be resolved and checked too."""
+    out = addresses.classify(
+        ["192.168.0.106", "192.168.64.1"], "mac", 9090,
+        {"192.168.0.106": "en1", "192.168.64.1": "bridge100"},
+        resolve_local=lambda name: "192.168.64.1")
+    assert [a["host"] for a in out] == ["192.168.0.106"]
+
+
+def test_a_local_name_that_resolves_to_the_lan_is_kept():
+    out = addresses.classify(
+        ["192.168.0.106", "192.168.64.1"], "mac", 9090,
+        {"192.168.0.106": "en1", "192.168.64.1": "bridge100"},
+        resolve_local=lambda name: "192.168.0.106")
+    assert [a["host"] for a in out] == ["192.168.0.106", "mac.local"]
+
+
+def test_an_unresolvable_local_name_is_kept_not_penalized():
+    """No evidence either way is not evidence against it — a network with
+    mDNS blocked must not lose the one name that survives a moved address."""
+    out = addresses.classify(
+        ["192.168.0.106"], "mac", 9090, {"192.168.0.106": "en1"},
+        resolve_local=lambda name: None)
+    assert [a["host"] for a in out] == ["192.168.0.106", "mac.local"]
+
+
 def test_the_bridge_number_is_not_what_is_excluded():
     """The kernel numbers these, so a check that knew `bridge100` would pass
     every test here and publish `bridge101` to the next device."""

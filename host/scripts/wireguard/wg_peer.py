@@ -17,9 +17,14 @@ sync is down.
 
     wg_peer.py add <device-name>          pair a new device (prints QR path)
     wg_peer.py add --leaf <machine-name>  enrol a leaf host (emits an install bundle)
-    wg_peer.py list                       show paired devices
-    wg_peer.py remove <device-name>       revoke a device
+    wg_peer.py list                       show paired devices, with last handshake
+    wg_peer.py remove <device-name>       revoke a device (a leaf needs --yes)
+    wg_peer.py remove <machine-name> --yes  revoke a leaf, having read the warning
     wg_peer.py refresh                    re-copy the bringup scripts into every leaf bundle
+    wg_peer.py prune --older-than <days> [--yes]
+                                           list (--yes: remove) peers idle past the
+                                           window; see `liveness()` for what "idle"
+                                           can and cannot mean without a password
 
 A leaf is a machine that joins the mesh by dialing out — same peer entry in
 wg0.conf, but instead of a QR it gets a self-contained folder
@@ -30,7 +35,8 @@ Client private keys and QR PNGs land in Credentials/wireguard/clients/ (0600,
 gitignored) so a device can be re-paired from the same QR without rotation.
 Revoking removes the peer from the conf AND deletes the client files.
 
-Env overrides (tests): WG_PEER_DIR, WG_BIN, WG_ENDPOINT, WG_SUBNET_PREFIX.
+Env overrides (tests): WG_PEER_DIR, WG_BIN, WG_ENDPOINT, WG_SUBNET_PREFIX,
+WG_SUDO_BIN, WG_NAME_FILE.
 """
 
 import os
@@ -39,6 +45,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -49,6 +56,7 @@ if str(_tree).endswith(".app/Contents/Resources/packages"):
         "JREMOTE_CREDENTIALS_DIR", Path.home() / ".local/share/jremote/credentials"))
 WG_DIR = Path(os.environ.get("WG_PEER_DIR", _default_credentials / "wireguard"))
 WG_BIN = os.environ.get("WG_BIN", "/opt/homebrew/bin/wg")
+SUDO_BIN = os.environ.get("WG_SUDO_BIN", "/usr/bin/sudo")
 SUBNET_PREFIX = os.environ.get("WG_SUBNET_PREFIX", "10.66.0")  # server = .1
 # Every issued tunnel pins a conservative MTU: at wireguard-go's 1420 default,
 # any path narrower than ~1480 (cellular, VPN, CGNAT middleboxes) blackholes
@@ -293,20 +301,128 @@ def add(name, leaf=False):
     print(f"conf: {conf_path}")
 
 
+#: The utun name file the hub tunnel daemon writes on startup — mirrors
+#: `jstack_host.open_mode.wg_iface` without importing the package, since this
+#: script ships standalone. WG_NAME_FILE overrides it for tests.
+_HUB_NAME_FILE = "/var/run/wireguard/jremote-hub.name"
+
+
+def _iface() -> str:
+    """The utun name the hub's tunnel landed on, or "" if it never came up —
+    nothing for `_handshakes` to ask `wg show` about."""
+    path = os.environ.get("WG_NAME_FILE", _HUB_NAME_FILE)
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return ""
+
+
+def _handshakes(iface: str) -> dict[str, int] | None:
+    """pubkey -> latest handshake (unix seconds, 0 = never), via the one read
+    this seat can make without a password: `sudo -n wg show <iface>
+    latest-handshakes` (jarvis#91). None on ANY failure — no iface, no
+    NOPASSWD sudoers entry, `wg` missing — never `{}`: "could not ask" and
+    "asked and heard nothing" must stay two different answers, or a caller
+    reading None as empty would treat every peer as one it has evidence
+    against. This never writes a sudoers entry; it only ever asks `-n`,
+    which fails closed the moment there isn't one.
+    """
+    if not iface:
+        return None
+    try:
+        run = subprocess.run(
+            [SUDO_BIN, "-n", WG_BIN, "show", iface, "latest-handshakes"],
+            capture_output=True, text=True, timeout=5)
+    except OSError:
+        return None
+    if run.returncode != 0:
+        return None
+    out: dict[str, int] = {}
+    for line in run.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+            out[parts[0]] = int(parts[1])
+    return out
+
+
+def liveness(pub: str, handshakes: dict[str, int] | None) -> str:
+    """"unknown" (the sudo read failed outright), "never" (a read that
+    succeeded and found no handshake for this key), or the handshake's unix
+    time as a string. Deliberately never "dead": that is a retention call
+    `prune` makes on top of this reading, not a fact this function alone has
+    grounds to assert — conflating the two is exactly how an unreadable
+    roster becomes a deletable one."""
+    if handshakes is None:
+        return "unknown"
+    seen = handshakes.get(pub, 0)
+    return "never" if seen == 0 else str(seen)
+
+
+def _fmt_liveness(seen: str) -> str:
+    if seen == "unknown":
+        return "unknown (sudo -n refused — no passwordless read configured)"
+    if seen == "never":
+        return "never"
+    return datetime.fromtimestamp(int(seen)).strftime("%Y-%m-%d %H:%M")
+
+
 def list_peers():
     _, peers = _peer_blocks()
     if not peers:
         print("no devices paired")
         return
-    for name, added, _, ip in peers:
-        print(f"{name}  {ip}  added {added}")
+    handshakes = _handshakes(_iface())
+    for name, added, pub, ip in peers:
+        seen = _fmt_liveness(liveness(pub, handshakes))
+        print(f"{name}  {ip}  added {added}  last handshake: {seen}")
 
 
-def remove(name):
+def prune(older_than_days, confirmed=False):
+    """List (or, confirmed, remove) every peer idle past the window — never
+    one this seat could not verify (jarvis#91). A peer this read cannot see
+    is left alone regardless of age: "no sudoers entry yet" and "confirmed
+    dead" must never be the same action, or the day that read is finally
+    granted, its first act is deleting every peer prune had only ever been
+    guessing about. `confirmed=False` (the default) removes nothing — it
+    prints exactly what a `--yes` run would act on, and nothing this call
+    does not print is ever touched by one.
+    """
+    _, peers = _peer_blocks()
+    handshakes = _handshakes(_iface())
+    cutoff = time.time() - older_than_days * 86400
+    for name, added, pub, ip in peers:
+        seen = liveness(pub, handshakes)
+        if seen == "unknown":
+            print(f"skip {name}: liveness unknown — sudo -n refused, refusing to prune")
+            continue
+        if seen != "never" and int(seen) >= cutoff:
+            continue                                      # handshake inside the window: alive
+        verb = "removed" if confirmed else "would remove (re-run with --yes)"
+        print(f"{verb} {name}  {ip}  added {added}  last handshake: {_fmt_liveness(seen)}")
+        if confirmed:
+            remove(name, confirmed=True)
+
+
+def remove(name, confirmed=False):
+    """Revoke a peer — destroys its keys and client files, no un-revoke.
+
+    A leaf's bundle IS the machine's whole way back onto this mesh once it is
+    off the LAN (jStack#55): the 2026-09-11 incident revoked work-mac's peer
+    this way and recovery needed `adopt --offline` to be built first. `remove`
+    on a leaf now refuses without `--yes` — a plain device (a phone, re-pairable
+    on the spot) is unaffected, since losing it costs nothing this sharp.
+    """
     interface, peers = _peer_blocks()
     keep = [p for p in peers if p[0] != name]
     if len(keep) == len(peers):
         raise SystemExit(f"no device {name!r}")
+    if (CLIENTS / f"{name}-leaf").is_dir() and not confirmed:
+        raise SystemExit(
+            f"{name!r} is a leaf machine's own credential — its only way back "
+            f"onto this mesh once it is off this LAN. Revoking destroys the "
+            f"keys now, with no un-revoke; physical LAN access or "
+            f"`adopt --offline` is the way back after. Re-run with --yes to "
+            f"confirm.")
     out = interface
     for pname, added, pub, ip in keep:
         out += (
@@ -337,8 +453,15 @@ def main():
         list_peers()
     elif cmd == "remove" and len(sys.argv) == 3:
         remove(sys.argv[2])
+    elif cmd == "remove" and len(sys.argv) == 4 and sys.argv[3] == "--yes":
+        remove(sys.argv[2], confirmed=True)
     elif cmd == "refresh" and len(sys.argv) == 2:
         refresh()
+    elif cmd == "prune" and len(sys.argv) >= 4 and sys.argv[2] == "--older-than":
+        rest = sys.argv[4:]
+        if rest not in ([], ["--yes"]):
+            raise SystemExit(__doc__)
+        prune(int(sys.argv[3]), confirmed=(rest == ["--yes"]))
     else:
         raise SystemExit(__doc__)
 
