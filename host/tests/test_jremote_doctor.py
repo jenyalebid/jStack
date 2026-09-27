@@ -373,3 +373,37 @@ def test_an_unaskable_writer_is_not_graded_as_agreement(machine, monkeypatch, tm
     result = doctor.check_timeline()
     assert result["grade"] == doctor.OK
     assert "could not be cross-checked" in result["hint"]
+
+
+def test_codex_hooks_reads_the_plugin_the_machine_runs(tmp_path, monkeypatch):
+    """The check reads the manifest from the plugin root, not beside the package.
+
+    An installed Hub imports the package from inside the app bundle, where no
+    plugins/ sits beside it; the plugin it should grade is the one Claude and
+    Codex run, which plugin_paths resolves. Until 2026-09-27 the check looked
+    beside the package and warned on every installed hub.
+    """
+    from jstack_host import codex_hooks, plugin_paths
+
+    plugin = tmp_path / "cache" / "jstack"
+    (plugin / "hooks").mkdir(parents=True)
+    bundle = tmp_path / "Hub.app" / "Contents" / "Resources" / "packages"
+    bundle.mkdir(parents=True)
+    managed = tmp_path / "managed_config.toml"
+    managed.write_text("[[hooks.x]]\n")
+    seen = []
+
+    def fake_managed_config(root, manifest_path=None):
+        seen.append(Path(root))
+        return "[[hooks.x]]\n", []
+
+    monkeypatch.setattr(doctor, "_which", lambda name: "/usr/local/bin/codex")
+    monkeypatch.setattr(hostenv, "package_root", lambda: bundle)
+    monkeypatch.setattr(plugin_paths, "jstack_root", lambda: plugin)
+    monkeypatch.setattr(codex_hooks, "managed_config", fake_managed_config)
+    monkeypatch.setattr(codex_hooks, "MANAGED_CONFIG", managed)
+
+    result = doctor.check_codex_hooks()
+
+    assert seen == [plugin]
+    assert result["grade"] == doctor.OK, result
