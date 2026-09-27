@@ -307,14 +307,37 @@ def add(name, leaf=False):
 _HUB_NAME_FILE = "/var/run/wireguard/jremote-hub.name"
 
 
+#: Why the last liveness read came back unknown — set by `_handshakes`, read
+#: by the list and prune output so "unknown" names its cause rather than
+#: guessing at sudo.
+_unknown_reason = ""
+
+
 def _iface() -> str:
     """The utun name the hub's tunnel landed on, or "" if it never came up —
-    nothing for `_handshakes` to ask `wg show` about."""
+    nothing for `_handshakes` to ask `wg show` about.
+
+    The name file first; failing that, `sudo -n wg show interfaces`.  On a
+    real hub the tunnel daemon writes its name file root-only (0400), so a
+    non-root seat cannot read it even though the sudoers grant for `wg show`
+    covers asking wg directly which interface it has.  Several interfaces
+    (a hub that is also a leaf) are joined with spaces; `_handshakes` asks
+    each."""
     path = os.environ.get("WG_NAME_FILE", _HUB_NAME_FILE)
     try:
-        return Path(path).read_text().strip()
+        name = Path(path).read_text().strip()
+    except OSError:
+        name = ""
+    if name:
+        return name
+    try:
+        run = subprocess.run([SUDO_BIN, "-n", WG_BIN, "show", "interfaces"],
+                             capture_output=True, text=True, timeout=5)
     except OSError:
         return ""
+    if run.returncode != 0:
+        return ""
+    return " ".join(run.stdout.split())
 
 
 def _handshakes(iface: str) -> dict[str, int] | None:
@@ -327,21 +350,31 @@ def _handshakes(iface: str) -> dict[str, int] | None:
     against. This never writes a sudoers entry; it only ever asks `-n`,
     which fails closed the moment there isn't one.
     """
+    global _unknown_reason
     if not iface:
-        return None
-    try:
-        run = subprocess.run(
-            [SUDO_BIN, "-n", WG_BIN, "show", iface, "latest-handshakes"],
-            capture_output=True, text=True, timeout=5)
-    except OSError:
-        return None
-    if run.returncode != 0:
+        _unknown_reason = ("no tunnel interface visible — the name file is unreadable "
+                           "and sudo -n wg show interfaces was refused or empty")
         return None
     out: dict[str, int] = {}
-    for line in run.stdout.splitlines():
-        parts = line.split()
-        if len(parts) == 2 and parts[1].lstrip("-").isdigit():
-            out[parts[0]] = int(parts[1])
+    for one in iface.split():
+        try:
+            run = subprocess.run(
+                [SUDO_BIN, "-n", WG_BIN, "show", one, "latest-handshakes"],
+                capture_output=True, text=True, timeout=5)
+        except OSError:
+            _unknown_reason = f"{WG_BIN} could not be run"
+            return None
+        if run.returncode != 0:
+            err = (run.stderr or run.stdout).strip().splitlines()
+            _unknown_reason = ("sudo -n refused — no passwordless read configured"
+                               if "password" in (err[-1] if err else "").lower()
+                               else f"wg show {one} failed: {err[-1] if err else run.returncode}")
+            return None
+        for line in run.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+                out[parts[0]] = int(parts[1])
+    _unknown_reason = ""
     return out
 
 
@@ -360,7 +393,7 @@ def liveness(pub: str, handshakes: dict[str, int] | None) -> str:
 
 def _fmt_liveness(seen: str) -> str:
     if seen == "unknown":
-        return "unknown (sudo -n refused — no passwordless read configured)"
+        return f"unknown ({_unknown_reason or 'liveness read failed'})"
     if seen == "never":
         return "never"
     return datetime.fromtimestamp(int(seen)).strftime("%Y-%m-%d %H:%M")
@@ -393,7 +426,7 @@ def prune(older_than_days, confirmed=False):
     for name, added, pub, ip in peers:
         seen = liveness(pub, handshakes)
         if seen == "unknown":
-            print(f"skip {name}: liveness unknown — sudo -n refused, refusing to prune")
+            print(f"skip {name}: liveness unknown — {_unknown_reason or 'read failed'}; refusing to prune")
             continue
         if seen != "never" and int(seen) >= cutoff:
             continue                                      # handshake inside the window: alive

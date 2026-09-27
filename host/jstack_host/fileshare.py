@@ -23,12 +23,16 @@ launchctl imitation cannot honestly claim to reproduce.
 from __future__ import annotations
 
 import asyncio
+import getpass
 import json
 import os
 import platform
 import pwd
 import re
+import shlex
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 from . import hostenv
@@ -41,6 +45,8 @@ PWPOLICY = "/usr/bin/pwpolicy"
 CHMOD = "/bin/chmod"
 LS = "/bin/ls"
 LAUNCHCTL = "/bin/launchctl"
+OSASCRIPT = "/usr/bin/osascript"
+CAT = "/bin/cat"
 
 ACCOUNT = "jstackshare"
 ACCOUNT_HOME = "/Users/Shared/.jstackshare"
@@ -280,8 +286,83 @@ def status() -> dict:
 
 
 def _display(argv: list[str]) -> str:
-    import shlex
     return shlex.join(argv)
+
+
+def _needs_password(argv: list[str]) -> bool:
+    """The two plan steps that set the sharing account's password."""
+    return ((argv[0] == SYSADMINCTL and "-addUser" in argv)
+            or (argv[0] == DSCL and "-passwd" in argv))
+
+
+def _administrator_script(commands: list[list[str]], password_file: Path | None) -> str:
+    """The plan as one `set -eu` shell script of fixed system tools, for the
+    OS administrator prompt.  The password steps read the account password
+    from `password_file` (user-owned, 0600) instead of a terminal: under the
+    prompt there is no tty for `sysadminctl -password -` or `dscl -passwd` to
+    ask on.  The script itself never contains the password."""
+    lines = ["set -eu", "umask 077", "export LC_ALL=C"]
+    if password_file is not None:
+        lines.append("pw=$(" + CAT + " " + shlex.quote(str(password_file)) + ")")
+    for argv in commands:
+        if _needs_password(argv):
+            if password_file is None:
+                raise FileShareError("plan sets a password but none was collected")
+            if argv[0] == SYSADMINCTL:
+                argv = [a if a != "-" else '"$pw"' for a in argv]
+                words = [shlex.quote(a) if a != '"$pw"' else a for a in argv]
+            else:
+                words = [shlex.quote(a) for a in argv] + ['"$pw"']
+            lines.append(" ".join(words))
+        else:
+            lines.append(_display(argv))
+    return "\n".join(lines)
+
+
+def _run_as_administrator(script: str, prompt: str, runner=subprocess.run) -> None:
+    """Execute a reviewed script of fixed system tools through the OS
+    administrator prompt, as the logged-in user.  The sealed runtime refuses
+    to start as root, and the identity rule behind that — root never runs
+    user-writable Python — holds here too: what root runs is the plan's own
+    `sharing`, `sysadminctl`, `dscl`, `pwpolicy` and `chmod` lines, nothing
+    from the package."""
+    literal = '"' + script.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+    source = ("do shell script " + literal + " with administrator privileges "
+              "with prompt " + json.dumps(prompt))
+    result = runner([OSASCRIPT, "-"], input=source, capture_output=True, text=True, timeout=600)
+    if result.returncode:
+        raise FileShareError("administrator approval or setup command failed: "
+                             + (result.stderr or result.stdout)[-1000:].strip())
+
+
+def _collect_password() -> str:
+    if not sys.stdin.isatty():
+        raise FileShareError("the sharing account needs a password and there is no "
+                             "terminal to ask on; run this from a terminal")
+    first = getpass.getpass(f"password for the {ACCOUNT} account (what a device types to mount): ")
+    if not first:
+        raise FileShareError("empty password refused")
+    if getpass.getpass("again: ") != first:
+        raise FileShareError("passwords did not match")
+    return first
+
+
+def _private_password_file(password: str) -> Path:
+    folder = Path(tempfile.mkdtemp(prefix="jstack-fileshare-", dir=None))
+    folder.chmod(0o700)
+    path = folder / "account-password"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(password)
+    return path
+
+
+def _discard(path: Path) -> None:
+    try:
+        path.unlink()
+        path.parent.rmdir()
+    except OSError:
+        pass
 
 
 def setup_plan(observed: dict | None = None) -> list[list[str]]:
@@ -348,16 +429,34 @@ def setup_plan(observed: dict | None = None) -> list[list[str]]:
             [c for c in commands if c[0] == SHARING])
 
 
-def setup(*, apply: bool = False) -> dict:
-    if apply and os.geteuid() != 0:
-        raise PermissionError("--apply requires root; run sudo jstack-host files setup --apply")
+def setup(*, apply: bool = False, runner=subprocess.run) -> dict:
+    """Print the plan, or apply it.  Applying as the logged-in user goes
+    through the OS administrator prompt (the sealed `jstack-host` cannot be
+    started under sudo); applying as root, on an unsealed install, runs the
+    plan directly."""
     before = status()
     commands = setup_plan(before)
     if not apply:
         return {"applied": False, "commands": [_display(c) for c in commands],
                 "status": before,
-                "note": "dry run; re-run with sudo and --apply, then enable "
-                        "File Sharing in System Settings"}
+                "note": "dry run; re-run with --apply (an administrator prompt "
+                        "opens), then enable File Sharing in System Settings"}
+    if os.geteuid() != 0:
+        password_file = None
+        if any(_needs_password(c) for c in commands):
+            password_file = _private_password_file(_collect_password())
+        try:
+            script = _administrator_script(commands, password_file)
+            _run_as_administrator(script, "Set up jStack selected-folder file sharing", runner)
+        finally:
+            if password_file is not None:
+                _discard(password_file)
+        after = status()
+        if not after["secure"]:
+            raise FileShareError("setup commands completed but observed state is still not secure")
+        return {"applied": True, "commands": [_display(c) for c in commands],
+                "status": after,
+                "note": "share points are ready; enable File Sharing in System Settings"}
     roots = desired_shares()
     identities = {name: (path.stat().st_dev, path.stat().st_ino) for name, path in roots.items()}
     completed = 0
@@ -377,7 +476,7 @@ def setup(*, apply: bool = False) -> dict:
             "note": "share points are ready; enable File Sharing in System Settings"}
 
 
-def off(*, apply: bool = False) -> dict:
+def off(*, apply: bool = False, runner=subprocess.run) -> dict:
     observed = status()
     names = sorted({row["name"] for row in observed.get("shares", [])
                     if row.get("present")} |
@@ -389,7 +488,12 @@ def off(*, apply: bool = False) -> dict:
                 "note": "dry run; --apply removes share points but File Sharing "
                         "must be switched off in System Settings"}
     if os.geteuid() != 0:
-        raise PermissionError("--apply requires root; run sudo jstack-host files off --apply")
+        if commands:
+            _run_as_administrator(_administrator_script(commands, None),
+                                  "Remove jStack SMB share points", runner)
+        return {"applied": True, "commands": [_display(c) for c in commands],
+                "status": status(),
+                "note": "share points removed; switch File Sharing off in System Settings"}
     for argv in commands:
         r = subprocess.run(argv, text=True, timeout=30)
         if r.returncode != 0:

@@ -698,3 +698,51 @@ def test_prune_keeps_a_handshake_inside_the_window(hub, tmp_path):
     r = _run_peer(env2, "prune", "--older-than", "30", "--yes")
     assert r.returncode == 0, r.stderr
     assert "# device: owner-phone" in (wg_dir / "wg0.conf").read_text()
+
+
+def _fake_wg_show_with_interfaces(tmp_path, handshake_line, iface="utun9"):
+    """A `wg` that also answers `show interfaces` — what a real hub answers
+    when the daemon's name file is root-only and the seat has to ask wg."""
+    script = tmp_path / "fake-wg-show-ifaces"
+    script.write_text(
+        "#!/bin/bash\n"
+        'case "$1" in\n'
+        '  genkey) echo "CLIENT-PRIVATE-KEY" ;;\n'
+        '  pubkey) cat >/dev/null; echo "CLIENT-PUBLIC-KEY" ;;\n'
+        '  show) if [ "$2" = interfaces ]; then echo "' + iface + '"; '
+        f'else echo "{handshake_line}"; fi ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n")
+    script.chmod(0o755)
+    return script
+
+
+def test_list_finds_the_interface_through_wg_when_the_name_file_is_unreadable(hub, tmp_path):
+    """On the real hub the tunnel daemon writes its name file 0400 root, so
+    the seat's only way to learn the utun is the same sudo grant that reads
+    handshakes. A missing or unreadable name file must not read as sudo
+    refusing."""
+    wg_dir, env = hub
+    _run_peer(env, "add", "work-mac")
+    recent = int(time.time()) - 60
+    env2 = {
+        **env,
+        "WG_BIN": str(_fake_wg_show_with_interfaces(tmp_path, f"CLIENT-PUBLIC-KEY\t{recent}")),
+        "WG_SUDO_BIN": str(_fake_sudo_passthrough(tmp_path)),
+        "WG_NAME_FILE": str(tmp_path / "no-such-name-file"),
+    }
+    out = _run_peer(env2, "list").stdout
+    assert "work-mac" in out and "last handshake:" in out
+    assert "unknown" not in out
+
+
+def test_unknown_names_its_cause(hub, tmp_path):
+    wg_dir, env = hub
+    _run_peer(env, "add", "work-mac")
+    refused = {**env, "WG_SUDO_BIN": str(_fake_sudo_refuses(tmp_path)),
+               "WG_NAME_FILE": str(_write_iface_file(tmp_path))}
+    assert "sudo -n refused" in _run_peer(refused, "list").stdout
+    no_iface = {**env, "WG_SUDO_BIN": str(_fake_sudo_refuses(tmp_path)),
+                "WG_NAME_FILE": str(tmp_path / "absent")}
+    out = _run_peer(no_iface, "list").stdout
+    assert "no tunnel interface visible" in out and "sudo -n refused" not in out
