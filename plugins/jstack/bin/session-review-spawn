@@ -103,6 +103,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from session_runtime import metadata, user_text, transcripts, CodexRPC, codex_user_engaged
 import repo_seat  # noqa: E402
+import review_config  # noqa: E402
 try:
     import root as _root  # noqa: E402
 except ImportError:
@@ -337,10 +338,7 @@ def _default_agent_root() -> Path:
 
 def load_config() -> dict:
     cfg = dict(DEFAULTS)
-    path = Path(os.environ.get(
-        "JSTACK_REVIEW_CONFIG",
-        str(Path.home() / ".claude" / "jstack" / "review.json"),
-    )).expanduser()
+    path = review_config.path()
     if path.exists():
         try:
             user = json.loads(path.read_text())

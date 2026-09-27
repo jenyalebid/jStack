@@ -376,6 +376,50 @@ def check_hook_owners() -> dict:
     return _check("hook owners", OK, f"{len(shipped)} shipped hooks, one owner each")
 
 
+def check_activation() -> dict:
+    """Does every system that declares an `activation` actually converge?
+
+    Generalises check_codex_hooks/check_hook_owners' question (jStack#134): a
+    system names the user-scope wiring it needs under `activation` in
+    systems.json — the same registry every other check already trusts — and
+    this grades whether the machine matches it. Nothing a system does not
+    declare is inspected; see activation.plan().
+    """
+    from . import activation, claude_settings, plugin_paths
+
+    plugin = plugin_paths.jstack_root()
+    try:
+        systems = json.loads((plugin / "systems.json").read_text())["systems"]
+    except (OSError, ValueError, KeyError) as exc:
+        return _check("activation", WARN, f"cannot read the systems registry: {exc}")
+
+    try:
+        desired = activation.desired_from_systems(systems)
+    except ValueError as exc:
+        return _check("activation", WARN, f"bad activation declaration: {exc}")
+
+    if not desired:
+        return _check("activation", OK, "no system declares an activation yet")
+
+    # Recomputed here, not `claude_settings.SETTINGS` — that name is a module
+    # constant captured at import, and a test (or a profile) redirecting HOME
+    # after import must still be answered about the redirected file.
+    settings_path = Path.home() / ".claude" / "settings.json"
+    observed = activation.observe(desired, settings=claude_settings.read(settings_path))
+    actions = activation.plan(desired, observed)
+    n_declared = sum(len(v) for v in desired.values())
+    if not actions:
+        return _check("activation", OK, f"{n_declared} declared, all converged")
+
+    unobserved = sorted(k for k in desired if k not in activation.OBSERVERS)
+    names = ", ".join(sorted(f"{a['system']} ({a['kind']})" for a in actions))
+    hint = (f"no observer yet for: {', '.join(unobserved)} — " if unobserved else "") \
+        + "wire the missing config, or run the installer that owns it"
+    return _check("activation", WARN,
+                  f"{len(actions)}/{n_declared} declared activation(s) not "
+                  f"converged: {names}", hint)
+
+
 def check_repos() -> dict:
     repos = hostenv.repos()
     if not repos:
@@ -569,7 +613,7 @@ def check_file_sharing() -> dict:
 CHECKS = (check_python, check_claude, check_tmux, check_websocket, check_fd_limit,
           check_token, check_profile, check_agents, check_registry, check_timeline,
           check_transcripts, check_scheduler, check_allowance, check_codex_hooks,
-          check_hook_owners,
+          check_hook_owners, check_activation,
           check_repos,
           check_service, check_source, check_app, check_file_sharing)
 

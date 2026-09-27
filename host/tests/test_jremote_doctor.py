@@ -35,7 +35,8 @@ def test_every_check_answers_with_a_grade(machine):
     names = [r["name"] for r in results]
     assert names == ["python", "claude", "tmux", "websocket", "open files", "token",
                      "profile", "agents", "registry", "timeline", "transcripts",
-                     "scheduler", "allowance", "codex hooks", "hook owners", "repos",
+                     "scheduler", "allowance", "codex hooks", "hook owners",
+                     "activation", "repos",
                      "service", "source", "app", "files"]
     assert all(r["grade"] in (doctor.OK, doctor.WARN, doctor.FAIL) for r in results)
     by = {r["name"]: r for r in results}
@@ -318,6 +319,91 @@ def test_a_machine_with_no_user_settings_has_nothing_to_double(machine, monkeypa
     monkeypatch.setenv("HOME", str(machine / "bare"))
     r = doctor.check_hook_owners()
     assert r["grade"] == doctor.OK
+
+
+# ── activation: declared systems.json wiring actually converges ──
+#
+# jStack#134 — a shipped system and an active one are different facts, and
+# nothing used to say which systems still need a hand. check_activation reads
+# the real systems.json (or a fixture standing in for it, here) and grades
+# whether every declared `activation` block matches the machine.
+
+def _systems_json(tmp_path, monkeypatch, systems):
+    plugin = tmp_path / "plugins" / "jstack"
+    plugin.mkdir(parents=True, exist_ok=True)
+    (plugin / "systems.json").write_text(json.dumps({"systems": systems}))
+    from jstack_host import plugin_paths
+    monkeypatch.setattr(plugin_paths, "jstack_root", lambda: plugin)
+    return plugin
+
+
+def test_no_declared_activation_is_ok_not_a_hole(machine, monkeypatch):
+    _systems_json(machine, monkeypatch, [{"id": "path-rule-injection"}])
+    r = doctor.check_activation()
+    assert r["grade"] == doctor.OK
+    assert "no system declares an activation" in r["detail"]
+
+
+def test_an_unknown_activation_kind_is_named_not_swallowed(machine, monkeypatch):
+    _systems_json(machine, monkeypatch, [
+        {"id": "typo-system", "activation": {"claude_setings": {"statusLine": True}}}])
+    r = doctor.check_activation()
+    assert r["grade"] == doctor.WARN
+    assert "typo-system" in r["detail"] and "claude_setings" in r["detail"]
+
+
+def test_a_converged_claude_settings_activation_is_ok(machine, monkeypatch):
+    _systems_json(machine, monkeypatch, [
+        {"id": "allowance-sampler",
+         "activation": {"claude_settings": {"statusLine": True}}}])
+    from jstack_host import claude_settings
+    home = machine / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text(json.dumps({
+        "statusLine": {"type": "command", "command": claude_settings.SAMPLER}}))
+    monkeypatch.setenv("HOME", str(home))
+    r = doctor.check_activation()
+    assert r["grade"] == doctor.OK and "1 declared, all converged" in r["detail"]
+
+
+def test_a_missing_statusline_is_a_warn_naming_the_system(machine, monkeypatch):
+    _systems_json(machine, monkeypatch, [
+        {"id": "allowance-sampler",
+         "activation": {"claude_settings": {"statusLine": True}}}])
+    monkeypatch.setenv("HOME", str(machine / "bare-home"))
+    r = doctor.check_activation()
+    assert r["grade"] == doctor.WARN
+    assert "allowance-sampler (claude_settings)" in r["detail"]
+
+
+def test_a_kind_with_no_observer_is_reported_not_silently_converged(machine, monkeypatch):
+    _systems_json(machine, monkeypatch, [
+        {"id": "job-monitor", "activation": {"codex_mcp": {"name": "job_monitor"}}}])
+    monkeypatch.setenv("HOME", str(machine / "bare-home"))
+    r = doctor.check_activation()
+    assert r["grade"] == doctor.WARN
+    assert "job-monitor (codex_mcp)" in r["detail"]
+    assert "no observer yet for: codex_mcp" in r["hint"]
+
+
+def test_activation_declared_in_a_subsystem_is_still_read(machine, monkeypatch):
+    _systems_json(machine, monkeypatch, [
+        {"id": "parent", "subsystems": [
+            {"id": "child", "activation": {"claude_settings": {"statusLine": True}}}]}])
+    monkeypatch.setenv("HOME", str(machine / "bare-home"))
+    r = doctor.check_activation()
+    assert r["grade"] == doctor.WARN and "child (claude_settings)" in r["detail"]
+
+
+def test_an_unreadable_systems_json_is_a_warn_not_a_crash(machine, monkeypatch):
+    plugin = machine / "plugins" / "jstack"
+    plugin.mkdir(parents=True)
+    (plugin / "systems.json").write_text("not json")
+    from jstack_host import plugin_paths
+    monkeypatch.setattr(plugin_paths, "jstack_root", lambda: plugin)
+    r = doctor.check_activation()
+    assert r["grade"] == doctor.WARN
+    assert "cannot read the systems registry" in r["detail"]
 
 
 # ── the timeline check must not report agreement it cannot observe ──

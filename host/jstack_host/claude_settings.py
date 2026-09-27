@@ -84,13 +84,12 @@ def is_ours(command) -> bool:
     return isinstance(command, str) and command.rstrip().endswith(SAMPLER)
 
 
-def statusline_state(path: Path | None = None) -> tuple[bool, str]:
-    """`(sampler is wired, what is there instead)` — the doctor's question.
-
-    Answered off the file, never off a memory of having installed it: the
-    installer runs once and the user edits this file for years.
+def statusline_state_of(settings: dict) -> tuple[bool, str]:
+    """The same question `statusline_state` answers, off an already-parsed
+    settings dict — what `activation.py` needs, since its convergence check
+    reads the file once for every declared kind rather than once per system.
     """
-    current = (read(path) or {}).get("statusLine")
+    current = (settings or {}).get("statusLine")
     if not isinstance(current, dict) or current.get("type") != "command":
         if current is None:
             return False, "no statusLine in ~/.claude/settings.json"
@@ -99,6 +98,15 @@ def statusline_state(path: Path | None = None) -> tuple[bool, str]:
     if is_ours(command):
         return True, str(command)
     return False, f"statusLine runs something else: {command!r}"
+
+
+def statusline_state(path: Path | None = None) -> tuple[bool, str]:
+    """`(sampler is wired, what is there instead)` — the doctor's question.
+
+    Answered off the file, never off a memory of having installed it: the
+    installer runs once and the user edits this file for years.
+    """
+    return statusline_state_of(read(path))
 
 
 def plan_statusline(settings: dict, command: str) -> tuple[dict, str]:
