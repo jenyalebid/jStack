@@ -47,6 +47,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import repo_seat  # noqa: E402
+import review_config  # noqa: E402
 
 XCODE_DOMAIN = "com.apple.dt.Xcode"
 LEGACY_KEY = "IDEChatOverrideAgenticHomeDirectory"
@@ -71,15 +72,7 @@ ACP_AGENT = _stable_agent_path()
 
 
 def _config() -> dict:
-    p = Path(os.environ.get(
-        "JSTACK_REVIEW_CONFIG",
-        str(Path.home() / ".claude" / "jstack" / "review.json"),
-    )).expanduser()
-    try:
-        data = json.loads(p.read_text())
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError, ValueError):
-        return {}
+    return review_config.load()
 
 
 def host_config_dir() -> Path:

@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import attention  # noqa: E402 — sibling hook, path set above
 import _host  # noqa: E402 — the one place the host is found
+import review_config as _review_config  # noqa: E402 — sibling of root.py
 
 #: One switch for all three moments. Whatever a person mutes, they mute
 #: because the injection is in their way, and a floor without its corrections
@@ -96,14 +97,7 @@ def review_config() -> dict:
     naming different agents for one directory would put an agent's settings and
     an agent's history in the same block under different owners.
     """
-    path = Path(os.environ.get(
-        "JSTACK_REVIEW_CONFIG",
-        str(Path.home() / ".claude" / "jstack" / "review.json"))).expanduser()
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    return _review_config.load()
 
 
 def seat_agent(cwd: str) -> str:
