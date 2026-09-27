@@ -25,6 +25,11 @@
 #   (h) an unreadable process table refuses rather than reporting a clear
 #       machine — a look that failed must not answer as a look that found
 #       nothing
+#   (i) a session that TOOK a worktree but has not yet moved into it — no
+#       ref in argv, no cwd match either — still blocks a second dispatch,
+#       via the claim it recorded the instant it took the tree      <- jStack#135
+#   (j) a claim whose owner has since died is stale and blocks nothing — a
+#       resume proceeds rather than refusing forever
 #
 # Exit 0 = all pass, 1 = any fail. Hermetic: its own git repo under $TMPDIR,
 # its own worktrees, and every process it starts is killed on the way out.
@@ -192,6 +197,46 @@ if [[ $rc -eq 3 && "$out" == *"state=refused"* ]]; then
   ok "an unreadable process table refuses rather than reporting a clear machine"
 else
   bad "fail-closed scan" "rc=$rc — a blind scan read as 'nobody is working this'"
+fi
+
+# ── (i) THE CLAIM: taken but not yet moved into — jStack#135 ────────────────
+# A session that ran issue-worktree, got the tree, and has not yet cd'd into
+# it (or moved on) carries no ref in its argv the RE_REF/RE_ROW shapes catch
+# (the issue number appears as a bare `--issue 91`, never `#91`) and its cwd
+# is wherever it was launched from, not the worktree. Only the claim written
+# the instant it took the tree sees it.
+WT91="$TMP/pad/issue-91"
+marker="claimed-then-idle"
+( exec -a claude /bin/bash -c \
+    '"$0" --repo "$1" --issue 91 --path "$2" --repo-root "$3" >/dev/null 2>&1
+     sleep 120 # '"$marker" \
+    "$BIN" "$SLUG" "$WT91" "$REPO" ) >/dev/null 2>&1 &
+claim_pid=$!
+KIDS+=("$claim_pid")
+# Wait for the CLAIM FILE, not the marker: the marker is in argv from the
+# process's first instant, well before its `git worktree add` and write_claim
+# actually run, and racing the second dispatch in ahead of the write would
+# prove nothing about the claim at all.
+CLAIM_FILE_91="$REPO/.git/jstack-claims/issue-91"
+for _ in $(seq 1 50); do
+  [[ -f "$CLAIM_FILE_91" ]] && break
+  sleep 0.2
+done
+[[ -f "$CLAIM_FILE_91" ]] || bad "claim fixture" "claim file never appeared at $CLAIM_FILE_91"
+out="$("$BIN" --repo "$SLUG" --issue 91 --path "$TMP/pad/issue-91-second" --repo-root "$REPO" 2>&1)"; rc=$?
+if [[ $rc -eq 3 && "$out" == *"$claim_pid"* && "$out" == *"state=refused"* ]]; then
+  ok "a claim recorded on take blocks a second dispatch with no ref in argv and no cwd match"
+else
+  bad "the claim" "rc=$rc out=$(echo "$out" | tr '\n' ' ')"
+fi
+
+# ── (j) a claim whose owner has since died is stale, and blocks nothing ────
+kill "$claim_pid" 2>/dev/null; wait "$claim_pid" 2>/dev/null
+out="$("$BIN" --repo "$SLUG" --issue 91 --path "$WT91" --repo-root "$REPO" 2>&1)"; rc=$?
+if [[ $rc -eq 0 && "$out" == *"state=resumed"* ]]; then
+  ok "a claim whose pid has died is stale and does not block a resume"
+else
+  bad "stale claim breaks" "rc=$rc out=$(echo "$out" | tr '\n' ' ')"
 fi
 
 echo
