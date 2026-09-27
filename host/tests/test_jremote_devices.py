@@ -837,6 +837,36 @@ def test_pair_list_remove_is_the_bar_s_whole_device_story(client, store, on_cons
     assert any(d["id"] == row["id"] and d["revoked"] for d in listed)
 
 
+def test_revoking_an_adopted_machine_s_credential_needs_confirmation(client, store, on_console, monkeypatch):
+    """jStack#55: work-mac's own device row is its whole way back onto the
+    mesh once it is off the LAN. The console gets a named warning first, not
+    a silent brick, and only past that does `confirm=true` let it through."""
+    import jstack_host.store as store_module
+    monkeypatch.setattr(store_module, "_store", store)   # managed_access reads get_store() directly
+    row, token = devices.mint("work-mac")
+    store.upsert_host("work-mac-key", "work-mac", "10.66.0.5")
+    store.bind_host_device("work-mac-key", row["id"])
+
+    r = client.post(f"/api/jremote/v1/devices/{row['id']}/revoke")
+    assert r.status_code == 409
+    assert "work-mac" in r.json()["detail"]
+    assert devices.authenticate(token) == row["id"]        # untouched
+
+    r = client.post(f"/api/jremote/v1/devices/{row['id']}/revoke?confirm=true")
+    assert r.status_code == 200
+    assert devices.authenticate(token) is None
+
+
+def test_an_ordinary_device_revokes_with_no_confirmation_needed(client, store, on_console):
+    """The gate is specific to an adopted machine's own credential — a phone
+    or laptop paired the ordinary way is not one, and revoking it is
+    unchanged (jStack#55 must not add friction nobody asked for)."""
+    row, token = devices.mint("someone-elses-phone")
+    r = client.post(f"/api/jremote/v1/devices/{row['id']}/revoke")
+    assert r.status_code == 200
+    assert devices.authenticate(token) is None
+
+
 def test_a_revoked_device_cannot_use_the_registry(client, store):
     """Its own row included — revocation ends the credential everywhere."""
     row, token = devices.mint("my-old-phone")
