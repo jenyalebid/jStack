@@ -281,11 +281,11 @@ def check_codex_hooks() -> dict:
     exists and still matches what the plugin declares, which is the only thing
     this reports.
     """
-    from . import codex_hooks
+    from . import codex_hooks, plugin_paths
 
     if not _which("codex"):
         return _check("codex hooks", OK, "codex not installed — nothing to wire")
-    plugin = hostenv.package_root().parent / "plugins/jstack"
+    plugin = plugin_paths.jstack_root()
     try:
         wanted, dropped = codex_hooks.managed_config(plugin)
     except OSError as exc:
