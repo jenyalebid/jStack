@@ -692,6 +692,37 @@ def test_launchd_replacement_waits_for_service_removal(tmp_path, monkeypatch):
     assert calls == ["bootout", "print", "print", "print"]
 
 
+def test_unload_reaps_a_child_still_on_the_hosts_port(tmp_path, monkeypatch):
+    """#219: bootout tears down the service's own process, never a child it
+    spawned into its own session — an embedding app that forks a detached
+    child is reparented to launchd, still on the host's port, once the
+    LaunchAgent is gone. `_unload("host")` must not return with that port
+    still held."""
+    import subprocess
+    from jstack_host import update_macos
+    lsof_answers = iter([["4242"], []])
+    def run(argv, **kwargs):
+        if argv[0] == "/bin/launchctl":
+            return subprocess.CompletedProcess(argv, 113 if argv[1] == "print" else 0)
+        assert argv[0] == "/usr/sbin/lsof"
+        return subprocess.CompletedProcess(argv, 0, stdout="\n".join(next(lsof_answers)))
+    killed = []
+    class FakeProcess:
+        def __init__(self, pid):
+            self.pid = pid
+        def terminate(self):
+            killed.append(("terminate", self.pid))
+        def kill(self):
+            killed.append(("kill", self.pid))
+    monkeypatch.setattr(update_macos.subprocess, "run", run)
+    monkeypatch.setattr(update_macos.time, "sleep", lambda _: None)
+    monkeypatch.setattr(update_macos.psutil, "Process", FakeProcess)
+    backend = update_macos.MacBackend(
+        tmp_path, {"host_label": "lab-host", "local_url": "http://127.0.0.1:9091"})
+    backend._unload("host")
+    assert killed == [("terminate", 4242)]
+
+
 def test_inventory_observes_updater_source_and_requires_live_menubar(tmp_path, monkeypatch):
     from jstack_host import update_macos, update_plugins, sourcestamp
     token = tmp_path / "token"

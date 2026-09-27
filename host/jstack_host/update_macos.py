@@ -25,7 +25,7 @@ import httpx
 import psutil
 
 from . import release_manifest as releases
-from .update_supervisor import atomic_json
+from .update_supervisor import atomic_json, log
 
 
 def command(argv: list[str], *, timeout=120, **kwargs) -> str:
@@ -404,7 +404,7 @@ class MacBackend:
 
     def _unload(self, kind: str):
         label = self.config[kind + "_label"]
-        print(f"update: unloading {kind}", flush=True)
+        log(f"update: unloading {kind}")
         # bootout returns before launchd necessarily removes the service.
         # Wait for that removal before trying to bootstrap its replacement.
         subprocess.run(["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
@@ -415,9 +415,44 @@ class MacBackend:
             if time.monotonic() >= deadline:
                 raise releases.ReleaseError(f"{kind} service did not unload")
             time.sleep(0.1)
+        # bootout tears down the service's own process, never a child it
+        # spawned into its own session (#219): an embedding app that forks a
+        # detached child leaves it reparented to launchd, still on the host's
+        # port, once the LaunchAgent itself is gone. `_load` must never
+        # bootstrap onto a port a leftover process still holds.
+        if kind == "host":
+            self._reap_port_holder()
+
+    def _port_holders(self, port: int) -> list[int]:
+        result = subprocess.run(
+            ["/usr/sbin/lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True, text=True, timeout=5)
+        return [int(pid) for pid in result.stdout.split() if pid.strip().isdigit()]
+
+    def _reap_port_holder(self) -> None:
+        from urllib.parse import urlsplit
+        port = urlsplit(self.config.get("local_url", "")).port
+        if not port:
+            return
+        deadline = time.monotonic() + 10
+        holders = self._port_holders(port)
+        while holders and time.monotonic() < deadline:
+            for pid in holders:
+                try:
+                    psutil.Process(pid).terminate()
+                except psutil.NoSuchProcess:
+                    pass
+            time.sleep(0.2)
+            holders = self._port_holders(port)
+        for pid in holders:
+            log(f"update: killing orphaned process {pid} still on port {port}")
+            try:
+                psutil.Process(pid).kill()
+            except psutil.NoSuchProcess:
+                pass
 
     def _load(self, kind: str):
-        print(f"update: loading {kind}", flush=True)
+        log(f"update: loading {kind}")
         try:
             command(["/bin/launchctl", "bootstrap", f"gui/{os.getuid()}", self.config[kind + "_plist"]])
         except releases.ReleaseError as exc:
@@ -431,7 +466,7 @@ class MacBackend:
         self._unload("menubar")
         built_here = self._built_here(job)
         for kind, app in transaction["apps"].items():
-            print(f"update: replacing {kind}", flush=True)
+            log(f"update: replacing {kind}")
             target, backup = Path(app["target"]), Path(app["backup"])
             stop_app(target)
             # A copy an earlier job left behind is never resumed, and named per
