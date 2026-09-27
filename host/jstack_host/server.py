@@ -232,6 +232,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     from .pty import ws_router
+    from .hub_shell import http_router as hub_shell_router, ws_router as hub_shell_ws_router
     from .router import grant_router, revoke_router, router, unauthenticated_router
 
     app = FastAPI(title="jRemote host", lifespan=lifespan,
@@ -249,6 +250,10 @@ def create_app() -> FastAPI:
     # host cannot be told at install time which role it will end up in.
     app.include_router(grant_router)
     app.include_router(ws_router)
+    # The hub's own shell — not a session, so it mounts beside `ws_router`
+    # rather than inside it (see `hub_shell.py`).
+    app.include_router(hub_shell_router)
+    app.include_router(hub_shell_ws_router)
 
     @app.get("/api/health")
     def health():
