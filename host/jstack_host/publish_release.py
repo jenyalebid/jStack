@@ -266,6 +266,125 @@ def seal(work: Path, config: dict, notes: str) -> Path:
     return output
 
 
+def publisher_key(config: dict) -> tuple[bytes, str]:
+    """The publisher's private key and its public half, from the release config."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    private = base64.b64decode(Path(config["private_key"]).read_text().strip(), validate=True)
+    public = Ed25519PrivateKey.from_private_bytes(private).public_key().public_bytes_raw()
+    return private, base64.b64encode(public).decode()
+
+
+def main_version(config: dict) -> str:
+    """The stack version on origin/main of the stack repo: the oldest line, and
+    so the floor a client publication claims when nobody names one."""
+    repo = str(config["stack_repo"])
+    command(["git", "-C", repo, "fetch", "-q", "origin", releases.STABLE_CHANNEL], timeout=120)
+    text = command(["git", "-C", repo, "show",
+                    f"origin/{releases.STABLE_CHANNEL}:plugins/jstack/.claude-plugin/plugin.json"])
+    return str(json.loads(text)["version"])
+
+
+def build_client(config: dict, notes: str, work: Path) -> tuple[Path, dict, str, dict]:
+    """Build, sign and notarize one client from the repos' committed HEADs.
+    The artifact, its component record, the client sha and the package shas."""
+    stack, client = work / "stack", work / "Projects/client"
+    client.parent.mkdir()
+    snapshot(Path(config["stack_repo"]), stack)
+    client_sha = snapshot(Path(config["client_repo"]), client)
+    dependencies = {}
+    for name, repository in config.get("client_packages", {}).items():
+        releases.identifier(name)
+        target = work / "Packages" / name
+        target.parent.mkdir(exist_ok=True)
+        dependencies[name] = snapshot(Path(repository), target)
+    app_output = work / "client-output"
+    app_script = client / "jRemote-Code/jRemote/release-mac.sh"
+    project = client / "jRemote-Code/jRemote/jRemote.xcodeproj/project.pbxproj"
+    current = max(map(int, re.findall(r"CURRENT_PROJECT_VERSION = (\d+);", project.read_text())))
+    number = allocate_client_build(Path(config["candidates_dir"]), current)
+    log_path = work / "client-build.log"
+    print(f"Building, signing and notarizing client {number} from {client_sha[:8]}", flush=True)
+    with log_path.open("w") as log:
+        process = subprocess.run(["bash", str(app_script), "--build-number", str(number),
+                                  "--candidate-dir", str(app_output), "--notes", notes],
+                                 timeout=2400, stdout=log, stderr=subprocess.STDOUT,
+                                 env={**os.environ, "JSTACK_CHECKOUT": str(stack)})
+    if process.returncode:
+        raise releases.ReleaseError(f"client build failed; see {log_path}\n{log_path.read_text()[-4000:]}")
+    app_manifest = json.loads((app_output / "latest.json").read_text())
+    releases.identifier(app_manifest["file"])
+    app = app_output / app_manifest["file"]
+    item = component(app, str(app_manifest["build"]))
+    return app, item, client_sha, dependencies
+
+
+def client(config: dict, notes: str, reuse_client: Path | None = None,
+           stack_minimum: str | None = None) -> Path:
+    """Publish one client build to the feed's shelf, on the client's own clock.
+
+    jRemote.app changes far less often than the stack and does not need the
+    stack's road to reach a Mac: the fleet sat on client 109 from 2026-09-23
+    while 119 was on TestFlight, because the only thing that could advance
+    the fleet's client was a full stack release through all twelve journeys.
+    A publication here is the client alone, signed with the publisher's key,
+    naming the oldest stack version it runs on (`--stack-minimum`; origin/main's
+    version when unsaid, so every line takes it). Every hub build after this
+    carries the shelf's newest compatible client (`build_source.carried_client`),
+    on whichever line it builds, and the leaves take it with the next build.
+
+    `reuse_client` publishes the exact signed client of an existing candidate
+    — the one that was built and notarized for a stack release that never got
+    promoted. Its manifest names the client sha it was built from, so nothing
+    here claims the repo's HEAD.
+    """
+    feed = Path(config["feed_dir"])
+    private, public = publisher_key(config)
+    floor = stack_minimum or main_version(config)
+    releases.version_key(floor)
+    work = None
+    if reuse_client is not None:
+        prior = releases.verify(json.loads((reuse_client / "candidate.json").read_text()),
+                                public, promoted=False)
+        item = prior["components"]["client"]
+        app = reuse_client / item["file"]
+        releases.check_artifact(app, item)
+        source, packages = prior["sources"]["client"], prior.get("client_packages", {})
+        print(f"Publishing the signed client {item['version']} of {prior['release']}", flush=True)
+    else:
+        candidates = Path(config["candidates_dir"])
+        candidates.mkdir(parents=True, exist_ok=True)
+        work = Path(tempfile.mkdtemp(prefix="client-", suffix=".noindex", dir=candidates))
+        app, item, source, packages = build_client(config, notes, work)
+    manifest = {"schema": releases.SCHEMA, "kind": "client", "build": int(item["version"]),
+                "component": item, "source": source, "packages": packages,
+                "compatibility": {"protocol": 1, "stack_minimum": floor},
+                "published": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "notes": notes}
+    envelope = releases.sign_client(manifest, private)
+    shelf = feed / releases.CLIENTS
+    shelf.mkdir(parents=True, exist_ok=True)
+    destination = shelf / str(manifest["build"])
+    if destination.exists():
+        held = json.loads((destination / "client.json").read_text())["manifest"]
+        if {k: v for k, v in held.items() if k not in ("published", "notes")} != \
+                {k: v for k, v in manifest.items() if k not in ("published", "notes")}:
+            raise releases.ReleaseError(
+                f"client build {manifest['build']} is already on the shelf with different contents")
+        envelope = {"manifest": held, "signature": json.loads(
+            (destination / "client.json").read_text())["signature"]}
+    else:
+        staging = Path(tempfile.mkdtemp(prefix=".client-", dir=shelf))
+        shutil.copy2(app, staging / item["file"])
+        releases.check_artifact(staging / item["file"], item)
+        atomic_json(staging / "client.json", envelope)
+        atomic_json(staging / "trust.json", {"algorithm": "Ed25519", "public_key": public})
+        os.rename(staging, destination)
+    atomic_json(shelf / "latest.json", envelope)
+    if work is not None:
+        shutil.rmtree(work, ignore_errors=True)
+    print(stamp_client_build(Path(config["client_repo"]), manifest["build"], notes), flush=True)
+    return destination
+
+
 def candidate_manifest(candidate: Path, private_key: bytes) -> dict:
     """The signed candidate's own manifest — never a manifest handed to us."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -275,8 +394,9 @@ def candidate_manifest(candidate: Path, private_key: bytes) -> dict:
     return copy.deepcopy(releases.verify(envelope, public, promoted=False))
 
 
-def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -> dict:
-    """Run the configured acceptance runner over this candidate, then read it.
+def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes,
+            *, only: list[str] | None = None) -> dict:
+    """Run the acceptance runner over what this candidate has not yet proved.
 
     The runner's subject is the commit — every Mac clones a ref and compiles
     the Hub itself — and the candidate names both the commit to put under test
@@ -293,6 +413,15 @@ def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -
     at all wrote no evidence, and that is this call's own failure, not a
     verdict about the candidate — it raises rather than handing back twelve
     `missing` rows and a zero exit.
+
+    A receipt that already passes for this exact candidate is evidence and
+    stays evidence: the runner is asked only for the journeys whose receipt is
+    missing, failed, or bound to another commit (`--only`, which retains the
+    rest), and when nothing is left to prove it is not started at all. Before
+    this, one red journey out of twelve restarted the whole run — ten
+    restarts on 2026-09-28 (~two hours each) for one candidate that had been
+    eleven-twelfths proven since the first. `only` narrows it further, to
+    the journeys the operator names, and never widens it.
     """
     runner = config.get("acceptance")
     if not runner:
@@ -300,20 +429,35 @@ def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -
             "configure 'acceptance' with the acceptance runner's command line")
     manifest = candidate_manifest(candidate, private_key)
     receipts.mkdir(parents=True, exist_ok=True)
+    build = build_of(manifest)
+    state = acceptance.inspect(receipts, build)
+    remaining = [name for name, entry in state.items() if entry["state"] != acceptance.PASSED]
+    if only:
+        unknown = sorted(set(only) - set(state))
+        if unknown:
+            raise releases.ReleaseError("unknown acceptance journeys: " + ", ".join(unknown))
+        remaining = [name for name in remaining if name in only]
+    kept = [name for name in state if name not in remaining and state[name]["state"] == acceptance.PASSED]
+    if kept:
+        print(f"Already proven for {manifest['release']}: " + ", ".join(kept), flush=True)
+    if not remaining:
+        print("Nothing left to run.", flush=True)
+        return state
     argv = [*runner, "--ref", built_from(manifest), "--candidate", str(candidate),
-            "--receipts", str(receipts)]
+            "--receipts", str(receipts), "--only", *remaining]
     print("Running acceptance: " + " ".join(argv), flush=True)
+    before = {name: state[name]["receipt"] for name in remaining}
     finished = subprocess.run(argv, timeout=config.get("acceptance_timeout", 6 * 3600))
-    state = acceptance.inspect(receipts, build_of(manifest))
+    state = acceptance.inspect(receipts, build)
     for name, entry in state.items():
         print(f"  {name}: {entry['state']}" + (f" — {entry['detail']}" if entry["detail"] else ""),
               flush=True)
     if finished.returncode:
         print(f"acceptance runner exited {finished.returncode}", flush=True)
-        if all(entry["receipt"] is None for entry in state.values()):
+        if all(state[name]["receipt"] == before[name] for name in remaining):
             raise releases.ReleaseError(
                 f"the acceptance runner exited {finished.returncode} without writing one "
-                f"receipt: it never reached a journey, so nothing here is evidence about "
+                f"receipt: it never reached a journey, so nothing new here is evidence about "
                 f"{manifest['release']}. Its command line was: " + " ".join(argv))
     return state
 
@@ -524,14 +668,14 @@ def deploy(release: str | None = None, *, port: int = 9090,
 
 
 def ship(config: dict, candidate: Path, receipts: Path, private_key: bytes,
-         *, deploy_after: bool) -> dict:
+         *, deploy_after: bool, only: list[str] | None = None) -> dict:
     """The one release action: qualify the exact candidate, promote, deploy.
 
     Nothing is published on a green unit suite. `qualify` produces receipts and
     `promote` re-reads them through the same gate every installing machine
     trusts, so an interrupted or partial acceptance run stops here.
     """
-    qualify(config, candidate, receipts, private_key)
+    qualify(config, candidate, receipts, private_key, only=only)
     envelope = promote(candidate, receipts, Path(config["feed_dir"]), private_key,
                        local_components=config.get("local_components"),
                        client_repo=config.get("client_repo"))
@@ -559,6 +703,13 @@ def main():
     create.add_argument("--notes", required=True)
     create.add_argument("--reuse-client", type=Path,
                         help="reuse an exact signed client candidate only when its source inputs are unchanged")
+    shelf = commands.add_parser("client", help="publish one client build to the feed's shelf, "
+                                "independent of any stack release")
+    shelf.add_argument("--notes", required=True)
+    shelf.add_argument("--reuse-client", type=Path,
+                       help="publish the exact signed client of this candidate instead of building")
+    shelf.add_argument("--stack-minimum", metavar="VERSION",
+                       help="the oldest stack version this client runs on (default: origin/main's)")
     finish = commands.add_parser("seal", help="resume a fully built candidate without rebuilding")
     finish.add_argument("work", type=Path)
     finish.add_argument("--notes", required=True)
@@ -568,6 +719,8 @@ def main():
     prove = commands.add_parser("qualify", help="run the acceptance runner over a candidate")
     prove.add_argument("candidate", type=Path)
     prove.add_argument("--receipts", type=Path, required=True)
+    prove.add_argument("--only", nargs="+", metavar="JOURNEY",
+                       help="run only these of the journeys still unproven; the rest keep their receipts")
     state = commands.add_parser("acceptance", help="what this candidate's receipts prove today")
     state.add_argument("candidate", type=Path)
     state.add_argument("--receipts", type=Path, required=True)
@@ -578,6 +731,8 @@ def main():
     whole.add_argument("--receipts", type=Path, required=True)
     whole.add_argument("--deploy", action="store_true",
                        help="after promotion, update this hub and its eligible leaves")
+    whole.add_argument("--only", nargs="+", metavar="JOURNEY",
+                       help="run only these of the journeys still unproven; the rest keep their receipts")
     args = parser.parse_args()
     if args.action == "init-key":
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -596,9 +751,12 @@ def main():
     if args.action == "seal":
         print(seal(args.work, config, args.notes))
         return
+    if args.action == "client":
+        print(client(config, args.notes, args.reuse_client, args.stack_minimum))
+        return
     private = base64.b64decode(Path(config["private_key"]).read_text().strip(), validate=True)
     if args.action == "qualify":
-        state = qualify(config, args.candidate, args.receipts, private)
+        state = qualify(config, args.candidate, args.receipts, private, only=args.only)
         print(json.dumps({name: entry["state"] for name, entry in state.items()}, indent=2))
     elif args.action == "acceptance":
         state = acceptance.inspect(
@@ -609,7 +767,7 @@ def main():
         print(json.dumps(deploy(args.release, port=config.get("hub_port", 9090)), indent=1))
     elif args.action == "ship":
         print(json.dumps(ship(config, args.candidate, args.receipts, private,
-                              deploy_after=args.deploy), indent=2))
+                              deploy_after=args.deploy, only=args.only), indent=2))
     else:
         result = promote(args.candidate, args.receipts, Path(config["feed_dir"]), private,
                          local_components=config.get("local_components"),
