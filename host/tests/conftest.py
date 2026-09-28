@@ -310,7 +310,7 @@ def _no_live_desktop_launches(monkeypatch):
                 raise AssertionError(
                     f"Test attempted a real `launchctl {' '.join(map(str, argv[1:]))}`; mock this boundary "
                     "— destructive service tests never run on the home machine")
-            if base in {"JStackHub", "JStackRuntime", "tccutil", "sudo"}:
+            if base in {"JStackHub", "JStackWindows", "JStackRuntime", "tccutil", "sudo"}:
                 raise AssertionError(
                     f"Test attempted to run the real {base}; mock this boundary "
                     "— destructive service tests never run on the home machine")

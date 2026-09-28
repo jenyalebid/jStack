@@ -453,6 +453,115 @@ def get_file_share():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+#
+# Windows on this machine's desk. Every verb runs inside the Hub's own sealed
+# helper, because macOS bills a privacy request to the *responsible process* of
+# the session that made it: the same verb over ssh asks for a grant on sshd and
+# is denied while the Hub holds the grant the whole time (jStack#239). These
+# routes are how a caller that is not sitting at the machine reaches the one
+# permission holder without becoming a shell on it.
+#
+
+def _window_call(call):
+    from . import windows
+    try:
+        return call(windows)
+    except windows.WindowsError as exc:
+        raise HTTPException(windows.STATUS.get(exc.reason, 500), str(exc))
+
+
+class WindowActRequest(BaseModel):
+    #: minimize | unminimize | raise — the whole vocabulary. There is no verb
+    #: here that takes a script, a selector or a path.
+    verb: str
+    pid: int
+    window: int
+    #: The title the caller read from `list`. The helper refuses when the
+    #: window at that index is no longer the one the caller was looking at.
+    title: str
+
+
+class WindowRestoreRequest(BaseModel):
+    #: An index and title out of `list`'s `minimized` array — the Dock's own
+    #: list, which carries no owning process because macOS does not expose one.
+    index: int
+    title: str
+
+
+class WindowHideRequest(BaseModel):
+    pid: int
+    hidden: bool = True
+
+
+@router.post("/windows/list")
+def windows_list():
+    """Every application with windows, each window's title, state and rectangle."""
+    return _window_call(lambda w: w.listing())
+
+
+@router.post("/windows/trust")
+def windows_trust():
+    """Whether this machine's Hub holds Accessibility. Asked, never read, and
+    never prompting — a status route that puts a dialog on someone's screen is
+    a status route nobody can afford to poll."""
+    return _window_call(lambda w: w.trust())
+
+
+@router.post("/windows/authorize")
+def windows_authorize():
+    """Raise the Accessibility request from inside the Hub, so the dialog names
+    jStack Hub and is answered once for the machine. A no-op when the grant is
+    already held, which is what keeps this callable without it becoming a way
+    to flash a dialog at whoever is sitting there."""
+    return _window_call(lambda w: w.authorize())
+
+
+@router.post("/windows/act")
+def windows_act(body: WindowActRequest):
+    return _window_call(lambda w: w.act(body.verb, body.pid, body.window, body.title))
+
+
+@router.post("/windows/restore")
+def windows_restore(body: WindowRestoreRequest):
+    """Bring a minimized window back. Separate from `act` because a window in
+    the Dock has no process to name it by — and a capability that minimizes
+    without a way back is a switch with no off."""
+    return _window_call(lambda w: w.restore(body.index, body.title))
+
+
+@router.post("/windows/hide")
+def windows_hide(body: WindowHideRequest):
+    """Hide or unhide a whole application. The answer carries what the desk
+    shows afterwards: an accessory application accepts the message and stays
+    exactly where it is, and that is reported as the failure it is."""
+    return _window_call(lambda w: w.set_hidden(body.pid, body.hidden))
+
+
+class HostWindowRequest(BaseModel):
+    #: One of the leaf's own `/windows/*` routes: list, trust, authorize, act, hide.
+    action: str
+    payload: dict = {}
+
+
+@router.post("/hosts/{key}/windows")
+def host_windows(key: str, body: HostWindowRequest, request: Request):
+    """Ask an adopted machine's Hub to run a window verb on its own desk.
+
+    The parent mints on the leaf and posts to the leaf's route, so the work
+    happens under the *leaf's* grant, held by the leaf's own bundle. Nothing
+    crosses a shell — a shell is precisely what moves the request into a
+    session macOS attributes to sshd, and the whole capability with it.
+    """
+    managed_access.require_console(request)
+    from . import windows
+    if body.action not in ("list", "trust", "authorize", "act", "restore", "hide"):
+        raise HTTPException(400, f"unsupported window action: {body.action}")
+    try:
+        return windows.on_host(key, body.action, body.payload)
+    except windows.WindowsError as exc:
+        raise HTTPException(windows.STATUS.get(exc.reason, 500), str(exc))
+
+
 @router.get("/sessions")
 def get_sessions(agent: str | None = None, shortcut: str | None = None):
     """`shortcut` is a shortcut's id: the sittings THAT card opened, rather
