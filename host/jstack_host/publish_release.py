@@ -153,7 +153,18 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
     # Deriving a Hub number from jRemote's project file is what made the two
     # products' versions look comparable when they count different things.
     date = release_date()
-    release_id = source_identity(date, stack_sha, client_sha, dependencies)
+    # Which line this release belongs to. `stack_repo` is on whatever branch
+    # the releaser checked out, and the snapshot is by sha, so building from a
+    # side branch already worked — what was missing was the offer saying which
+    # line it came from, so a hub can decline the ones that are not its own.
+    #
+    # Read before the identity, not after, because the line is part of the
+    # name: without it main and dev cut from one commit on one day are one
+    # release id carrying two different signed manifests (#235).
+    channel = command(["git", "-C", str(config["stack_repo"]), "rev-parse",
+                       "--abbrev-ref", "HEAD"]).strip()
+    channel = releases.STABLE_CHANNEL if channel in ("main", "HEAD") else channel
+    release_id = source_identity(date, stack_sha, client_sha, dependencies, channel=channel)
     output = work / release_id
     output.mkdir()
     version = json.loads((stack / "plugins/jstack/.claude-plugin/plugin.json").read_text())["version"]
@@ -171,13 +182,6 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
     # only to be compared against the sequence of the release a hub already
     # holds, and only within one channel, where the two counts share a root.
     sequence = int(command(["git", "-C", str(stack), "rev-list", "--count", stack_sha]).strip())
-    # Which line this release belongs to. `stack_repo` is on whatever branch
-    # the releaser checked out, and the snapshot is by sha, so building from a
-    # side branch already worked — what was missing was the offer saying which
-    # line it came from, so a hub can decline the ones that are not its own.
-    channel = command(["git", "-C", str(config["stack_repo"]), "rev-parse",
-                       "--abbrev-ref", "HEAD"]).strip()
-    channel = releases.STABLE_CHANNEL if channel in ("main", "HEAD") else channel
     from .sourcestamp import fingerprint
     (stack / "host/release-identity.json").write_text(json.dumps({
         "release": release_id, "sha": stack_sha, "version": version, "date": date,

@@ -136,7 +136,7 @@ def release_date() -> str:
 
 
 def source_identity(date: str, stack: str, client: str, dependencies: dict, *,
-                    debug: bool = False) -> str:
+                    debug: bool = False, channel: str = "", builder: str = "") -> str:
     """The build's name: the day, the commit, and a hash of every source in it.
 
     Lives here rather than in `publish_release`, which is the only other
@@ -146,9 +146,27 @@ def source_identity(date: str, stack: str, client: str, dependencies: dict, *,
     already installed. A debug build is a different input from a release of
     the same commit, so it is a different name — a rebuild would otherwise
     re-offer one as the other.
+
+    Two things beyond the sources make a release a different release, and both
+    were missing (#235):
+
+    `channel`, because a line is inside the signed manifest and a hub declines
+    an offer naming another line. Cut main and dev from one commit on one day
+    and they were one release id holding two manifests.
+
+    `builder`, because the same commit built by the publisher and built by a
+    hub from source are not the same bytes — different signing key, different
+    origin — and a hub that finds the publisher's release already sitting under
+    the name it was about to use reads it as its own earlier build and verifies
+    it against its own key. Run 20260928-121855 is that: `release signature not
+    trusted`, from a hub that had been seeded with a candidate built the same
+    day off the same commit, and could not build at all until the date rolled
+    over. The publisher passes no builder; a hub passes its own build key.
     """
     sources = {"stack": stack, "client": client, "dependencies": dependencies,
-               **({"debug": True} if debug else {})}
+               **({"debug": True} if debug else {}),
+               **({"channel": channel} if channel else {}),
+               **({"builder": builder} if builder else {})}
     fingerprint = hashlib.sha256(releases.canonical(sources)).hexdigest()[:16]
     return f"{date}-{stack[:8]}-{fingerprint}"
 
@@ -568,13 +586,24 @@ def _build(root: Path, config: dict, ref: str, *, debug: bool = False) -> dict:
     client_sha = previous["sources"]["client"]
     dependencies = previous.get("client_packages", {})
     date = release_date()
-    release_id = source_identity(date, sha, client_sha, dependencies, debug=debug)
+    release_id = source_identity(date, sha, client_sha, dependencies, debug=debug,
+                                 channel=ref, builder=public)
     envelope_path = feed / release_id / "manifest.json"
     if envelope_path.exists():
         # This hub already built these exact sources today. Re-offer those
         # bytes rather than building different ones under the same name.
         envelope = json.loads(envelope_path.read_text())
-        manifest = releases.verify(envelope, public)
+        try:
+            manifest = releases.verify(envelope, public)
+        except releases.ReleaseError as exc:
+            # Unreachable once `builder` is in the name above, and named
+            # anyway: a feed carrying someone else's release under a name this
+            # hub computed for itself is the one case where the bare
+            # "release signature not trusted" points at the wrong file.
+            raise releases.ReleaseError(
+                f"{release_id} is already in this hub's feed but was not built by this hub "
+                "— it does not verify against this machine's build key. Two builders have "
+                "named one release; move the other aside before building.") from exc
         for item in manifest["components"].values():
             releases.check_artifact(feed / release_id / item["file"], item)
         variant_present(config, release_id)
@@ -783,7 +812,8 @@ def bootstrap(checkout: Path, output: Path, key_dir: Path, *, repo: str, ref: st
         version = json.loads(
             (stack / "plugins/jstack/.claude-plugin/plugin.json").read_text())["version"]
         item, client_sha = client_component(client, output) if client else (None, "")
-        release_id = source_identity(date, sha, client_sha, {}, debug=debug)
+        release_id = source_identity(date, sha, client_sha, {}, debug=debug,
+                                     channel=ref, builder=public)
         built_by = source_origin(machine)
         identity = {"release": release_id, "sha": sha, "version": version, "date": date,
                     "github_repo": repo, "sequence": sequence, "channel": ref,
