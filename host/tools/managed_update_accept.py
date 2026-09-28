@@ -2856,6 +2856,23 @@ def main() -> int:
                 f"{fleet.prior.slug} is from before a7c0a7a (2026-09-24), so a Hub "
                 "built from it demands a Developer ID team a source build cannot "
                 "have and refuses its own signature: pick a later prior")
+        # Same reason, same place: a prior with no client stages a leaf with no
+        # client, and `upgrade` then holds that leaf to the one the candidate
+        # carries. The prior is built from source on the guest, so the only
+        # client it can put there is the one handed in — `move()` installs
+        # `build.client` and skips the step when it is None. Discovered on the
+        # guest this reads as `client is None, the build this Mac took carries
+        # 119`, forty minutes in, and says nothing about the missing argument.
+        #
+        # Named rather than defaulted: which client a prior carries is the
+        # fleet's current one, and only the releaser knows what that is.
+        if fleet.prior.client is None:
+            parser.error(
+                f"--prior-ref {args.prior_ref} needs --client: the prior is built from "
+                "source and carries no client of its own, so a leaf staged onto it "
+                "starts with none, and the managed update will not install one onto a "
+                "Mac that has none. Pass the jRemote.app the fleet runs today, so the "
+                "journey is the upgrade it claims to be.")
     print(f"Acceptance for {build.slug} over {plan['hub']} "
           f"and {len(fleet.leaves)} managed Macs", flush=True)
     fleet.hub.start()
