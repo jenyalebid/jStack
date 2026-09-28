@@ -256,6 +256,22 @@ class Build:
         raise AcceptanceFailure(f"a build does not declare a {component} version up front")
 
 
+#: The Hub's runtime checks its own seal before it loads a line of Python, and
+#: until a7c0a7a (2026-09-24) it demanded the publisher's Developer ID team
+#: unconditionally. A source build has no such identity and signs ad-hoc, so a
+#: Hub built from any commit before that one refuses itself: every service
+#: exits 78 and the machine never comes up. That is a floor on how old a prior
+#: can be, the same shape as the one that retired upgrade_shell, and it is read
+#: out of the commit rather than pinned to a sha so a rebase cannot move it.
+SOURCE_BUILD_ESCAPE = "JSTACK_SOURCE_BUILD"
+
+
+def runs_when_source_built(build: "Build") -> bool:
+    """Whether a Hub built from this commit will accept its own signature."""
+    runtime = git(build.checkout, "show", build.sha + ":host/macos/Runtime.c")
+    return SOURCE_BUILD_ESCAPE in runtime
+
+
 def staged_candidate(candidate: Path) -> tuple[dict, Path]:
     """A signed candidate's own manifest, and its client unpacked as a bundle.
 
@@ -2812,6 +2828,14 @@ def main() -> int:
     if args.prior_ref:
         fleet.prior = Build(args.repo, args.prior_ref, checkout=args.checkout,
                             client=args.client)
+        # Refused here rather than discovered on a guest: staging an
+        # unrunnable prior fails forty minutes in, as a leaf whose services
+        # will not spawn, and says nothing about why.
+        if not runs_when_source_built(fleet.prior):
+            parser.error(
+                f"{fleet.prior.slug} is from before a7c0a7a (2026-09-24), so a Hub "
+                "built from it demands a Developer ID team a source build cannot "
+                "have and refuses its own signature: pick a later prior")
     print(f"Acceptance for {build.slug} over {plan['hub']} "
           f"and {len(fleet.leaves)} managed Macs", flush=True)
     fleet.hub.start()

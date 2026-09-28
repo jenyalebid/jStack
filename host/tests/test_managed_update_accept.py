@@ -564,6 +564,19 @@ def test_a_build_reads_what_the_commit_declares_not_the_working_tree(runner, tmp
         "https://raw.githubusercontent.com/jenyalebid/jStack/" + HEAD_SHA + "/install.sh")
 
 
+def test_a_prior_from_before_the_source_build_escape_is_refused(runner, tmp_path, monkeypatch):
+    made = a_build(runner, monkeypatch, tmp_path, "prior/old", PRIOR_SHA)
+    unconditional = 'CFSTR("anchor apple generic and certificate leaf[subject.OU] = ...")'
+    monkeypatch.setattr(runner, "git", lambda *a, **k: unconditional)
+    assert runner.runs_when_source_built(made) is False
+
+
+def test_a_prior_that_carries_the_escape_is_allowed(runner, tmp_path, monkeypatch):
+    made = a_build(runner, monkeypatch, tmp_path, "prior/new", PRIOR_SHA)
+    monkeypatch.setattr(runner, "git", lambda *a, **k: "#ifdef JSTACK_SOURCE_BUILD\n")
+    assert runner.runs_when_source_built(made) is True
+
+
 def test_a_ref_the_repo_does_not_carry_is_named_not_guessed(runner, tmp_path, monkeypatch):
     monkeypatch.setattr(runner.subprocess, "run",
                         lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
