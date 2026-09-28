@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import copy
 import fcntl
 import json
@@ -205,19 +206,78 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
         atomic_json(app_output / "latest.json", {**item, "build": item["version"]})
         print("Reusing the signed client artifact from identical committed sources", flush=True)
         return seal(work, config, notes)
-    app_script = client / "jRemote-Code/jRemote/release-mac.sh"
-    print("Building, signing and notarizing client candidate", flush=True)
-    log_path = work / "client-build.log"
-    project = client / "jRemote-Code/jRemote/jRemote.xcodeproj/project.pbxproj"
-    current = max(map(int, re.findall(r"CURRENT_PROJECT_VERSION = (\d+);", project.read_text())))
-    client_build = allocate_client_build(candidates, current)
-    with log_path.open("w") as log:
-        process = subprocess.run(["bash", str(app_script), "--build-number", str(client_build), "--candidate-dir", str(app_output),
-                                  "--notes", notes], timeout=2400, stdout=log, stderr=subprocess.STDOUT,
-                                 env={**os.environ, "JSTACK_CHECKOUT": str(stack)})
-    if process.returncode:
-        raise releases.ReleaseError(f"client build failed; see {log_path}\n{log_path.read_text()[-4000:]}")
+    build_client(config, work, notes)
     return seal(work, config, notes)
+
+
+@contextlib.contextmanager
+def launch_guest(config: dict, check_script: Path):
+    """Yield the SSH destination of a verified GUI guest for the launch check.
+
+    release-mac.sh opens the notarized client in a disposable GUI Mac named by
+    JREMOTE_RELEASE_TEST_HOST, and nothing on the road used to provide one: three
+    candidates on 2026-09-27 died at that preflight after a guest had to be
+    booted, marked and exported by hand. `client_launch_guest` in the release
+    configuration names the publisher's own commands — `up` boots and marks a
+    guest and prints its destination as its last line, `down` releases it — so
+    a publish is one command. How a guest is made is the publisher's business;
+    the road only runs it, and runs `down` on success and failure alike.
+
+    An explicit JREMOTE_RELEASE_TEST_HOST is the operator naming a guest they
+    already hold, and wins. Either way the preflight runs here, before a build
+    number is reserved: a guest that cannot pass it must not cost one.
+    """
+    guest = config.get("client_launch_guest") or {}
+    host = os.environ.get("JREMOTE_RELEASE_TEST_HOST", "")
+    booted = bool(guest) and not host
+    try:
+        if booted:
+            print("Booting the launch-check guest: " + " ".join(guest["up"]), flush=True)
+            up = subprocess.run(guest["up"], stdout=subprocess.PIPE, text=True,
+                                timeout=guest.get("timeout", 900))
+            lines = [line.strip() for line in up.stdout.splitlines() if line.strip()]
+            if up.returncode or not lines:
+                raise releases.ReleaseError(
+                    f"launch-check guest did not come up (exit {up.returncode}); "
+                    "no client build number was reserved")
+            host = lines[-1]
+        elif host:
+            print(f"Launch-check guest from JREMOTE_RELEASE_TEST_HOST: {host}", flush=True)
+        check = subprocess.run([sys.executable, str(check_script), "--preflight"],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                               timeout=120, env={**os.environ, "JREMOTE_RELEASE_TEST_HOST": host})
+        if check.returncode:
+            raise releases.ReleaseError(
+                "launch-check guest failed its preflight; no client build number was reserved\n"
+                + check.stdout[-2000:])
+        yield host
+    finally:
+        if booted:
+            down = subprocess.run(guest["down"], timeout=guest.get("timeout", 900))
+            if down.returncode:
+                print(f"WARNING: launch-check guest teardown exited {down.returncode}: "
+                      + " ".join(guest["down"]), flush=True)
+
+
+def build_client(config: dict, work: Path, notes: str) -> None:
+    """Build, sign and notarize the client candidate into work/client-output."""
+    stack, client = work / "stack", work / "Projects/client"
+    candidates = Path(config["candidates_dir"])
+    app_script = client / "jRemote-Code/jRemote/release-mac.sh"
+    with launch_guest(config, app_script.parent / "Scripts/check-launch.py") as host:
+        print("Building, signing and notarizing client candidate", flush=True)
+        log_path = work / "client-build.log"
+        project = client / "jRemote-Code/jRemote/jRemote.xcodeproj/project.pbxproj"
+        current = max(map(int, re.findall(r"CURRENT_PROJECT_VERSION = (\d+);", project.read_text())))
+        client_build = allocate_client_build(candidates, current)
+        with log_path.open("w") as log:
+            process = subprocess.run(["bash", str(app_script), "--build-number", str(client_build),
+                                      "--candidate-dir", str(work / "client-output"), "--notes", notes],
+                                     timeout=2400, stdout=log, stderr=subprocess.STDOUT,
+                                     env={**os.environ, "JSTACK_CHECKOUT": str(stack),
+                                          "JREMOTE_RELEASE_TEST_HOST": host})
+        if process.returncode:
+            raise releases.ReleaseError(f"client build failed; see {log_path}\n{log_path.read_text()[-4000:]}")
 
 
 def seal(work: Path, config: dict, notes: str) -> Path:
