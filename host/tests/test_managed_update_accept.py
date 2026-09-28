@@ -435,6 +435,26 @@ def test_a_two_slot_host_never_boots_a_third_guest(runner, subject, tmp_path):
         "a two-slot plan must park a leaf to make room for the other"
 
 
+def test_the_hub_takes_a_slot_the_last_run_left_occupied(runner):
+    """A run begun over a previous run's guests must park them for the hub.
+
+    `cast` is the only thing that honours `vm_slots`, and the hub starts
+    before the first journey — outside it. Two leaves left running by the run
+    before make the hub the third boot, which Virtualization refuses and tart
+    reports as a connection reset, naming neither the limit nor the guests.
+    """
+    scripted = SlotCountingFleet()
+    fleet = build(runner, scripted, vm_slots=2)
+    for leaf in fleet.leaves:
+        leaf.start()
+    assert scripted.peak == 2 and not fleet.hub.name in scripted.booted
+    fleet.cast(fleet.hub)
+    assert fleet.hub.name in scripted.booted
+    assert scripted.peak <= 2, "the hub was booted beside the guests of the last run"
+    assert scripted.booted == {fleet.hub.name}, \
+        f"the last run's guests were not parked: {scripted.booted}"
+
+
 def test_a_cast_larger_than_the_slots_is_refused(runner):
     scripted = SlotCountingFleet()
     fleet = build(runner, scripted, vm_slots=2)

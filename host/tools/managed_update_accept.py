@@ -2914,7 +2914,16 @@ def main() -> int:
                 "journey is the upgrade it claims to be.")
     print(f"Acceptance for {build.slug} over {plan['hub']} "
           f"and {len(fleet.leaves)} managed Macs", flush=True)
-    fleet.hub.start()
+    # `cast` is the only thing that honours `vm_slots`, and the hub starts
+    # before the first journey — outside it. Over a previous run's guests the
+    # hub is then the third boot, which surfaces as tart's "Connection reset
+    # by peer (os error 54)" and a line in ~/.tart/<name>.run.log naming the
+    # VMs already up. Casting the hub alone parks them; journeys boot back
+    # whatever they cast.
+    if fleet.slots and not isinstance(fleet.hub, LocalHub):
+        fleet.cast(fleet.hub)
+    else:
+        fleet.hub.start()
     if isinstance(fleet.hub, LocalHub):
         try:
             identity = local_identity(fleet, build)
