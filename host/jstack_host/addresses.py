@@ -189,7 +189,6 @@ RESOLVE_DEADLINE = 1.0
 #: How long an answer stands before it is looked up again.
 RESOLVE_TTL = 300.0
 
-_RESOLVER = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mdns")
 _RESOLVE_LOCK = threading.Lock()
 _RESOLVED: dict[str, tuple[float, str | None]] = {}
 _PENDING: dict[str, concurrent.futures.Future] = {}
@@ -200,6 +199,24 @@ def _lookup(name: str, resolver) -> str | None:
         return resolver(name)
     except OSError:
         return None
+
+
+def _start_lookup(name: str, resolver) -> concurrent.futures.Future:
+    """The lookup on a thread of its own — a daemon, and that is the point.
+
+    An executor's workers are joined at interpreter exit, so a one-shot
+    command that asked once (`pair --json`, which the menu bar runs and waits
+    on) sat at its exit for the resolver's whole 35s failure after it had
+    printed its answer in one second — Get a Code showed no dialog for 35s
+    and full/pair read no code off it (26.9.4 proof). A daemon thread dies
+    with the process; the answer a still-running lookup would have landed is
+    one nobody was left to read."""
+    future: concurrent.futures.Future = concurrent.futures.Future()
+
+    def work() -> None:
+        future.set_result(_lookup(name, resolver))
+    threading.Thread(target=work, name=f"mdns:{name}", daemon=True).start()
+    return future
 
 
 def _resolve_local(name: str, *, resolver=socket.gethostbyname,
@@ -223,7 +240,7 @@ def _resolve_local(name: str, *, resolver=socket.gethostbyname,
             return cached[1]
         pending = _PENDING.get(name)
         if pending is None:
-            pending = _PENDING[name] = _RESOLVER.submit(_lookup, name, resolver)
+            pending = _PENDING[name] = _start_lookup(name, resolver)
     try:
         answer = pending.result(timeout=deadline)
     except concurrent.futures.TimeoutError:

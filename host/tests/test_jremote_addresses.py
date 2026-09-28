@@ -293,6 +293,32 @@ def test_a_slow_lookup_cannot_hold_the_caller(monkeypatch):
     release.set()
 
 
+def test_a_slow_lookup_cannot_hold_the_process_exit():
+    """The caller was already free; the PROCESS was not. Executor threads
+    are joined at interpreter exit, so `pair --json` — a one-shot command
+    the menu bar runs and waits on — printed its answer in a second and
+    then sat 35s at exit behind the resolver's failure, and Get a Code
+    showed no dialog until the journey had given up (26.9.4 proof). A
+    process whose lookup is still running exits when it is done."""
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+    script = (
+        "import time\n"
+        "from jstack_host import addresses\n"
+        "def slow(name):\n"
+        "    time.sleep(8)\n"
+        "    return '192.168.0.106'\n"
+        "print(addresses._resolve_local('slow.local', resolver=slow, deadline=0.05))\n")
+    started = time.monotonic()
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                         timeout=30, cwd=str(Path(addresses.__file__).resolve().parents[1]))
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "None"
+    assert time.monotonic() - started < 4.0
+
+
 def test_a_lookup_that_lands_serves_the_calls_after_it(monkeypatch):
     """The first caller does not wait past the deadline; the answer still
     lands, and the next caller reads it instead of resolving again."""
