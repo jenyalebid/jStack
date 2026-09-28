@@ -14,6 +14,7 @@ import importlib.util
 import json
 import re
 import subprocess
+import types
 import sys
 from types import SimpleNamespace
 from pathlib import Path
@@ -2389,6 +2390,60 @@ def test_the_publishers_command_line_parses_under_the_runners_own_parser(runner,
     assert parsed.ref == "dev"
     assert parsed.candidate == directory
     assert parsed.receipts == tmp_path / "receipts"
+
+
+def _prior_main(runner, tmp_path, monkeypatch, *extra):
+    """A run that names a prior, stopped just after the parser has had its say."""
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"vm_tool": str(tmp_path / "vm.sh"), "hub": "acc-hub",
+                                "leaves": ["acc-leaf1"], "disposable": True}))
+    monkeypatch.setattr(runner, "Build", lambda repo, ref, *, checkout, client=None:
+                        types.SimpleNamespace(client=client, slug=ref, ref=ref, sha="a" * 40))
+    monkeypatch.setattr(runner, "runs_when_source_built", lambda build: True)
+    monkeypatch.setattr("sys.argv", ["accept", "--ref", "dev", "--plan", str(plan),
+                                     "--receipts", str(tmp_path / "r"),
+                                     "--prior-ref", "prior/2026-09-26-3c78eb6", *extra])
+
+
+def test_a_prior_with_no_client_is_refused_before_a_guest_is_staged(runner, tmp_path,
+                                                                    monkeypatch, capsys):
+    """Run 20260928-122313, `upgrade`: the leaf reached 119 and the journey
+    still failed on `client is None, the build this Mac took carries 119`.
+
+    The prior is built from source on the guest and carries no client of its
+    own — `move()` installs `build.client` and skips the step when it is None
+    — so a pristine leaf staged onto the prior starts with no jRemote.app at
+    all. The managed update then declines to put one there, because
+    `client_distribution` answers `missing` for a bundle that is not present
+    and only `hub` is installed over. The leaf lands on the new build carrying
+    no client, and `component_check` fails on it forty minutes in.
+
+    The publisher's own command line never passed `--client`, so this was true
+    of every acceptance run that named a prior, not of one lab guest.
+    """
+    _prior_main(runner, tmp_path, monkeypatch)
+    with pytest.raises(SystemExit) as exit_code:
+        runner.main()
+    assert exit_code.value.code == 2
+    said = capsys.readouterr().err
+    assert "--client" in said and "prior/2026-09-26-3c78eb6" in said
+    assert not (tmp_path / "r").exists(), "a refusal wrote receipts"
+
+
+def test_a_prior_given_its_client_gets_past_the_parser(runner, tmp_path, monkeypatch):
+    """The other half: the refusal is about the missing argument, not about
+    naming a prior at all."""
+    bundle = tmp_path / "jRemote.app"
+    bundle.mkdir()
+    _prior_main(runner, tmp_path, monkeypatch, "--client", str(bundle))
+    monkeypatch.setattr(runner.Fleet, "prepare", lambda self, *guests: None)
+
+    class Started(Exception):
+        pass
+
+    monkeypatch.setattr(runner.Guest, "start", lambda self: (_ for _ in ()).throw(Started()))
+    with pytest.raises(Started):
+        runner.main()
 
 
 def test_a_hub_that_offers_an_older_client_than_the_candidate_fails_the_run(runner, tmp_path,
