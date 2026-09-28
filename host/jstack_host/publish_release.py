@@ -275,8 +275,9 @@ def candidate_manifest(candidate: Path, private_key: bytes) -> dict:
     return copy.deepcopy(releases.verify(envelope, public, promoted=False))
 
 
-def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -> dict:
-    """Run the configured acceptance runner over this candidate, then read it.
+def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes,
+            *, only: list[str] | None = None) -> dict:
+    """Run the acceptance runner over what this candidate has not yet proved.
 
     The runner's subject is the commit — every Mac clones a ref and compiles
     the Hub itself — and the candidate names both the commit to put under test
@@ -293,6 +294,15 @@ def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -
     at all wrote no evidence, and that is this call's own failure, not a
     verdict about the candidate — it raises rather than handing back twelve
     `missing` rows and a zero exit.
+
+    A receipt that already passes for this exact candidate is evidence and
+    stays evidence: the runner is asked only for the journeys whose receipt is
+    missing, failed, or bound to another commit (`--only`, which retains the
+    rest), and when nothing is left to prove it is not started at all. Before
+    this, one red journey out of twelve restarted the whole run — ten
+    restarts on 2026-09-28 (~two hours each) for one candidate that had been
+    eleven-twelfths proven since the first. `only` narrows it further, to
+    the journeys the operator names, and never widens it.
     """
     runner = config.get("acceptance")
     if not runner:
@@ -300,20 +310,35 @@ def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -
             "configure 'acceptance' with the acceptance runner's command line")
     manifest = candidate_manifest(candidate, private_key)
     receipts.mkdir(parents=True, exist_ok=True)
+    build = build_of(manifest)
+    state = acceptance.inspect(receipts, build)
+    remaining = [name for name, entry in state.items() if entry["state"] != acceptance.PASSED]
+    if only:
+        unknown = sorted(set(only) - set(state))
+        if unknown:
+            raise releases.ReleaseError("unknown acceptance journeys: " + ", ".join(unknown))
+        remaining = [name for name in remaining if name in only]
+    kept = [name for name in state if name not in remaining and state[name]["state"] == acceptance.PASSED]
+    if kept:
+        print(f"Already proven for {manifest['release']}: " + ", ".join(kept), flush=True)
+    if not remaining:
+        print("Nothing left to run.", flush=True)
+        return state
     argv = [*runner, "--ref", built_from(manifest), "--candidate", str(candidate),
-            "--receipts", str(receipts)]
+            "--receipts", str(receipts), "--only", *remaining]
     print("Running acceptance: " + " ".join(argv), flush=True)
+    before = {name: state[name]["receipt"] for name in remaining}
     finished = subprocess.run(argv, timeout=config.get("acceptance_timeout", 6 * 3600))
-    state = acceptance.inspect(receipts, build_of(manifest))
+    state = acceptance.inspect(receipts, build)
     for name, entry in state.items():
         print(f"  {name}: {entry['state']}" + (f" — {entry['detail']}" if entry["detail"] else ""),
               flush=True)
     if finished.returncode:
         print(f"acceptance runner exited {finished.returncode}", flush=True)
-        if all(entry["receipt"] is None for entry in state.values()):
+        if all(state[name]["receipt"] == before[name] for name in remaining):
             raise releases.ReleaseError(
                 f"the acceptance runner exited {finished.returncode} without writing one "
-                f"receipt: it never reached a journey, so nothing here is evidence about "
+                f"receipt: it never reached a journey, so nothing new here is evidence about "
                 f"{manifest['release']}. Its command line was: " + " ".join(argv))
     return state
 
@@ -524,14 +549,14 @@ def deploy(release: str | None = None, *, port: int = 9090,
 
 
 def ship(config: dict, candidate: Path, receipts: Path, private_key: bytes,
-         *, deploy_after: bool) -> dict:
+         *, deploy_after: bool, only: list[str] | None = None) -> dict:
     """The one release action: qualify the exact candidate, promote, deploy.
 
     Nothing is published on a green unit suite. `qualify` produces receipts and
     `promote` re-reads them through the same gate every installing machine
     trusts, so an interrupted or partial acceptance run stops here.
     """
-    qualify(config, candidate, receipts, private_key)
+    qualify(config, candidate, receipts, private_key, only=only)
     envelope = promote(candidate, receipts, Path(config["feed_dir"]), private_key,
                        local_components=config.get("local_components"),
                        client_repo=config.get("client_repo"))
@@ -568,6 +593,8 @@ def main():
     prove = commands.add_parser("qualify", help="run the acceptance runner over a candidate")
     prove.add_argument("candidate", type=Path)
     prove.add_argument("--receipts", type=Path, required=True)
+    prove.add_argument("--only", nargs="+", metavar="JOURNEY",
+                       help="run only these of the journeys still unproven; the rest keep their receipts")
     state = commands.add_parser("acceptance", help="what this candidate's receipts prove today")
     state.add_argument("candidate", type=Path)
     state.add_argument("--receipts", type=Path, required=True)
@@ -578,6 +605,8 @@ def main():
     whole.add_argument("--receipts", type=Path, required=True)
     whole.add_argument("--deploy", action="store_true",
                        help="after promotion, update this hub and its eligible leaves")
+    whole.add_argument("--only", nargs="+", metavar="JOURNEY",
+                       help="run only these of the journeys still unproven; the rest keep their receipts")
     args = parser.parse_args()
     if args.action == "init-key":
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -598,7 +627,7 @@ def main():
         return
     private = base64.b64decode(Path(config["private_key"]).read_text().strip(), validate=True)
     if args.action == "qualify":
-        state = qualify(config, args.candidate, args.receipts, private)
+        state = qualify(config, args.candidate, args.receipts, private, only=args.only)
         print(json.dumps({name: entry["state"] for name, entry in state.items()}, indent=2))
     elif args.action == "acceptance":
         state = acceptance.inspect(
@@ -609,7 +638,7 @@ def main():
         print(json.dumps(deploy(args.release, port=config.get("hub_port", 9090)), indent=1))
     elif args.action == "ship":
         print(json.dumps(ship(config, args.candidate, args.receipts, private,
-                              deploy_after=args.deploy), indent=2))
+                              deploy_after=args.deploy, only=args.only), indent=2))
     else:
         result = promote(args.candidate, args.receipts, Path(config["feed_dir"]), private,
                          local_components=config.get("local_components"),

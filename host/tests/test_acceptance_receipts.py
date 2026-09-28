@@ -304,6 +304,82 @@ def test_qualify_reports_what_a_runner_that_died_left_behind(tmp_path, candidate
         publish_release.promote(candidate["dir"], receipts, tmp_path / "feed", candidate["private"])
 
 
+def test_qualify_asks_the_runner_only_for_what_this_candidate_has_not_proven(
+        tmp_path, candidate, monkeypatch):
+    """One red journey restarted all twelve. On 2026-09-28 the same candidate
+    was run ten times from the top (~2h each) while eleven receipts had been
+    green since the first. The runner has `--only`; `qualify` must use it."""
+    import subprocess
+
+    receipts = tmp_path / "receipts"
+    pass_everything(acceptance.Run(receipts, candidate["build"]), skip={"shell_flip", "fleet"})
+    with acceptance.Run(receipts, candidate["build"]).journey("fleet") as journey:
+        raise RuntimeError("leaf never joined")
+    calls = []
+
+    def finish_the_rest(argv, **kwargs):
+        calls.append(argv)
+        run = acceptance.Run(receipts, candidate["build"])
+        for name in argv[argv.index("--only") + 1:]:
+            with run.journey(name) as journey:
+                for check in acceptance.REQUIRED[name]:
+                    journey.observe(check, {"observed": check})
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(publish_release.subprocess, "run", finish_the_rest)
+    state = publish_release.qualify({"acceptance": ["runner"]}, candidate["dir"], receipts,
+                                    candidate["private"])
+    assert calls[0][calls[0].index("--only") + 1:] == ["fleet", "shell_flip"]
+    assert all(entry["state"] == "passed" for entry in state.values())
+    # Everything green: the runner is not started again.
+    publish_release.qualify({"acceptance": ["runner"]}, candidate["dir"], receipts,
+                            candidate["private"])
+    assert len(calls) == 1
+
+
+def test_qualify_only_narrows_to_the_named_unproven_journeys(tmp_path, candidate, monkeypatch):
+    import subprocess
+
+    receipts = tmp_path / "receipts"
+    pass_everything(acceptance.Run(receipts, candidate["build"]),
+                    skip={"shell_flip", "fleet", "upgrade"})
+    calls = []
+
+    def fail_them(argv, **kwargs):
+        calls.append(argv)
+        run = acceptance.Run(receipts, candidate["build"])
+        for name in argv[argv.index("--only") + 1:]:
+            with run.journey(name):
+                raise RuntimeError("no")
+        return subprocess.CompletedProcess(argv, 1)
+
+    monkeypatch.setattr(publish_release.subprocess, "run", fail_them)
+    state = publish_release.qualify({"acceptance": ["runner"]}, candidate["dir"], receipts,
+                                    candidate["private"], only=["fleet", "upgrade"])
+    assert calls[0][calls[0].index("--only") + 1:] == ["fleet", "upgrade"]
+    assert state["upgrade"]["state"] == "failed" and state["shell_flip"]["state"] == "missing"
+    with pytest.raises(releases.ReleaseError, match="unknown acceptance journeys: teleport"):
+        publish_release.qualify({"acceptance": ["runner"]}, candidate["dir"], receipts,
+                                candidate["private"], only=["teleport"])
+
+
+def test_qualify_reruns_receipts_bound_to_another_commit(tmp_path, candidate, monkeypatch):
+    """Receipts prove a commit. A receipt from the previous candidate is not
+    carried over; it is on the runner's list again."""
+    import subprocess
+
+    receipts = tmp_path / "receipts"
+    elsewhere = dict(candidate["build"], sha="c" * 40)
+    pass_everything(acceptance.Run(receipts, elsewhere))
+    calls = []
+    monkeypatch.setattr(publish_release.subprocess, "run",
+                        lambda argv, **kwargs: (calls.append(argv), subprocess.CompletedProcess(argv, 1))[1])
+    with pytest.raises(releases.ReleaseError, match="without writing one receipt"):
+        publish_release.qualify({"acceptance": ["runner"]}, candidate["dir"], receipts,
+                                candidate["private"])
+    assert calls[0][calls[0].index("--only") + 1:] == sorted(releases.RECEIPTS)
+
+
 def test_qualify_without_a_configured_runner_refuses(tmp_path, candidate):
     with pytest.raises(releases.ReleaseError, match="acceptance runner"):
         publish_release.qualify({}, candidate["dir"], tmp_path / "receipts", candidate["private"])
