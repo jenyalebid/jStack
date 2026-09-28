@@ -26,6 +26,29 @@ def test_client_and_dependency_fixes_cannot_reuse_an_installed_release_identity(
     assert releases.identifier(first) == first
 
 
+def test_two_lines_cut_from_one_commit_on_one_day_are_two_releases():
+    """#235. The line is inside the signed manifest and a hub declines an
+    offer naming another line — so main and dev off one commit are two
+    releases, and were one name carrying two manifests."""
+    identify = publish_release.source_identity
+    args = ("2026-09-22", "a" * 40, "b" * 40, {"kit": "c" * 40})
+    assert identify(*args, channel="main") != identify(*args, channel="dev")
+    assert identify(*args, channel="dev") == identify(*args, channel="dev")
+
+
+def test_a_hub_building_a_commit_the_publisher_already_released_names_it_differently():
+    """The collision that stopped a hub building at all: seeded with a
+    candidate built the same day off the same commit, it computed that exact
+    release id for its own build, found the publisher's manifest under it and
+    verified it against its own key."""
+    identify = publish_release.source_identity
+    args = ("2026-09-22", "a" * 40, "b" * 40, {"kit": "c" * 40})
+    publisher = identify(*args, channel="dev")
+    assert identify(*args, channel="dev", builder="hub-key") != publisher
+    assert (identify(*args, channel="dev", builder="hub-key")
+            != identify(*args, channel="dev", builder="other-hub-key"))
+
+
 def test_build_reservations_are_unique_and_survive_failed_builds(tmp_path):
     from concurrent.futures import ThreadPoolExecutor
 

@@ -466,6 +466,28 @@ def test_a_reoffer_whose_variant_is_gone_says_so_at_the_build(builder, tmp_path)
         build_source.build(root, config)
 
 
+def test_a_release_under_this_hub_s_name_that_another_builder_signed_is_named(builder):
+    """The shortcut at the top of a build reads "this hub already built these
+    exact sources today" out of the feed, and verifies it with the hub's own
+    key. Seeded with a candidate the publisher built the same day off the same
+    commit, a hub computed that exact id, found that manifest and reported
+    `release signature not trusted` — pointing at neither the file nor the
+    reason, and refusing to build at all until the date rolled over.
+
+    `builder` in the identity means the two names no longer meet; this is the
+    same collision arriving by another road, and it says whose release it is.
+    """
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    root, feed, config, _ = builder
+    release = build_source.build(root, config)["release"]
+    envelope = json.loads((feed / release / "manifest.json").read_text())
+    stranger = Ed25519PrivateKey.generate().private_bytes_raw()
+    (feed / release / "manifest.json").write_text(
+        json.dumps(releases.sign(envelope["manifest"], stranger)))
+    with pytest.raises(releases.ReleaseError, match="was not built by this hub"):
+        build_source.build(root, config)
+
+
 def test_a_build_carries_the_client_artifact_forward_byte_for_byte(builder):
     """jRemote's Mac app is not built here, so the honest thing to name is the
     exact client this hub already holds and has already verified."""
