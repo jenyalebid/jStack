@@ -238,3 +238,31 @@ def test_a_mac_offline_since_before_the_deploy_does_not_fail_it(monkeypatch):
     assert result["offline"] == ["gone"]
     assert result["unreached"] == []
     assert "gone" not in result["states"]
+
+
+class _TwoLines(_Client):
+    """A hub with a Mac on each line. Only the line being deployed is asked."""
+
+    def get(self, url, headers=None):
+        self.calls.append(("GET", url, headers["Authorization"]))
+        return _Answer({"release": "r1", "machines": [
+            {"machine": "on-dev", "supervisor": True, "state": "current",
+             "contact_status": "online", "line": "dev", "desired": "r1"},
+            {"machine": "on-main", "supervisor": True, "state": "current",
+             "contact_status": "online", "line": "main", "desired": "r0"}]})
+
+
+def test_a_mac_on_the_other_line_is_not_reported_as_deployed(monkeypatch):
+    """The hub measures each machine against its own line's offer, so a Mac on
+    the line not being deployed reads `current` the instant it is asked about.
+    Counted, the deploy claims it carried a release to a Mac still running the
+    other one.
+    """
+    _hub_credential(monkeypatch)
+    import httpx
+    clients = []
+    monkeypatch.setattr(httpx, "Client", lambda **kw: clients.append(_TwoLines([])) or clients[-1])
+    result = publish_release.deploy("r1", port=9090, timeout=1, poll=0)
+    assert result["eligible"] == ["on-dev"]
+    assert result["other_line"] == ["on-main"]
+    assert "on-main" not in result["states"]

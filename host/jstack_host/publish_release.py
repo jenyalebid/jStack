@@ -416,8 +416,11 @@ def deploy(release: str | None = None, *, port: int = 9090,
     have one, is reported and passed over: it is never counted as deployed, and
     never counted against the deploy either, because nothing was asked of it.
     Only a machine that was asked and did not arrive is unreached, and that is
-    what fails the run. Reaching `current` is the hub's independent
-    confirmation of the running release, not the leaf's own claim.
+    what fails the run. A machine following the other line is passed over the
+    same way: this release is not its line's offer, so nothing is asked of it
+    and its `current` is about a release that is not this one. Reaching
+    `current` is the hub's independent confirmation of the running release,
+    not the leaf's own claim.
     """
     import httpx
     base = f"http://127.0.0.1:{port}/api/jremote/v1/updates"
@@ -453,15 +456,28 @@ def deploy(release: str | None = None, *, port: int = 9090,
         def online(row) -> bool:
             return row.get("contact_status", "online") == "online"
 
+        # And on this release's line. A hub measures every machine against its
+        # own line's offer, so a Mac following the other line reads `current`
+        # the moment it is asked about — current on a release this deploy is
+        # not carrying. Counted, it would report a deploy that reached a Mac
+        # the deploy never moved. `desired` is that machine's line's offer,
+        # which is the comparison without needing the line's name.
+        def carried(row) -> bool:
+            return row.get("desired", release) == release
+
         eligible = sorted(row["machine"] for row in before["machines"]
-                          if row.get("supervisor") and online(row))
+                          if row.get("supervisor") and online(row) and carried(row))
         offline = sorted(row["machine"] for row in before["machines"]
                          if row.get("supervisor") and not online(row))
+        elsewhere = sorted(row["machine"] for row in before["machines"]
+                           if row.get("supervisor") and online(row) and not carried(row))
         unmanaged = sorted(row["machine"] for row in before["machines"] if not row.get("supervisor"))
         if not eligible:
             raise releases.ReleaseError("no machine on this hub can accept a managed update")
         if offline:
             print("Not asked, offline: " + ", ".join(offline), flush=True)
+        if elsewhere:
+            print("Not asked, on the other line: " + ", ".join(elsewhere), flush=True)
         # A request id is idempotent on the hub: repeating one hands back the
         # job it named, failed or not. A deploy run again after a machine's
         # failure was fixed is a new request, so it gets a new id; a machine
@@ -494,7 +510,8 @@ def deploy(release: str | None = None, *, port: int = 9090,
             time.sleep(poll)
     result = {"release": release, "eligible": eligible, "states": states,
               "unreached": sorted(m for m, s in states.items() if s != "current"),
-              "offline": offline, "no_supervisor": unmanaged, "jobs": queued.json()}
+              "offline": offline, "other_line": elsewhere,
+              "no_supervisor": unmanaged, "jobs": queued.json()}
     if result["unreached"]:
         raise releases.ReleaseError(
             "promoted, but these machines did not reach the release: "
