@@ -1588,6 +1588,39 @@ def await_lab(port: int, timeout: int = 90) -> None:
     raise AcceptanceFailure(f"the lab hub never answered on port {port}")
 
 
+def await_leaf(address: str, name: str, timeout: int = 180) -> None:
+    """Wait for an adopted leaf's own HTTP API to answer on the LAN.
+
+    `adopt` restarts the leaf's services, and the flip that follows is not a
+    guest command: the stub hub reaches each leaf directly at
+    `http://<address>:9090` to refresh its keys. Between the adoption and that
+    call the leaf is still coming up.
+
+    An unreachable leaf does not fail that refresh loudly. The hub records the
+    step `ok: False` with "its keys catch up at the next joiner run" — which is
+    the right answer for a fleet, where a Mac that is asleep really will catch
+    up — and `flip_pair` then fails the journey on a step that was only ever
+    early. Run 20260928-15xx is that: both leaves `[Errno 65] No route to host`,
+    seconds after both were adopted.
+
+    `await_lab` waits for the stub. Nothing waited for the machines it calls.
+    """
+    import urllib.request
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(f"http://{address}:9090/api/health",
+                                        timeout=3) as response:
+                if response.status == 200:
+                    return
+        except OSError:
+            pass
+        time.sleep(2)
+    raise AcceptanceFailure(
+        f"{name} never answered on {address}:9090 in {timeout}s after adoption, so the "
+        "flip would have refreshed its keys against a Mac that was still starting")
+
+
 def lab_teardown(fleet: Fleet, server, adopted: list[Guest]) -> list[str]:
     """Undo the lab re-parenting whatever happened: dev parent record back,
     then a local refresh so each leaf re-pulls its own hub's key — without it
@@ -1730,6 +1763,7 @@ def flip_through_lab(journey, fleet: Fleet) -> None:
     lab_root = str(Path(tempfile.mkdtemp(prefix="shell-lab-")) / "updates-lab")
     port = int(fleet.plan.get("shell_lab_port") or 19090)
     server, adopted, error = None, [], None
+    addresses: dict[str, str] = {}
     try:
         hub_address = ""
         for guest in (leaf_a, leaf_b):
@@ -1738,8 +1772,9 @@ def flip_through_lab(journey, fleet: Fleet) -> None:
             expect(gateway, f"{guest.name} has no route back to the host")
             hub_address = gateway
             record = Path(lab_root) / f"{guest.name}-lab-record.json"
+            addresses[guest.name] = guest.vm("ip", guest.name).strip()
             lab_call(lab_root, port, gateway, "enrol-shell", fleet.machine(guest),
-                     "--name", guest.name, "--address", guest.vm("ip", guest.name).strip(),
+                     "--name", guest.name, "--address", addresses[guest.name],
                      "--pubkey", guest.sh(f"/bin/cat {SHELL_KEY}.pub").strip(),
                      "--user", guest.sh("/usr/bin/id -un").strip(),
                      "--record", str(record))
@@ -1756,6 +1791,10 @@ def flip_through_lab(journey, fleet: Fleet) -> None:
                                    "--port", str(port), "--hub-address", hub_address,
                                    "serve"], stdout=log, stderr=subprocess.STDOUT)
         await_lab(port)
+        # The stub is up; the two Macs it is about to call are not necessarily.
+        # Both were adopted moments ago and adoption restarts their services.
+        for guest in (leaf_a, leaf_b):
+            await_leaf(addresses[guest.name], guest.name)
         flip_pair(journey, leaf_a, leaf_b, machine_a, machine_b,
                   peer_name(leaf_b.name) or machine_b,
                   lambda allowed: lab_call(lab_root, port, hub_address, "shell-flip",

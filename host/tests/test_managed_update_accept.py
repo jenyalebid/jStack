@@ -42,6 +42,62 @@ def dated(build_id: str, version: str = "0.69.3") -> str:
     return f"{''.join(parts[:3])}.{int(release[1]) if release else 0}.{int(parts[3], 16)}"
 
 
+class _Answer:
+    """Just enough of an `http.client.HTTPResponse` for the health poll."""
+
+    def __init__(self, status):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+def _health(runner, monkeypatch, answers):
+    """Script the leaf's /api/health: each entry is a status or an exception."""
+    seen = []
+
+    def urlopen(url, timeout=None):
+        seen.append(url)
+        answer = answers.pop(0) if answers else OSError("nothing left to say")
+        if isinstance(answer, BaseException):
+            raise answer
+        return _Answer(answer)
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    return seen
+
+
+def test_a_leaf_still_starting_is_waited_for_rather_than_flipped_at(runner, monkeypatch):
+    """Run 20260928-15xx: both leaves answered `[Errno 65] No route to host`
+    seconds after being adopted, and the hub recorded the key refresh as
+    `ok: False, its keys catch up at the next joiner run` — the right answer
+    for a Mac that is asleep, and the wrong one for a Mac that is booting.
+    `flip_pair` failed the journey on a step that was only ever early.
+
+    `await_lab` waited for the stub hub. Nothing waited for the two machines
+    the stub was about to call."""
+    seen = _health(runner, monkeypatch,
+                   [OSError(65, "No route to host"), OSError(65, "No route to host"), 200])
+    runner.await_leaf("192.168.2.140", "acc-leaf2")
+    assert seen == ["http://192.168.2.140:9090/api/health"] * 3
+
+
+def test_a_leaf_that_never_comes_back_says_so_instead_of_flipping(runner, monkeypatch):
+    """The other half: waiting is bounded, and the refusal names the machine
+    and the port rather than surfacing later as an unreachable refresh."""
+    _health(runner, monkeypatch, [])
+    monkeypatch.setattr(runner.time, "monotonic",
+                        iter([0, 0, 5, 10, 999]).__next__)
+    with pytest.raises(runner.AcceptanceFailure) as failure:
+        runner.await_leaf("192.168.2.139", "acc-leaf1", timeout=30)
+    said = str(failure.value)
+    assert "acc-leaf1" in said and "192.168.2.139:9090" in said and "still starting" in said
+
+
 def test_the_menu_bar_version_is_read_back_by_the_one_formula(runner):
     from jstack_host import build_hub
     for version in ("0.69.3", "26.9.4"):
