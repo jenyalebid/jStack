@@ -328,3 +328,52 @@ def test_checks_that_honestly_agree_are_not_mistaken_for_a_paste(tmp_path, candi
                             else {"check": check})
     assert acceptance.inspect(receipts, candidate["build"])["fresh_install"]["state"] == "passed"
     assert acceptance.gate(receipts, candidate["build"])
+
+
+# ── The publication reaches the line it was built for
+
+
+def test_qualify_fails_when_the_runner_never_reached_a_journey(tmp_path, candidate, monkeypatch):
+    """Twelve `missing` rows and exit 0 is what this call did for four days.
+
+    The runner was dying in argument parsing before it booted anything, and
+    `qualify` printed its exit status, returned the empty state and exited
+    clean — so the failure read as "acceptance is not done yet" rather than
+    "acceptance cannot run", and nobody looked at the publisher.
+    """
+    import subprocess
+
+    monkeypatch.setattr(publish_release.subprocess, "run",
+                        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 2))
+    with pytest.raises(releases.ReleaseError, match="without writing one receipt"):
+        publish_release.qualify({"acceptance": ["runner"]}, candidate["dir"],
+                                tmp_path / "receipts", candidate["private"])
+
+
+def test_a_dev_release_is_offered_on_the_dev_line(tmp_path, candidate):
+    """A dev candidate written to `latest.json` reaches every machine that
+    follows main and no machine that follows dev — which is every machine it
+    was built for."""
+    manifest = {**candidate["manifest"],
+                "channel": {"github_repo": "example/stack", "name": "dev"}}
+    (candidate["dir"] / "candidate.json").write_text(
+        json.dumps(releases.sign(manifest, candidate["private"], promoted=False)))
+    receipts = tmp_path / "receipts"
+    pass_everything(acceptance.Run(receipts, publish_release.build_of(manifest)))
+    feed = tmp_path / "feed"
+    envelope = publish_release.promote(candidate["dir"], receipts, feed, candidate["private"])
+    assert json.loads((feed / "latest-dev.json").read_text()) == envelope
+    assert not (feed / "latest.json").exists()
+
+
+def test_a_main_release_still_lands_in_the_file_every_leaf_has_always_read(tmp_path, candidate):
+    manifest = {**candidate["manifest"],
+                "channel": {"github_repo": "example/stack", "name": "main"}}
+    (candidate["dir"] / "candidate.json").write_text(
+        json.dumps(releases.sign(manifest, candidate["private"], promoted=False)))
+    receipts = tmp_path / "receipts"
+    pass_everything(acceptance.Run(receipts, publish_release.build_of(manifest)))
+    feed = tmp_path / "feed"
+    envelope = publish_release.promote(candidate["dir"], receipts, feed, candidate["private"])
+    assert json.loads((feed / "latest.json").read_text()) == envelope
+    assert not (feed / "latest-dev.json").exists()

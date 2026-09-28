@@ -313,6 +313,21 @@ def test_a_branch_that_cannot_fast_forward_is_left_alone_and_the_checkout_detach
     assert _git("rev-parse", "main", cwd=clone) == mine, "no branch is moved off its own commits"
 
 
+def test_a_checkout_asked_for_an_earlier_commit_is_moved_back_to_it(tmp_path, monkeypatch):
+    """A rollback names a commit the branch already contains, and `git merge
+    --ff-only` on one of those is "already up to date": it exits 0 and moves
+    nothing. Read as a move, it leaves the checkout — and the plugin every
+    engine reads through it — on the newer release the update just replaced,
+    and the job fails verification over a plugin version that disagrees with
+    the stack's."""
+    clone, first, second = _origin_and_clone(tmp_path)
+    _git("reset", "--quiet", "--hard", second, cwd=clone)
+    monkeypatch.setattr(update_plugins, "run", lambda argv: "[]")
+    update_plugins.install([_provider(clone)], tmp_path / "stack", first)
+    assert _git("rev-parse", "HEAD", cwd=clone) == first
+    assert '"0.78.0"' in (clone / "plugins/jstack/.claude-plugin/plugin.json").read_text()
+
+
 def test_an_uncommitted_change_refuses_the_move_by_name(tmp_path, monkeypatch):
     clone, first, second = _origin_and_clone(tmp_path)
     (clone / "plugins/jstack/.claude-plugin/plugin.json").write_text('{"version": "hand-edited"}')

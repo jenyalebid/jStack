@@ -127,8 +127,16 @@ def advance(root: str, sha: str) -> None:
         command([*git, "fetch", "--force", "origin", sha], timeout=3600)
     on_branch = not subprocess.run([*git, "symbolic-ref", "--quiet", "HEAD"],
                                    capture_output=True).returncode
-    if not (on_branch and not subprocess.run([*git, "merge", "--ff-only", "--quiet", sha],
-                                             capture_output=True).returncode):
+    merged = on_branch and not subprocess.run([*git, "merge", "--ff-only", "--quiet", sha],
+                                              capture_output=True).returncode
+    # A merge to a commit the branch already contains is "already up to date":
+    # git exits 0 and moves nothing. Read as success that left the checkout on
+    # the newer commit, serving the newer plugin, while the update installed
+    # the older one — and the job then fails verification over a plugin version
+    # that disagrees with the stack's, naming neither (run 20260928-112354:
+    # acc-leaf1 staged onto 3c78eb62 with ~/jStack still at 79f82820 and the
+    # plugin still 26.9.5). Where HEAD ended up is the answer, not the status.
+    if not merged or command([*git, "rev-parse", "HEAD"]).strip() != sha:
         command([*git, "checkout", "--quiet", "--detach", sha])
     # The tree is written from the commit, not trusted to the move: a file
     # touched within the second its index entry was written reads as clean
