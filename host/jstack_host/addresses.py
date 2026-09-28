@@ -50,11 +50,14 @@ screen says "try these", never "these work".
 
 from __future__ import annotations
 
+import concurrent.futures
 import ipaddress
 import os
 import re
 import socket
 import subprocess
+import threading
+import time
 
 #: The mesh subnet, mirrored from `wg_peer.py`'s SUBNET_PREFIX the same way
 #: `devices.MESH_SUBNET` mirrors it. A host with no tunnel simply never has an
@@ -176,9 +179,90 @@ def _is_host_only(iface: str) -> bool:
     return iface.startswith(_HOST_ONLY_IFACES)
 
 
+#: How long one request may wait on the Bonjour lookup. mDNS answers in
+#: milliseconds when it answers at all; the sealed runtime's resolver fails the
+#: `.local` name and takes ~35s to say so, and `/host` — the first call every
+#: client makes, and the one the installer's health check waits on — hung for
+#: exactly that long behind it, so every fresh install read "did not become
+#: healthy" (26.9.3 proof). No lookup blocks a request past this.
+RESOLVE_DEADLINE = 1.0
+#: How long an answer stands before it is looked up again.
+RESOLVE_TTL = 300.0
+
+_RESOLVE_LOCK = threading.Lock()
+_RESOLVED: dict[str, tuple[float, str | None]] = {}
+_PENDING: dict[str, concurrent.futures.Future] = {}
+
+
+def _lookup(name: str, resolver) -> str | None:
+    try:
+        return resolver(name)
+    except OSError:
+        return None
+
+
+def _start_lookup(name: str, resolver) -> concurrent.futures.Future:
+    """The lookup on a thread of its own — a daemon, and that is the point.
+
+    An executor's workers are joined at interpreter exit, so a one-shot
+    command that asked once (`pair --json`, which the menu bar runs and waits
+    on) sat at its exit for the resolver's whole 35s failure after it had
+    printed its answer in one second — Get a Code showed no dialog for 35s
+    and full/pair read no code off it (26.9.4 proof). A daemon thread dies
+    with the process; the answer a still-running lookup would have landed is
+    one nobody was left to read."""
+    future: concurrent.futures.Future = concurrent.futures.Future()
+
+    def work() -> None:
+        future.set_result(_lookup(name, resolver))
+    threading.Thread(target=work, name=f"mdns:{name}", daemon=True).start()
+    return future
+
+
+def _resolve_local(name: str, *, resolver=socket.gethostbyname,
+                   deadline: float = RESOLVE_DEADLINE) -> str | None:
+    """What `name` resolves to right now, or None on any failure — bounded.
+
+    A seam, like `_hostname`/`_inet_ifaces`: real mDNS resolution is network
+    IO the classifier below stays free of. None is "no evidence either way",
+    never grounds to drop the entry — only a resolved address this machine
+    itself holds on a host-only interface is (jStack#41).
+
+    The lookup runs off the request: one worker owns it, a call waits at most
+    `deadline` for it, and a lookup still running answers None now and serves
+    the calls that come after it lands. An answer is kept for `RESOLVE_TTL`,
+    so a resolver that takes 35s to fail costs one request one second every
+    five minutes, never every request its whole wait."""
+    now = time.monotonic()
+    with _RESOLVE_LOCK:
+        cached = _RESOLVED.get(name)
+        if cached and now - cached[0] < RESOLVE_TTL:
+            return cached[1]
+        pending = _PENDING.get(name)
+        if pending is None:
+            pending = _PENDING[name] = _start_lookup(name, resolver)
+    try:
+        answer = pending.result(timeout=deadline)
+    except concurrent.futures.TimeoutError:
+        return None
+    with _RESOLVE_LOCK:
+        _RESOLVED[name] = (time.monotonic(), answer)
+        if _PENDING.get(name) is pending:
+            del _PENDING[name]
+    return answer
+
+
+def _forget_resolved() -> None:
+    """Drop every cached and pending answer — for tests."""
+    with _RESOLVE_LOCK:
+        _RESOLVED.clear()
+        _PENDING.clear()
+
+
 def classify(inets: list[str], hostname: str, port: int,
              ifaces: dict[str, str] | None = None, domain: str = "",
-             mesh_port: int | None = None) -> list[dict]:
+             mesh_port: int | None = None,
+             resolve_local=None) -> list[dict]:
     """The address list, ordered lan → local → mesh. Pure, so the ordering
     and the exclusions are what the tests actually pin.
 
@@ -203,6 +287,13 @@ def classify(inets: list[str], hostname: str, port: int,
     bridge be told apart from the real LAN. Omitted, every address is treated
     as network-facing: an interface map is extra evidence for dropping an
     entry, never a precondition for keeping one.
+
+    `resolve_local` answers what the Bonjour name resolves to right now — the
+    same VM-bridge ambiguity `ifaces` resolves for a bare address applies to
+    the name too (jStack#41): a Mac running VMs can have its own `.local` name
+    answer from `bridge100`'s mDNS responder as easily as the real LAN one, and
+    the address alone cannot tell them apart. Omitted or unresolvable, the
+    entry is kept — no evidence is not evidence against it.
     """
     mesh_port = port if mesh_port is None else mesh_port
     out: list[dict] = []
@@ -265,7 +356,9 @@ def classify(inets: list[str], hostname: str, port: int,
     if name and name.lower() != "localhost":
         if not name.endswith(".local"):
             name = name.split(".")[0] + ".local"
-        if name.lower() != stable:
+        resolved = resolve_local(name) if resolve_local else None
+        on_bridge = resolved is not None and _is_host_only((ifaces or {}).get(resolved, ""))
+        if name.lower() != stable and not on_bridge:
             out.append({"kind": "local", "host": name,
                         "url": f"http://{name}:{port}",
                         "note": "survives this Mac changing address"})
@@ -282,4 +375,4 @@ def reachable(port: int = DEFAULT_PORT, mesh_port: int | None = None) -> list[di
     """Where a second machine could try to reach this one."""
     held = _inet_ifaces()
     return classify(list(held), _hostname(), port, held, hub_domain(),
-                    mesh_port=mesh_port)
+                    mesh_port=mesh_port, resolve_local=_resolve_local)

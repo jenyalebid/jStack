@@ -33,7 +33,12 @@ mkdir -p "$dir" 2>/dev/null || exit 0
 
 park="$dir/$key.park"
 release="$dir/$key.release"
-printf '%s\n' "$f" > "$park" 2>/dev/null || exit 0
+# Written beside and renamed into place: `> "$park"` creates the file empty
+# before printf fills it, and a host poll landing in that gap read "" as the
+# handed-over path (#96). rename(2) within one directory is atomic, so the park
+# file never exists without its content.
+printf '%s\n' "$f" > "$park.tmp" 2>/dev/null || exit 0
+mv -f "$park.tmp" "$park" 2>/dev/null || { rm -f "$park.tmp"; exit 0; }
 
 # The pane is on the agent's alternate screen with nothing drawn in it while
 # this blocks. Say why, for anyone looking at the terminal instead of the app.

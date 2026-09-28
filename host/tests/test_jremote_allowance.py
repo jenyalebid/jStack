@@ -211,6 +211,32 @@ def test_codex_ignores_unrelated_quota_and_malformed_last_line(state, monkeypatc
     assert allowance.read()['providers']['codex']['windows'][0]['pct'] == 15
 
 
+def test_an_unchanged_rollout_is_not_parsed_twice(state, monkeypatch):
+    """#164. /usage/caps re-parsed every rollout on every request (~1.0s on
+    98 files). A rollout whose mtime and size have not moved is answered from
+    the memo; one that grows is read again and its newer sample wins."""
+    from jstack_host import codex_transcript
+    monkeypatch.setattr(allowance, 'CODEX_SESSIONS', state / 'sessions')
+    allowance._ROLLOUT_SAMPLES.clear()
+    path = state / 'sessions' / 'rollout-new.jsonl'
+    _codex_sample(path, time.time() - 60, pct=10)
+    parsed = []
+    real = codex_transcript.summary
+    monkeypatch.setattr(codex_transcript, 'summary',
+                        lambda p: parsed.append(str(p)) or real(p))
+    assert allowance.codex_rollout_sample()['windows'][0]['pct'] == 10
+    assert allowance.codex_rollout_sample()['windows'][0]['pct'] == 10
+    assert len(parsed) == 1, "an unchanged rollout was parsed again"
+    with path.open('a') as fh:            # the file grew: read it again
+        fh.write('\n')
+    _codex_sample(path, time.time() - 30, pct=40)
+    assert allowance.codex_rollout_sample()['windows'][0]['pct'] == 40
+    assert len(parsed) == 2
+    path.unlink()                          # a rollout that is gone leaves the memo
+    assert allowance.codex_rollout_sample() is None
+    assert str(path) not in allowance._ROLLOUT_SAMPLES
+
+
 def test_availability_stops_after_observing_one_rollout_sample(state, monkeypatch):
     from jstack_host import codex_transcript
     monkeypatch.setattr(allowance, "CODEX_SESSIONS", state / "sessions")

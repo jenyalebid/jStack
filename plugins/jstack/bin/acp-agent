@@ -38,11 +38,13 @@ and JSTACK_ACP_ADAPTER in the environment, then `claude_executable` and
 # system 3.9, which cannot evaluate `X | None` at import time.
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import review_config  # noqa: E402
 
 # Where a login shell would have found things, in the order a login shell
 # looks. An IDE gives us none of this.
@@ -56,15 +58,7 @@ PATH_DIRS = [
 
 
 def _config() -> dict:
-    p = Path(os.environ.get(
-        "JSTACK_REVIEW_CONFIG",
-        str(Path.home() / ".claude" / "jstack" / "review.json"),
-    )).expanduser()
-    try:
-        data = json.loads(p.read_text())
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError, ValueError):
-        return {}
+    return review_config.load()
 
 
 def build_path() -> str:

@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import repo_seat  # noqa: E402
+import review_config  # noqa: E402
 
 try:
     import root as _root  # noqa: E402
@@ -31,15 +32,7 @@ except ImportError:
 
 
 def _config() -> dict:
-    p = Path(os.environ.get(
-        "JSTACK_REVIEW_CONFIG",
-        str(Path.home() / ".claude" / "jstack" / "review.json"),
-    )).expanduser()
-    try:
-        data = json.loads(p.read_text())
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError, ValueError):
-        return {}
+    return review_config.load()
 
 
 def main(argv: list[str]) -> int:

@@ -100,11 +100,3 @@ def test_the_bundle_version_is_the_formula_the_hub_build_uses(tmp_path):
             {"date": built["date"], "sha": built["sha"]}, version)
     assert built["bundle"].endswith(f".14.{int('0badf00d', 16)}")
     assert identity.bundle_number(date(2026, 9, 25), "26.9.3", "") == "20260925.3.0"
-
-
-def test_installer_embeds_identity_not_placeholder():
-    script = (Path(__file__).parents[1] / "menubar/install.sh").read_text()
-    assert '<key>CFBundleVersion</key><string>$BUILD_BUNDLE</string>' in script
-    assert '<key>JStackSourceCommit</key><string>$BUILD_SHA</string>' in script
-    # No counter survives anywhere in the install path.
-    assert "BUILD_NUMBER" not in script

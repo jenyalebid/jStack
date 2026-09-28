@@ -28,10 +28,15 @@ import sys
 # Where the host keeps its state. `hostenv` owns this answer for the rest of
 # the package, but this file is run by Claude Code as a script with no package
 # context, so it cannot import it — it reads the same env var by hand instead.
-# The fallback is this Mac's layout, which is what a hook wired into
-# ~/.claude/settings.json on a machine with a dashboard is looking at anyway.
+# The fallback is the standalone Hub's own answer, `hostenv.DefaultProfile
+# .state_dir()`: `~/.local/state/jremote`. It used to be `<package>/../state`,
+# which on a plain `install.sh` Mac wrote a second turn-state tree into the
+# code checkout — untracked dirt beside the source, and a tree nothing that
+# follows `jstack-host where` ever reads (#207). An embedded Hub declares its
+# state dir in the embed marker, which the plugin hook turns into
+# JREMOTE_STATE_DIR before this runs; the fallback is only ever a standalone.
 _STATE = os.environ.get("JREMOTE_STATE_DIR") or os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state")
+    os.path.expanduser("~"), ".local", "state", "jremote")
 
 _DIR = os.environ.get("JREMOTE_ATTENTION_DIR") or os.path.join(
     _STATE, "jremote_attention")

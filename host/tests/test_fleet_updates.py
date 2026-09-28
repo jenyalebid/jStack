@@ -127,6 +127,27 @@ def test_artifact_paths_are_bare_safe_names(release, filename):
         releases.validate(release[2]["manifest"])
 
 
+def test_artifact_verifies_a_release_against_the_key_that_signed_it(tmp_path, monkeypatch, release):
+    """#144 part 2: a hub that later builds its own source rotates its
+    configured key to that build's — an older release still sitting in the
+    feed, signed by a different (publisher's) key, must not 404 for it."""
+    from jstack_host import releases as app_releases
+    key, public, envelope = release
+    monkeypatch.setattr(app_releases, "RELEASE_DIR", tmp_path / "releases/mac")
+    monkeypatch.setattr(hostenv, "state_dir", lambda: tmp_path / "state")
+    fleet.root().mkdir(parents=True)
+    rotated = base64.b64encode(Ed25519PrivateKey.generate().public_key().public_bytes_raw()).decode()
+    atomic_json(fleet.root() / "config.json", {"public_key": rotated})
+    directory = fleet.feed_dir() / envelope["manifest"]["release"]
+    directory.mkdir(parents=True)
+    atomic_json(directory / "manifest.json", envelope)
+    atomic_json(directory / "trust.json", {"algorithm": "Ed25519", "public_key": public})
+    filename = next(iter(envelope["manifest"]["components"].values()))["file"]
+    (directory / filename).write_bytes(b"artifact")
+    response = update_routes.artifact(envelope["manifest"]["release"], filename)
+    assert response.status_code == 200
+
+
 def test_job_survives_reopen_duplicate_delivery_and_rejects_overlap(tmp_path, release):
     path = tmp_path / "jobs.sqlite"
     job = fleet.FleetStore(path).queue("leaf", "credential", release[2], "click-one")
@@ -439,6 +460,19 @@ def test_failed_verification_fails_the_job(tmp_path, release):
     assert daemon.current["detail"].startswith("updated components failed verification")
 
 
+def test_a_failed_verification_names_what_the_backend_found(tmp_path, release):
+    """A dropped role must say which one in the job's failure (#197)."""
+    daemon, job = supervisor(tmp_path, release)
+    daemon.tick()
+    daemon.backend.healthy = False
+    daemon.backend.unverified = "tunnel service is not_registered, was enabled before the update"
+    daemon.save(verify_started=time.time() - 150)
+    daemon.tick()
+    assert daemon.current["state"] == "failed"
+    assert daemon.current["detail"].startswith(
+        "updated components failed verification: tunnel service is not_registered")
+
+
 def test_tampered_download_never_reaches_apply(tmp_path, release):
     daemon, job = supervisor(tmp_path, release)
     original = daemon.client
@@ -677,6 +711,37 @@ def test_launchd_replacement_waits_for_service_removal(tmp_path, monkeypatch):
     monkeypatch.setattr(update_macos.time, "sleep", lambda _: None)
     update_macos.MacBackend(tmp_path, {"host_label": "lab-host"})._unload("host")
     assert calls == ["bootout", "print", "print", "print"]
+
+
+def test_unload_reaps_a_child_still_on_the_hosts_port(tmp_path, monkeypatch):
+    """#219: bootout tears down the service's own process, never a child it
+    spawned into its own session — an embedding app that forks a detached
+    child is reparented to launchd, still on the host's port, once the
+    LaunchAgent is gone. `_unload("host")` must not return with that port
+    still held."""
+    import subprocess
+    from jstack_host import update_macos
+    lsof_answers = iter([["4242"], []])
+    def run(argv, **kwargs):
+        if argv[0] == "/bin/launchctl":
+            return subprocess.CompletedProcess(argv, 113 if argv[1] == "print" else 0)
+        assert argv[0] == "/usr/sbin/lsof"
+        return subprocess.CompletedProcess(argv, 0, stdout="\n".join(next(lsof_answers)))
+    killed = []
+    class FakeProcess:
+        def __init__(self, pid):
+            self.pid = pid
+        def terminate(self):
+            killed.append(("terminate", self.pid))
+        def kill(self):
+            killed.append(("kill", self.pid))
+    monkeypatch.setattr(update_macos.subprocess, "run", run)
+    monkeypatch.setattr(update_macos.time, "sleep", lambda _: None)
+    monkeypatch.setattr(update_macos.psutil, "Process", FakeProcess)
+    backend = update_macos.MacBackend(
+        tmp_path, {"host_label": "lab-host", "local_url": "http://127.0.0.1:9091"})
+    backend._unload("host")
+    assert killed == [("terminate", 4242)]
 
 
 def test_inventory_observes_updater_source_and_requires_live_menubar(tmp_path, monkeypatch):

@@ -46,6 +46,7 @@ from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_ROOT))
+import review_config  # noqa: E402 — stdlib-only, safe ahead of the bootstrap guard
 
 _BOOTSTRAP_ERROR = None
 try:
@@ -500,9 +501,7 @@ def check_injection() -> dict:
         return _check("injection", FAIL, f"injector will not load: {e}",
                       f"run {hook} --explain <agent/seat> by hand for the traceback")
 
-    cfg_path = Path(os.environ.get(
-        "JSTACK_REVIEW_CONFIG",
-        str(Path.home() / ".claude" / "jstack" / "review.json"))).expanduser()
+    cfg_path = review_config.path()
     if os.environ.get("JSTACK_TIMELINE_INJECT_DISABLED") == "1":
         return _check("injection", WARN,
                       "JSTACK_TIMELINE_INJECT_DISABLED=1 — no session reads its "
@@ -706,17 +705,54 @@ def _release_stage(source: "Path") -> bool:
     """Is this path inside a release staging tree?
 
     A managed release unpacks each build to `…/releases/<release>/stage-<tok>/`
-    and points every jStack reference at the `stack/` inside it. That copy is
-    one commit, frozen at unpack time, and nothing will ever move it — which
-    is the property that matters here, whatever the machine.
+    (the sealed Hub's updater: `app-stage-<tok>/`) and points every jStack
+    reference at the `stack/` inside it. That copy is one commit, frozen at
+    unpack time, and nothing will ever move it — which is the property that
+    matters here, whatever the machine.
 
     Matched on shape rather than on a fixed prefix: the state dir is
     configurable, so the only portable signal is the layout the release writer
     itself produces.
     """
     parts = source.parts
-    return any(part.startswith("stage-") and "releases" in parts[max(0, i - 2):i]
+    return any(part.startswith(("stage-", "app-stage-"))
+               and "releases" in parts[max(0, i - 2):i]
                for i, part in enumerate(parts))
+
+
+def _jstack_checkout(path: "Path|None") -> bool:
+    """Is this a jStack checkout — a git tree that carries this plugin?
+
+    Both halves matter. A `.git` alone is any repo: `rev-parse --show-toplevel`
+    from an installed plugin cache walks up past the plugin's boundary into
+    whatever encloses it, and on a Mac whose home directory is a git repo that
+    is the home repo — `versions` then compared a jStack sha against the home
+    tree's HEAD (#86). The plugin manifest alone is any copy: a release stage
+    carries one and is frozen.
+    """
+    return bool(path) and (path / ".git").exists() and \
+        (path / "plugins" / "jstack" / ".claude-plugin" / "plugin.json").exists()
+
+
+def _local_checkout(marketplace: str = "") -> "Path|None":
+    """The jStack checkout on this machine, or None on a Mac that has none.
+
+    Three places, in the order they are trusted: the repo this very copy of
+    the tool runs from (only when that repo IS jStack), the marketplace's
+    registered directory (only when it is one), then the conventional clone
+    the installer makes — `$JSTACK_CHECKOUT`, default `~/jStack`. A leaf
+    installed from a commit has none of the three, and that answer is a fact
+    about the machine, not a failure to look.
+    """
+    repo = _git(PLUGIN_ROOT, "rev-parse", "--show-toplevel")
+    candidates = [Path(repo) if repo else None,
+                  _marketplace_checkout(marketplace) if marketplace else None,
+                  Path(os.environ["JSTACK_CHECKOUT"]) if os.environ.get("JSTACK_CHECKOUT") else None,
+                  Path.home() / "jStack"]
+    for candidate in candidates:
+        if _jstack_checkout(candidate):
+            return candidate
+    return None
 
 
 def check_marketplace_source() -> dict:
@@ -755,14 +791,26 @@ def check_marketplace_source() -> dict:
                       "— its source is not a local path to grade")
     source = Path(registered["path"])
     if _release_stage(source):
+        # Frozen is only a fault where something that moves was passed over.
+        # On a leaf the stage IS the registration: the updater relocates it
+        # release by release (`update_plugins.install`), and there is no
+        # checkout it could point at instead — failing that graded every
+        # leaf broken for being installed the way leaves are (#120).
+        checkout = _local_checkout()
+        if checkout is None:
+            return _check("marketplace", OK, f"{marketplace} serves from the "
+                          f"release stage at {source} — no checkout on this "
+                          "machine, so the shipped copy is the copy and the "
+                          "updater moves this registration with each release")
         return _check("marketplace", FAIL,
-                      f"{marketplace} is served from a release stage — {source}. "
+                      f"{marketplace} is served from a release stage — {source} "
+                      f"— while the checkout at {checkout} sits unused. "
                       "That copy is frozen at one commit, so `plugin update` "
                       "re-reads it and correctly finds nothing to do; the "
                       "install cannot move and no restart changes that",
                       f"re-register against the checkout — `claude plugin "
                       f"marketplace remove {marketplace}` then `marketplace add "
-                      f"<checkout>`, then `claude plugin update jstack@{marketplace}`")
+                      f"{checkout}`, then `claude plugin update jstack@{marketplace}`")
     if not source.exists():
         return _check("marketplace", FAIL,
                       f"{marketplace} is served from {source}, which is not "
@@ -792,18 +840,18 @@ def check_versions() -> dict:
     """
     marketplace, record = _installed_jstack()
     pin = str(record.get("gitCommitSha") or "")
-    repo = _git(PLUGIN_ROOT, "rev-parse", "--show-toplevel")
-    checkout = Path(repo) if repo else _marketplace_checkout(marketplace)
-
-    if checkout and _release_stage(checkout):
-        # The one place `_marketplace_checkout` gets trusted as "the checkout".
-        # A stage is not one: it is a snapshot, and the cache below was taken
-        # from it, so every comparison this check makes would agree by
-        # construction. Refuse the comparison instead of passing it.
-        return _check("versions", WARN,
-                      f"the copy this would grade against is a release stage "
-                      f"({checkout}) — the cache was taken from it, so agreement "
-                      f"here would mean nothing", "see the marketplace check")
+    checkout = _local_checkout(marketplace)
+    staged = False
+    if checkout is None:
+        # No jStack checkout anywhere the installer or the engines would put
+        # one: a leaf. What is left is whatever the marketplace registers — a
+        # shipped copy, graded below on its identity file. A release stage is
+        # one of those (the updater relocates the registration with each
+        # release, #120), never a checkout: git is not asked of it even when
+        # it would answer, because the cache was pinned from that very copy
+        # and a sha comparison there agrees by construction.
+        checkout = _marketplace_checkout(marketplace)
+        staged = bool(checkout) and _release_stage(checkout)
     if not pin and not checkout:
         return _check("versions", WARN, "no installed plugin record and no "
                       "checkout — this copy's identity is unknowable",
@@ -813,11 +861,12 @@ def check_versions() -> dict:
                       f"{pin[:12]} — no local checkout on this machine, the "
                       "cache is the only copy")
 
-    head = _git(checkout, "rev-parse", "HEAD")
+    head = "" if staged else _git(checkout, "rev-parse", "HEAD")
     if not head:
         # A shipped release copy has no .git on purpose — its identity file
         # is the identity. Grading it as a broken checkout told people with
         # git installed to install git.
+        kind = "release stage" if staged else "shipped copy"
         try:
             identity = json.loads(
                 (checkout / "host" / "release-identity.json").read_text())
@@ -827,15 +876,19 @@ def check_versions() -> dict:
             sha = str(identity["sha"])
             rel = identity.get("release") or identity.get("version") or "release"
             if pin and pin == sha:
-                return _check("versions", OK, f"shipped copy {rel} at "
+                return _check("versions", OK, f"{kind} {rel} at "
                               f"{sha[:12]} — cache in step with it")
             if pin:
-                return _check("versions", WARN, f"shipped copy {rel} at "
+                return _check("versions", WARN, f"{kind} {rel} at "
                               f"{sha[:12]}, cache pinned {pin[:12]} — two "
                               "different snapshots",
                               "reinstall/update the plugin to re-pin the cache")
-            return _check("versions", OK, f"shipped copy {rel} at {sha[:12]} "
+            return _check("versions", OK, f"{kind} {rel} at {sha[:12]} "
                           "— not installed as a plugin")
+        if staged:
+            return _check("versions", WARN, f"release stage at {checkout} "
+                          "carries no release identity — nothing to compare "
+                          "the cache against", "see the marketplace check")
         return _check("versions", WARN, f"checkout at {checkout}, but git "
                       "cannot read it — no identity to compare",
                       "repair the checkout, or reinstall from a release")

@@ -240,14 +240,29 @@ def _resolve_dir(loc: str) -> tuple[Path | None, str]:
 def _window_truth() -> tuple[dict[str, str], set[str]]:
     """(pane tty → tmux session name, tmux sessions a client is displaying).
 
-    Tolerates a tmux failure by reporting no panes — every session then falls
-    back to its own tty, which is the raw-window rule.
+    Two independent tmux reads, each tolerated on its own: a failing
+    `attached_names()` costs the attached set and nothing else, a failing
+    `pane_ttys()` costs the pane map and nothing else. One try around both
+    used to discard a good pane map because the client read raised — and
+    with no panes every Codex process lost its identity (its argv carries no
+    sid, so the pane is the only thing that knows which session it is) and
+    fell through to an empty `pid-` orphan row beside the real one (#135).
+    Every failure is logged: this failed silently for the life of a session.
     """
     from . import managed
+    panes: dict[str, str] = {}
+    attached: set[str] = set()
     try:
-        return managed.pane_ttys(), managed.attached_names()
-    except Exception:
-        return {}, set()
+        panes = managed.pane_ttys()
+    except Exception as e:                                  # noqa: BLE001
+        managed._log(f"board: pane_ttys failed, panes unknown this tick: "
+                     f"{type(e).__name__}: {e}")
+    try:
+        attached = managed.attached_names()
+    except Exception as e:                                  # noqa: BLE001
+        managed._log(f"board: attached_names failed, no window is provable "
+                     f"this tick: {type(e).__name__}: {e}")
+    return panes, attached
 
 
 def _has_window(tty: str | None, panes: dict[str, str], attached: set[str]) -> bool:

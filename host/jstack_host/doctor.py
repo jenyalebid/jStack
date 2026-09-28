@@ -281,11 +281,11 @@ def check_codex_hooks() -> dict:
     exists and still matches what the plugin declares, which is the only thing
     this reports.
     """
-    from . import codex_hooks
+    from . import codex_hooks, plugin_paths
 
     if not _which("codex"):
         return _check("codex hooks", OK, "codex not installed — nothing to wire")
-    plugin = hostenv.package_root().parent / "plugins/jstack"
+    plugin = plugin_paths.jstack_root()
     try:
         wanted, dropped = codex_hooks.managed_config(plugin)
     except OSError as exc:
@@ -374,6 +374,94 @@ def check_hook_owners() -> dict:
                       f"hand-wired twin of them cannot be detected: {', '.join(undeclared)}",
                       f"add them to {plugin}/hooks/owners.json")
     return _check("hook owners", OK, f"{len(shipped)} shipped hooks, one owner each")
+
+
+def check_activation() -> dict:
+    """Does every system that declares an `activation` actually converge?
+
+    Generalises check_codex_hooks/check_hook_owners' question (jStack#134): a
+    system names the user-scope wiring it needs under `activation` in
+    systems.json — the same registry every other check already trusts — and
+    this grades whether the machine matches it. Nothing a system does not
+    declare is inspected; see activation.plan().
+    """
+    from . import activation, claude_settings, plugin_paths
+
+    plugin = plugin_paths.jstack_root()
+    try:
+        systems = json.loads((plugin / "systems.json").read_text())["systems"]
+    except (OSError, ValueError, KeyError) as exc:
+        return _check("activation", WARN, f"cannot read the systems registry: {exc}")
+
+    try:
+        desired = activation.desired_from_systems(systems)
+    except ValueError as exc:
+        return _check("activation", WARN, f"bad activation declaration: {exc}")
+
+    if not desired:
+        return _check("activation", OK, "no system declares an activation yet")
+
+    # Recomputed here, not `claude_settings.SETTINGS` — that name is a module
+    # constant captured at import, and a test (or a profile) redirecting HOME
+    # after import must still be answered about the redirected file.
+    settings_path = Path.home() / ".claude" / "settings.json"
+    observed = activation.observe(desired, settings=claude_settings.read(settings_path))
+    actions = activation.plan(desired, observed)
+    n_declared = sum(len(v) for v in desired.values())
+    if not actions:
+        return _check("activation", OK, f"{n_declared} declared, all converged")
+
+    unobserved = sorted(k for k in desired if k not in activation.OBSERVERS)
+    names = ", ".join(sorted(f"{a['system']} ({a['kind']})" for a in actions))
+    hint = (f"no observer yet for: {', '.join(unobserved)} — " if unobserved else "") \
+        + "wire the missing config, or run the installer that owns it"
+    return _check("activation", WARN,
+                  f"{len(actions)}/{n_declared} declared activation(s) not "
+                  f"converged: {names}", hint)
+def check_git_hooks() -> dict:
+    """Are this checkout's commit-identity and push-reachability gates live?
+
+    Both ship as plain files under `plugins/jstack/githooks/`, wired only if a
+    human symlinked them into `.git/hooks` by hand — the install procedure is
+    a comment in the file's own header, nothing runs it. A clone that skipped
+    that step pushes with no identity check and no reachability check; the
+    identity gate's own history records what that let through once, cured
+    only by a history rewrite (#138). Graded on the real state a clone commits
+    and pushes through — `core.hooksPath`, or a hook's resolved symlink
+    target — never on whether the source files exist under `githooks/`,
+    which is true on every clone whether or not either gate is wired.
+    """
+    from . import plugin_paths
+    plugin = plugin_paths.jstack_root()
+    githooks = plugin / "githooks"
+    repo = plugin.parent.parent
+    if not (repo / ".git").exists():
+        return _check("git hooks", OK, "no jStack checkout here — nothing to gate")
+    try:
+        configured = subprocess.run(["git", "-C", str(repo), "config", "--get", "core.hooksPath"],
+                                    capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        configured = ""
+    if configured and (repo / configured).resolve() == githooks.resolve():
+        return _check("git hooks", OK, f"core.hooksPath points at {githooks}")
+    broken = []
+    for name in ("pre-commit", "pre-push"):
+        installed = repo / ".git" / "hooks" / name
+        if not installed.is_symlink():
+            broken.append(f"{name} (not installed)")
+            continue
+        try:
+            if installed.resolve() != (githooks / name).resolve():
+                broken.append(f"{name} (points elsewhere)")
+        except OSError as exc:
+            broken.append(f"{name} ({exc})")
+    if broken:
+        return _check("git hooks", WARN,
+                      f"the identity and reachability gates are not both live: {', '.join(broken)}",
+                      "from the checkout root: ln -s ../../plugins/jstack/githooks/pre-commit "
+                      ".git/hooks/pre-commit && ln -s ../../plugins/jstack/githooks/pre-push "
+                      ".git/hooks/pre-push")
+    return _check("git hooks", OK, "pre-commit and pre-push both live")
 
 
 def check_repos() -> dict:
@@ -569,7 +657,8 @@ def check_file_sharing() -> dict:
 CHECKS = (check_python, check_claude, check_tmux, check_websocket, check_fd_limit,
           check_token, check_profile, check_agents, check_registry, check_timeline,
           check_transcripts, check_scheduler, check_allowance, check_codex_hooks,
-          check_hook_owners,
+          check_hook_owners, check_activation,
+          check_git_hooks,
           check_repos,
           check_service, check_source, check_app, check_file_sharing)
 
@@ -589,9 +678,39 @@ def worst(results: list[dict]) -> str:
     return max((r["grade"] for r in results), key=lambda g: _RANK[g], default=OK)
 
 
+#: The checks without which the host cannot serve a chat at all: the runtime,
+#: the credential it authenticates with, the socket the terminal streams over,
+#: and the service that answers. Serve-blocking is a property of the CHECK, not
+#: of its grade — a FAIL on an optional surface (the Files share, the app, the
+#: source stamp) is that surface down, with chats unaffected (#90).
+SERVE_BLOCKING = frozenset({"python", "token", "websocket", "service", "fd limit"})
+
+
+def closing_line(results: list[dict]) -> str:
+    """The one line a hurried reader reads, derived from WHICH checks failed.
+
+    Only a failed serve-blocking check may say the host cannot serve chats;
+    any other FAIL names its own surface and says chats stand. The old flat
+    map over `worst()` printed the chat sentence for a Files-share finding on
+    a host that was serving, which read as an outage and trained readers to
+    discount the verdict."""
+    grade = worst(results)
+    if grade == OK:
+        return "every check passed"
+    if grade == WARN:
+        return "serving; some screens wait on the warnings above"
+    failed = [r["name"] for r in results if r["grade"] == FAIL]
+    blocking = [n for n in failed if n in SERVE_BLOCKING]
+    if blocking:
+        return ("the host cannot serve chats until the failures above are fixed "
+                f"({', '.join(blocking)})")
+    return (f"serving; {', '.join(failed)} failed — that surface is down, "
+            "chats are unaffected")
+
+
 def report(out=None) -> int:
-    """Print the table; exit status 0 ok, 1 warnings only, 2 something the
-    host cannot serve without."""
+    """Print the table; exit status 0 ok, 1 warnings only, 2 a failure — the
+    closing line says whether that failure stops chats or one surface."""
     out = out or sys.stdout
     results = checks()
     mark = {OK: "ok  ", WARN: "warn", FAIL: "FAIL"}
@@ -599,11 +718,8 @@ def report(out=None) -> int:
         print(f"{mark[r['grade']]}  {r['name']:<12} {r['detail']}", file=out)
         if r["hint"] and r["grade"] != OK:
             print(f"      → {r['hint']}", file=out)
-    grade = worst(results)
-    summary = {OK: "every check passed", WARN: "serving; some screens wait on the warnings above",
-               FAIL: "the host cannot serve chats until the failures above are fixed"}
-    print(f"\n{summary[grade]}", file=out)
-    return _RANK[grade]
+    print(f"\n{closing_line(results)}", file=out)
+    return _RANK[worst(results)]
 
 
 if __name__ == "__main__":

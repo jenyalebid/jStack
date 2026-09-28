@@ -35,7 +35,8 @@ def test_every_check_answers_with_a_grade(machine):
     names = [r["name"] for r in results]
     assert names == ["python", "claude", "tmux", "websocket", "open files", "token",
                      "profile", "agents", "registry", "timeline", "transcripts",
-                     "scheduler", "allowance", "codex hooks", "hook owners", "repos",
+                     "scheduler", "allowance", "codex hooks", "hook owners",
+                     "activation", "git hooks", "repos",
                      "service", "source", "app", "files"]
     assert all(r["grade"] in (doctor.OK, doctor.WARN, doctor.FAIL) for r in results)
     by = {r["name"]: r for r in results}
@@ -71,10 +72,43 @@ def test_the_report_exits_with_the_worst_grade(machine, monkeypatch):
     assert doctor.report(out) == 1
     text = out.getvalue()
     assert "warn  b" in text and "→ do this" in text and "some screens wait" in text
-    monkeypatch.setattr(doctor, "CHECKS", (lambda: doctor._check("c", doctor.FAIL, "no"),))
+    monkeypatch.setattr(doctor, "CHECKS", (lambda: doctor._check("token", doctor.FAIL, "no"),))
     assert doctor.report(io.StringIO()) == 2
     monkeypatch.setattr(doctor, "CHECKS", (lambda: doctor._check("d", doctor.OK, "yes"),))
     assert doctor.report(io.StringIO()) == 0
+
+
+def test_a_failed_optional_surface_does_not_claim_the_host_cannot_serve_chats(machine, monkeypatch):
+    """#90. The closing line is read from WHICH checks failed. A Files-share
+    finding on a serving host used to print the chat-outage sentence; now it
+    names the surface, says chats stand, and still exits 2."""
+    monkeypatch.setattr(doctor, "CHECKS", (
+        lambda: doctor._check("token", doctor.OK, "present"),
+        lambda: doctor._check("files", doctor.FAIL, "undeclared SMB share point(s): x",
+                              "run `jstack-host files status`"),
+    ))
+    out = io.StringIO()
+    assert doctor.report(out) == 2
+    text = out.getvalue()
+    assert "cannot serve chats" not in text
+    assert "files failed" in text and "chats are unaffected" in text
+
+
+def test_a_failed_serve_blocking_check_names_itself_in_the_verdict(machine, monkeypatch):
+    monkeypatch.setattr(doctor, "CHECKS", (
+        lambda: doctor._check("files", doctor.FAIL, "drifted"),
+        lambda: doctor._check("token", doctor.FAIL, "missing"),
+    ))
+    out = io.StringIO()
+    assert doctor.report(out) == 2
+    assert "the host cannot serve chats until the failures above are fixed (token)" in out.getvalue()
+
+
+def test_every_serve_blocking_name_is_a_real_check():
+    """A name in SERVE_BLOCKING that no check produces is a gate that never
+    fires — pin the set to the checks that exist."""
+    names = {fn.__name__.removeprefix("check_").replace("_", " ") for fn in doctor.CHECKS}
+    assert doctor.SERVE_BLOCKING <= names, doctor.SERVE_BLOCKING - names
 
 
 # ── the source check: does the running host serve the bytes the tree holds ──
@@ -287,6 +321,117 @@ def test_a_machine_with_no_user_settings_has_nothing_to_double(machine, monkeypa
     assert r["grade"] == doctor.OK
 
 
+# ── activation: declared systems.json wiring actually converges ──
+#
+# jStack#134 — a shipped system and an active one are different facts, and
+# nothing used to say which systems still need a hand. check_activation reads
+# the real systems.json (or a fixture standing in for it, here) and grades
+# whether every declared `activation` block matches the machine.
+
+def _systems_json(tmp_path, monkeypatch, systems):
+    plugin = tmp_path / "plugins" / "jstack"
+    plugin.mkdir(parents=True, exist_ok=True)
+    (plugin / "systems.json").write_text(json.dumps({"systems": systems}))
+    from jstack_host import plugin_paths
+    monkeypatch.setattr(plugin_paths, "jstack_root", lambda: plugin)
+    return plugin
+
+
+def test_no_declared_activation_is_ok_not_a_hole(machine, monkeypatch):
+    _systems_json(machine, monkeypatch, [{"id": "path-rule-injection"}])
+    r = doctor.check_activation()
+    assert r["grade"] == doctor.OK
+    assert "no system declares an activation" in r["detail"]
+
+
+def test_an_unknown_activation_kind_is_named_not_swallowed(machine, monkeypatch):
+    _systems_json(machine, monkeypatch, [
+        {"id": "typo-system", "activation": {"claude_setings": {"statusLine": True}}}])
+    r = doctor.check_activation()
+    assert r["grade"] == doctor.WARN
+    assert "typo-system" in r["detail"] and "claude_setings" in r["detail"]
+
+
+def test_a_converged_claude_settings_activation_is_ok(machine, monkeypatch):
+    _systems_json(machine, monkeypatch, [
+        {"id": "allowance-sampler",
+         "activation": {"claude_settings": {"statusLine": True}}}])
+    from jstack_host import claude_settings
+    home = machine / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text(json.dumps({
+        "statusLine": {"type": "command", "command": claude_settings.SAMPLER}}))
+    monkeypatch.setenv("HOME", str(home))
+    r = doctor.check_activation()
+    assert r["grade"] == doctor.OK and "1 declared, all converged" in r["detail"]
+
+
+def test_a_missing_statusline_is_a_warn_naming_the_system(machine, monkeypatch):
+    _systems_json(machine, monkeypatch, [
+        {"id": "allowance-sampler",
+         "activation": {"claude_settings": {"statusLine": True}}}])
+    monkeypatch.setenv("HOME", str(machine / "bare-home"))
+    r = doctor.check_activation()
+    assert r["grade"] == doctor.WARN
+    assert "allowance-sampler (claude_settings)" in r["detail"]
+
+
+def test_a_kind_with_no_observer_is_reported_not_silently_converged(machine, monkeypatch):
+    _systems_json(machine, monkeypatch, [
+        {"id": "job-monitor", "activation": {"codex_mcp": {"name": "job_monitor"}}}])
+    monkeypatch.setenv("HOME", str(machine / "bare-home"))
+    r = doctor.check_activation()
+    assert r["grade"] == doctor.WARN
+    assert "job-monitor (codex_mcp)" in r["detail"]
+    assert "no observer yet for: codex_mcp" in r["hint"]
+
+
+def test_activation_declared_in_a_subsystem_is_still_read(machine, monkeypatch):
+    _systems_json(machine, monkeypatch, [
+        {"id": "parent", "subsystems": [
+            {"id": "child", "activation": {"claude_settings": {"statusLine": True}}}]}])
+    monkeypatch.setenv("HOME", str(machine / "bare-home"))
+    r = doctor.check_activation()
+    assert r["grade"] == doctor.WARN and "child (claude_settings)" in r["detail"]
+
+
+def test_an_unreadable_systems_json_is_a_warn_not_a_crash(machine, monkeypatch):
+    plugin = machine / "plugins" / "jstack"
+    plugin.mkdir(parents=True)
+    (plugin / "systems.json").write_text("not json")
+    from jstack_host import plugin_paths
+    monkeypatch.setattr(plugin_paths, "jstack_root", lambda: plugin)
+    r = doctor.check_activation()
+    assert r["grade"] == doctor.WARN
+    assert "cannot read the systems registry" in r["detail"]
+# ── the git identity/reachability gates only run if a clone wired them ──
+#
+# Both ship as plain files under githooks/, live only once a human symlinks
+# them into .git/hooks by hand (#138) — a fresh clone with no symlink pushes
+# with no identity check and no reachability check, silently.
+
+def _repo(tmp_path, monkeypatch):
+    import subprocess
+    repo = tmp_path / "checkout"
+    githooks = repo / "plugins" / "jstack" / "githooks"
+    githooks.mkdir(parents=True)
+    (githooks / "pre-commit").write_text("#!/bin/sh\n")
+    (githooks / "pre-push").write_text("#!/bin/sh\n")
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    from jstack_host import plugin_paths
+    monkeypatch.setattr(plugin_paths, "jstack_root", lambda: githooks.parent)
+    return repo, githooks
+
+
+def test_a_clone_with_no_symlinks_is_the_loaded_gun_the_issue_names(machine, monkeypatch):
+    _repo(machine, monkeypatch)
+    r = doctor.check_git_hooks()
+    assert r["grade"] == doctor.WARN
+    assert "pre-commit (not installed)" in r["detail"]
+    assert "pre-push (not installed)" in r["detail"]
+    assert "ln -s" in r["hint"]
+
+
 # ── the timeline check must not report agreement it cannot observe ──
 
 def _fake_log_event(tmp_path, prints: str) -> Path:
@@ -340,3 +485,37 @@ def test_an_unaskable_writer_is_not_graded_as_agreement(machine, monkeypatch, tm
     result = doctor.check_timeline()
     assert result["grade"] == doctor.OK
     assert "could not be cross-checked" in result["hint"]
+
+
+def test_codex_hooks_reads_the_plugin_the_machine_runs(tmp_path, monkeypatch):
+    """The check reads the manifest from the plugin root, not beside the package.
+
+    An installed Hub imports the package from inside the app bundle, where no
+    plugins/ sits beside it; the plugin it should grade is the one Claude and
+    Codex run, which plugin_paths resolves. Until 2026-09-27 the check looked
+    beside the package and warned on every installed hub.
+    """
+    from jstack_host import codex_hooks, plugin_paths
+
+    plugin = tmp_path / "cache" / "jstack"
+    (plugin / "hooks").mkdir(parents=True)
+    bundle = tmp_path / "Hub.app" / "Contents" / "Resources" / "packages"
+    bundle.mkdir(parents=True)
+    managed = tmp_path / "managed_config.toml"
+    managed.write_text("[[hooks.x]]\n")
+    seen = []
+
+    def fake_managed_config(root, manifest_path=None):
+        seen.append(Path(root))
+        return "[[hooks.x]]\n", []
+
+    monkeypatch.setattr(doctor, "_which", lambda name: "/usr/local/bin/codex")
+    monkeypatch.setattr(hostenv, "package_root", lambda: bundle)
+    monkeypatch.setattr(plugin_paths, "jstack_root", lambda: plugin)
+    monkeypatch.setattr(codex_hooks, "managed_config", fake_managed_config)
+    monkeypatch.setattr(codex_hooks, "MANAGED_CONFIG", managed)
+
+    result = doctor.check_codex_hooks()
+
+    assert seen == [plugin]
+    assert result["grade"] == doctor.OK, result

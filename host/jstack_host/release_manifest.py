@@ -79,7 +79,15 @@ def validate(manifest: dict, *, promoted: bool = True) -> dict:
     if len({item["file"] for item in components.values()}) != len(components):
         raise ReleaseError("release artifacts require distinct filenames")
     compatibility = manifest.get("compatibility", {})
-    if (compatibility.get("protocol") != 1 or compatibility.get("rollback") is not True
+    # `rollback` promised a bundle restore that no longer exists — a failed
+    # update leaves the running machine alone, and a release is taken back by
+    # switching the ref. Deployed updaters still REQUIRE the field to be True,
+    # so the writers keep emitting it; this reader accepts a manifest without
+    # it, and refuses only the one value that would claim a mechanism is off
+    # (#150). Once no deployed updater predates this, the writers drop it.
+    if compatibility.get("rollback", True) is not True:
+        raise ReleaseError("unsupported compatibility or non-reversible migration")
+    if (compatibility.get("protocol") != 1
             or compatibility.get("platform") != "macos"
             or compatibility.get("architecture") not in ("arm64", "x86_64", "universal")):
         raise ReleaseError("unsupported compatibility or non-reversible migration")

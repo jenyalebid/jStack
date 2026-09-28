@@ -64,6 +64,7 @@ except ImportError:
     # one place degrading quietly is right: fall back to the literal pre-root
     # default at the use site.
     _root = None
+import review_config as _review_config
 STATE_DIR = Path(os.environ.get(
     "JSTACK_REVIEW_STATE", str(Path.home() / ".claude" / "jstack" / "review-state")
 )).expanduser() / "inbox-guarded"
@@ -77,15 +78,7 @@ def allow():
 
 
 def _config() -> dict:
-    path = Path(os.environ.get(
-        "JSTACK_REVIEW_CONFIG",
-        str(Path.home() / ".claude" / "jstack" / "review.json"),
-    )).expanduser()
-    try:
-        data = json.loads(path.read_text())
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError, ValueError):
-        return {}
+    return _review_config.load()
 
 
 def resolve_seat(cwd: str) -> "str|None":

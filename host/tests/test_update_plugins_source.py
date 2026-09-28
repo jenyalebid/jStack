@@ -31,6 +31,10 @@ from jstack_host import update_plugins
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    # `local_checkout` looks at ~/jStack. The real one on a developer's Mac
+    # is nobody's fixture — and never to be moved by a test.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("JSTACK_CHECKOUT", raising=False)
     return tmp_path
 
 
@@ -155,6 +159,26 @@ def test_a_shipped_copy_is_still_relocated_onto_the_stage(home, monkeypatch):
     update_plugins.install(update_plugins.discover(), stage)
     assert moved and all(a[-1] == str(stage) for a in moved)
     assert str(stage) in asked[0]
+
+
+def test_install_refreshes_the_managed_codex_hooks(home, monkeypatch):
+    """#141: a release can change the plugin's hooks/hooks.json, and nothing
+    before this ever re-ran the install-time write of the operator-owned
+    config at MANAGED_CONFIG — so a managed machine kept trusting hooks that
+    no longer matched what the plugin now ships."""
+    from jstack_host import codex_hooks
+    stage = _shipped(home)
+    hooks_dir = stage / "plugins/jstack/hooks"
+    hooks_dir.mkdir(parents=True)
+    (hooks_dir / "hooks.json").write_text(json.dumps(
+        {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "true"}]}]}}))
+    _codex(home, stage)
+    managed = home / "etc-codex/managed_config.toml"
+    managed.parent.mkdir(parents=True)
+    monkeypatch.setattr(codex_hooks, "MANAGED_CONFIG", managed)
+    monkeypatch.setattr(update_plugins, "run", lambda argv: "[]")
+    update_plugins.install(update_plugins.discover(), stage)
+    assert "[[hooks.SessionStart]]" in managed.read_text()
 
 
 def test_a_non_directory_marketplace_still_refuses_before_the_checkout_test(home):
@@ -299,6 +323,64 @@ def test_an_uncommitted_change_refuses_the_move_by_name(tmp_path, monkeypatch):
     assert _git("rev-parse", "HEAD", cwd=clone) == first and asked == []
 
 
+# ── a registration left on a stage goes back to the checkout (#163) ─────────
+
+def test_a_stage_registration_is_re_adopted_by_the_checkout_beside_it(home, tmp_path, monkeypatch):
+    """The Mac a pre-564f571 update left behind: the registration on a shipped
+    stage copy, `~/jStack` a clean clone nothing has moved since install. The
+    update moves the clone to its commit and points the registration at it."""
+    clone, first, second = _origin_and_clone(tmp_path)          # tmp_path/jStack == ~/jStack
+    shipped = _shipped(home)
+    _claude(home, shipped)
+    asked, moved = [], []
+    monkeypatch.setattr(update_plugins, "run", lambda argv: asked.append(argv) or "[]")
+    monkeypatch.setattr(update_plugins, "replace_references", lambda *a: moved.append(a))
+    monkeypatch.setattr(update_plugins, "move_shell_references", lambda *a: moved.append(a))
+    update_plugins.install(update_plugins.discover(), shipped.parent / "next", second)
+    assert _git("rev-parse", "HEAD", cwd=clone) == second
+    assert moved and all(a[-2] == str(shipped) and a[-1] == str(clone) for a in moved), moved
+    assert asked[0][1:] == ["plugin", "update", "jstack@jStack", "--scope", "user"]
+
+
+def test_a_dirty_checkout_is_not_re_adopted_and_the_stage_still_moves(home, tmp_path, monkeypatch, capsys):
+    """What `advance` refuses, re-adoption refuses — by name — and the update
+    still lands the way it did before: onto the stage."""
+    clone, first, second = _origin_and_clone(tmp_path)
+    (clone / "plugins/jstack/.claude-plugin/plugin.json").write_text('{"version": "hand-edited"}')
+    shipped = _shipped(home)
+    stage = shipped.parent / "next"
+    _codex(home, shipped)
+    asked, moved = [], []
+    monkeypatch.setattr(update_plugins, "run", lambda argv: asked.append(argv) or "[]")
+    monkeypatch.setattr(update_plugins, "replace_references", lambda *a: moved.append(a))
+    monkeypatch.setattr(update_plugins, "move_shell_references", lambda *a: moved.append(a))
+    update_plugins.install(update_plugins.discover(), stage, second)
+    assert _git("rev-parse", "HEAD", cwd=clone) == first
+    assert moved and all(a[-1] == str(stage) for a in moved)
+    assert str(stage) in asked[0]
+    assert "uncommitted changes" in capsys.readouterr().err
+
+
+def test_without_a_commit_or_a_checkout_the_stage_moves_as_before(home, tmp_path, monkeypatch):
+    """No sha: nothing to advance a checkout to, so nothing is re-adopted. No
+    checkout — a bare .git or a plugin without git is not one — same."""
+    clone, first, second = _origin_and_clone(tmp_path)
+    shipped = _shipped(home)
+    stage = shipped.parent / "next"
+    _codex(home, shipped)
+    moved = []
+    monkeypatch.setattr(update_plugins, "run", lambda argv: "[]")
+    monkeypatch.setattr(update_plugins, "replace_references", lambda *a: moved.append(a))
+    monkeypatch.setattr(update_plugins, "move_shell_references", lambda *a: moved.append(a))
+    update_plugins.install(update_plugins.discover(), stage, None)
+    assert moved and all(a[-1] == str(stage) for a in moved)
+    assert _git("rev-parse", "HEAD", cwd=clone) == first
+    (clone / "plugins/jstack/.claude-plugin/plugin.json").unlink()
+    moved.clear()
+    update_plugins.install(update_plugins.discover(), stage, second)
+    assert moved and all(a[-1] == str(stage) for a in moved)
+
+
 def test_a_checkout_already_on_the_commit_and_a_shipped_copy_are_not_touched(home, tmp_path, monkeypatch):
     clone, first, second = _origin_and_clone(tmp_path)
     _git("reset", "--quiet", "--hard", second, cwd=clone)
@@ -311,6 +393,60 @@ def test_a_checkout_already_on_the_commit_and_a_shipped_copy_are_not_touched(hom
     shipped = _shipped(home)
     fetched = []
     monkeypatch.setattr(update_plugins, "advance", lambda *a: fetched.append(a))
+    # A shipped copy on a Mac with no checkout: the clone above IS ~/jStack
+    # here, and beside it a stage registration would be re-adopted (#163) —
+    # so the checkout is pointed elsewhere for this leaf case.
+    monkeypatch.setenv("JSTACK_CHECKOUT", str(tmp_path / "nowhere"))
     update_plugins.install([{**_provider(shipped), "checkout": False}], tmp_path / "stack", second)
     update_plugins.install([_provider(clone)], tmp_path / "stack", None)
     assert fetched == []
+
+
+# ── a registration reached through a symlink (#220) ──────────────────────────
+
+REFUSED = ("plugin installation failed: Error: marketplace 'jstack' is already added "
+           "from a different source; remove it before adding this source")
+
+
+def _codex_runner(asked, real: Path, refuse: bool):
+    def run(argv):
+        asked.append(argv)
+        if argv[1:4] == ["plugin", "marketplace", "add"] and refuse:
+            raise update_plugins.ReleaseError(REFUSED)
+        if argv[1:4] == ["plugin", "marketplace", "list"]:
+            return f"MARKETPLACE     ROOT\nopenai-curated  /x\njstack          {real}\n"
+        return "[]"
+    return run
+
+
+def test_a_codex_registration_naming_this_tree_through_a_symlink_is_accepted(home, monkeypatch):
+    """codex 0.157 refuses `marketplace add ~/jStack` when it stored the symlink
+    and canonicalizes what it is given. Same directory, so the update goes on."""
+    real = _checkout(home, "Projects/jStack-Project/jStack-Code")
+    link = home / "jStack"
+    link.symlink_to(real)
+    _codex(home, link)
+    asked = []
+    monkeypatch.setattr(update_plugins, "run", _codex_runner(asked, real, refuse=True))
+    update_plugins.install(update_plugins.discover(), _shipped(home))
+    assert ["plugin", "add", "jstack@jstack", "--json"] == asked[-1][1:]
+
+
+def test_a_codex_registration_of_another_tree_still_fails(home, monkeypatch):
+    repo = _checkout(home)
+    _codex(home, repo)
+    asked = []
+    monkeypatch.setattr(update_plugins, "run",
+                        _codex_runner(asked, home / "somewhere-else", refuse=True))
+    with pytest.raises(update_plugins.ReleaseError, match="different source"):
+        update_plugins.install(update_plugins.discover(), _shipped(home))
+    assert not any(a[1:3] == ["plugin", "add"] for a in asked)
+
+
+def test_an_accepted_add_asks_nothing_more(home, monkeypatch):
+    repo = _checkout(home)
+    _codex(home, repo)
+    asked = []
+    monkeypatch.setattr(update_plugins, "run", _codex_runner(asked, repo, refuse=False))
+    update_plugins.install(update_plugins.discover(), _shipped(home))
+    assert not any(a[1:4] == ["plugin", "marketplace", "list"] for a in asked)

@@ -80,6 +80,35 @@ def test_a_vm_bridge_is_not_the_lan():
     assert [a["host"] for a in out] == ["192.168.0.106", "mac.local"]
 
 
+def test_a_local_name_that_resolves_to_the_bridge_is_dropped():
+    """jStack#41: a Mac running VMs can have its own Bonjour name answered by
+    bridge100's mDNS responder as easily as the real LAN interface — the
+    address alone (`ifaces`) cannot tell these apart for the NAME the way it
+    does for a bare address, so the name has to be resolved and checked too."""
+    out = addresses.classify(
+        ["192.168.0.106", "192.168.64.1"], "mac", 9090,
+        {"192.168.0.106": "en1", "192.168.64.1": "bridge100"},
+        resolve_local=lambda name: "192.168.64.1")
+    assert [a["host"] for a in out] == ["192.168.0.106"]
+
+
+def test_a_local_name_that_resolves_to_the_lan_is_kept():
+    out = addresses.classify(
+        ["192.168.0.106", "192.168.64.1"], "mac", 9090,
+        {"192.168.0.106": "en1", "192.168.64.1": "bridge100"},
+        resolve_local=lambda name: "192.168.0.106")
+    assert [a["host"] for a in out] == ["192.168.0.106", "mac.local"]
+
+
+def test_an_unresolvable_local_name_is_kept_not_penalized():
+    """No evidence either way is not evidence against it — a network with
+    mDNS blocked must not lose the one name that survives a moved address."""
+    out = addresses.classify(
+        ["192.168.0.106"], "mac", 9090, {"192.168.0.106": "en1"},
+        resolve_local=lambda name: None)
+    assert [a["host"] for a in out] == ["192.168.0.106", "mac.local"]
+
+
 def test_the_bridge_number_is_not_what_is_excluded():
     """The kernel numbers these, so a check that knew `bridge100` would pass
     every test here and publish `bridge101` to the next device."""
@@ -237,3 +266,101 @@ def test_mesh_port_defaults_to_the_reached_port():
     assert {a["url"] for a in out} == {
         "http://192.168.0.106:9595", "http://10.66.0.1:9595",
         "http://mac.local:9595"}
+
+
+def _fresh(monkeypatch):
+    addresses._forget_resolved()
+    monkeypatch.setattr(addresses, "RESOLVE_TTL", 300.0)
+
+
+def test_a_slow_lookup_cannot_hold_the_caller(monkeypatch):
+    """26.9.3: the sealed runtime's resolver took 35s to fail the `.local`
+    name, and `/host` — which the installer's health check waits on — hung
+    behind it, so every fresh install read "did not become healthy". A
+    lookup that has not answered within the deadline is no evidence, and
+    the caller gets that answer now, not when the resolver gives up."""
+    import threading
+    import time
+    _fresh(monkeypatch)
+    release = threading.Event()
+
+    def slow(name):
+        release.wait(5)
+        return "192.168.0.106"
+    started = time.monotonic()
+    assert addresses._resolve_local("slow.local", resolver=slow, deadline=0.05) is None
+    assert time.monotonic() - started < 1.0
+    release.set()
+
+
+def test_a_slow_lookup_cannot_hold_the_process_exit():
+    """The caller was already free; the PROCESS was not. Executor threads
+    are joined at interpreter exit, so `pair --json` — a one-shot command
+    the menu bar runs and waits on — printed its answer in a second and
+    then sat 35s at exit behind the resolver's failure, and Get a Code
+    showed no dialog until the journey had given up (26.9.4 proof). A
+    process whose lookup is still running exits when it is done."""
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+    script = (
+        "import time\n"
+        "from jstack_host import addresses\n"
+        "def slow(name):\n"
+        "    time.sleep(8)\n"
+        "    return '192.168.0.106'\n"
+        "print(addresses._resolve_local('slow.local', resolver=slow, deadline=0.05))\n")
+    started = time.monotonic()
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                         timeout=30, cwd=str(Path(addresses.__file__).resolve().parents[1]))
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "None"
+    assert time.monotonic() - started < 4.0
+
+
+def test_a_lookup_that_lands_serves_the_calls_after_it(monkeypatch):
+    """The first caller does not wait past the deadline; the answer still
+    lands, and the next caller reads it instead of resolving again."""
+    import threading
+    _fresh(monkeypatch)
+    release = threading.Event()
+    calls = []
+
+    def slow(name):
+        calls.append(name)
+        release.wait(5)
+        return "192.168.64.1"
+    assert addresses._resolve_local("late.local", resolver=slow, deadline=0.05) is None
+    release.set()
+    # The one pending lookup finishes; a call after it reads its answer.
+    for _ in range(50):
+        if addresses._resolve_local("late.local", resolver=slow, deadline=0.2) == "192.168.64.1":
+            break
+    assert addresses._resolve_local("late.local", resolver=slow, deadline=0.05) == "192.168.64.1"
+    assert calls == ["late.local"]
+
+
+def test_a_failed_lookup_is_none_and_cached(monkeypatch):
+    _fresh(monkeypatch)
+    calls = []
+
+    def failing(name):
+        calls.append(name)
+        raise OSError("nodename nor servname provided, or not known")
+    assert addresses._resolve_local("gone.local", resolver=failing, deadline=1.0) is None
+    assert addresses._resolve_local("gone.local", resolver=failing, deadline=1.0) is None
+    assert calls == ["gone.local"]
+
+
+def test_a_stale_answer_is_looked_up_again(monkeypatch):
+    _fresh(monkeypatch)
+    monkeypatch.setattr(addresses, "RESOLVE_TTL", 0.0)
+    calls = []
+
+    def fast(name):
+        calls.append(name)
+        return "192.168.0.106"
+    assert addresses._resolve_local("mac.local", resolver=fast, deadline=1.0) == "192.168.0.106"
+    assert addresses._resolve_local("mac.local", resolver=fast, deadline=1.0) == "192.168.0.106"
+    assert calls == ["mac.local", "mac.local"]

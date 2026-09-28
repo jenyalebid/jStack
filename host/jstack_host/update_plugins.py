@@ -137,6 +137,49 @@ def advance(root: str, sha: str) -> None:
     command([*git, "reset", "--quiet", "--hard", "HEAD"])
 
 
+def local_checkout() -> Path | None:
+    """The jStack checkout the installer makes on this Mac, if it is one.
+
+    `$JSTACK_CHECKOUT`, default `~/jStack` — the same two answers install.sh
+    gives. A directory counts only when it is a git tree AND carries this
+    plugin: `.git` alone is any repo, the plugin alone is any copy.
+    """
+    root = Path(os.environ.get("JSTACK_CHECKOUT") or Path.home() / "jStack")
+    if (root / ".git").exists() and (root / "plugins/jstack/.claude-plugin/plugin.json").exists():
+        return root
+    return None
+
+
+def readopt(provider: dict, sha: str | None) -> Path | None:
+    """The checkout a stage-registered provider goes back to, or None.
+
+    Before 564f571 an update rewrote the registration from `~/jStack` to the
+    shipped copy inside its stage, and every update since carried that forward:
+    the copy is relocated stage to stage while the checkout beside it is never
+    advanced and never read — dead weight that looks live to a developer, to
+    `jstack-doctor` and to the nightly heal (#163). The doctor now fails that
+    registration wherever a checkout exists; this is the updater's half. The
+    checkout is moved to the commit this update installs, exactly as a
+    registered checkout is, and the registration follows it home. What
+    `advance` refuses — uncommitted work, most of all — refuses the
+    re-adoption too: the stage keeps serving, the update still lands, and the
+    reason is said rather than swallowed.
+    """
+    if provider.get("checkout") or not sha:
+        return None
+    checkout = local_checkout()
+    if checkout is None:
+        return None
+    try:
+        advance(str(checkout), sha)
+    except ReleaseError as exc:
+        import sys
+        print(f"jstack update: the registration stays on its release stage — {exc}",
+              file=sys.stderr, flush=True)
+        return None
+    return checkout
+
+
 def install(providers: list[dict], stack: Path, sha: str | None = None):
     # Every checkout the engines read the plugin from, moved once, before any
     # engine is told to re-read it. A shipped copy has no commit to move to.
@@ -145,22 +188,70 @@ def install(providers: list[dict], stack: Path, sha: str | None = None):
             advance(root, sha)
     for provider in providers:
         # A checkout stays where it is; the update moved its contents, not its
-        # path. Only a shipped copy is relocated onto what was just staged.
+        # path. A shipped copy is relocated — back onto the checkout this Mac
+        # has when it has one, else onto what was just staged.
         if not provider.get("checkout"):
+            home = readopt(provider, sha)
+            target = str(home) if home else str(stack)
             for field in ("config", "hooks", "marketplace"):
                 if provider.get(field):
-                    replace_references(Path(provider[field]), provider["root"], str(stack))
-            move_shell_references(provider["root"], str(stack))
+                    replace_references(Path(provider[field]), provider["root"], target)
+            move_shell_references(provider["root"], target)
         binary = provider["binary"]
         # Where the engine is told to read the plugin from. Naming the stage
         # for a checkout would move the registration the branch above just
         # declined to move.
-        source = provider["root"] if provider.get("checkout") else str(stack)
+        source = provider["root"] if provider.get("checkout") else target
         if provider["kind"] == "claude":
             run([binary, "plugin", "update", "jstack@jStack", "--scope", "user"])
         else:
-            run([binary, "plugin", "marketplace", "add", source])
+            register_codex_marketplace(binary, source)
             run([binary, "plugin", "add", "jstack@jstack", "--json"])
+            # A release can change hooks/hooks.json, and nothing before this
+            # ever re-ran the install-time write of the operator-owned config
+            # (#141) — so a managed machine kept trusting hooks that no
+            # longer matched what the plugin now ships. Best-effort: a
+            # machine with no passwordless path to /etc/codex logs the same
+            # message `codex_setup.py` would print and is left exactly where
+            # it was; `jstack-doctor`'s `codex hooks` check already catches
+            # that drift and names the manual re-run that clears it. Never
+            # fatal to the update itself, on the same reasoning as the doctor
+            # check reading this same manifest.
+            from .codex_hooks import install_managed_config
+            try:
+                print(install_managed_config(Path(source) / "plugins/jstack"))
+            except OSError as exc:
+                print(f"codex hooks not refreshed: {exc}")
+
+
+def registered_codex_root(binary: str) -> Path | None:
+    """The directory codex holds for the `jstack` marketplace, resolved."""
+    for line in run([binary, "plugin", "marketplace", "list"]).splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0] == "jstack":
+            return Path(parts[1].strip()).resolve()
+    return None
+
+
+def register_codex_marketplace(binary: str, source: str) -> None:
+    """`codex plugin marketplace add`, accepting a registration that already
+    names this directory.
+
+    codex-cli 0.157 canonicalizes the path it is given and compares that with
+    the string it stored, so a registration written before the checkout moved
+    behind a symlink (`~/jStack` -> jStack-Project/jStack-Code) is refused as
+    "a different source" although both name the same tree — which stopped the
+    hub's own 26.9.2 update (#220). The registration is left as it is: the
+    engine reads the plugin through it fine, and only a registration that
+    really names another directory is an error.
+    """
+    try:
+        run([binary, "plugin", "marketplace", "add", source])
+    except ReleaseError as exc:
+        if "already added from a different source" not in str(exc):
+            raise
+        if registered_codex_root(binary) != Path(source).resolve():
+            raise
 
 
 def observed(providers: list[dict]) -> dict:

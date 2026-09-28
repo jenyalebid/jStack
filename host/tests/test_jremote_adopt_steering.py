@@ -15,6 +15,7 @@ file exists for. So a peer that is live but silent must still get the file.
 from __future__ import annotations
 
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -65,7 +66,7 @@ def hub(tmp_path, monkeypatch):
 
 def _adopt(name="Work Mac", offline=False, **over):
     fields = {"name": name, "offline": offline, "ttl": None, "port": None,
-              "json": False, "state_dir": None}
+              "json": False, "state_dir": None, "reinstall": False}
     return SimpleNamespace(**{**fields, **over})
 
 
@@ -109,7 +110,39 @@ def test_a_refused_offline_adopt_mints_no_code(hub, monkeypatch):
     assert hub.minted == []
 
 
+def test_the_refusal_names_the_reinstall_route(hub, monkeypatch, capsys):
+    """The third case the refusal used to leave unnamed: a live Mac about to be
+    purged, whose only remaining route in is the file minted before the purge."""
+    _mesh(monkeypatch, {"work-mac"})
+
+    cli._cmd_adopt(_adopt(offline=True))
+    assert "adopt 'Work Mac' --offline --reinstall" in capsys.readouterr().err
+
+
 # ── and the cases that must NOT be refused ───────────────────────────────────
+
+def test_a_live_mac_about_to_be_purged_gets_the_file_when_told_so(hub, monkeypatch):
+    """#178. The peer is live and answers, and the operator knows what the peer
+    table cannot: after the purge this Mac has no jStack and no route here. The
+    carried file is minted now, while the tunnel is still up, and the standing
+    peer is left alone for `_adopt_offline` to reuse."""
+    _mesh(monkeypatch, {"work-mac"})
+
+    assert cli._cmd_adopt(_adopt(offline=True, reinstall=True)) == 0
+    assert hub.carried, "the reinstall route was refused like a stray file"
+    assert hub.minted and hub.minted[-1]["name"] == "Work Mac"
+
+
+def test_reinstall_without_offline_is_refused_before_minting(hub, monkeypatch, capsys):
+    """A flag that silently does nothing is a trap; without --offline there is
+    no carried file for it to describe."""
+    _mesh(monkeypatch, set())
+
+    assert cli._cmd_adopt(_adopt(reinstall=True)) == 2
+    assert hub.minted == []
+    assert "--offline" in capsys.readouterr().err
+
+
 
 def test_a_live_peer_that_does_not_answer_still_gets_the_file(hub, monkeypatch):
     """The case the whole carried flow exists for, and the one a check on the
@@ -274,3 +307,70 @@ def test_leaves_json_carries_the_peer_name_and_liveness(hub, monkeypatch,
     assert cli._cmd_leaves(SimpleNamespace(json=True, state_dir=None)) == 0
     rows = json.loads(capsys.readouterr().out)
     assert [(r["peer"], r["online"]) for r in rows] == [("work-mac", True)]
+
+
+# ── `--json` owns stdout: the first-adopt provisioning talks on stderr ────────
+
+def test_json_adopt_keeps_stdout_for_the_document_while_becoming_a_hub(
+        hub, monkeypatch, capsys):
+    """#206. A fresh standalone hub provisions the mesh on its first adopt and
+    said so on stdout — the progress line plus everything the sudo'd installer
+    printed — so a caller parsing `adopt --json` met a keypair before the
+    JSON. With `--json`, stdout carries the one document and nothing else."""
+    import subprocess
+
+    monkeypatch.setattr(mode, "current", lambda: {"mode": "local", "note": ""})
+    pairable = {"ok": False}
+    monkeypatch.setattr(tunnel, "can_pair", lambda: pairable["ok"])
+    monkeypatch.setattr(tunnel, "rebind", lambda: pairable.update(ok=True))
+    script = hub.store.db_path.parent / "install_hub.sh"
+    script.write_text("#!/bin/sh\n")
+    monkeypatch.setattr("jstack_host.hostenv.peer_script",
+                        lambda: script.parent / "wg_peer.py")
+    from jstack_host import open_mode
+    monkeypatch.setattr(open_mode, "lan_ip", lambda: "192.168.0.106")
+    _mesh(monkeypatch, set())
+
+    ran = []
+
+    def installer(argv, **kw):
+        ran.append(kw.get("stdout"))
+        # what the real installer prints: it must land where `stdout=` points
+        print("keypair written, wg0.conf installed, tunnel up",
+              file=kw.get("stdout") or sys.stdout)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", installer)
+
+    assert cli._cmd_adopt(_adopt(json=True)) == 0
+    out = capsys.readouterr()
+    doc = json.loads(out.out)            # the whole of stdout is the document
+    assert doc["kind"] == "host" and doc["name"] == "Work Mac"
+    assert "making this Mac a mesh hub" in out.err
+    assert "wg0.conf" in out.err
+    assert ran and ran[0] is sys.stderr, "the installer's output was not redirected"
+
+
+def test_a_plain_adopt_still_narrates_the_provisioning_on_stdout(
+        hub, monkeypatch, capsys):
+    """The human-readable path keeps its progress where a person reads it."""
+    import subprocess
+
+    monkeypatch.setattr(mode, "current", lambda: {"mode": "local", "note": ""})
+    pairable = {"ok": False}
+    monkeypatch.setattr(tunnel, "can_pair", lambda: pairable["ok"])
+    monkeypatch.setattr(tunnel, "rebind", lambda: pairable.update(ok=True))
+    script = hub.store.db_path.parent / "install_hub.sh"
+    script.write_text("#!/bin/sh\n")
+    monkeypatch.setattr("jstack_host.hostenv.peer_script",
+                        lambda: script.parent / "wg_peer.py")
+    from jstack_host import open_mode
+    monkeypatch.setattr(open_mode, "lan_ip", lambda: "192.168.0.106")
+    _mesh(monkeypatch, set())
+    monkeypatch.setattr(subprocess, "run",
+                        lambda argv, **kw: SimpleNamespace(returncode=0))
+
+    assert cli._cmd_adopt(_adopt()) == 0
+    out = capsys.readouterr()
+    assert "making this Mac a mesh hub" in out.out
+    assert "jstack-host attach" in out.out

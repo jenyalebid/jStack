@@ -300,6 +300,31 @@ else
     pass "status raised nothing"
 fi
 
+# ── status reads the probe PAIR: an orphan holding the port is named (#47) ────
+# The two probes are each honest alone; only their combination proves an
+# unmanaged process. Pure function, loaded from the tool itself.
+out8=$(JSTACK_SCHEDULER_TOOL="$TOOL" "$PY" - <<'PYEOF' 2>&1
+import importlib.machinery, importlib.util, os
+spec = importlib.util.spec_from_loader("jss", importlib.machinery.SourceFileLoader(
+    "jss", os.environ["JSTACK_SCHEDULER_TOOL"]))
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+dead_but_answering = m.status_diagnosis("ours", False, True, 9091, "x.label")
+assert any("unmanaged scheduler holds the port" in l for l in dead_but_answering), dead_but_answering
+assert any("lsof -ti :9091" in l for l in dead_but_answering), dead_but_answering
+up_but_silent = m.status_diagnosis("ours", True, False, 9091, "x.label")
+assert any("running but nothing answers" in l for l in up_but_silent), up_but_silent
+assert m.status_diagnosis("ours", True, True, 9091, "x.label") == []
+assert m.status_diagnosis("ours", False, False, 9091, "x.label") == []
+assert m.status_diagnosis("absent", False, True, 9091, "x.label") == []  # its own note already
+print("ok")
+PYEOF
+)
+if [ "$out8" = "ok" ]; then
+    pass "status names an unmanaged holder when the job is dead and the API answers"
+else
+    fail "status pair diagnosis: $out8"
+fi
+
 # ── Hub mode: a Hub that seals the role owns it; this tool writes nothing ─────
 # The bundle is built here, so the refusal is proved on a machine that has no
 # Hub and the standalone half stays provable on a machine that has one.

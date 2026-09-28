@@ -15,7 +15,8 @@
       "description": "string — one-line description of what the test verifies"
     },
     "subsystems": "array of nested entries",
-    "notes": "free-form operator notes"
+    "notes": "free-form operator notes",
+    "activation": "optional object — user-scope wiring this system needs to actually run, beyond shipping the files (jenyalebid/jStack#134). Keys are a CLOSED vocabulary interpreted by host/jstack_host/activation.py: claude_settings (~/.claude/settings.json — statusLine, hooks), codex_mcp (`codex mcp add` entries), codex_hooks (the managed Codex hooks config), codex_shell_env (shell profile exports), shell_path (a directory on PATH), user_links (symlinks into user-scope dirs). An unrecognized key is refused, never silently skipped — see activation.desired_from_systems. jstack-doctor's `activation` check grades every declared entry against the machine."
   },
   "systems": [
     {
@@ -608,6 +609,27 @@
       "notes": "Args: [today|yesterday|<date>], date normalized in python3 (defaults today). Portable repo discovery: repo_root userConfig, else parent of agent_root, scanned for */.git. Ownership: agent_registry userConfig (else {agent_root}/agents.json) — each agent entry's {workspace, repos}; repo<->registry matched by normalized name (case + _/- folded) against BOTH local dir basename and git origin, so Acme_iOS==Acme-iOS. Owning-agent context delivered by instructing the auditor to read {workspace}/CLAUDE.md + {repo}/CLAUDE.md first (in-process subagents don't inherit a foreign CLAUDE.md via cwd); unowned repo -> generic auditor, coverage never drops. Per-day commits via `git log --all --no-merges --since/--until --date=local` so develop/feature/pushed work is covered. Verdict logged to the AUDITED day's file: `log_event day-audit --at <now> --date <DAY> --pipeline-task day-audit#<DAY>` — one block per day, replaced on re-run. Report-only on repos (never edits code); high-severity findings re-verified by the parent before repeating. /jstack:day-audit."
     },
     {
+      "id": "review-config",
+      "kind": "system",
+      "name": "Review Config Resolution",
+      "status": "live",
+      "description": "The one place review.json's location is decided. root.py reads no config file by contract, so thirteen readers (5 hooks, 8 bins) each carried the same $JSTACK_REVIEW_CONFIG / ~/.claude/jstack/review.json literal independently — agreeing by coincidence, not construction. review_config.py is a stdlib-only sibling of root.py exposing path() and load(); every reader imports it instead of restating the default.",
+      "code": [
+        "review_config.py"
+      ],
+      "config": [
+        "~/.claude/jstack/review.json"
+      ],
+      "docs": [],
+      "test": {
+        "type": "script",
+        "path": "tests/review-config.sh",
+        "description": "Default resolution against a redirected HOME with no override; JSTACK_REVIEW_CONFIG overriding both the path and the loaded contents; malformed JSON and a non-dict top level both degrading to {} rather than raising; and a grep guard that no hook, bin or skill outside this module still constructs the review.json path itself — the exact drift jenyalebid/jStack#190 was filed over."
+      },
+      "subsystems": [],
+      "notes": "Imports nothing beyond the stdlib, for the same reason root.py does not: loaded both as a sibling and by standalone bin/ scripts that insert the plugin dir themselves."
+    },
+    {
       "id": "root-derivation",
       "kind": "system",
       "name": "Root Derivation",
@@ -834,7 +856,7 @@
       "kind": "system",
       "name": "Org-identity scrub gate",
       "status": "live",
-      "description": "The plugin was built inside one private operation before it shipped public, and its release history is squashed: whatever identity sits in the tree at a cut is permanent. This gate scans every git-tracked file (contents and paths) for the terms of that operation — its people, its principal's persona, its closed-source siblings, its machine paths — and fails naming file, line and term. One extensible term list; a per-(file, term) allowlist where each load-bearing wire literal (the shipped default board name, the commit-identity allowlist's own addresses) carries its reason; a stale allowlist entry fails too, so an exemption outlives its carrier by zero releases. Lowercase `boss`/`@boss` is deliberately off the list: the refused address and the `--from boss` convention are shipped behavior, only the capitalized persona is banned.",
+      "description": "The plugin was built inside one private operation before it shipped public, and its release history is squashed: whatever identity sits in the tree at a cut is permanent. This gate scans every file the working tree would ship — tracked, plus untracked files git does not ignore, since a new file is untracked exactly when its author runs the gate before `git add` — (contents and paths) for the terms of that operation — its people, its principal's persona, its closed-source siblings, its machine paths — and fails naming file, line and term. One extensible term list; a per-(file, term) allowlist where each load-bearing wire literal (the shipped default board name, the commit-identity allowlist's own addresses) carries its reason; a stale allowlist entry fails too, so an exemption outlives its carrier by zero releases. Lowercase `boss`/`@boss` is deliberately off the list: the refused address and the `--from boss` convention are shipped behavior, only the capitalized persona is banned.",
       "code": [
         "tests/scrub.sh"
       ],
@@ -842,7 +864,24 @@
         "type": "script",
         "path": "tests/scrub.sh",
         "description": "Runs the scan itself against the real tree: exit 0 with the scanned-file count when no org term appears outside the reasoned allowlist, exit 1 naming every file:line and term when one does."
-      }
+      },
+      "subsystems": [
+        {
+          "id": "identity-scrub-untracked",
+          "kind": "system",
+          "name": "Scrub reach into unstaged files",
+          "status": "live",
+          "description": "The scrub once listed only `git ls-files`, so a new file run through the gate before staging passed unread and reached public main. The scan now also lists `--others --exclude-standard`, and its count line splits tracked from untracked.",
+          "code": [
+            "tests/scrub.sh"
+          ],
+          "test": {
+            "type": "script",
+            "path": "tests/scrub-untracked.sh",
+            "description": "Throwaway shared clone of HEAD with the working copy's scrub.sh: the clean tree passes; an untracked file holding a banned term fails named file:line and is counted as untracked; an untracked file whose name holds a term fails; a .gitignore'd file is not scanned."
+          }
+        }
+      ]
     },
     {
       "id": "release-reachability",

@@ -300,3 +300,113 @@ def test_cli_files_subcommands_dispatch(monkeypatch, capsys):
     monkeypatch.setattr(fileshare, "status", lambda: {"ready": True})
     assert cli.main(["files", "status"]) == 0
     assert '"ready": true' in capsys.readouterr().out
+
+
+# --- applying without root: the administrator prompt ----------------------------
+#
+# The sealed runtime refuses to start as root, so `sudo jstack-host files
+# setup --apply` cannot exist.  Applying as the logged-in user hands the plan —
+# fixed system tools only — to the OS administrator prompt.
+
+def _apply_rig(monkeypatch, commands, *, secure=True):
+    monkeypatch.setattr(fileshare.os, "geteuid", lambda: 501)
+    monkeypatch.setattr(fileshare, "setup_plan", lambda observed=None: commands)
+    monkeypatch.setattr(fileshare, "status", lambda: {"secure": secure, "ready": False})
+    calls = []
+
+    def runner(argv, **kw):
+        calls.append((argv, kw.get("input", "")))
+        return _done(argv, out="")
+    return calls, runner
+
+
+def test_apply_without_root_goes_through_the_administrator_prompt(monkeypatch, tmp_path):
+    commands = [
+        [fileshare.SYSADMINCTL, "-addUser", fileshare.ACCOUNT, "-fullName",
+         "jStack File Sharing", "-shell", fileshare.ACCOUNT_SHELL, "-home",
+         fileshare.ACCOUNT_HOME, "-password", "-"],
+        [fileshare.PWPOLICY, "-u", fileshare.ACCOUNT, "-sethashtypes", "SMB-NT", "on"],
+        [fileshare.DSCL, ".", "-passwd", f"/Users/{fileshare.ACCOUNT}"],
+        [fileshare.SHARING, "-r", "hostuser’s Public Folder"],
+        [fileshare.SHARING, "-a", str(tmp_path / "Agents"), "-n", "Agents", "-g", "000", "-E", "1"],
+    ]
+    calls, runner = _apply_rig(monkeypatch, commands)
+    monkeypatch.setattr(fileshare, "_collect_password", lambda: "s3cret pass")
+    written = []
+    real = fileshare._private_password_file
+
+    def spy(password):
+        path = real(password)
+        written.append(path)
+        return path
+    monkeypatch.setattr(fileshare, "_private_password_file", spy)
+
+    result = fileshare.setup(apply=True, runner=runner)
+
+    assert result["applied"] is True
+    [(argv, source)] = calls
+    assert argv == [fileshare.OSASCRIPT, "-"]
+    assert source.startswith("do shell script ")
+    assert "with administrator privileges" in source
+    # the password travels by file, never in the script or on argv
+    assert "s3cret" not in source
+    assert f'pw=$({fileshare.CAT} ' in source
+    assert '-password \\"$pw\\"' in source
+    assert f'-passwd /Users/{fileshare.ACCOUNT} \\"$pw\\"' in source
+    assert "-password -" not in source
+    assert "sharing -r 'hostuser’s Public Folder'" in source
+    assert "set -eu" in source
+    # and the file is gone once the prompt has closed
+    assert written and not written[0].exists() and not written[0].parent.exists()
+
+
+def test_apply_without_root_and_without_a_password_step_asks_for_none(monkeypatch, tmp_path):
+    commands = [[fileshare.SHARING, "-a", str(tmp_path / "Agents"), "-n", "Agents"]]
+    calls, runner = _apply_rig(monkeypatch, commands)
+    monkeypatch.setattr(fileshare, "_collect_password",
+                        lambda: (_ for _ in ()).throw(AssertionError("asked")))
+    result = fileshare.setup(apply=True, runner=runner)
+    assert result["applied"] is True
+    assert "pw=" not in calls[0][1]
+
+
+def test_apply_reports_a_refused_or_failed_prompt(monkeypatch, tmp_path):
+    commands = [[fileshare.SHARING, "-a", str(tmp_path / "Agents"), "-n", "Agents"]]
+    monkeypatch.setattr(fileshare.os, "geteuid", lambda: 501)
+    monkeypatch.setattr(fileshare, "setup_plan", lambda observed=None: commands)
+    monkeypatch.setattr(fileshare, "status", lambda: {"secure": False})
+
+    def refused(argv, **kw):
+        return _done(argv, code=1, err="User canceled. (-128)")
+    with pytest.raises(fileshare.FileShareError, match="administrator approval"):
+        fileshare.setup(apply=True, runner=refused)
+
+
+def test_apply_without_root_still_demands_a_secure_result(monkeypatch, tmp_path):
+    commands = [[fileshare.SHARING, "-a", str(tmp_path / "Agents"), "-n", "Agents"]]
+    calls, runner = _apply_rig(monkeypatch, commands, secure=False)
+    with pytest.raises(fileshare.FileShareError, match="still not secure"):
+        fileshare.setup(apply=True, runner=runner)
+
+
+def test_off_without_root_removes_through_the_administrator_prompt(monkeypatch):
+    monkeypatch.setattr(fileshare.os, "geteuid", lambda: 501)
+    monkeypatch.setattr(fileshare, "status", lambda: {
+        "secure": False, "shares": [{"name": "Agents", "present": True}],
+        "unexpected": [{"name": "home"}]})
+    calls = []
+
+    def runner(argv, **kw):
+        calls.append(kw.get("input", ""))
+        return _done(argv)
+    result = fileshare.off(apply=True, runner=runner)
+    assert result["applied"] is True
+    [source] = calls
+    assert "sharing -r Agents" in source and "sharing -r home" in source
+    assert "with administrator privileges" in source
+
+
+def test_administrator_script_refuses_a_password_step_with_no_password():
+    with pytest.raises(fileshare.FileShareError, match="none was collected"):
+        fileshare._administrator_script(
+            [[fileshare.DSCL, ".", "-passwd", f"/Users/{fileshare.ACCOUNT}"]], None)

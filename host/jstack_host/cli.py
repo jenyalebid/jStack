@@ -65,15 +65,22 @@ def _cmd_updates_enable(args) -> int:
 
 
 def _updates_config(args):
-    """The updater config this command acts on, or None with the reason said."""
+    """The updater config this command acts on, or None with the reason said.
+
+    Through `_adopt`, like every other read command, because the config lives
+    in the host's state dir and on this operation's hub that directory is
+    named by the installed service and by nothing else. Resolving the package
+    default instead answered `~/.local/state/jremote` — a directory the live
+    host has never read — so `channel` reported "updates are not enabled" on a
+    hub whose updater was enabled and current, and `build`, the only door that
+    builds, refused the same way. That is #34 again, in the two verbs the
+    builds-not-releases migration added: `enable` adopted from the first
+    commit and these two never did.
+    """
     import json
-    import os
     from . import hostenv
 
-    state_dir = _path(args.state_dir)
-    if state_dir is not None:
-        os.environ["JREMOTE_STATE_DIR"] = str(state_dir)
-        hostenv.reset_profile()
+    _adopt(args)
     config_path = hostenv.state_dir() / "updates" / "config.json"
     if not config_path.exists():
         print("updates are not enabled on this host — run `jstack-host updates enable`",
@@ -555,7 +562,7 @@ def _adopt_offline(name: str, row: dict, port: int, as_json: bool = False) -> in
     return 0
 
 
-def _become_hub_for_adopt(m, open_mode, tunnel) -> None:
+def _become_hub_for_adopt(m, open_mode, tunnel, as_json: bool = False) -> None:
     """Provision the mesh on first adopt so a standalone hub can mint a leaf.
 
     Only from a standalone (`local`) hub — a managed leaf was already turned
@@ -566,7 +573,12 @@ def _become_hub_for_adopt(m, open_mode, tunnel) -> None:
     `install_hub.sh` is idempotent and needs root for the tunnel daemons, so it
     is `sudo`; on failure we say nothing here and let the detailed refusal that
     follows stand. `rebind()` re-reads the table so `can_pair()` sees the conf
-    this just wrote."""
+    this just wrote.
+
+    With `--json` the caller owns stdout for one document, so the progress
+    line and everything the installer prints go to stderr instead — a parser
+    reading stdout otherwise meets a keypair and a wg0.conf before the JSON
+    (#206)."""
     if m.get("mode") != "local":
         return
     script = hostenv.peer_script().parent / "install_hub.sh"
@@ -578,12 +590,14 @@ def _become_hub_for_adopt(m, open_mode, tunnel) -> None:
               "leaf dials — connect it to the network and adopt again.",
               file=sys.stderr)
         return
+    progress = sys.stderr if as_json else sys.stdout
     print(f"making this Mac a mesh hub so it can hand out a leaf tunnel "
           f"(endpoint {endpoint}:51820) — this needs your password once.",
-          flush=True)
+          file=progress, flush=True)
     try:
         subprocess.run(["sudo", "bash", str(script), "--endpoint",
-                        f"{endpoint}:51820"], check=False)
+                        f"{endpoint}:51820"], check=False,
+                       stdout=sys.stderr if as_json else None)
     except OSError as exc:
         print(f"could not run the hub installer: {exc}", file=sys.stderr)
         return
@@ -631,7 +645,8 @@ def _cmd_adopt(args) -> int:
         # Mac a hub" — so do it, once, here, instead of handing the user a
         # dead-end. Provisioning brings up the tunnel daemons (root) with this
         # Mac's own LAN address as the endpoint the leaf will dial.
-        _become_hub_for_adopt(m, open_mode, tunnel)
+        _become_hub_for_adopt(m, open_mode, tunnel,
+                              as_json=bool(getattr(args, "json", False)))
     if not tunnel.can_pair():
         # `can_pair()` and not the mode's hub test, deliberately: the mode will
         # call a machine a hub on the strength of holding `10.66.0.1`, which is
@@ -671,7 +686,21 @@ def _cmd_adopt(args) -> int:
     # offline path it is worse than that — `_adopt_offline` writes the code
     # into the machine's bundle on its way past, so a refusal printed
     # afterwards would arrive over a JOIN.md that had already been rewritten.
-    if offline:
+    reinstall = getattr(args, "reinstall", False)
+    if reinstall and not offline:
+        print("--reinstall is for the carried file: pass it with --offline. "
+              "A Mac that is staying installed redeems the printed line from "
+              "where it stands.", file=sys.stderr)
+        return 2
+    if offline and reinstall:
+        # The operator has said what the peer table cannot know: the named Mac
+        # is live now and is about to be purged. After the purge it has no
+        # jStack and no route here, so the carried file is exactly what it will
+        # need, and the only moment to mint it without a round trip is while the
+        # tunnel is still up (#178). `_adopt_offline` reuses a live peer's keys
+        # (`relift`), so the standing tunnel is untouched until the purge.
+        pass
+    elif offline:
         from . import presence
         live = presence.live_on_mesh(args.name)
         if live is not None:
@@ -688,7 +717,10 @@ def _cmd_adopt(args) -> int:
                 "here.\n\nIf that Mac has genuinely lost the tunnel — "
                 "reinstalled, or its keys gone — take\nits peer out first "
                 f"(`{tunnel.PEER_SCRIPT} remove {live['peer']}`), and this "
-                "flow is\nthe right one again.", file=sys.stderr)
+                "flow is\nthe right one again. If it is about to be purged and "
+                "reinstalled, mint the file\nnow, while the tunnel is up:\n\n"
+                f"    jstack-host adopt {shlex.quote(args.name)} --offline "
+                "--reinstall", file=sys.stderr)
             return 1
     elif not any(a["kind"] in ("lan", "mesh") for a in found):
         # Loopback only, and no mesh to fall back to: nothing another machine
@@ -869,6 +901,39 @@ def _cmd_leaves(args) -> int:
     return 0
 
 
+def _cmd_history(args) -> int:
+    """Who forgot a machine, revoked a grant, or cut a credential (audit.py).
+
+    A machine argument matches by key or name, forgotten rows included, and
+    pulls in the device credentials that belong to it — a leaf's removal is a
+    tile, a grant and a device row, and one question should show all three.
+    """
+    _adopt(args)
+    from . import grants
+    from .store import get_store
+    store = get_store()
+    targets = store.machine_targets(args.machine) if args.machine else None
+    rows = store.access_history(targets, limit=args.limit)
+    if getattr(args, "json", False):
+        import json
+        print(json.dumps(rows))
+        return 0
+    if not rows:
+        print(f"no access changes recorded{' for ' + args.machine if args.machine else ''}.")
+        return 0
+    for r in rows:
+        who = r["actor_name"] or r["actor"] or "?"
+        print(f"{grants.stamp(r['at'])}  {r['action']:<20} "
+              f"{r['target_name'] or r['target']}")
+        print(f"    by {who} via {r['via']} from {r['origin'] or '?'}")
+        extra = {k: v for k, v in r["detail"].items() if k != "argv"}
+        if r["user_agent"]:
+            extra["user_agent"] = r["user_agent"]
+        for k, v in extra.items():
+            print(f"    {k}: {' > '.join(v) if isinstance(v, list) else v}")
+    return 0
+
+
 def _cmd_token(args) -> int:
     _adopt(args)
     path = hostenv.token_path()
@@ -878,6 +943,23 @@ def _cmd_token(args) -> int:
         print(f"no token at {path} — run `jstack-host install` first.",
               file=sys.stderr)
         return 1
+    return 0
+
+
+def _cmd_shell_grants_refresh(args) -> int:
+    """Rebuild the hub's ssh blocks from its store — what startup does, on
+    demand."""
+    _adopt(args)
+    import json
+    from . import shell_grants
+    out = shell_grants.reconcile_hub()
+    if args.json:
+        print(json.dumps(out))
+    elif not out["hub"]:
+        print(out["note"])
+    else:
+        fixed = ", ".join(out["fixed"]) or "nothing — already current"
+        print(f"rebuilt {fixed} ({out['note']})")
     return 0
 
 
@@ -1650,6 +1732,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--offline", action="store_true",
                    help="write a folder to carry to a Mac that cannot reach "
                         "this hub yet (off-LAN, never on the mesh)")
+    p.add_argument("--reinstall", action="store_true",
+                   help="with --offline: the named Mac is live on the mesh now "
+                        "and about to be purged and reinstalled — mint the "
+                        "carried file while the tunnel is still up instead of "
+                        "refusing because it answers")
     p.add_argument("--ttl", type=int, default=None,
                    help="seconds the code stays good (default 600, at most "
                         "3600; with --offline default 3600, at most 7 days)")
@@ -1689,6 +1776,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--state-dir", default=None)
     p.set_defaults(fn=_cmd_leaves)
 
+    p = sub.add_parser("history",
+                       help="who forgot machines and revoked grants or devices")
+    p.add_argument("machine", nargs="?", default="",
+                   help="a machine key or name, forgotten ones included")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--state-dir", default=None)
+    p.set_defaults(fn=_cmd_history)
+
     p = sub.add_parser("welcome",
                        help="open the app on a session that checks this install")
     p.add_argument("--agent", default="",
@@ -1696,6 +1792,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "on this host)")
     p.add_argument("--state-dir", default=None)
     p.set_defaults(fn=_cmd_welcome)
+
+    p = sub.add_parser("shell-grants", help="the hub's ssh access to its machines")
+    sg = p.add_subparsers(dest="shell_grants_cmd", required=True)
+    sp = sg.add_parser("refresh",
+                       help="rebuild the hub's ssh config and keys block from its store")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--state-dir", default=None)
+    sp.set_defaults(fn=_cmd_shell_grants_refresh)
 
     p = sub.add_parser("token", help="print this host's bearer token")
     p.add_argument("--state-dir", default=None)
@@ -1874,13 +1978,13 @@ def build_parser() -> argparse.ArgumentParser:
     fs = files.add_parser("status", help="compare declared and observed sharing state")
     fs.set_defaults(fn=_cmd_files)
     fs = files.add_parser("setup", help="print or apply the selected-folder setup")
-    fs.add_argument("--agents-root", help="absolute installed Agents directory (required under sudo)")
+    fs.add_argument("--agents-root", help="absolute installed Agents directory (required when run as root)")
     fs.add_argument("--apply", action="store_true",
-                    help="apply as root (default: print a dry run)")
+                    help="apply through the administrator prompt (default: print a dry run)")
     fs.set_defaults(fn=_cmd_files)
     fs = files.add_parser("off", help="print or remove all SMB share points")
     fs.add_argument("--apply", action="store_true",
-                    help="remove as root (default: print a dry run)")
+                    help="remove through the administrator prompt (default: print a dry run)")
     fs.set_defaults(fn=_cmd_files)
     return ap
 
@@ -1922,7 +2026,9 @@ def main(argv: list[str] | None = None) -> int:
         from . import spawn
         return spawn.main(argv[1:])
     args = build_parser().parse_args(argv)
-    return args.fn(args) or 0
+    from . import audit
+    with audit.acting(audit.from_cli(args.cmd)):
+        return args.fn(args) or 0
 
 
 if __name__ == "__main__":

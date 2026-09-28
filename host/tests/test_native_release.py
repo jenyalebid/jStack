@@ -20,6 +20,18 @@ def manifest():
                                 "evidence_sha256": "b" * 64} for name in releases.RECEIPTS}}
 
 
+def test_rollback_is_accepted_absent_and_refused_false():
+    """#150. The field is a promise about a retired mechanism. Writers still
+    emit True for updaters already deployed; this reader no longer requires
+    it, and refuses only an explicit False."""
+    value = manifest()
+    del value["compatibility"]["rollback"]
+    releases.validate(value)
+    value["compatibility"]["rollback"] = False
+    with pytest.raises(ValueError, match="compatibility"):
+        releases.validate(value)
+
+
 def test_receipts_bind_the_exact_commit():
     """Not the artifact bytes: every Mac builds the Hub itself, so two honest
     installs of one commit never share a digest and binding on bytes would

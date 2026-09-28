@@ -21,6 +21,10 @@ def no_real_installer(tmp_path, monkeypatch):
     # supplies its own installer. An incomplete command mock must never reach
     # the public installer or mutate the developer machine's packages.
     monkeypatch.setenv("JSTACK_INSTALL_URL", (tmp_path / "no-installer").as_uri())
+    # The joiner reads the hub's ref from the updater config in the state dir;
+    # a test never reads this machine's. Empty state is a hub on main.
+    from jstack_host import hostenv
+    monkeypatch.setattr(hostenv, "state_dir", lambda: tmp_path / "state")
 
 
 @pytest.fixture
@@ -471,5 +475,61 @@ def test_an_installed_hub_can_name_the_installer_without_git(tmp_path, monkeypat
     monkeypatch.delenv("JSTACK_INSTALL_URL", raising=False)
     monkeypatch.setattr(sourcestamp, "_PKG", bundle_tree(tmp_path))
     monkeypatch.setattr(sourcestamp, "_stamp", None)
-    assert (adopt_offline._installer_url()
+    assert (adopt_offline._installer_url("main")
             == "https://raw.githubusercontent.com/jenyalebid/jStack/main/install.sh")
+    assert (adopt_offline._installer_url("dev")
+            == "https://raw.githubusercontent.com/jenyalebid/jStack/dev/install.sh")
+
+
+def _hub_on(tmp_path, channel):
+    """The updater config a hub moved onto `channel` holds; None = never enabled."""
+    import json
+    updates = tmp_path / "state" / "updates"
+    updates.mkdir(parents=True, exist_ok=True)
+    if channel is not None:
+        (updates / "config.json").write_text(json.dumps({"channel": channel}))
+
+
+@pytest.mark.parametrize("channel,ref", [(None, "main"), ("stable", "main"),
+                                         ("main", "main"), ("dev", "dev")])
+def test_the_joiner_follows_the_hubs_ref(tmp_path, monkeypatch, channel, ref):
+    """#161: a hub following dev minted joiners that put the far Mac on main.
+
+    `_installer_url` named `.../main/install.sh` whatever the hub followed and
+    the install line carried no `--ref`, so the joined Mac cloned and built
+    main, then failed the capability probe against the hub's release. Both
+    now come from the ref the hub follows, read as `updates channel` reads
+    it: absent config and the pre-ref `stable` spelling are main.
+    """
+    from jstack_host import sourcestamp
+    from test_jremote_sourcestamp import bundle_tree
+    monkeypatch.delenv("JSTACK_INSTALL_URL", raising=False)
+    monkeypatch.setattr(sourcestamp, "_PKG", bundle_tree(tmp_path))
+    monkeypatch.setattr(sourcestamp, "_stamp", None)
+    _hub_on(tmp_path, channel)
+    assert adopt_offline._hub_ref() == ref
+    body = adopt_offline._join_body("work-mac", "PQ4V-LUGA", 9090, "10.66.0.1")
+    assert f"INSTALLER=https://raw.githubusercontent.com/jenyalebid/jStack/{ref}/install.sh" in body
+    assert f'INSTALL_REF="{ref}"' in body
+    assert '--yes --ref $INSTALL_REF' in body
+    assert "--debug" not in body.split("INSTALL_REF=")[1].split("\n")[0]
+
+
+def test_a_hub_on_a_feature_branch_installs_the_leaf_as_a_debug_build(tmp_path, monkeypatch):
+    """install.sh refuses `--ref <not a line>` without `--debug`, and a hub on
+    such a branch is itself a debug build — the joiner says so on its behalf,
+    keeping the URL override in force for the download."""
+    _hub_on(tmp_path, "verify-journeys")
+    body = adopt_offline._join_body("work-mac", "PQ4V-LUGA", 9090, "10.66.0.1")
+    assert 'INSTALL_REF="verify-journeys --debug"' in body
+    # The URL override from the autouse fixture is still what gets downloaded.
+    assert f"INSTALLER={(tmp_path / 'no-installer').as_uri()}" in body
+
+
+def test_the_joiner_still_mints_when_the_updater_config_is_unreadable(tmp_path, monkeypatch):
+    """A corrupt config.json is the updater's problem, not a reason to refuse
+    a joiner: the hub is read as main, which is what an unset ref means."""
+    updates = tmp_path / "state" / "updates"
+    updates.mkdir(parents=True)
+    (updates / "config.json").write_text("{not json")
+    assert adopt_offline._hub_ref() == "main"

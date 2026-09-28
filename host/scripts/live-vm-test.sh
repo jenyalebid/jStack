@@ -145,13 +145,23 @@ else
 fi
 
 # ── install the host ──
-say "running host/install.sh in the guest"
-# JSTACK_INSTALLER is what the top-level install.sh exports, and host/install.sh
-# refuses without it (79ead6e: one installer, one door). This suite is the one
-# caller that cannot come through that door — it installs the WORKING TREE it
-# just copied in, and the top-level installer clones a ref instead. So it says
-# so, rather than dying at a guard meant for a human pasting the wrong path.
-vssh 'JSTACK_INSTALLER=1 bash ~/jStack/host/install.sh --yes 2>&1 | tail -25' || \
+say "building the host's virtualenv and registering it in the guest"
+# host/install.sh is gone (#192 — the unsealed installer beside the sealed Hub
+# is deleted). What it did for a bare host, reproduced directly: a private
+# venv beside the package, `pip install -e .` into it, the CLI symlinked onto
+# PATH, then jstack_host.install_host registers the LaunchAgent. This suite is
+# the one caller that cannot come through the sealed Hub build instead — it
+# installs the WORKING TREE it just copied in, and a signed, notarized app is
+# not something built from an arbitrary tree.
+vssh 'set -e
+PY=/opt/homebrew/bin/python3.12
+cd ~/jStack/host
+[ -x .venv/bin/python3 ] || "$PY" -m venv .venv
+./.venv/bin/python3 -m pip install --quiet --upgrade pip
+./.venv/bin/python3 -m pip install --quiet -e .
+mkdir -p ~/.local/bin
+ln -sf ~/jStack/host/.venv/bin/jstack-host ~/.local/bin/jstack-host
+./.venv/bin/python3 -m jstack_host.install_host install' 2>&1 | tail -25 || \
     die "host install failed — see the output above"
 
 # ── give the guest an agent to be about ──

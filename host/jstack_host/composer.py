@@ -163,6 +163,27 @@ def _wait(path: Path, exists: bool, timeout: float) -> bool:
     return path.exists() == exists
 
 
+def _parked(path: Path, timeout: float) -> str:
+    """The path the shim parked, or "" when none arrived in time.
+
+    Satisfied by CONTENT, never by existence. A shim from an older install
+    opens the park file before it writes it, so for a moment the file exists
+    and is empty; a poll that took `exists()` as the handoff read "" and then
+    tried to open `Path("")` — the current directory (#96). An empty park is
+    a shim that has not finished parking yet, so keep waiting."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            text = path.read_text().strip()
+        except OSError:
+            text = ""
+        if text:
+            return text
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(POLL)
+
+
 def lift(sid: str, replacement: str = "") -> dict:
     """Take the session's input buffer, and leave `replacement` in its place.
 
@@ -193,14 +214,15 @@ def lift(sid: str, replacement: str = "") -> dict:
     if r.returncode != 0:
         return {"lifted": False, "reason": (r.stderr or "send-keys failed").strip()}
 
-    if not _wait(_park(sid), True, PARK_TIMEOUT):
+    parked = _parked(_park(sid), PARK_TIMEOUT)
+    if not parked:
         # No shim answered. Either the session predates it (spawned without
         # VISUAL), or the agent had a dialog up and swallowed the key. The
         # buffer is untouched either way; the ctrl+G may have been a no-op.
         return {"lifted": False, "reason": "the CLI did not hand over its input box"}
 
     try:
-        prompt = Path(_park(sid).read_text().strip())
+        prompt = Path(parked)
         text = _without_reference_block(prompt.read_text())
     except OSError as e:
         # Release anyway — a shim left parked holds the session on a blank

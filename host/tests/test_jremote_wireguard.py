@@ -514,3 +514,235 @@ def test_revoking_removes_the_peer_and_the_client_files(hub):
     assert _run_peer(env, "remove", "work-mac").returncode == 0
     assert "# device: work-mac" not in (wg_dir / "wg0.conf").read_text()
     assert not (wg_dir / "clients" / "work-mac.conf").exists()
+
+
+def test_revoking_a_leaf_without_confirmation_is_refused(hub):
+    """jStack#55: a leaf's bundle is its only way back onto the mesh once it
+    is off the LAN — the 2026-09-11 incident. `remove` must not destroy that
+    silently; the keys and bundle stay until the caller says --yes."""
+    wg_dir, env = hub
+    _run_peer(env, "add", "--leaf", "studio")
+    r = _run_peer(env, "remove", "studio")
+    assert r.returncode != 0
+    assert "--yes" in r.stderr
+    assert "# device: studio" in (wg_dir / "wg0.conf").read_text()
+    assert (wg_dir / "clients" / "studio-leaf").is_dir()
+
+
+def test_revoking_a_leaf_with_confirmation_proceeds(hub):
+    wg_dir, env = hub
+    _run_peer(env, "add", "--leaf", "studio")
+    r = _run_peer(env, "remove", "studio", "--yes")
+    assert r.returncode == 0, r.stderr
+    assert "# device: studio" not in (wg_dir / "wg0.conf").read_text()
+    assert not (wg_dir / "clients" / "studio-leaf").exists()
+
+
+def test_revoking_an_ordinary_device_needs_no_confirmation(hub):
+    """The gate is specific to a leaf's bundle — an ordinary paired device
+    (a phone, re-pairable on the spot) is unchanged."""
+    wg_dir, env = hub
+    _run_peer(env, "add", "phone")
+    assert _run_peer(env, "remove", "phone").returncode == 0
+    assert "# device: phone" not in (wg_dir / "wg0.conf").read_text()
+
+
+def test_refresh_recopies_stale_bundle_scripts_and_keeps_the_key(hub):
+    """A bundle is minted with a byte copy of the three bringup scripts and the
+    folder ships wholesale — a script fixed after the mint leaves the old copy
+    waiting in every bundle on disk. `refresh` brings those copies up to the
+    tool's own and touches nothing else: keys, conf and env stay as minted."""
+    wg_dir, env = hub
+    assert _run_peer(env, "add", "--leaf", "studio").returncode == 0
+    bundle = wg_dir / "clients" / "studio-leaf"
+    conf_before = (bundle / "jrleaf.conf").read_bytes()
+    env_before = (bundle / "leaf.env").read_bytes()
+    (bundle / "wg_up.sh").write_text("#!/bin/bash\n# stale copy from an older mint\n")
+
+    r = _run_peer(env, "refresh")
+    assert r.returncode == 0, r.stderr
+    assert "studio-leaf: refreshed wg_up.sh" in r.stdout
+    assert (bundle / "wg_up.sh").read_bytes() == (WG_ROOT / "wg_up.sh").read_bytes()
+    assert (bundle / "wg_up.sh").stat().st_mode & 0o777 == 0o700
+    assert (bundle / "jrleaf.conf").read_bytes() == conf_before
+    assert (bundle / "leaf.env").read_bytes() == env_before
+
+    again = _run_peer(env, "refresh")
+    assert again.returncode == 0, again.stderr
+    assert "studio-leaf: current" in again.stdout
+
+
+# --- 4. liveness and prune (operator issue 91) ---------------------------------------
+#
+# There is no real NOPASSWD sudoers grant to test against — this tool never
+# writes one — so a fake `sudo` stands in for the two answers the real one
+# can give: pass the read through, or refuse it the way an ungranted seat's
+# always does today.
+
+def _fake_wg_show(tmp_path, handshake_line):
+    """`hub`'s own fake `wg` has no `show` case — nothing else needs one."""
+    script = tmp_path / "fake-wg-show"
+    script.write_text(
+        "#!/bin/bash\n"
+        'case "$1" in\n'
+        '  genkey) echo "CLIENT-PRIVATE-KEY" ;;\n'
+        '  pubkey) cat >/dev/null; echo "CLIENT-PUBLIC-KEY" ;;\n'
+        f'  show) echo "{handshake_line}" ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n")
+    script.chmod(0o755)
+    return script
+
+
+def _fake_sudo_passthrough(tmp_path):
+    script = tmp_path / "fake-sudo"
+    script.write_text('#!/bin/bash\nshift\nexec "$@"\n')
+    script.chmod(0o755)
+    return script
+
+
+def _fake_sudo_refuses(tmp_path):
+    script = tmp_path / "fake-sudo-refuse"
+    script.write_text(
+        '#!/bin/bash\necho "sudo: a password is required" >&2\nexit 1\n')
+    script.chmod(0o755)
+    return script
+
+
+def test_list_shows_a_recent_handshake_when_sudo_grants_the_read(hub, tmp_path):
+    wg_dir, env = hub
+    _run_peer(env, "add", "work-mac")
+    recent = int(time.time()) - 60
+    env2 = {
+        **env,
+        "WG_BIN": str(_fake_wg_show(tmp_path, f"CLIENT-PUBLIC-KEY\t{recent}")),
+        "WG_SUDO_BIN": str(_fake_sudo_passthrough(tmp_path)),
+        "WG_NAME_FILE": str(_write_iface_file(tmp_path)),
+    }
+    out = _run_peer(env2, "list").stdout
+    assert "work-mac" in out and "last handshake:" in out
+    assert "unknown" not in out and "never" not in out
+
+
+def test_list_reads_unknown_never_dead_when_sudo_refuses(hub, tmp_path):
+    """operator issue 91: no NOPASSWD entry exists today, so this is the everyday
+    case — and the row must read `unknown`, not something that reads as
+    evidence the peer is gone."""
+    wg_dir, env = hub
+    _run_peer(env, "add", "work-mac")
+    env2 = {
+        **env,
+        "WG_SUDO_BIN": str(_fake_sudo_refuses(tmp_path)),
+        "WG_NAME_FILE": str(_write_iface_file(tmp_path)),
+    }
+    out = _run_peer(env2, "list").stdout
+    assert "work-mac" in out
+    assert "unknown" in out
+    assert "dead" not in out
+
+
+def _write_iface_file(tmp_path):
+    path = tmp_path / "iface-name"
+    path.write_text("utun9")
+    return path
+
+
+def test_prune_dry_runs_by_default_then_removes_with_yes(hub, tmp_path):
+    wg_dir, env = hub
+    _run_peer(env, "add", "old-phone")
+    stale = int(time.time()) - 40 * 86400
+    env2 = {
+        **env,
+        "WG_BIN": str(_fake_wg_show(tmp_path, f"CLIENT-PUBLIC-KEY\t{stale}")),
+        "WG_SUDO_BIN": str(_fake_sudo_passthrough(tmp_path)),
+        "WG_NAME_FILE": str(_write_iface_file(tmp_path)),
+    }
+
+    dry = _run_peer(env2, "prune", "--older-than", "30")
+    assert dry.returncode == 0, dry.stderr
+    assert "would remove" in dry.stdout
+    assert "# device: old-phone" in (wg_dir / "wg0.conf").read_text()
+
+    r = _run_peer(env2, "prune", "--older-than", "30", "--yes")
+    assert r.returncode == 0, r.stderr
+    assert "removed old-phone" in r.stdout
+    assert "# device: old-phone" not in (wg_dir / "wg0.conf").read_text()
+
+
+def test_prune_never_touches_a_peer_it_cannot_read(hub, tmp_path):
+    """operator issue 91's own guard: unreadable is not evidence of dead, so even
+    `--older-than 0` (everything qualifies by age) must skip it."""
+    wg_dir, env = hub
+    _run_peer(env, "add", "mystery")
+    env2 = {
+        **env,
+        "WG_SUDO_BIN": str(_fake_sudo_refuses(tmp_path)),
+        "WG_NAME_FILE": str(_write_iface_file(tmp_path)),
+    }
+    r = _run_peer(env2, "prune", "--older-than", "0", "--yes")
+    assert r.returncode == 0, r.stderr
+    assert "skip mystery" in r.stdout
+    assert "# device: mystery" in (wg_dir / "wg0.conf").read_text()
+
+
+def test_prune_keeps_a_handshake_inside_the_window(hub, tmp_path):
+    wg_dir, env = hub
+    _run_peer(env, "add", "owner-phone")
+    recent = int(time.time()) - 60
+    env2 = {
+        **env,
+        "WG_BIN": str(_fake_wg_show(tmp_path, f"CLIENT-PUBLIC-KEY\t{recent}")),
+        "WG_SUDO_BIN": str(_fake_sudo_passthrough(tmp_path)),
+        "WG_NAME_FILE": str(_write_iface_file(tmp_path)),
+    }
+    r = _run_peer(env2, "prune", "--older-than", "30", "--yes")
+    assert r.returncode == 0, r.stderr
+    assert "# device: owner-phone" in (wg_dir / "wg0.conf").read_text()
+
+
+def _fake_wg_show_with_interfaces(tmp_path, handshake_line, iface="utun9"):
+    """A `wg` that also answers `show interfaces` — what a real hub answers
+    when the daemon's name file is root-only and the seat has to ask wg."""
+    script = tmp_path / "fake-wg-show-ifaces"
+    script.write_text(
+        "#!/bin/bash\n"
+        'case "$1" in\n'
+        '  genkey) echo "CLIENT-PRIVATE-KEY" ;;\n'
+        '  pubkey) cat >/dev/null; echo "CLIENT-PUBLIC-KEY" ;;\n'
+        '  show) if [ "$2" = interfaces ]; then echo "' + iface + '"; '
+        f'else echo "{handshake_line}"; fi ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n")
+    script.chmod(0o755)
+    return script
+
+
+def test_list_finds_the_interface_through_wg_when_the_name_file_is_unreadable(hub, tmp_path):
+    """On the real hub the tunnel daemon writes its name file 0400 root, so
+    the seat's only way to learn the utun is the same sudo grant that reads
+    handshakes. A missing or unreadable name file must not read as sudo
+    refusing."""
+    wg_dir, env = hub
+    _run_peer(env, "add", "work-mac")
+    recent = int(time.time()) - 60
+    env2 = {
+        **env,
+        "WG_BIN": str(_fake_wg_show_with_interfaces(tmp_path, f"CLIENT-PUBLIC-KEY\t{recent}")),
+        "WG_SUDO_BIN": str(_fake_sudo_passthrough(tmp_path)),
+        "WG_NAME_FILE": str(tmp_path / "no-such-name-file"),
+    }
+    out = _run_peer(env2, "list").stdout
+    assert "work-mac" in out and "last handshake:" in out
+    assert "unknown" not in out
+
+
+def test_unknown_names_its_cause(hub, tmp_path):
+    wg_dir, env = hub
+    _run_peer(env, "add", "work-mac")
+    refused = {**env, "WG_SUDO_BIN": str(_fake_sudo_refuses(tmp_path)),
+               "WG_NAME_FILE": str(_write_iface_file(tmp_path))}
+    assert "sudo -n refused" in _run_peer(refused, "list").stdout
+    no_iface = {**env, "WG_SUDO_BIN": str(_fake_sudo_refuses(tmp_path)),
+                "WG_NAME_FILE": str(tmp_path / "absent")}
+    out = _run_peer(no_iface, "list").stdout
+    assert "no tunnel interface visible" in out and "sudo -n refused" not in out

@@ -14,13 +14,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .auth import current_device, require_token
-from . import board, devices, docfence, hostenv, plugin_paths
+from . import audit, board, devices, docfence, hostenv, plugin_paths
 from . import managed_access
 from .turns import stream_turn, TurnError
 from .messages import _blocks_to_segments, _flatten, _is_noise
@@ -749,26 +749,100 @@ def rename_device(device_id: str, body: DeviceRenameRequest, request: Request,
     return {"renamed": device_id}
 
 
-@router.post("/devices/{device_id}/revoke")
-def revoke_device(device_id: str, request: Request,
+@router.post("/devices/{device_id}/delete")
+def delete_device(device_id: str, request: Request,
                   caller: str = Depends(current_device)):
+    """Clear a revoked row from the roster outright — a hub-console action,
+    same footing as rename (jStack#35). Distinct from revoke: this is for a
+    row that should never have existed, not the record of a real device
+    someone actually removed — revoke stays the answer there, audit trail
+    intact. 404 covers both an unknown id and a row that is still live; the
+    store refuses to delete a live one (jStack#60), so the caller revokes
+    first if that is what it meant."""
+    managed_access.require_console(request)
+    if not devices.delete(device_id):
+        raise HTTPException(status_code=404,
+                            detail="unknown device, or not yet revoked")
+    return {"deleted": device_id}
+
+
+#
+# `revoke_router` carries exactly one route, and it is not outside the bearer
+# gate: `_revoking_device` below IS that gate — `current_device`, which runs
+# `require_token` with its lockout and denial log — plus one answer the
+# router-wide dependency cannot give, for one token on one route. `/revoke`
+# cannot sit on `router`, whose `require_token` answers 401 before any route's
+# own dependency runs. Nothing else goes here: a second route on this router is
+# a route a retired credential can reach.
+revoke_router = APIRouter(prefix="/api/jremote/v1")
+
+
+async def _revoking_device(device_id: str, request: Request,
+                           authorization: str = Header(default="")) -> str:
+    """The caller of a revoke — `current_device`, with one more answer.
+
+    A leaf's detach runs `parent-forget` then `parent-revoke`. Since 5da4fad
+    the hub's forget revokes the machine's own credential in the same call, so
+    a leaf on an older release follows up with a credential that no longer
+    exists and ended a clean detach on a false 401 (#179). Old leaves cannot
+    be changed; the hub knows the dead token is exactly the credential named
+    in the path, and says so instead. The lockout and the denial log run
+    first, as for any other caller — this is read only after they let a 401
+    through, and it grants nothing: the route returns before touching a row.
+    """
+    try:
+        return await current_device(request, authorization)
+    except HTTPException as exc:
+        if exc.status_code != 401:
+            raise
+        prefix = "Bearer "
+        presented = authorization[len(prefix):] if authorization.startswith(prefix) else ""
+        if not devices.retired(presented, device_id):
+            raise
+        request.state.already_revoked = True
+        return device_id
+
+
+@revoke_router.post("/devices/{device_id}/revoke")
+def revoke_device(device_id: str, request: Request, confirm: bool = False,
+                  caller: str = Depends(_revoking_device)):
     """Revoke a device — from this moment its token opens nothing, and its
     live connections (PTY terminal, SSE streams) are cut, not left to drain.
     Idempotent-safe: revoking an already-revoked device answers 404 and
-    changes nothing.
+    changes nothing — except a device presenting its OWN retired credential,
+    which is told 200 `already`: the detach step that sent it is complete.
 
     A caller may revoke ITSELF from anywhere — that is the remote's one device
     action, "disconnect this device". Revoking ANOTHER device is
     a hub menu-bar action: a remote must not reach across and cut a device that
     is not it ("It should NOT ... kill other DEVICES"). Enforced here so the
-    refusal holds whatever the app shows."""
+    refusal holds whatever the app shows.
+
+    One more gate before the console cuts SOMEONE ELSE's row (jStack#55): if
+    that row is bound to an adopted machine (`hosts.device_id` — the same
+    credential `wg_peer.py`'s leaf bundle carries), destroying it strands a
+    remote Mac with no way back short of physical LAN presence or
+    `adopt --offline`. `confirm=true` is the caller naming that it read the
+    warning, the same shape the CLI's confirmation prompt takes. A self-revoke
+    never asks: the machine choosing to detach already knows what it is doing.
+    """
+    if getattr(request.state, "already_revoked", False):
+        return {"revoked": device_id, "self": True, "already": True}
     if not _hub_console(request) and (
             device_id != caller or not managed_access.can_disconnect(caller)):
         raise HTTPException(
             status_code=403,
             detail="a device can disconnect only itself; removing another device is a hub menu-bar action")
-    if not devices.revoke(device_id):
-        raise HTTPException(status_code=404, detail="unknown or already revoked device")
+    if device_id != caller and not confirm:
+        leaf = managed_access.leaf_for_device(device_id)
+        if leaf is not None and not leaf["deleted"]:
+            raise HTTPException(
+                status_code=409,
+                detail=(f"{leaf['name'] or leaf['key']} has no way back onto this mesh "
+                        "without this credential — resend with confirm=true to revoke anyway"))
+    with audit.acting(audit.from_request(request, caller)):
+        if not devices.revoke(device_id):
+            raise HTTPException(status_code=404, detail="unknown or already revoked device")
     return {"revoked": device_id, "self": device_id == caller}
 
 
@@ -1052,18 +1126,19 @@ def forget_host(key: str, request: Request, device_id: str = Depends(current_dev
     itself = own is not None and own["key"] == key
     if not itself:
         managed_access.require_console(request)
-    if not get_store().forget_host(key):
-        raise HTTPException(status_code=404,
-                            detail="unknown or already forgotten host")
-    # The credential goes with the tile when the machine itself is the caller.
-    # It could not revoke itself afterwards: the tombstone already ends its
-    # reach (`managed_access.authorize`), and a machine credential is not a
-    # device that may disconnect (`revoke_device`). Left alive it would still
-    # open every /managed/ route of a hub that has forgotten the machine.
-    revoked = device_id if itself and devices.revoke(device_id) else ""
-    return {"forgotten": key, "grant_dropped": grants.forget(key),
-            "shell_steps": shell_grants.machine_forgotten(key),
-            "credential_revoked": revoked}
+    with audit.acting(audit.from_request(request, device_id)):
+        if not get_store().forget_host(key):
+            raise HTTPException(status_code=404,
+                                detail="unknown or already forgotten host")
+        # The credential goes with the tile when the machine itself is the caller.
+        # It could not revoke itself afterwards: the tombstone already ends its
+        # reach (`managed_access.authorize`), and a machine credential is not a
+        # device that may disconnect (`revoke_device`). Left alive it would still
+        # open every /managed/ route of a hub that has forgotten the machine.
+        revoked = device_id if itself and devices.revoke(device_id) else ""
+        return {"forgotten": key, "grant_dropped": grants.forget(key),
+                "shell_steps": shell_grants.machine_forgotten(key),
+                "credential_revoked": revoked}
 
 
 class HostGrantRequest(BaseModel):
@@ -1264,10 +1339,11 @@ def shell_refresh(device_id: str = Depends(current_device)):
 
 
 @router.post("/device/disconnect")
-def disconnect_self(device_id: str = Depends(current_device)):
+def disconnect_self(request: Request, device_id: str = Depends(current_device)):
     if not managed_access.can_disconnect(device_id):
         raise HTTPException(403, "the host's own credential cannot disconnect itself")
-    devices.revoke(device_id)
+    with audit.acting(audit.from_request(request, device_id)):
+        devices.revoke(device_id)
     return {"disconnected": True}
 
 #
@@ -2995,8 +3071,8 @@ def splitoff_session(sid: str):
             break
     if not key:
         raise HTTPException(status_code=404, detail="no transcript to fork")
-    # The dub is a jStack plugin binary, and `host/install.sh` installs the
-    # host without the plugins tree — so a standalone host does not have one.
+    # The dub is a jStack plugin binary, and a host installed without the
+    # plugins tree does not have one.
     # Asked for it anyway, `subprocess.run` raised FileNotFoundError straight
     # out of the route and the phone got a bare 500 for a feature the machine
     # simply does not carry. Every other optional tier here answers honestly
@@ -3081,8 +3157,12 @@ def input_session(sid: str, payload: InputBody):
     text = (payload.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="empty input")
-    if not managed.send_input(sid, text):
+    if not managed.is_open(sid):
         raise HTTPException(status_code=409, detail="session is not open (managed)")
+    if not managed.send_input(sid, text):
+        # Typed, submitted, and proven not to have run — the box is cleared
+        # back out, and the client hears it instead of a placeholder (#157).
+        raise HTTPException(status_code=409, detail="the session did not take the input")
     return {"ok": True}
 
 

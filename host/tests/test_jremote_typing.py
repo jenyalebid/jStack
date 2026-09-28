@@ -161,3 +161,48 @@ def test_a_closed_session_is_never_armed(tmp_path, monkeypatch):
 def test_empty_text_is_never_armed(tmp_path, monkeypatch):
     monkeypatch.setattr(managed, "is_open", lambda sid: True)
     assert managed.send_input_after_compact("s", "", str(tmp_path / "x")) is False
+
+
+# ── `send_input`: an Enter is not a submission (#157) ───────────────────────
+#
+# The route behind `POST /sessions/{sid}/input` used to report success off the
+# Enter alone — a busy pane HOLDS a send instead of running it, and the box
+# then shows a dim placeholder that reads on screen exactly like a line that
+# already ran. `send_input` now goes through `compact_delivery.submit`, the
+# same type-then-verify already trusted for `/compact` and the continue
+# nudge, so a send that never took is wiped back out and logged rather than
+# left drawn in the box as a lie.
+
+def test_send_input_reports_a_send_that_never_took(monkeypatch, capsys):
+    from jstack_host import compact_delivery as cod
+
+    monkeypatch.setattr(managed, "is_open", lambda sid: True)
+    monkeypatch.setattr(managed, "open_registry",
+                        lambda: {"aaaaaaaa": {"engine": "claude"}})
+    monkeypatch.setattr(cod, "SUBMIT_CHECK_SECS", 0.2)
+    monkeypatch.setattr(cod, "POLL_SECS", 0.05)
+    monkeypatch.setattr(cod, "send_text", lambda name, text, delay=0.0: None)
+    # A pane still showing exactly what we typed, the whole window: stuck.
+    monkeypatch.setattr(cod, "pane",
+                        lambda name: "❯ do the thing\n\n  bypass permissions on")
+    wiped = []
+    monkeypatch.setattr(cod, "clear_line", wiped.append)
+
+    assert managed.send_input("aaaaaaaa", "do the thing") is False
+    assert wiped == ["jr-aaaaaaaa"]
+    assert "did not take" in capsys.readouterr().err
+
+
+def test_send_input_reports_success_once_the_box_clears(monkeypatch):
+    from jstack_host import compact_delivery as cod
+
+    monkeypatch.setattr(managed, "is_open", lambda sid: True)
+    monkeypatch.setattr(managed, "open_registry",
+                        lambda: {"aaaaaaaa": {"engine": "claude"}})
+    monkeypatch.setattr(cod, "SUBMIT_CHECK_SECS", 0.2)
+    monkeypatch.setattr(cod, "POLL_SECS", 0.05)
+    monkeypatch.setattr(cod, "send_text", lambda name, text, delay=0.0: None)
+    # The box no longer holds our text: the CLI took it and cleared the line.
+    monkeypatch.setattr(cod, "pane", lambda name: "❯ \n\n  bypass permissions on")
+
+    assert managed.send_input("aaaaaaaa", "do the thing") is True

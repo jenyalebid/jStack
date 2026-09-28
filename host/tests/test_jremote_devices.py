@@ -464,6 +464,7 @@ def test_an_orphaned_credential_never_locks_anything(store, monkeypatch):
     monkeypatch.setattr("jstack_host.hostenv.security_alert", alerts.append)
     ip = "10.66.0.4"
     row, token = devices.mint("wiped-mac")
+    store.revoke_device(row["id"])
     store.delete_device(row["id"])                # the row is gone, not revoked
     _, good = devices.mint("my-iphone")
     for i in range(60):                           # past _SPRAY_MAX, one id
@@ -473,6 +474,19 @@ def test_an_orphaned_credential_never_locks_anything(store, monkeypatch):
     assert auth._gate(ip, f"Bearer {good}")       # the live row never noticed
     time.sleep(0.1)                               # alert would be threaded
     assert alerts == [], f"an orphan's retries raised an alert: {alerts}"
+
+
+def test_delete_device_refuses_a_live_row(store):
+    """jStack#60: nothing shipped calls delete_device yet, but the day it does,
+    a caller that forgot to revoke first must not be able to make a live
+    credential vanish with no trace. The store enforces its own contract
+    instead of trusting every future caller to have read the docstring."""
+    row, _token = devices.mint("still-paired")
+    assert store.delete_device(row["id"]) is False
+    assert store.device(row["id"]) is not None     # unchanged, not silently gone
+    assert store.revoke_device(row["id"])
+    assert store.delete_device(row["id"]) is True
+    assert store.device(row["id"]) is None
 
 
 def test_spraying_many_device_ids_still_locks_the_address(store, monkeypatch):
@@ -750,6 +764,40 @@ def test_a_device_can_always_revoke_itself(store):
     assert devices.authenticate(token) is None
 
 
+def test_a_credential_already_revoked_by_its_own_forget_may_still_revoke_itself(store):
+    """A leaf on a release before 5da4fad detaches as `parent-forget` then
+    `parent-revoke`; the hub's forget now revokes the machine's credential in
+    the same call, so the follow-up arrived with a dead token and ended a clean
+    detach on a false 401 (#179). The hub knows that token is exactly the
+    credential it retired: 200, `already`, and nothing changes."""
+    row, token = devices.mint("work-mac")
+    assert devices.revoke(row["id"])
+    c = TestClient(app)
+    c.headers.update({"Authorization": f"Bearer {token}"})
+    r = c.post(f"/api/jremote/v1/devices/{row['id']}/revoke")
+    assert r.status_code == 200
+    assert r.json() == {"revoked": row["id"], "self": True, "already": True}
+    assert devices.authenticate(token) is None
+    # The answer is for that one route and that one row: the dead token still
+    # opens nothing else, and reaches no other device's revoke.
+    assert c.get("/api/jremote/v1/devices").status_code == 401
+    other, other_token = devices.mint("phone")
+    assert c.post(f"/api/jremote/v1/devices/{other['id']}/revoke").status_code == 401
+    assert devices.authenticate(other_token) == other["id"]
+
+
+def test_a_guess_at_a_revoked_devices_secret_is_still_refused(store):
+    """`already` is earned by holding the retired credential, not by naming a
+    revoked row: the wrong secret for it is the 401 it always was."""
+    row, token = devices.mint("work-mac")
+    devices.revoke(row["id"])
+    head, _, secret = token.rpartition(".")
+    wrong = f"{head}.{'x' * len(secret)}"
+    c = TestClient(app)
+    c.headers.update({"Authorization": f"Bearer {wrong}"})
+    assert c.post(f"/api/jremote/v1/devices/{row['id']}/revoke").status_code == 401
+
+
 def test_a_remote_cannot_revoke_another_device(client, store):
     """A remote must not revoke another device. Off the hub console
     a revoke of anything but the caller itself is refused, and the target's
@@ -767,6 +815,56 @@ def test_the_hub_console_can_revoke_another_device(client, store, on_console):
     assert r.status_code == 200 and r.json()["self"] is False
     assert devices.authenticate(token) is None
     assert client.post(f"/api/jremote/v1/devices/{row['id']}/revoke").status_code == 404
+
+
+def test_pair_list_remove_is_the_bar_s_whole_device_story(client, store, on_console):
+    """jStack#27's own acceptance line: pair a device, see it in the roster,
+    remove it there, verify its token no longer works. The pieces were each
+    tested alone; this walks the one path the menu bar's Remove item takes,
+    end to end, on the API it calls."""
+    row, token = devices.mint("owner-iphone")
+    listed = client.get("/api/jremote/v1/devices").json()["devices"]
+    assert any(d["id"] == row["id"] and not d["revoked"] for d in listed)
+
+    r = client.post(f"/api/jremote/v1/devices/{row['id']}/revoke")
+    assert r.status_code == 200 and r.json()["self"] is False
+
+    dead = TestClient(app)
+    dead.headers.update({"Authorization": f"Bearer {token}"})
+    assert dead.get("/api/jremote/v1/devices").status_code == 401
+
+    listed = client.get("/api/jremote/v1/devices").json()["devices"]
+    assert any(d["id"] == row["id"] and d["revoked"] for d in listed)
+
+
+def test_revoking_an_adopted_machine_s_credential_needs_confirmation(client, store, on_console, monkeypatch):
+    """jStack#55: work-mac's own device row is its whole way back onto the
+    mesh once it is off the LAN. The console gets a named warning first, not
+    a silent brick, and only past that does `confirm=true` let it through."""
+    import jstack_host.store as store_module
+    monkeypatch.setattr(store_module, "_store", store)   # managed_access reads get_store() directly
+    row, token = devices.mint("work-mac")
+    store.upsert_host("work-mac-key", "work-mac", "10.66.0.5")
+    store.bind_host_device("work-mac-key", row["id"])
+
+    r = client.post(f"/api/jremote/v1/devices/{row['id']}/revoke")
+    assert r.status_code == 409
+    assert "work-mac" in r.json()["detail"]
+    assert devices.authenticate(token) == row["id"]        # untouched
+
+    r = client.post(f"/api/jremote/v1/devices/{row['id']}/revoke?confirm=true")
+    assert r.status_code == 200
+    assert devices.authenticate(token) is None
+
+
+def test_an_ordinary_device_revokes_with_no_confirmation_needed(client, store, on_console):
+    """The gate is specific to an adopted machine's own credential — a phone
+    or laptop paired the ordinary way is not one, and revoking it is
+    unchanged (jStack#55 must not add friction nobody asked for)."""
+    row, token = devices.mint("someone-elses-phone")
+    r = client.post(f"/api/jremote/v1/devices/{row['id']}/revoke")
+    assert r.status_code == 200
+    assert devices.authenticate(token) is None
 
 
 def test_a_revoked_device_cannot_use_the_registry(client, store):
@@ -804,6 +902,30 @@ def test_the_hub_console_renames_and_404s_the_unknown(client, store, on_console)
     assert store.device(row["id"])["name"] == "My iPhone 17"
     assert client.post("/api/jremote/v1/devices/nope/rename",
                        json={"name": "x"}).status_code == 404
+
+
+def test_a_remote_cannot_delete_a_device(client, store):
+    row, _ = devices.mint("junk-row")
+    devices.revoke(row["id"])
+    r = client.post(f"/api/jremote/v1/devices/{row['id']}/delete")
+    assert r.status_code == 403
+    assert store.device(row["id"]) is not None
+
+
+def test_the_hub_console_deletes_a_revoked_row_but_not_a_live_one(client, store, on_console):
+    """jStack#35: a junk or duplicate row is gone for good once revoked and
+    deleted; a live row is refused rather than silently vanishing (jStack#60
+    enforces the refusal, this pins the route surfaces it as a 404)."""
+    live, _ = devices.mint("still-paired")
+    assert client.post(f"/api/jremote/v1/devices/{live['id']}/delete").status_code == 404
+    assert store.device(live["id"]) is not None
+
+    junk, _ = devices.mint("e2e-tests")
+    devices.revoke(junk["id"])
+    r = client.post(f"/api/jremote/v1/devices/{junk['id']}/delete")
+    assert r.status_code == 200 and r.json()["deleted"] == junk["id"]
+    assert store.device(junk["id"]) is None
+    assert client.post(f"/api/jremote/v1/devices/{junk['id']}/delete").status_code == 404
 
 
 # ── why a 401 happened ───────────────────────────────────────────────────────

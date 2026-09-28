@@ -435,7 +435,15 @@ def artifact(release: str, filename: str):
         envelope = json.loads((directory / "manifest.json").read_text())
         from .release_manifest import verify
         settings = fleet.config()
-        manifest = verify(envelope, settings.get("public_key", ""),
+        # A release verifies against the key recorded when it landed (#144):
+        # after a hub rotates to its own build key, an older release still in
+        # the feed must not 404 just because the hub's current key changed.
+        # A release landed before this existed has no trust.json; the hub's
+        # current key is the only key it ever had.
+        trust = directory / "trust.json"
+        key = (json.loads(trust.read_text())["public_key"] if trust.is_file()
+               else settings.get("public_key", ""))
+        manifest = verify(envelope, key,
                           promoted=not settings.get("candidate_test", False))
         if manifest["release"] != release or filename not in {
                 item["file"] for item in manifest["components"].values()}:

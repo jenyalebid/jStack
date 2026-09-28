@@ -147,6 +147,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import repo_seat  # noqa: E402
+import review_config as _review_config  # noqa: E402
 
 
 def _inject_hook():
@@ -606,13 +607,7 @@ def exec_session_hooks(directory: Path, hooks: list[Hook],
 # --------------------------------------------------- SessionStart (timeline)
 
 def review_config() -> dict:
-    cfg_path = Path(os.environ.get("JSTACK_REVIEW_CONFIG",
-                                   str(claude_dir() / "jstack" / "review.json"))).expanduser()
-    try:
-        data = json.loads(cfg_path.read_text())
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError, ValueError):
-        return {}
+    return _review_config.load()
 
 
 def resolve_seat(directory: Path, root: Path,

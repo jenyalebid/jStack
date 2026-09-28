@@ -73,9 +73,8 @@ usage: install.sh [options]
   --prefix DIR     where to install (default /Applications)
   --help, -h       this
 
-The app talks to a host, which is the other half and installs separately:
-
-    ./host/install.sh
+The app talks to a host, which is the other half; the top-level
+`install.sh` installs both.
 EOF
 }
 
