@@ -19,7 +19,7 @@ from pathlib import Path
 from . import acceptance, release_manifest as releases
 #: Defined where a hub builds from source, so a build cut here and a build
 #: cut there can never name the same sources differently.
-from .build_source import release_date, source_identity
+from .build_source import built_from, latest_name, release_date, source_identity
 from .update_macos import command
 from .update_supervisor import atomic_json
 
@@ -274,9 +274,21 @@ def candidate_manifest(candidate: Path, private_key: bytes) -> dict:
 def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -> dict:
     """Run the configured acceptance runner over this candidate, then read it.
 
+    The runner's subject is the commit — every Mac clones a ref and compiles
+    the Hub itself — and the candidate names both the commit to put under test
+    and the exact client and identifier the receipts are evidence for. Sending
+    one without the other is what left this call unable to run at all: from
+    7bce523 until this was fixed it passed `--candidate` alone to a runner that
+    had been rewritten to require `--ref`, so the runner died in argument
+    parsing on every invocation, every journey stayed missing, and `promote`
+    was shut for good.
+
     The runner's exit status is a hint; the receipts it wrote are the evidence.
     A runner that dies half way leaves the journeys it never reached missing,
-    and missing is what keeps promotion closed.
+    and missing is what keeps promotion closed. A runner that writes no receipt
+    at all wrote no evidence, and that is this call's own failure, not a
+    verdict about the candidate — it raises rather than handing back twelve
+    `missing` rows and a zero exit.
     """
     runner = config.get("acceptance")
     if not runner:
@@ -284,7 +296,8 @@ def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -
             "configure 'acceptance' with the acceptance runner's command line")
     manifest = candidate_manifest(candidate, private_key)
     receipts.mkdir(parents=True, exist_ok=True)
-    argv = [*runner, "--candidate", str(candidate), "--receipts", str(receipts)]
+    argv = [*runner, "--ref", built_from(manifest), "--candidate", str(candidate),
+            "--receipts", str(receipts)]
     print("Running acceptance: " + " ".join(argv), flush=True)
     finished = subprocess.run(argv, timeout=config.get("acceptance_timeout", 6 * 3600))
     state = acceptance.inspect(receipts, build_of(manifest))
@@ -293,6 +306,11 @@ def qualify(config: dict, candidate: Path, receipts: Path, private_key: bytes) -
               flush=True)
     if finished.returncode:
         print(f"acceptance runner exited {finished.returncode}", flush=True)
+        if all(entry["receipt"] is None for entry in state.values()):
+            raise releases.ReleaseError(
+                f"the acceptance runner exited {finished.returncode} without writing one "
+                f"receipt: it never reached a journey, so nothing here is evidence about "
+                f"{manifest['release']}. Its command line was: " + " ".join(argv))
     return state
 
 
@@ -346,7 +364,13 @@ def promote(candidate: Path, receipts_dir: Path, feed: Path, private_key: bytes,
             shutil.copy2(variant, target)
     # Single publication point. Every referenced artifact and evidence receipt
     # already exists, and the prior release directory remains untouched.
-    atomic_json(feed / "latest.json", envelope)
+    #
+    # The line the candidate was cut from, which is not always main's file. A
+    # dev release written to `latest.json` is offered to the machines that
+    # follow main and to no machine that follows dev — the two this Mac and
+    # Work Main are — so the line it was built for never sees it.
+    offer = feed / latest_name(built_from(manifest))
+    atomic_json(offer, envelope)
     # A release is not finished until its build number is in the source it was
     # cut from. Last, because only a published build may claim one.
     client = manifest["components"].get("client")
@@ -383,7 +407,8 @@ def hub_token() -> str:
     return token
 
 
-def deploy(release: str, *, port: int = 9090, timeout: int = 2700, poll: int = 15) -> dict:
+def deploy(release: str | None = None, *, port: int = 9090,
+           timeout: int = 2700, poll: int = 15) -> dict:
     """Update this hub and its eligible leaves to a promoted release, and watch.
 
     Eligibility is the hub's own answer — a machine it has heard from recently
@@ -402,6 +427,15 @@ def deploy(release: str, *, port: int = 9090, timeout: int = 2700, poll: int = 1
             return answer.json()
 
         before = inventory()
+        # Named nothing: this hub's own current offer, which is the one release
+        # it can honestly deploy. Read here rather than from a file in the feed
+        # — the feed holds one offer per line, and a hub following dev would
+        # otherwise be handed main's.
+        if release is None:
+            release = before.get("release")
+            if not release:
+                raise releases.ReleaseError("this hub offers no release to deploy")
+            print(f"Deploying this hub's current offer: {release}", flush=True)
         if before.get("release") != release:
             raise releases.ReleaseError(
                 f"this hub offers {before.get('release')}, not the promoted {release}")
@@ -532,11 +566,7 @@ def main():
         print(json.dumps({name: {"state": entry["state"], "detail": entry["detail"]}
                           for name, entry in state.items()}, indent=2))
     elif args.action == "deploy":
-        release = args.release
-        if not release:
-            latest = json.loads((Path(config["feed_dir"]) / "latest.json").read_text())
-            release = latest["manifest"]["release"]
-        print(json.dumps(deploy(release, port=config.get("hub_port", 9090)), indent=1))
+        print(json.dumps(deploy(args.release, port=config.get("hub_port", 9090)), indent=1))
     elif args.action == "ship":
         print(json.dumps(ship(config, args.candidate, args.receipts, private,
                               deploy_after=args.deploy), indent=2))

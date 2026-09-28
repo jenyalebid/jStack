@@ -675,3 +675,21 @@ def test_updates_build_builds_the_lines_unless_told_one_ref(tmp_path, monkeypatc
     monkeypatch.setattr("sys.argv", ["jstack-host", "updates", "build", *argv])
     assert cli.main() in (0, None) and seen == [expected]
     assert json.loads(capsys.readouterr().out)
+
+
+def test_a_source_build_says_when_it_carries_a_client_the_hub_has_outgrown(tmp_path, monkeypatch):
+    """The fleet sat on client 109 for five days while this same hub served
+    119 at `/app/mac/latest`. Nothing said so, because carrying the client
+    forward is correct behaviour and the two doors never compared notes."""
+    from jstack_host import build_source, releases as published
+
+    manifest = tmp_path / "latest.json"
+    manifest.write_text(json.dumps({"build": 119, "file": "jRemote-119.zip"}))
+    monkeypatch.setattr(published, "MANIFEST", manifest)
+    warning = build_source.client_drift("109")
+    assert "109" in warning and "119" in warning and "/app/mac/latest" in warning
+    assert build_source.client_drift("119") == ""
+    assert build_source.client_drift("121") == ""
+    # A hub that publishes no Mac app of its own has nothing to compare with.
+    monkeypatch.setattr(published, "MANIFEST", tmp_path / "gone.json")
+    assert build_source.client_drift("109") == ""

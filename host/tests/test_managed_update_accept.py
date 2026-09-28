@@ -2244,3 +2244,109 @@ def test_an_interpreter_without_the_host_dependencies_is_refused_before_any_jour
     assert exit_code.value.code == 2
     err = capsys.readouterr().err
     assert "jstack_host.enrolment" in err and "host/pyproject.toml" in err
+
+
+# ── The seam between the publisher and this runner
+
+
+def test_the_publishers_command_line_parses_under_the_runners_own_parser(runner, tmp_path,
+                                                                        monkeypatch):
+    """The one test that would have caught the four-day outage.
+
+    `publish_release.qualify` built a command line for this runner and nothing
+    ever checked that this runner accepts it. From 7bce523 it sent
+    `--candidate` alone to a parser that requires `--ref` and had no
+    `--candidate` at all, so every acceptance run died in argparse, every
+    journey stayed missing and nothing could be promoted.
+    """
+    import base64
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from jstack_host import publish_release, release_manifest as releases
+
+    directory = tmp_path / "candidate"
+    directory.mkdir()
+    components = {}
+    for name in sorted(releases.COMPONENTS):
+        body = (name + " artifact").encode()
+        (directory / (name + ".zip")).write_bytes(body)
+        components[name] = {"file": name + ".zip", "version": "119",
+                            "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+    manifest = {"schema": 1, "release": CANDIDATE, "notes": "test",
+                "channel": {"github_repo": "jenyalebid/jStack", "name": "dev"},
+                "sources": {"stack": HEAD_SHA, "client": "b" * 40},
+                "components": components,
+                "compatibility": {"protocol": 1, "rollback": True, "platform": "macos",
+                                  "architecture": "arm64", "minimum_os": "26.0"},
+                "receipts": {}}
+    key = Ed25519PrivateKey.generate()
+    private = key.private_bytes_raw()
+    (directory / "candidate.json").write_text(
+        json.dumps(releases.sign(manifest, private, promoted=False)))
+
+    prefix = [sys.executable, str(TOOLS), "--plan", str(tmp_path / "plan.json")]
+    sent = []
+
+    def record(argv, **kwargs):
+        sent.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(publish_release.subprocess, "run", record)
+    publish_release.qualify({"acceptance": prefix}, directory,
+                            tmp_path / "receipts", private)
+    assert sent and sent[0][:len(prefix)] == prefix
+    parsed = runner.build_parser().parse_args(sent[0][len(prefix):] + ["--plan", "p.json"])
+    # And it carries the two things the run cannot be done without: the commit
+    # the guests install, and the exact candidate they are held to.
+    assert parsed.ref == "dev"
+    assert parsed.candidate == directory
+    assert parsed.receipts == tmp_path / "receipts"
+
+
+def test_a_hub_that_offers_an_older_client_than_the_candidate_fails_the_run(runner, tmp_path,
+                                                                           monkeypatch):
+    """What actually happened to the fleet, caught where it happens.
+
+    A hub's build carries forward the client its feed already holds, so a hub
+    seeded with nothing builds the new commit and goes on offering the old
+    client. Every hub-served journey then asserts its leaf against that old
+    client and passes, which is how three Macs sat on 109 while the other
+    three doors served 119.
+    """
+    plan = {"vm_tool": str(tmp_path / "vm.sh"), "hub": "acc-hub", "leaves": [], "disposable": True}
+    fleet = runner.Fleet(plan, run=lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
+    build = a_build(runner, monkeypatch, tmp_path, "dev", HEAD_SHA, client="119")
+    monkeypatch.setattr(type(fleet.hub), "sh",
+                        lambda self, command, timeout=600: json.dumps({"release": CANDIDATE}))
+    monkeypatch.setattr(type(fleet), "served_now",
+                        lambda self: {"build": CANDIDATE, "client": "109"})
+    # Unqualified, the same stale offer is simply what this hub serves.
+    assert fleet.offer(build) == CANDIDATE
+    fleet.candidate_client = "119"
+    with pytest.raises(runner.AcceptanceFailure, match="carried an older client forward"):
+        fleet.offer(build)
+
+
+def test_a_candidate_is_refused_unless_the_publisher_signed_it(runner, tmp_path):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from jstack_host import release_manifest as releases
+
+    directory = tmp_path / "candidate"
+    directory.mkdir()
+    components = {}
+    for name in sorted(releases.COMPONENTS):
+        body = (name + " artifact").encode()
+        (directory / (name + ".zip")).write_bytes(body)
+        components[name] = {"file": name + ".zip", "version": "119",
+                            "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+    manifest = {"schema": 1, "release": CANDIDATE, "notes": "test",
+                "channel": {"github_repo": "jenyalebid/jStack", "name": "dev"},
+                "sources": {"stack": HEAD_SHA, "client": "b" * 40},
+                "components": components,
+                "compatibility": {"protocol": 1, "rollback": True, "platform": "macos",
+                                  "architecture": "arm64", "minimum_os": "26.0"},
+                "receipts": {}}
+    forged = Ed25519PrivateKey.generate().private_bytes_raw()
+    (directory / "candidate.json").write_text(
+        json.dumps(releases.sign(manifest, forged, promoted=False)))
+    with pytest.raises(runner.AcceptanceFailure, match="not signed by the publisher"):
+        runner.staged_candidate(directory)

@@ -25,6 +25,7 @@ candidate-test trust before it is touched.
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import importlib
 import json
@@ -56,6 +57,12 @@ GUEST_TMUX = "/Applications/jStack Hub.app/Contents/MacOS/tmux"
 # neither, so the runner lays them down itself before any journey uses one.
 GUEST_TOOLS = {GUEST_TOOL: Path(__file__).resolve().parent / "managed_update_vm.py",
                GUEST_FAULT: Path(__file__).resolve().parent / "managed_update_fault.py"}
+#: The key a published release is signed with, as every installed machine
+#: already holds it. A seeded candidate is verified against this and nothing
+#: the candidate directory carries about itself.
+PUBLISHER_KEY = json.loads(
+    (Path(__file__).resolve().parents[1]
+     / "jstack_host/release-trust.json").read_text())["public_key"]
 #: How long a spawned session gets to answer on its own before the runner looks
 #: at its pane. Releases before ca7cf89 left the bypass warning on screen (the
 #: watcher ran an unquoted tmux path), so a session on such a PRIOR never
@@ -114,6 +121,40 @@ SERVED_PY = ("import json,os,sys; c=json.load(open(sys.argv[1])); "
              "'client': str(m['components']['client']['version'])}))")
 SERVED = ("f=$HOME/.local/state/jremote/updates/config.json; "
           + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(SERVED_PY) + " \"$f\"")
+#: Put a signed candidate in the fixture hub's own feed, as the line's offer,
+#: and point the hub's trust at the key that signed it.
+#:
+#: This is what lets a run prove a *new* client. jRemote's Mac app is closed
+#: source, so a hub's build carries forward the client its feed already holds
+#: (`build_source.inherited`) — a client only ever enters a feed as part of a
+#: signed release. Before this, the only signed release a fixture hub could
+#: hold was one already promoted, and promotion is what the run gates: the
+#: client under test could never reach the hub-served journeys, and they
+#: asserted the leaf against whatever stale client the hub had inherited.
+#: `candidate_test` is the hatch the product already carries for exactly this
+#: — a hub that verifies unpromoted envelopes — and the hub's own build then
+#: rotates the trust key to its own, which is the production shape.
+SEED_PY = ("import json, os, shutil, sys; "
+           "cfg, staged, key = sys.argv[1:4]; "
+           "c = json.load(open(cfg)); feed = c['feed_dir']; "
+           "env = json.load(open(staged + '/candidate.json')); "
+           "m = env['manifest']; rel = m['release']; "
+           "d = feed + '/' + rel; os.makedirs(d, exist_ok=True); "
+           "[shutil.copy2(staged + '/' + i['file'], d + '/' + i['file']) "
+           "for i in m['components'].values()]; "
+           "open(d + '/manifest.json', 'w').write(json.dumps(env)); "
+           "open(d + '/trust.json', 'w').write("
+           "json.dumps({'algorithm': 'Ed25519', 'public_key': key})); "
+           "n = 'latest-dev.json' if m['channel']['name'] == 'dev' else 'latest.json'; "
+           "open(feed + '/' + n + '.seed', 'w').write(json.dumps(env)); "
+           "os.replace(feed + '/' + n + '.seed', feed + '/' + n); "
+           "c['public_key'] = key; c['candidate_test'] = True; "
+           "open(cfg + '.seed', 'w').write(json.dumps(c, indent=2)); "
+           "os.replace(cfg + '.seed', cfg); "
+           "print(json.dumps({'release': rel, 'offer': n, "
+           "'client': str(m['components']['client']['version'])}))")
+SEED = ("f=$HOME/.local/state/jremote/updates/config.json; "
+        + shlex.quote(GUEST_PYTHON) + " -c " + shlex.quote(SEED_PY) + " \"$f\" ")
 #: One request under a bearer the runner holds rather than the machine's own
 #: token — a hub device, a projection — answered with its status, refusals
 #: included. The token rides the environment; a path is resolved against the
@@ -213,6 +254,40 @@ class Build:
         if component == "client":
             return self.client_version
         raise AcceptanceFailure(f"a build does not declare a {component} version up front")
+
+
+def staged_candidate(candidate: Path) -> tuple[dict, Path]:
+    """A signed candidate's own manifest, and its client unpacked as a bundle.
+
+    Verified against the publisher key every installed machine already holds,
+    never against anything the directory says about itself. The client is
+    delivered as a zip and every path that installs one wants a bundle, so it
+    is unpacked once here and handed to `Build` as `--client` would be.
+    """
+    from jstack_host import release_manifest
+    try:
+        envelope = json.loads((candidate / "candidate.json").read_text())
+    except (OSError, ValueError) as exc:
+        raise AcceptanceFailure(f"{candidate} is not a candidate directory: {exc}") from exc
+    try:
+        manifest = release_manifest.verify(envelope, PUBLISHER_KEY, promoted=False)
+    except Exception as exc:
+        raise AcceptanceFailure(f"{candidate} is not signed by the publisher: {exc}") from exc
+    item = manifest["components"]["client"]
+    release_manifest.check_artifact(candidate / item["file"], item)
+    work = Path(tempfile.mkdtemp(prefix="accept-candidate-"))
+    atexit.register(shutil.rmtree, work, ignore_errors=True)
+    subprocess.run(["/usr/bin/ditto", "-x", "-k", str(candidate / item["file"]), str(work)],
+                   check=True, timeout=600)
+    apps = sorted(work.glob("*.app"))
+    if len(apps) != 1:
+        raise AcceptanceFailure(
+            f"{item['file']} does not hold exactly one app bundle: {[a.name for a in apps]}")
+    found = bundle_build(apps[0])
+    if found != str(item["version"]):
+        raise AcceptanceFailure(
+            f"{item['file']} holds client {found}, but the manifest names {item['version']}")
+    return manifest, apps[0]
 
 
 def bundle_build(app: Path) -> str:
@@ -616,6 +691,10 @@ class Fleet:
         #: hub serves lands on the hub's client, whatever this run carried in
         #: for the Macs it installs by hand.
         self.served: dict[str, str] = {}
+        #: The client the seeded candidate carries, when this run is qualifying
+        #: one. Empty for a plain ref run, where the hub's inherited client is
+        #: the only client there is and nothing is held to a newer one.
+        self.candidate_client: str = ""
         #: Guests this run installed a host on by hand, by name. The fresh
         #: guest is reset before its first cast of a run and kept afterwards:
         #: the Mac fresh_install adopted is a fleet member for the rest of the
@@ -750,6 +829,44 @@ class Fleet:
             self._ids[guest.name] = guest.host_id()
         return self._ids[guest.name]
 
+    def seed(self, candidate: Path, manifest: dict) -> dict:
+        """Put the candidate in the fixture hub's feed before it builds.
+
+        The hub then builds the commit with the candidate's client already in
+        the feed it inherits from, so what it serves its fleet is the client
+        under test. Without this a hub-served journey can only ever observe
+        the client the fixture happened to be carrying, which is how a fleet
+        sat on client 109 while three other doors served 119.
+
+        Never on a local hub, for the same reason `offer` refuses one: this
+        rewrites the feed and the trust key of the hub that Mac really manages.
+        """
+        if isinstance(self.hub, LocalHub):
+            raise AcceptanceFailure(
+                f"refusing to seed {LOCAL_HUB} with a candidate: the hub is this Mac, and "
+                "its feed is what the fleet it really manages installs from")
+        staged = f"{GUEST_HOME}/accept-candidate-{uuid.uuid4().hex[:12]}"
+        self.hub.sh(f"/bin/mkdir -p {staged}")
+        try:
+            self.hub.copy(candidate / "candidate.json", f"{staged}/candidate.json")
+            for item in manifest["components"].values():
+                self.hub.copy(candidate / item["file"], f"{staged}/{item['file']}")
+            answer = self.hub.sh(SEED + shlex.quote(staged) + " "
+                                 + shlex.quote(PUBLISHER_KEY), timeout=900)
+        finally:
+            self.hub.sh(f"/bin/rm -rf {shlex.quote(staged)} || true")
+        try:
+            seeded = json.loads(answer[answer.index("{"):])
+        except ValueError as exc:
+            raise HarnessFault(
+                f"{self.hub.name}: could not seed the candidate: {answer[-400:]}") from exc
+        # The updater verifies unpromoted envelopes only after it re-reads the
+        # config this just rewrote.
+        self.hub.sh("/bin/launchctl kickstart -k gui/$(id -u)/live.jstack.hub.updater || true")
+        print(f"{self.hub.name} holds candidate {seeded['release']} "
+              f"(client {seeded['client']}) as its {seeded['offer']}", flush=True)
+        return seeded
+
     def offer(self, build: Build) -> str:
         """Make the fixture hub build a ref and offer the result to its fleet.
 
@@ -792,6 +909,15 @@ class Fleet:
         expect(served["build"] == built["release"],
                f"the hub reports {built['release']} built but serves {served['build']}")
         self.served[build.ref] = served["client"]
+        # The whole point of seeding. A hub that built the commit but still
+        # offers its old client would send every managed Mac to that old
+        # client, and every hub-served journey below would then assert the
+        # leaf against it and pass.
+        if self.candidate_client:
+            expect(served["client"] == self.candidate_client,
+                   f"the hub built {build.slug} but offers client {served['client']}, not the "
+                   f"candidate's {self.candidate_client}: the build carried an older client "
+                   "forward (build_source.inherited)")
         self.build = build
         return built["release"]
 
@@ -2602,7 +2728,12 @@ def local_identity(fleet: Fleet, build: Build) -> dict:
 DEFAULT_REPO = "https://github.com/jenyalebid/jStack.git"
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The runner's argument surface, apart from `main` so that the publisher's
+    own command line can be parsed by it in a unit test. `publish_release`
+    spent four days sending this parser a flag it had never accepted, and no
+    test could see it because the surface existed only inside a call that
+    boots virtual machines."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ref", required=True, help="the branch under test")
     parser.add_argument("--prior-ref", help="an earlier branch the upgrade legs start from")
@@ -2610,6 +2741,11 @@ def main() -> int:
                         help="where the guests fetch the installer and the source from")
     parser.add_argument("--client", type=Path,
                         help="the jRemote.app bundle to install; it is not built from this repo")
+    parser.add_argument("--candidate", type=Path,
+                        help="a signed candidate directory this run qualifies for publication: "
+                             "its client is what the guests are held to, its release identifier "
+                             "is what the receipts bind to, and the fixture hub is seeded with "
+                             "it so what the hub serves is the client under test")
     parser.add_argument("--checkout", type=Path,
                         default=Path(__file__).resolve().parents[2],
                         help="a checkout used only to read what the commit declares")
@@ -2617,6 +2753,11 @@ def main() -> int:
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--only", nargs="+", choices=sorted(JOURNEYS),
                         help="run these journeys, retaining previous receipts for the others")
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
     args = parser.parse_args()
     # The shell journeys read the host package proper (a peer name from
     # jstack_host.enrolment), which pulls in the Hub's web dependencies. An
@@ -2639,7 +2780,27 @@ def main() -> int:
     refusal = local_hub_refusal(fleet, list(args.only or JOURNEYS))
     if refusal:
         parser.error(refusal)
-    build = Build(args.repo, args.ref, checkout=args.checkout, client=args.client)
+    candidate = client = None
+    if args.candidate:
+        if isinstance(fleet.hub, LocalHub):
+            parser.error(f"qualifying a candidate needs a disposable hub: {LOCAL_HUB} is this "
+                         "Mac, and seeding its feed would re-offer the fleet it really manages")
+        try:
+            candidate, client = staged_candidate(args.candidate)
+        except AcceptanceFailure as exc:
+            parser.error(str(exc))
+    build = Build(args.repo, args.ref, checkout=args.checkout, client=client or args.client)
+    if candidate:
+        # The receipts are about to be written against the candidate's own
+        # identifier, so the commit the guests install has to be the commit
+        # the candidate was cut from. A line that moved since the candidate
+        # was built would otherwise qualify it on someone else's code.
+        if candidate["sources"]["stack"] != build.sha:
+            parser.error(f"{args.ref} is at {build.sha}, but the candidate was built from "
+                         f"{candidate['sources']['stack']}: qualify it on its own commit")
+        if candidate["channel"]["name"] != args.ref:
+            parser.error(f"the candidate is a {candidate['channel']['name']} release, "
+                         f"and --ref names {args.ref}")
     if args.prior_ref:
         fleet.prior = Build(args.repo, args.prior_ref, checkout=args.checkout,
                             client=args.client)
@@ -2657,10 +2818,19 @@ def main() -> int:
             leaf.start()
     if not isinstance(fleet.hub, LocalHub):
         fleet.prepare(fleet.hub)
+        if candidate:
+            fleet.candidate_client = str(candidate["components"]["client"]["version"])
+            fleet.seed(args.candidate, candidate)
         # The hub builds the commit before any receipt is written: the build id it
         # comes out with is what the fleet is offered, and a run that cannot even
         # build has nothing to write receipts about.
-        identity = {"build": fleet.offer(build), "sha": build.sha}
+        built = fleet.offer(build)
+        # A receipt names what it is evidence for. Qualifying a candidate, that
+        # is the candidate's release identifier — which folds in its client and
+        # its dependency set, so receipts cannot be carried from one candidate
+        # to the next over the same commit. A plain ref run has no publication
+        # to name and keeps naming the hub's own build.
+        identity = {"build": candidate["release"] if candidate else built, "sha": build.sha}
         # The hub runs what it built before it serves it. What a leaf takes on
         # its heartbeat — the key the hub signs with — is this commit's route
         # answering, not the route of whatever the hub ran when it built.

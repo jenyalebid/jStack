@@ -325,7 +325,40 @@ def inherited(config: dict, ref: str | None = None) -> dict:
                                promoted=not config.get("candidate_test", False))
     item = manifest["components"]["client"]
     releases.check_artifact(feed / manifest["release"] / item["file"], item)
+    drift = client_drift(str(item["version"]))
+    if drift:
+        print(drift, flush=True)
     return manifest
+
+
+def client_drift(carried: str) -> str:
+    """Said out loud when this hub already serves a newer client than the one
+    its next build will carry forward, or "" when it does not.
+
+    A hub source-build inherits the client its feed holds, and only a signed
+    publication can advance that. `/app/mac/latest` — the door a Mac installs
+    the client from — is advanced by the publication of the Mac app alone. The
+    two therefore drift apart silently, and did: the fleet offer sat on client
+    109 from 2026-09-23 while this same hub served 119 at `/app/mac/latest`,
+    on TestFlight and on the public tag, and every `release deploy` in between
+    honestly re-offered 109 without a word.
+
+    A warning rather than a refusal. Carrying the client forward is what lets
+    a hub rebuild itself at all, and a hub that cannot build is worse than one
+    that builds behind — but it must not be the quiet option.
+    """
+    from . import releases as published
+    try:
+        latest = json.loads(published.MANIFEST.read_text())
+        newer = int(latest["build"]) > int(carried)
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+    if not newer:
+        return ""
+    return (f"warning: this build carries client {carried} forward, but this hub already "
+            f"serves client {latest['build']} at /app/mac/latest. A source build cannot "
+            "advance the client; only a signed publication can. The fleet will stay on "
+            f"{carried} until one is promoted.")
 
 
 def assemble(*, release_id: str, notes: str, sequence: int, repo: str, ref: str,
