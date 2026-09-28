@@ -56,6 +56,27 @@ def published(feed: Path, key, *, stack=OLD, sequence=5, ref="stable", client=b"
     return envelope
 
 
+def shelved(feed: Path, key, *, build=119, stack_minimum="1.0", body=b"client-119",
+            source="d" * 40):
+    """One client publication on the feed's shelf, as `publish_release client` leaves it."""
+    directory = feed / releases.CLIENTS / str(build)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"jRemote-{build}.zip").write_bytes(body)
+    manifest = {"schema": 1, "kind": "client", "build": build,
+                "component": {"file": f"jRemote-{build}.zip", "version": str(build),
+                              "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()},
+                "source": source, "packages": {"JLibrary": "e" * 40},
+                "compatibility": {"protocol": 1, "stack_minimum": stack_minimum},
+                "published": "2026-09-28T00:00:00Z", "notes": "test"}
+    envelope = releases.sign_client(manifest, key.private_bytes_raw())
+    atomic_json(directory / "client.json", envelope)
+    atomic_json(directory / "trust.json", {
+        "algorithm": "Ed25519",
+        "public_key": base64.b64encode(key.public_key().public_bytes_raw()).decode()})
+    atomic_json(feed / releases.CLIENTS / "latest.json", envelope)
+    return manifest
+
+
 def wired(sha=HEAD, status=200):
     """A GitHub that answers the one question a check is allowed to ask."""
     seen = []
@@ -318,6 +339,8 @@ def builder(tmp_path, publisher, monkeypatch):
             return ""
         if "rev-list" in argv:
             return "101\n"
+        if "show" in argv:
+            return '{"version": "9.9.9"}'
         if argv[0] == "/usr/bin/ditto":
             with zipfile.ZipFile(argv[-1], "w") as bundle:
                 bundle.writestr("jStack Hub.app/Contents/Info.plist", "hub")
@@ -499,6 +522,78 @@ def test_a_build_carries_the_client_artifact_forward_byte_for_byte(builder):
     assert manifest["components"]["client"] == previous["components"]["client"]
     assert manifest["sources"]["client"] == previous["sources"]["client"]
     assert (feed / release / "client.zip").read_bytes() == b"client-bytes"
+
+
+# ── The client rides its own clock: the shelf
+
+
+def test_a_build_carries_the_shelfs_newer_client_when_this_stack_runs_it(builder):
+    """The fleet sat on client 109 for five days while 119 was on TestFlight,
+    because only a full stack release through twelve journeys could move the
+    fleet's client. A client publication on the shelf is enough now."""
+    root, feed, config, _ = builder
+    publisher = Ed25519PrivateKey.generate()
+    shelf = shelved(feed, publisher, build=119, stack_minimum="9.9.0")
+    without = build_source.source_identity(
+        build_source.release_date(), HEAD, "b" * 40, {}, channel="main",
+        builder=build_source.build_key(root)[1])
+    release = build_source.build(root, config)["release"]
+    manifest = releases.verify(json.loads((feed / "latest.json").read_text()),
+                               build_source.build_key(root)[1])
+    assert manifest["components"]["client"] == shelf["component"]
+    assert manifest["sources"]["client"] == shelf["source"]
+    assert manifest["client_packages"] == shelf["packages"]
+    assert (feed / release / "jRemote-119.zip").read_bytes() == b"client-119"
+    assert "client 119 from clients/119" in manifest["notes"]
+    # A different client is a different release: fleet jobs key by release.
+    assert release != without
+
+
+@pytest.mark.parametrize("build,stack_minimum", [(119, "9.9.10"), (1, "1.0")])
+def test_a_build_keeps_the_previous_client_when_the_shelfs_is_not_for_it(builder, build,
+                                                                         stack_minimum):
+    """A client that needs a newer stack, or one older than what the release
+    already carries, is not this build's client — the previous bytes are."""
+    root, feed, config, _ = builder
+    shelved(feed, Ed25519PrivateKey.generate(), build=build, stack_minimum=stack_minimum)
+    previous = json.loads((feed / "latest.json").read_text())["manifest"]
+    release = build_source.build(root, config)["release"]
+    manifest = releases.verify(json.loads((feed / "latest.json").read_text()),
+                               build_source.build_key(root)[1])
+    assert manifest["components"]["client"] == previous["components"]["client"]
+    assert (feed / release / "client.zip").read_bytes() == b"client-bytes"
+
+
+def test_a_shelf_that_does_not_verify_stops_the_build_rather_than_carrying_the_old_client(builder):
+    root, feed, config, calls = builder
+    shelved(feed, Ed25519PrivateKey.generate())
+    (feed / releases.CLIENTS / "119/jRemote-119.zip").write_bytes(b"other bytes")
+    with pytest.raises(releases.ReleaseError, match="artifact does not match"):
+        build_source.build(root, config)
+    atomic_json(feed / releases.CLIENTS / "119/trust.json",
+                {"algorithm": "Ed25519", "public_key": "AAAA"})
+    with pytest.raises(releases.ReleaseError, match="not trusted"):
+        build_source.build(root, config)
+    assert not any("worktree" in " ".join(argv) for argv in calls)
+
+
+def test_building_the_lines_rebuilds_a_line_at_its_tip_whose_client_is_behind_the_shelf(
+        builder, monkeypatch):
+    root, feed, config, _ = builder
+    private, public = build_source.build_key(root)
+    published(feed, SimpleNamespace(private_bytes_raw=lambda: private))
+    config["public_key"] = public
+    monkeypatch.setattr(build_source, "head", lambda client, repo, ref: OLD)
+    assert build_source.build_lines(root, config, client=object())["main"]["skipped"] == "current"
+    # The stack the offer carries is version "1"; a client for stack 2.0 is not behind for it.
+    shelved(feed, Ed25519PrivateKey.generate(), stack_minimum="2.0")
+    assert not build_source.client_behind(config, "main")
+    shelved(feed, Ed25519PrivateKey.generate(), stack_minimum="1.0")
+    assert build_source.client_behind(config, "main")
+    result = build_source.build_lines(root, config, client=object())
+    assert "skipped" not in result["main"]
+    assert build_source.offer(config, "main")["components"]["client"]["version"] == "119"
+    assert not build_source.client_behind(config, "main")
 
 
 def test_a_hub_with_nothing_to_carry_forward_refuses_rather_than_half_builds(builder):

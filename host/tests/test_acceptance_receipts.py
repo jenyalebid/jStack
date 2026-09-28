@@ -429,6 +429,74 @@ def test_checks_that_honestly_agree_are_not_mistaken_for_a_paste(tmp_path, candi
     assert acceptance.gate(receipts, candidate["build"])
 
 
+# ── The client is published on its own clock
+
+
+def test_client_publishes_a_candidates_signed_client_to_the_shelf(tmp_path, candidate, monkeypatch):
+    """Client 119 was built, signed and notarized inside a stack candidate that
+    never got promoted. The client alone goes to the shelf, with the sha it was
+    built from and the oldest stack it runs on; nothing about the stack rides."""
+    from jstack_host import build_source
+
+    feed, key_file = tmp_path / "feed", tmp_path / "key"
+    key_file.write_text(base64.b64encode(candidate["private"]).decode() + "\n")
+    config = {"feed_dir": str(feed), "private_key": str(key_file),
+              "client_repo": str(tmp_path / "no-repo")}
+    monkeypatch.setattr(publish_release, "main_version", lambda config: "26.9.5")
+    # The candidate fixture's client is version "1.2.3"; a client's version is its build.
+    manifest = dict(candidate["manifest"])
+    body = b"client 119"
+    (candidate["dir"] / "jRemote-119.zip").write_bytes(body)
+    manifest["components"] = {**manifest["components"], "client": {
+        "file": "jRemote-119.zip", "version": "119", "bytes": len(body),
+        "sha256": hashlib.sha256(body).hexdigest()}}
+    manifest["client_packages"] = {"JLibrary": "e" * 40}
+    (candidate["dir"] / "candidate.json").write_text(
+        json.dumps(releases.sign(manifest, candidate["private"], promoted=False)))
+    shelf = publish_release.client(config, "the client alone", candidate["dir"])
+    assert shelf == feed / "clients/119"
+    envelope = json.loads((feed / "clients/latest.json").read_text())
+    trust = json.loads((shelf / "trust.json").read_text())["public_key"]
+    assert trust == candidate["public"]
+    published = releases.verify_client(envelope, trust)
+    assert published["build"] == 119 and published["source"] == "b" * 40
+    assert published["packages"] == {"JLibrary": "e" * 40}
+    assert published["compatibility"] == {"protocol": 1, "stack_minimum": "26.9.5"}
+    assert (shelf / "jRemote-119.zip").read_bytes() == body
+    assert json.loads((shelf / "client.json").read_text()) == envelope
+    # What a hub building a 26.9.5 stack, or newer, now carries; an older one does not.
+    assert build_source.shelf_client(feed, "26.9.5")["build"] == 119
+    assert build_source.shelf_client(feed, "26.10")["build"] == 119
+    assert build_source.shelf_client(feed, "26.9.4") is None
+    # Publishing the same build again is the same shelf; different bytes are refused.
+    assert publish_release.client(config, "again", candidate["dir"]) == shelf
+    assert json.loads((shelf / "client.json").read_text()) == envelope
+    with pytest.raises(releases.ReleaseError, match="already on the shelf"):
+        publish_release.client(config, "narrower", candidate["dir"], stack_minimum="27.0")
+    with pytest.raises(releases.ReleaseError, match="not a stack version"):
+        publish_release.client(config, "typo", candidate["dir"], stack_minimum="latest")
+
+
+def test_the_default_client_floor_is_origin_mains_stack_version(tmp_path):
+    import subprocess
+
+    upstream, checkout = tmp_path / "upstream", tmp_path / "checkout"
+    (upstream / "plugins/jstack/.claude-plugin").mkdir(parents=True)
+    (upstream / "plugins/jstack/.claude-plugin/plugin.json").write_text('{"version": "26.9.4"}')
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@t", "HOME": str(tmp_path)}
+    for argv in (["git", "init", "-q", "-b", "main"], ["git", "add", "."],
+                 ["git", "commit", "-q", "-m", "main"]):
+        subprocess.run(argv, cwd=upstream, check=True, env=env, capture_output=True)
+    subprocess.run(["git", "clone", "-q", str(upstream), str(checkout)], check=True, env=env,
+                   capture_output=True)
+    subprocess.run(["git", "checkout", "-q", "-b", "dev"], cwd=checkout, check=True, env=env)
+    (checkout / "plugins/jstack/.claude-plugin/plugin.json").write_text('{"version": "26.9.5"}')
+    subprocess.run(["git", "commit", "-q", "-am", "dev"], cwd=checkout, check=True, env=env,
+                   capture_output=True)
+    assert publish_release.main_version({"stack_repo": str(checkout)}) == "26.9.4"
+
+
 # ── The publication reaches the line it was built for
 
 

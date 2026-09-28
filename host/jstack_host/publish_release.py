@@ -266,6 +266,125 @@ def seal(work: Path, config: dict, notes: str) -> Path:
     return output
 
 
+def publisher_key(config: dict) -> tuple[bytes, str]:
+    """The publisher's private key and its public half, from the release config."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    private = base64.b64decode(Path(config["private_key"]).read_text().strip(), validate=True)
+    public = Ed25519PrivateKey.from_private_bytes(private).public_key().public_bytes_raw()
+    return private, base64.b64encode(public).decode()
+
+
+def main_version(config: dict) -> str:
+    """The stack version on origin/main of the stack repo: the oldest line, and
+    so the floor a client publication claims when nobody names one."""
+    repo = str(config["stack_repo"])
+    command(["git", "-C", repo, "fetch", "-q", "origin", releases.STABLE_CHANNEL], timeout=120)
+    text = command(["git", "-C", repo, "show",
+                    f"origin/{releases.STABLE_CHANNEL}:plugins/jstack/.claude-plugin/plugin.json"])
+    return str(json.loads(text)["version"])
+
+
+def build_client(config: dict, notes: str, work: Path) -> tuple[Path, dict, str, dict]:
+    """Build, sign and notarize one client from the repos' committed HEADs.
+    The artifact, its component record, the client sha and the package shas."""
+    stack, client = work / "stack", work / "Projects/client"
+    client.parent.mkdir()
+    snapshot(Path(config["stack_repo"]), stack)
+    client_sha = snapshot(Path(config["client_repo"]), client)
+    dependencies = {}
+    for name, repository in config.get("client_packages", {}).items():
+        releases.identifier(name)
+        target = work / "Packages" / name
+        target.parent.mkdir(exist_ok=True)
+        dependencies[name] = snapshot(Path(repository), target)
+    app_output = work / "client-output"
+    app_script = client / "jRemote-Code/jRemote/release-mac.sh"
+    project = client / "jRemote-Code/jRemote/jRemote.xcodeproj/project.pbxproj"
+    current = max(map(int, re.findall(r"CURRENT_PROJECT_VERSION = (\d+);", project.read_text())))
+    number = allocate_client_build(Path(config["candidates_dir"]), current)
+    log_path = work / "client-build.log"
+    print(f"Building, signing and notarizing client {number} from {client_sha[:8]}", flush=True)
+    with log_path.open("w") as log:
+        process = subprocess.run(["bash", str(app_script), "--build-number", str(number),
+                                  "--candidate-dir", str(app_output), "--notes", notes],
+                                 timeout=2400, stdout=log, stderr=subprocess.STDOUT,
+                                 env={**os.environ, "JSTACK_CHECKOUT": str(stack)})
+    if process.returncode:
+        raise releases.ReleaseError(f"client build failed; see {log_path}\n{log_path.read_text()[-4000:]}")
+    app_manifest = json.loads((app_output / "latest.json").read_text())
+    releases.identifier(app_manifest["file"])
+    app = app_output / app_manifest["file"]
+    item = component(app, str(app_manifest["build"]))
+    return app, item, client_sha, dependencies
+
+
+def client(config: dict, notes: str, reuse_client: Path | None = None,
+           stack_minimum: str | None = None) -> Path:
+    """Publish one client build to the feed's shelf, on the client's own clock.
+
+    jRemote.app changes far less often than the stack and does not need the
+    stack's road to reach a Mac: the fleet sat on client 109 from 2026-09-23
+    while 119 was on TestFlight, because the only thing that could advance
+    the fleet's client was a full stack release through all twelve journeys.
+    A publication here is the client alone, signed with the publisher's key,
+    naming the oldest stack version it runs on (`--stack-minimum`; origin/main's
+    version when unsaid, so every line takes it). Every hub build after this
+    carries the shelf's newest compatible client (`build_source.carried_client`),
+    on whichever line it builds, and the leaves take it with the next build.
+
+    `reuse_client` publishes the exact signed client of an existing candidate
+    — the one that was built and notarized for a stack release that never got
+    promoted. Its manifest names the client sha it was built from, so nothing
+    here claims the repo's HEAD.
+    """
+    feed = Path(config["feed_dir"])
+    private, public = publisher_key(config)
+    floor = stack_minimum or main_version(config)
+    releases.version_key(floor)
+    work = None
+    if reuse_client is not None:
+        prior = releases.verify(json.loads((reuse_client / "candidate.json").read_text()),
+                                public, promoted=False)
+        item = prior["components"]["client"]
+        app = reuse_client / item["file"]
+        releases.check_artifact(app, item)
+        source, packages = prior["sources"]["client"], prior.get("client_packages", {})
+        print(f"Publishing the signed client {item['version']} of {prior['release']}", flush=True)
+    else:
+        candidates = Path(config["candidates_dir"])
+        candidates.mkdir(parents=True, exist_ok=True)
+        work = Path(tempfile.mkdtemp(prefix="client-", suffix=".noindex", dir=candidates))
+        app, item, source, packages = build_client(config, notes, work)
+    manifest = {"schema": releases.SCHEMA, "kind": "client", "build": int(item["version"]),
+                "component": item, "source": source, "packages": packages,
+                "compatibility": {"protocol": 1, "stack_minimum": floor},
+                "published": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "notes": notes}
+    envelope = releases.sign_client(manifest, private)
+    shelf = feed / releases.CLIENTS
+    shelf.mkdir(parents=True, exist_ok=True)
+    destination = shelf / str(manifest["build"])
+    if destination.exists():
+        held = json.loads((destination / "client.json").read_text())["manifest"]
+        if {k: v for k, v in held.items() if k not in ("published", "notes")} != \
+                {k: v for k, v in manifest.items() if k not in ("published", "notes")}:
+            raise releases.ReleaseError(
+                f"client build {manifest['build']} is already on the shelf with different contents")
+        envelope = {"manifest": held, "signature": json.loads(
+            (destination / "client.json").read_text())["signature"]}
+    else:
+        staging = Path(tempfile.mkdtemp(prefix=".client-", dir=shelf))
+        shutil.copy2(app, staging / item["file"])
+        releases.check_artifact(staging / item["file"], item)
+        atomic_json(staging / "client.json", envelope)
+        atomic_json(staging / "trust.json", {"algorithm": "Ed25519", "public_key": public})
+        os.rename(staging, destination)
+    atomic_json(shelf / "latest.json", envelope)
+    if work is not None:
+        shutil.rmtree(work, ignore_errors=True)
+    print(stamp_client_build(Path(config["client_repo"]), manifest["build"], notes), flush=True)
+    return destination
+
+
 def candidate_manifest(candidate: Path, private_key: bytes) -> dict:
     """The signed candidate's own manifest — never a manifest handed to us."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -584,6 +703,13 @@ def main():
     create.add_argument("--notes", required=True)
     create.add_argument("--reuse-client", type=Path,
                         help="reuse an exact signed client candidate only when its source inputs are unchanged")
+    shelf = commands.add_parser("client", help="publish one client build to the feed's shelf, "
+                                "independent of any stack release")
+    shelf.add_argument("--notes", required=True)
+    shelf.add_argument("--reuse-client", type=Path,
+                       help="publish the exact signed client of this candidate instead of building")
+    shelf.add_argument("--stack-minimum", metavar="VERSION",
+                       help="the oldest stack version this client runs on (default: origin/main's)")
     finish = commands.add_parser("seal", help="resume a fully built candidate without rebuilding")
     finish.add_argument("work", type=Path)
     finish.add_argument("--notes", required=True)
@@ -624,6 +750,9 @@ def main():
         return
     if args.action == "seal":
         print(seal(args.work, config, args.notes))
+        return
+    if args.action == "client":
+        print(client(config, args.notes, args.reuse_client, args.stack_minimum))
         return
     private = base64.b64decode(Path(config["private_key"]).read_text().strip(), validate=True)
     if args.action == "qualify":
