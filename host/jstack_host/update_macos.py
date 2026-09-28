@@ -571,11 +571,21 @@ class MacBackend:
             return isinstance(response.json().get("sessions"), list)
 
     def verify(self, job: dict) -> bool:
+        self.unverified = ""
         try:
             from . import update_plugins
             plugins = update_plugins.observed(update_plugins.discover())
             expected = job["envelope"]["manifest"]["components"]["stack"]["version"]
-            if any(value["version"] != expected for value in plugins.values()):
+            behind = {kind: value["version"] for kind, value in plugins.items()
+                      if value["version"] != expected}
+            if behind:
+                # Named for the same reason a diverged service is (#197):
+                # unnamed, a plugin left on another release reads exactly like
+                # a bundle that failed to land, and the machine has nothing to
+                # say which. Cost a run to tell apart by hand.
+                self.unverified = "; ".join(
+                    f"the {kind} plugin is {version or 'absent'}, not the {expected} this "
+                    "release carries" for kind, version in sorted(behind.items()))
                 return False
             if self._host_required(job) and not self._verify_host(job):
                 return False
