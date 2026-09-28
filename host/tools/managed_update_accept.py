@@ -695,6 +695,10 @@ class Fleet:
         #: one. Empty for a plain ref run, where the hub's inherited client is
         #: the only client there is and nothing is held to a newer one.
         self.candidate_client: str = ""
+        #: The ref the candidate was seeded onto. Only that ref's build is held
+        #: to the candidate's client: the prior is built on purpose to serve an
+        #: older one, and it lands on its own line's offer.
+        self.candidate_ref: str = ""
         #: Guests this run installed a host on by hand, by name. The fresh
         #: guest is reset before its first cast of a run and kept afterwards:
         #: the Mac fresh_install adopted is a fleet member for the rest of the
@@ -913,7 +917,11 @@ class Fleet:
         # offers its old client would send every managed Mac to that old
         # client, and every hub-served journey below would then assert the
         # leaf against it and pass.
-        if self.candidate_client:
+        #
+        # Only the candidate's own ref. The prior is built to serve the older
+        # client a leaf is upgraded FROM, onto its own line's offer, and it
+        # would fail this by doing its job.
+        if self.candidate_client and build.ref == self.candidate_ref:
             expect(served["client"] == self.candidate_client,
                    f"the hub built {build.slug} but offers client {served['client']}, not the "
                    f"candidate's {self.candidate_client}: the build carried an older client "
@@ -2820,6 +2828,7 @@ def main() -> int:
         fleet.prepare(fleet.hub)
         if candidate:
             fleet.candidate_client = str(candidate["components"]["client"]["version"])
+            fleet.candidate_ref = args.ref
             fleet.seed(args.candidate, candidate)
         # The hub builds the commit before any receipt is written: the build id it
         # comes out with is what the fleet is offered, and a run that cannot even

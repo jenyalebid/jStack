@@ -111,7 +111,8 @@ def runner():
 def a_build(runner, monkeypatch, tmp_path, ref, sha, *, version="0.69.3", client="70"):
     """A `Build` without the network: what the ref resolves to is scripted."""
     app = tmp_path / (ref + "-jRemote.app")
-    app.mkdir(exist_ok=True)
+    # A real prior ref carries a slash (`prior/2026-09-23-b1a0212a`).
+    app.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(runner.subprocess, "run",
                         lambda *a, **k: subprocess.CompletedProcess(a, 0, sha + "\trefs/heads/" + ref, ""))
     monkeypatch.setattr(runner, "git", lambda checkout, *argv, **kwargs:
@@ -2322,8 +2323,27 @@ def test_a_hub_that_offers_an_older_client_than_the_candidate_fails_the_run(runn
     # Unqualified, the same stale offer is simply what this hub serves.
     assert fleet.offer(build) == CANDIDATE
     fleet.candidate_client = "119"
+    fleet.candidate_ref = "dev"
     with pytest.raises(runner.AcceptanceFailure, match="carried an older client forward"):
         fleet.offer(build)
+
+
+def test_the_prior_may_offer_the_older_client_it_exists_to_serve(runner, tmp_path, monkeypatch):
+    """The upgrade journey builds the prior on purpose to serve the client a
+    leaf is upgraded FROM. Holding that build to the candidate's client would
+    fail every journey that stages a prior for doing its job.
+    """
+    plan = {"vm_tool": str(tmp_path / "vm.sh"), "hub": "acc-hub", "leaves": [], "disposable": True}
+    fleet = runner.Fleet(plan, run=lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
+    prior = a_build(runner, monkeypatch, tmp_path, "prior/2026-09-23", HEAD_SHA, client="109")
+    monkeypatch.setattr(type(fleet.hub), "sh",
+                        lambda self, command, timeout=600: json.dumps({"release": CANDIDATE}))
+    monkeypatch.setattr(type(fleet), "served_now",
+                        lambda self: {"build": CANDIDATE, "client": "109"})
+    fleet.candidate_client = "119"
+    fleet.candidate_ref = "dev"
+    assert fleet.offer(prior) == CANDIDATE
+    assert fleet.served["prior/2026-09-23"] == "109"
 
 
 def test_a_candidate_is_refused_unless_the_publisher_signed_it(runner, tmp_path):
