@@ -364,3 +364,51 @@ def test_a_stale_answer_is_looked_up_again(monkeypatch):
     assert addresses._resolve_local("mac.local", resolver=fast, deadline=1.0) == "192.168.0.106"
     assert addresses._resolve_local("mac.local", resolver=fast, deadline=1.0) == "192.168.0.106"
     assert calls == ["mac.local", "mac.local"]
+
+
+_DSCACHEUTIL = """name: acc-hub.local
+ipv6_address: ::1
+ipv6_address: fe80:7::1c37:b3ca:3228:6782
+
+name: acc-hub.local
+ip_address: 127.0.0.1
+ip_address: 192.168.64.2
+
+"""
+
+
+def test_the_bonjour_name_is_resolved_outside_the_hub_process(monkeypatch):
+    """jStack#226: in the sealed Hub, an in-process `.local` lookup is a Local
+    Network access billed to `live.jstack.hub`, and mDNSResponder denies it —
+    `gethostbyname` failed Errno 8 on every sealed hub, so the #41 check never
+    had evidence. The default resolver asks `dscacheutil`, a platform binary the
+    policy does not police, and never this process's own resolver."""
+    import subprocess
+    _fresh(monkeypatch)
+
+    def denied(name):
+        raise OSError(8, "nodename nor servname provided, or not known")
+    monkeypatch.setattr(addresses.socket, "gethostbyname", denied)
+    monkeypatch.setattr(addresses.socket, "getaddrinfo", denied)
+    ran = []
+
+    def run(cmd, **kw):
+        ran.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=_DSCACHEUTIL, stderr="")
+    monkeypatch.setattr(addresses.subprocess, "run", run)
+    assert addresses._resolve_local("acc-hub.local", deadline=1.0) == "127.0.0.1"
+    assert ran == [["/usr/bin/dscacheutil", "-q", "host", "-a", "name", "acc-hub.local"]]
+
+
+def test_an_unresolved_or_hung_dscacheutil_is_no_evidence(monkeypatch):
+    import subprocess
+
+    def empty(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    def hung(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+    for run in (empty, hung):
+        _fresh(monkeypatch)
+        monkeypatch.setattr(addresses.subprocess, "run", run)
+        assert addresses._resolve_local("gone.local", deadline=1.0) is None

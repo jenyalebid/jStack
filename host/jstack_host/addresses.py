@@ -180,18 +180,46 @@ def _is_host_only(iface: str) -> bool:
 
 
 #: How long one request may wait on the Bonjour lookup. mDNS answers in
-#: milliseconds when it answers at all; the sealed runtime's resolver fails the
-#: `.local` name and takes ~35s to say so, and `/host` — the first call every
-#: client makes, and the one the installer's health check waits on — hung for
-#: exactly that long behind it, so every fresh install read "did not become
-#: healthy" (26.9.3 proof). No lookup blocks a request past this.
+#: milliseconds when it answers at all; an in-process lookup from the sealed
+#: Hub waited ~35s on a Local Network prompt nobody answered (see `_mdns_lookup`),
+#: and `/host` — the first call every client makes, and the one the installer's
+#: health check waits on — hung for exactly that long behind it, so every fresh
+#: install read "did not become healthy" (26.9.3 proof). No lookup blocks a
+#: request past this.
 RESOLVE_DEADLINE = 1.0
+#: The subprocess bound on one `dscacheutil` lookup.
+MDNS_TIMEOUT = 5.0
 #: How long an answer stands before it is looked up again.
 RESOLVE_TTL = 300.0
 
 _RESOLVE_LOCK = threading.Lock()
 _RESOLVED: dict[str, tuple[float, str | None]] = {}
 _PENDING: dict[str, concurrent.futures.Future] = {}
+
+
+def _mdns_lookup(name: str) -> str:
+    """The first IPv4 `name` resolves to, asked of `dscacheutil`, not of this process.
+
+    Resolving a `.local` name is a Local Network access, and macOS bills it to
+    the asking process's bundle. Inside the sealed Hub that is `live.jstack.hub`,
+    whose Info.plist declares `NSLocalNetworkUsageDescription`: mDNSResponder
+    answers "Local network access to query policy 'denied' for
+    (live.jstack.hub)" and `gethostbyname` fails with Errno 8 — after ~35s the
+    first time, while the permission prompt waits — so the jStack#41 check read
+    "no evidence" forever on every sealed hub (jStack#226, proven in a 26.6.2
+    guest). `dscacheutil` is a platform binary: the same query through it is
+    not policed, answers in milliseconds, and does not raise a Local Network
+    prompt for a lookup of this Mac's own name."""
+    try:
+        out = subprocess.run(["/usr/bin/dscacheutil", "-q", "host", "-a", "name", name],
+                             capture_output=True, text=True, timeout=MDNS_TIMEOUT).stdout
+    except subprocess.SubprocessError as exc:
+        raise OSError(str(exc)) from exc
+    for line in out.splitlines():
+        key, _, value = line.partition(":")
+        if key.strip() == "ip_address" and value.strip():
+            return value.strip()
+    raise OSError(f"{name} did not resolve")
 
 
 def _lookup(name: str, resolver) -> str | None:
@@ -219,7 +247,7 @@ def _start_lookup(name: str, resolver) -> concurrent.futures.Future:
     return future
 
 
-def _resolve_local(name: str, *, resolver=socket.gethostbyname,
+def _resolve_local(name: str, *, resolver=_mdns_lookup,
                    deadline: float = RESOLVE_DEADLINE) -> str | None:
     """What `name` resolves to right now, or None on any failure — bounded.
 
