@@ -2455,7 +2455,27 @@ def join(fleet: Fleet, guest: Guest) -> None:
     if not isinstance(fleet.hub, LocalHub):
         expect(fleet.plan.get("adopt_command"),
                "pairing a Mac to a VM hub needs 'adopt_command' in the plan")
-        guest.sh(fleet.plan["adopt_command"], timeout=900)
+        # The joiner ends in the same `attach` the branch below runs, so it
+        # exits non-zero for the same two unlike reasons — and a lab guest has
+        # no app, so a successful adoption always ends in the second. Left to
+        # `vm.sh ssh`, which raises on any non-zero exit, that reads as the
+        # guest refusing to be adopted at all (run 20260928-105508: acc-leaf1
+        # recorded the hub as its parent and the run failed the upgrade
+        # anyway). The transcript says which of the two it was.
+        command = fleet.plan["adopt_command"]
+        report = guest.sh(f"{command} 2>&1; printf 'adopt-exit=%s\\n' $?", timeout=900)
+        found = re.search(r"adopt-exit=(\d+)", report)
+        status = int(found.group(1)) if found else -1
+        declined = (status != 0 and ATTACH_APP_DECLINED in report
+                    and ATTACH_NOT_MANAGED not in report)
+        expect(status == 0 or declined,
+               f"{guest.name}: {command} exited {status}: {report.strip()[-600:]}")
+        # Which hub it named is the VM plan's business, not this run's: the
+        # joiner points it at the plan's hub and the caller reads the hub's
+        # own inventory back. That it recorded a parent at all is what
+        # separates a redeem that landed from one that did not.
+        expect(guest.sh(PARENT_URL).strip(),
+               f"{guest.name} records no parent after {command}: the redeem never landed")
         return
     code = local_mint(fleet, guest)
     parent = hub_parent_url(fleet, guest)

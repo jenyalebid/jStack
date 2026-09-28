@@ -135,6 +135,16 @@ def earlier(tmp_path, runner, monkeypatch):
 IDENTITY = {"build": CANDIDATE, "sha": HEAD_SHA}
 
 
+#: What the lab's joiner prints on a guest with no app: the redeem lands, and
+#: the local pair link `attach` hands the leaf's own app last finds nothing to
+#: take it, so the script exits 1 on a successful adoption.
+ADOPT_NO_APP = ("attached Update lab leaf-a to http://hub.local:9090 — "
+                "this Mac is a managed hub now.\n"
+                "the app on this Mac did not take that link — open it, then type this code "
+                "into it:\n\n    YU5B-EHM8\n\ngood for 10 minutes.\n"
+                "adopt-exit=1\n")
+
+
 class ScriptedFleet:
     """One disposable fleet's answers, in the shape vm.sh and the tools give them."""
 
@@ -159,6 +169,8 @@ class ScriptedFleet:
         self.denied_status = denied_status
         self.calls: list[list[str]] = []
         self.queued: list[str] = []
+        #: Guests the lab's joiner has run on: they record a parent afterwards.
+        self.joined: set[str] = set()
 
     def probe(self, name):
         return {"host_id": "machine-" + name,
@@ -190,7 +202,12 @@ class ScriptedFleet:
         elif "launchctl kickstart" in command:
             self.kicked.append(name)
             return subprocess.CompletedProcess(argv, 0, "", "")
+        elif "adopt-to-hub" in command:
+            self.joined.add(name)
+            return subprocess.CompletedProcess(argv, 0, ADOPT_NO_APP, "")
         elif "parent.json" in command:
+            if name in self.joined:
+                return subprocess.CompletedProcess(argv, 0, "http://hub.local:9090\n", "")
             # No credential recorded: nothing for the hub to have revoked.
             return subprocess.CompletedProcess(argv, 0, "\n", "")
         elif "--path /devices" in command:
@@ -2084,14 +2101,72 @@ def test_a_leaf_recording_another_parent_is_not_adopted(runner, monkeypatch):
         runner.join(fleet, guest)
 
 
+VM_HUB_PLAN = {**LOCAL_PLAN, "hub": "acc-hub",
+               "adopt_command": "/bin/bash ~/adopt-to-hub.sh acc-hub.local"}
+
+
+def _joiner_shell(ran, *, report, parent):
+    """A guest shell answering what the VM-hub half of join() asks: the
+    joiner's transcript, and what parent.json names afterwards."""
+    def sh(command, **kw):
+        ran.append(command)
+        if "adopt-to-hub" in command:
+            return report
+        if "parent.json" in command:
+            return parent + "\n"
+        return ""
+    return sh
+
+
 def test_joining_a_vm_hub_still_runs_the_plan_s_joiner(runner, monkeypatch):
-    fleet = runner.Fleet({**LOCAL_PLAN, "hub": "acc-hub",
-                          "adopt_command": "/bin/bash ~/adopt-to-hub.sh acc-hub.local"},
-                         run=SlotCountingFleet())
-    ran = []
-    monkeypatch.setattr(fleet.leaves[0], "sh", lambda command, **kw: ran.append(command) or "")
+    fleet, ran = runner.Fleet(VM_HUB_PLAN, run=SlotCountingFleet()), []
+    monkeypatch.setattr(fleet.leaves[0], "sh", _joiner_shell(
+        ran, report="attach-exit=0\nadopt-exit=0\n", parent="http://acc-hub.local:9090"))
     runner.join(fleet, fleet.leaves[0])
-    assert ran == ["/bin/bash ~/adopt-to-hub.sh acc-hub.local"]
+    assert ran[0].startswith("/bin/bash ~/adopt-to-hub.sh acc-hub.local")
+
+
+def test_a_vm_hub_joiner_whose_app_declined_the_link_still_adopted_the_leaf(runner, monkeypatch):
+    """The joiner ends in `attach`, which hands the leaf's own app a local
+    pair link last and exits 1 when nothing spends it — on a lab guest, every
+    time. Run 20260928-105508 failed the upgrade on that exit while acc-leaf1
+    sat there recording the hub as its parent."""
+    fleet, ran = runner.Fleet(VM_HUB_PLAN, run=SlotCountingFleet()), []
+    monkeypatch.setattr(fleet.leaves[0], "sh", _joiner_shell(
+        ran, report=ADOPT_NO_APP, parent="http://acc-hub.local:9090"))
+    runner.join(fleet, fleet.leaves[0])
+    assert "adopt-exit=" in ran[0], \
+        "join must capture the joiner's exit itself; vm.sh ssh raises on the app's refusal"
+    assert any("parent.json" in command for command in ran), \
+        "a joiner that exited 1 was taken on its word, with no proof the redeem landed"
+
+
+def test_a_vm_hub_joiner_that_failed_to_redeem_fails_by_name(runner, monkeypatch):
+    fleet, ran = runner.Fleet(VM_HUB_PLAN, run=SlotCountingFleet()), []
+    monkeypatch.setattr(fleet.leaves[0], "sh", _joiner_shell(
+        ran, report="that code is not one this hub minted\nadopt-exit=1\n", parent=""))
+    with pytest.raises(runner.AcceptanceFailure, match="adopt-to-hub.sh acc-hub.local exited 1"):
+        runner.join(fleet, fleet.leaves[0])
+
+
+def test_a_vm_hub_joiner_that_does_not_read_as_managed_fails_even_without_an_app(
+        runner, monkeypatch):
+    fleet, ran = runner.Fleet(VM_HUB_PLAN, run=SlotCountingFleet()), []
+    report = ADOPT_NO_APP.replace(
+        "adopt-exit=1", "this machine is not reading as a managed hub yet\nadopt-exit=1")
+    monkeypatch.setattr(fleet.leaves[0], "sh", _joiner_shell(
+        ran, report=report, parent="http://acc-hub.local:9090"))
+    with pytest.raises(runner.AcceptanceFailure, match="exited 1"):
+        runner.join(fleet, fleet.leaves[0])
+
+
+def test_a_vm_hub_joiner_that_left_no_parent_record_fails(runner, monkeypatch):
+    """A declined app is forgiven; a leaf that recorded no parent is not."""
+    fleet, ran = runner.Fleet(VM_HUB_PLAN, run=SlotCountingFleet()), []
+    monkeypatch.setattr(fleet.leaves[0], "sh", _joiner_shell(
+        ran, report=ADOPT_NO_APP, parent=""))
+    with pytest.raises(runner.AcceptanceFailure, match="records no parent"):
+        runner.join(fleet, fleet.leaves[0])
 
 
 def test_a_local_hub_without_an_address_asks_the_guest_for_its_gateway(runner, monkeypatch):
