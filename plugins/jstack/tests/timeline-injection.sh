@@ -175,7 +175,11 @@ hook, payload, outfile = sys.argv[1], sys.argv[2], sys.argv[3]
 if os.fork() == 0:
     os.setsid()
     if os.fork() == 0:
-        deadline = time.time() + 5
+        # Same budget as the IDE case below: reparenting to init is the
+        # machine's business, not this test's, and a shorter deadline here
+        # only means the hook starts before the chain is the shape the case
+        # is about.
+        deadline = time.time() + 20
         while os.getppid() != 1 and time.time() < deadline:
             time.sleep(0.05)
         r = subprocess.run(["python3", hook], input=payload,
@@ -187,7 +191,11 @@ if os.fork() == 0:
 else:
     os.wait()
 PYEOF
-for _ in $(seq 1 60); do [[ -f "$HEADLESS_OUT" ]] && break; sleep 0.1; done
+# The orphan spends up to 20s waiting to be reparented before it starts the
+# hook at all, so a 6s budget here could expire while the case had not begun
+# — a red that says nothing about the code and everything about how busy the
+# machine was. Waits generously; a green run still exits on the first tick.
+for _ in $(seq 1 300); do [[ -f "$HEADLESS_OUT" ]] && break; sleep 0.1; done
 [[ -f "$HEADLESS_OUT" && ! -s "$HEADLESS_OUT" ]] \
   && pass "live-only: orphaned headless spawn gets nothing" \
   || fail "live-only: orphaned headless spawn gets nothing"
@@ -416,6 +424,28 @@ echo "$o_out" | grep -q "omega/chat (your seat)" \
   && echo "$o_out" | grep -q "Omega under the declared root" \
   && pass "JSTACK_ROOT: agents resolve under the declared root, no agent_root key" \
   || fail "JSTACK_ROOT: agents resolve under the declared root ($o_out)"
+
+# (o) a seat the install cannot SEE answers unknown, never zero. The window is
+#     read out of a db, but the thing it is a window on is a directory: when
+#     the agents dir does not exist this install resolved a different tree,
+#     and the db it opens is whatever sits under the root it guessed. Found on
+#     a leaf that answered `sessions: 10, ids: [1, 2]` out of a stray database
+#     for a seat with 19 entries in the real one — a confident wrong number is
+#     worse than an unknown, because only one of them gets looked into.
+BLIND_CFG="$TMP/review-blind.json"
+printf '{ "agent_root": "%s", "timeline_inject": {"*/*": 2} }' "$TMP/no-such-agents" > "$BLIND_CFG"
+b_out=$(explain gamma/chat "$BLIND_CFG")
+[[ "$(echo "$b_out" | field ok)" == "False" ]] \
+  && pass "--explain: a missing agents dir answers ok=false, not a confident zero" \
+  || fail "--explain: a missing agents dir answers ok=false ($b_out)"
+echo "$b_out" | grep -q "no-such-agents" \
+  && pass "--explain: the unknown names the dir it could not find" \
+  || fail "--explain: the unknown names the dir it could not find ($b_out)"
+# The same run against a tree that IS there must stay ok — the gate is the
+# missing directory, not the presence of the check.
+[[ "$(explain gamma/chat | field ok)" == "True" ]] \
+  && pass "--explain: a visible tree is unaffected by the blindness gate" \
+  || fail "--explain: a visible tree is unaffected by the blindness gate"
 
 echo
 if [[ $fails -gt 0 ]]; then

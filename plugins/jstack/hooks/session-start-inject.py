@@ -287,6 +287,34 @@ def carry_tag(tag: str, session_id: str) -> None:
         pass
 
 
+def _blind() -> str:
+    """Why this install cannot see any seat, or "" when it can.
+
+    The window is read out of a timeline db, but the thing it is a window ON
+    is a directory. When the agents dir does not exist, this install is not
+    standing in the tree it thinks it is — a root declared in one place and
+    not another, a moved tree, a marker the environment disagrees with — and
+    the db it then opens is whatever sits under the root it guessed. Every
+    count taken through that is a count of the wrong tree.
+
+    That is "could not be computed", not "this seat injects nothing", and the
+    difference is the whole reason `ok` exists. Observed on a leaf whose tree
+    sits at ~/Documents/Alpine while the resolver answered $HOME:
+    `--explain atlas/chat` returned a confident `sessions: 10, ids: [1, 2]`
+    against a stray database, for a seat with 19 entries sitting in the real
+    one. Two rows it had no business reading, reported as the answer.
+    """
+    if _root is None:
+        # An install too old to carry root.py resolves seats by the literal
+        # gate in resolve(); it has no agents dir to be wrong about.
+        return ""
+    try:
+        agents = _root.agents_dir(_config())
+    except Exception:  # noqa: BLE001 — a hook never dies on a probe
+        return "agents dir could not be resolved"
+    return "" if agents.is_dir() else f"agents dir does not exist: {agents}"
+
+
 def explain(seat: str) -> dict:
     """What a live session of `seat` would be injected, as data.
 
@@ -306,15 +334,23 @@ def explain(seat: str) -> dict:
     nothing); `ids` are the entry ids inside it — more than one per session
     when a session logged more than once.
 
-    ok=False means the answer could not be computed (log_event unreachable
-    or unparseable) — a caller must render that as unknown, never as "these
-    rows don't inject".
+    ok=False means the answer could not be computed — log_event unreachable
+    or unparseable, or this install cannot see its own agents dir, so the
+    tree it would count in is not the tree the seat is in. A caller must
+    render that as unknown, never as "these rows don't inject". It carries a
+    `reason` alongside, present only when ok is False: a consumer that shows
+    the reader an unknown owes them the sentence that says which unknown.
     """
     agent, _, submode = seat.partition("/")
     agent = agent.lower()
     submode = submode.lower() or "chat"
     out = {"ok": True, "seat": f"{agent}/{submode}", "sessions": 0, "ids": []}
     if not agent or submode == "review":
+        return out
+    blind = _blind()
+    if blind:
+        out["ok"] = False
+        out["reason"] = blind
         return out
     out["sessions"] = n = inject_count(_config(), agent, submode)
     if n <= 0:
@@ -325,12 +361,14 @@ def explain(seat: str) -> dict:
         # tail, so json mode is asked for explicitly: empty output here
         # means the call itself produced nothing.
         out["ok"] = False
+        out["reason"] = "log_event tail produced no output"
         return out
     try:
         rows = json.loads(raw)
         out["ids"] = [int(r["id"]) for r in rows if r.get("id") is not None]
-    except (json.JSONDecodeError, ValueError, TypeError, KeyError):
+    except (json.JSONDecodeError, ValueError, TypeError, KeyError) as e:
         out["ok"] = False
+        out["reason"] = f"log_event tail is not readable json: {e}"
     return out
 
 

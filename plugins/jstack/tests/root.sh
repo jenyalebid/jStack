@@ -566,6 +566,63 @@ print("OK")' 2>&1)
 [ "$out" = "OK" ] && pass "a machine with no marker still answers HOME" \
                   || fail "no marker: $out"
 
+# ── candidate_roots: every rung, so a fork has nowhere to hide ──────────────
+# root() answers with one root; the doctor needs the ones it did NOT answer,
+# because a second timeline db appears exactly where a second root does. The
+# list is asserted whole, in order, so a rung added to root() and forgotten
+# here fails rather than quietly narrowing the search.
+CAND="$TMP/candhome"; mkdir -p "$CAND/.config/jstack"
+ENVROOT="$TMP/envroot"; mkdir -p "$ENVROOT"
+printf '%s\n' "$ROOT_A" > "$CAND/.config/jstack/root"
+printf '%s\n' "$ROOT_B/Agents" > "$CAND/.config/jstack/instance_root"
+
+out=$(HOME="$CAND" JSTACK_ROOT="$ENVROOT" ROOT_A="$ROOT_A" ROOT_B="$ROOT_B" "$PY" -c '
+import os, root
+from pathlib import Path
+want = [Path(os.environ["JSTACK_ROOT"]), Path(os.environ["ROOT_A"]),
+        Path(os.environ["ROOT_B"]), Path(os.environ["HOME"])]
+got = root.candidate_roots()
+assert got == want, got
+assert root.root() == got[0], (root.root(), got[0])
+print("OK")' 2>&1)
+[ "$out" = "OK" ] && pass "candidate_roots names every rung, best first, and root() is its head" \
+                  || fail "candidate_roots order: $out"
+
+# cfg["root"] is listed even where it cannot win. The question the doctor asks
+# is not what THIS process resolves — it is what any process here could have,
+# and the shell that never exported the variable resolves through the cfg.
+out=$(HOME="$CAND" JSTACK_ROOT="$ENVROOT" ROOT_A="$ROOT_A" ROOT_B="$ROOT_B" "$PY" -c '
+import os, root
+from pathlib import Path
+got = root.candidate_roots({"root": os.environ["ROOT_B"] + "/cfgtree"})
+assert Path(os.environ["ROOT_B"] + "/cfgtree") in got, got
+assert got[0] == Path(os.environ["JSTACK_ROOT"]), got
+print("OK")' 2>&1)
+[ "$out" = "OK" ] && pass "an outranked cfg[\"root\"] is still a candidate" \
+                  || fail "candidate_roots cfg: $out"
+
+# Two rungs naming one tree is one candidate, not two — otherwise the ordinary
+# install, whose marker agrees with its environment, reads as a fork.
+out=$(HOME="$CAND" JSTACK_ROOT="$ROOT_A" ROOT_A="$ROOT_A" "$PY" -c '
+import os, root
+from pathlib import Path
+got = root.candidate_roots()
+assert got.count(Path(os.environ["ROOT_A"])) == 1, got
+print("OK")' 2>&1)
+[ "$out" = "OK" ] && pass "rungs that agree collapse to one candidate" \
+                  || fail "candidate_roots dedupe: $out"
+
+# The machine with nothing declared has exactly one candidate. A doctor that
+# searches this list must find nothing to report on a plain install.
+out=$(HOME="$FAKEHOME" "$PY" -c '
+import os, root
+from pathlib import Path
+got = root.candidate_roots()
+assert got == [Path(os.environ["HOME"])], got
+print("OK")' 2>&1)
+[ "$out" = "OK" ] && pass "an undeclared machine has exactly one candidate root" \
+                  || fail "candidate_roots default: $out"
+
 echo
 if [ "$fails" -eq 0 ]; then
     echo "PASS — one declaration, the whole tree derives; precedence holds the live install"

@@ -480,6 +480,40 @@ g=$(grade_of "$TMP/inj-off.json" injection)
 [ "$g" = "warn" ] && pass "the kill switch is reported, not silently obeyed"
 rm -f "$CFG"
 
+# ── a forked timeline is a failure, not a clean bill ───────────────────────
+# The defect this covers: a root declared in one place and not another, so one
+# tool writes history into a tree the rest of the install never opens. The
+# doctor must find the stray by asking the resolver which roots it can name —
+# here HOME is the second candidate, and a db planted under it is the fork.
+mkdir -p "$TMP/home/Logs/Timeline"
+"$PY" -c '
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("CREATE TABLE entries (id INTEGER PRIMARY KEY, headline TEXT)")
+c.execute("INSERT INTO entries (headline) VALUES (\"a sitting nobody reads\")")
+c.commit(); c.close()' "$TMP/home/Logs/Timeline/timeline.db"
+run_doctor --json > "$TMP/fork.json" 2>/dev/null
+g=$(grade_of "$TMP/fork.json" timeline)
+if [ "$g" = "fail" ] && grep -q "has forked" "$TMP/fork.json"; then
+    pass "a second timeline db under another candidate root is reported as a fork"
+else
+    fail "a forked timeline was not reported (grade '$g')"
+fi
+# And it names the stray, with what is in it. "Something is wrong somewhere"
+# is not an answer anyone can act on at 2am.
+grep -q "1 entry" "$TMP/fork.json" \
+  && pass "the fork line names the stray's row count" \
+  || fail "the fork line does not say what is in the stray"
+rm -rf "$TMP/home/Logs"
+
+# The ordinary install must stay quiet. A candidate list that collapses to one
+# root has nothing to compare, and a check that cried fork on every machine
+# would be switched off within a week.
+run_doctor --json > "$TMP/nofork.json" 2>/dev/null
+grep -q "has forked" "$TMP/nofork.json" \
+  && fail "a single-rooted install was reported as forked" \
+  || pass "an install whose roots agree reports no fork"
+
 # ── a check that raises FAILS; it does not disappear ───────────────────────
 # Proven by breaking a seam the doctor reads rather than by patching the tool:
 # a root that resolves inside the shipping checkout makes root.py raise, and

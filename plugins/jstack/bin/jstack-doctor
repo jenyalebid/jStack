@@ -225,12 +225,73 @@ def check_agents() -> dict:
     return _check("agents", OK, f"{len(found)} in {d}: {', '.join(sorted(found))}")
 
 
+def _timeline_rows(db: Path) -> str:
+    """"<n> entries" for a timeline db, or why it could not be counted. A
+    stray file is worth naming whether or not it parses — an unreadable one
+    at a path nothing should be writing is the same finding."""
+    try:
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+            n = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
+    except sqlite3.Error:
+        return "unreadable"
+    return f"{n} entr{'y' if n == 1 else 'ies'}"
+
+
+def _timeline_forks(db: Path) -> "list[tuple[Path, str]]":
+    """Timeline databases on this machine that this install is not writing to.
+
+    One lookup per root `root.candidate_roots()` can name, because a second
+    database appears exactly where a second root does: a tool that resolved
+    through a rung this process does not reach writes a whole timeline nobody
+    opens. Found on a leaf whose tree is at ~/Documents/Alpine — the Hub read
+    the install marker, everything importing root.py answered $HOME, and two
+    real sessions went into a $HOME database for a day before anyone noticed
+    the injection was empty.
+
+    Not a tree walk. The stray is always under a root the resolver itself can
+    name, and walking a user's home on a Mac means walking into TCC-gated
+    directories, where the refusal to enumerate is indistinguishable from an
+    empty one — a search that cannot tell "nothing there" from "not allowed
+    to look" must not be the thing a doctor says "clean" on.
+    """
+    try:
+        declared = db.resolve()
+    except OSError:
+        declared = db
+    out = []
+    for cand in root.candidate_roots():
+        other = cand / "Logs" / "Timeline" / "timeline.db"
+        try:
+            if other.resolve() == declared or not other.is_file():
+                continue
+        except OSError:
+            continue
+        out.append((other, _timeline_rows(other)))
+    return out
+
+
 def check_timeline() -> dict:
     d = root.timeline_dir()
     db = d / "timeline.db"
     if not _writable(d):
         return _check("timeline", FAIL, f"cannot write {d}",
                       "log_event, msg and the session-end engine all write here")
+    # Before the declared db is graded at all: a fork is a finding about this
+    # machine, not about that file, and it is true whether or not the declared
+    # one exists yet. The worst version of it is exactly the one where it does
+    # not — every entry so far went to the stray, and the check that only ever
+    # looked at the declared path would call that install fresh.
+    forks = _timeline_forks(db)
+    if forks:
+        listing = "; ".join(f"{q} ({n})" for q, n in forks)
+        return _check("timeline", FAIL,
+                      f"the timeline has forked — this install writes {db}, and "
+                      f"{listing} {'is' if len(forks) == 1 else 'are'} also on disk",
+                      "two of this machine's roots resolve to different trees, so "
+                      "some tool wrote history where nothing reads it — the `root` "
+                      "check above names the one in force. Merge the stray into the "
+                      "declared db and move it aside: a second file here is not a "
+                      "backup, it is history nobody will open")
     if not db.exists():
         # OK, not WARN. The directory is writable — checked above — so the only
         # thing missing is a file `log_event` creates on first use, and nothing
