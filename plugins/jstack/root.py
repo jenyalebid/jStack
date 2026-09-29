@@ -119,9 +119,57 @@ def _marker(name: str) -> "Path|None":
     return path if path.is_absolute() else None
 
 
+def candidate_roots(cfg: "dict|None" = None) -> "list[Path]":
+    """Every root this resolver's rungs could produce, best first.
+
+    `root()` answers with the first rung that speaks; this answers with all of
+    them, and `root()` is this list's head. A tree does not split because one
+    rung is wrong — it splits because two rungs disagree and some tool resolved
+    through the loser. So the roots that COULD have been answered are exactly
+    the places a second copy of the tree can be hiding, and they are the only
+    list worth searching: on the leaf this was found on the stray timeline.db
+    sat under $HOME, the last rung, while every tool a person could see
+    resolved through the marker.
+
+    A full walk of the user's tree would find the same file and cost far more
+    than it is worth — on a Mac it also walks straight into the TCC-gated
+    directories, where enumeration fails with a permission error that reads
+    exactly like an empty directory. Asking the resolver which roots it can
+    name is cheap, total, and cannot be lied to.
+
+    Deduped, order-preserving, never empty: $HOME is always last, exactly as
+    in `root()`. Deriving one from the other is the point — a rung added to
+    `root()` and forgotten here would hand the doctor a blind spot in the
+    shape of the newest feature.
+
+    cfg["root"] is listed even when $JSTACK_ROOT outranks it, because the
+    question is not what THIS process resolves — it is what any process on
+    this machine could have resolved. A second opinion that cannot win here
+    still wins in the shell that never exported the variable, which is the
+    whole mechanism being looked for.
+    """
+    out: "list[Path]" = []
+
+    def add(path: "Path|None") -> None:
+        if path is not None and path not in out:
+            out.append(path)
+
+    val = os.environ.get("JSTACK_ROOT")
+    if val:
+        add(_absolute(val))
+    if cfg and cfg.get("root"):
+        add(_absolute(cfg["root"]))
+    add(_marker("root"))
+    agents = _marker("instance_root")
+    if agents is not None and agents.name == "Agents":
+        add(agents.parent)
+    add(Path.home())
+    return out
+
+
 def root(cfg: "dict|None" = None) -> Path:
     """The install root: $JSTACK_ROOT, else cfg["root"], else the install-time
-    marker, else $HOME.
+    marker, else $HOME — the head of `candidate_roots()`.
 
     No walk-up search, no probing — declarations in order, then the default.
     `cfg` is the caller's own already-parsed config file, so there is exactly
@@ -148,18 +196,7 @@ def root(cfg: "dict|None" = None) -> Path:
     has only that one, and a witness that can be right or absent but not wrong
     beats resolving a tree to a directory nothing writes.
     """
-    val = os.environ.get("JSTACK_ROOT")
-    if not val and cfg:
-        val = cfg.get("root")
-    if val:
-        return _absolute(val)
-    marked = _marker("root")
-    if marked is not None:
-        return marked
-    agents = _marker("instance_root")
-    if agents is not None and agents.name == "Agents":
-        return agents.parent
-    return Path.home()
+    return candidate_roots(cfg)[0]
 
 
 def _absolute(val, name: str = "JSTACK_ROOT") -> Path:
