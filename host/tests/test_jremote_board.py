@@ -726,7 +726,7 @@ import signal as _signal
 
 import jstack_host.managed as managed
 import jstack_host.router as router
-import jstack_host.transcripts as transcripts
+from fastapi import HTTPException
 
 
 def test_end_raw_holders_signals_the_owner_and_waits_for_it(ws, monkeypatch):
@@ -770,13 +770,18 @@ def test_a_dead_holder_is_not_kept_alive_by_a_sibling_in_the_same_workspace(
     assert board.end_raw_holders("1111aaaa", _signal.SIGKILL, timeout=0.6) is True
 
 
-def _open_route(monkeypatch, *, live: bool, open_managed, mid_turn=None):
+def _open_route(monkeypatch, *, live: bool, open_managed, mid_turn=None,
+                target={"cwd": "/ws/chat", "agent": "nova",
+                        "engine": "claude", "resume_id": ""},
+                is_open=False, registered=None):
     """Call the /open route with the host faked out; returns nothing but lets
     `open_managed` record how it was called."""
     sid = "1111aaaa-2222-3333-4444-555555555555"
-    monkeypatch.setattr(transcripts, "_find_session_cwd", lambda s: "/ws/chat")
-    monkeypatch.setattr(managed, "is_open", lambda s: False)
-    monkeypatch.setattr(managed, "record_open", lambda s, b: None)
+    monkeypatch.setattr(managed, "reopen_target", lambda s: target)
+    monkeypatch.setattr(managed, "is_open", lambda s: is_open)
+    seen_registrations = registered if registered is not None else []
+    monkeypatch.setattr(managed, "record_open",
+                        lambda s, b, **kw: seen_registrations.append((b, kw)))
     monkeypatch.setattr(managed, "open_managed", open_managed)
     monkeypatch.setattr(board, "mid_turn", mid_turn or (lambda s: False))
     monkeypatch.setattr(board, "_live_session_ids",
@@ -786,7 +791,7 @@ def _open_route(monkeypatch, *, live: bool, open_managed, mid_turn=None):
 
 def test_open_displaces_only_a_session_a_mac_window_still_holds(monkeypatch):
     seen = {}
-    def fake(sid, cwd, resume=True, displace=None, nudge=None):
+    def fake(sid, cwd, resume=True, displace=None, nudge=None, **kw):
         seen["displace"] = displace
     _open_route(monkeypatch, live=True, open_managed=fake)
     assert seen["displace"] is not None, "a live raw session must be displaced"
@@ -801,7 +806,7 @@ def test_failed_open_never_touches_the_mac_session(monkeypatch):
     `open_managed` and is its to call once the managed session exists; an open
     that fails before that must never have run it."""
     called = []
-    def fake(sid, cwd, resume=True, displace=None, nudge=None):
+    def fake(sid, cwd, resume=True, displace=None, nudge=None, **kw):
         raise RuntimeError("tmux is down")
     monkeypatch.setattr(board, "end_raw_holders",
                         lambda *a, **k: called.append(True) or True)
@@ -822,7 +827,7 @@ def test_takeover_closes_the_window_the_raw_claude_left_behind(monkeypatch):
                         lambda s, sig: events.append("kill") or True)
     monkeypatch.setattr(managed, "close_windows",
                         lambda ttys: events.append(("close", tuple(ttys))))
-    def fake(sid, cwd, resume=True, displace=None, nudge=None):
+    def fake(sid, cwd, resume=True, displace=None, nudge=None, **kw):
         assert displace() is True
     _open_route(monkeypatch, live=True, open_managed=fake)
     assert events == ["ttys", "kill", ("close", ("/dev/ttys007",))], \
@@ -836,7 +841,7 @@ def test_takeover_that_fails_leaves_the_raw_window_alone(monkeypatch):
     monkeypatch.setattr(board, "window_ttys", lambda pids: ["/dev/ttys007"])
     monkeypatch.setattr(board, "end_raw_holders", lambda s, sig: False)
     monkeypatch.setattr(managed, "close_windows", closed.append)
-    def fake(sid, cwd, resume=True, displace=None, nudge=None):
+    def fake(sid, cwd, resume=True, displace=None, nudge=None, **kw):
         assert displace() is False
     _open_route(monkeypatch, live=True, open_managed=fake)
     assert closed == [], "a window whose claude survived is not garbage"
@@ -851,7 +856,7 @@ def test_takeover_that_fails_leaves_the_raw_window_alone(monkeypatch):
 
 def test_takeover_of_a_working_session_carries_the_continue_nudge(monkeypatch):
     seen = {}
-    def fake(sid, cwd, resume=True, displace=None, nudge=None):
+    def fake(sid, cwd, resume=True, displace=None, nudge=None, **kw):
         seen["nudge"] = nudge
     _open_route(monkeypatch, live=True, open_managed=fake,
                 mid_turn=lambda s: True)
@@ -862,7 +867,7 @@ def test_takeover_of_a_working_session_carries_the_continue_nudge(monkeypatch):
 def test_takeover_of_an_idle_session_stays_quiet(monkeypatch):
     """A session at rest comes up waiting, unchanged — no phantom prompt."""
     seen = {}
-    def fake(sid, cwd, resume=True, displace=None, nudge=None):
+    def fake(sid, cwd, resume=True, displace=None, nudge=None, **kw):
         seen["nudge"] = nudge
     _open_route(monkeypatch, live=True, open_managed=fake,
                 mid_turn=lambda s: False)
@@ -881,7 +886,7 @@ def test_working_is_judged_before_the_kill(monkeypatch):
     monkeypatch.setattr(board, "end_raw_holders",
                         lambda s, sig: events.append("kill") or True)
     monkeypatch.setattr(managed, "close_windows", lambda ttys: None)
-    def fake(sid, cwd, resume=True, displace=None, nudge=None):
+    def fake(sid, cwd, resume=True, displace=None, nudge=None, **kw):
         displace()
     _open_route(monkeypatch, live=True, open_managed=fake,
                 mid_turn=lambda s: events.append("judge") or True)
@@ -1973,3 +1978,46 @@ def test_both_builders_carry_a_spawned_title_the_same_way(ws, monkeypatch, tmp_p
     opened = next(r for r in board.open_sessions() if r["session_id"] == sid)
     active = next(r for r in board.active_sessions() if r["session_id"] == sid)
     assert opened["window_name"] == active["window_name"] == "HF · Service consolidation"
+
+
+# ── the reopen is engine-blind ───────────────────────────────────────────────
+#
+# This route is every client reopen (`APIClient.openManaged`). It used to
+# resolve the session by walking `~/.claude/projects` for `{sid}.jsonl`: a
+# Codex session writes none and its board handle is not its rollout's name, so
+# every closed Codex thread answered 404 and could not be reopened at all —
+# the PTY socket deliberately does not revive one.
+
+def test_reopening_a_codex_session_execs_codex_on_its_own_thread_id(monkeypatch):
+    seen = {}
+    registered = []
+    def fake(sid, cwd, resume=True, displace=None, nudge=None, **kw):
+        seen.update(kw, cwd=cwd)
+    _open_route(monkeypatch, live=False, open_managed=fake, registered=registered,
+                target={"cwd": "/ws/chat", "agent": "atlas", "engine": "codex",
+                        "resume_id": "01a0eb9f-a0ca-78e0-8b17-faf6bd71775c"})
+    assert seen["engine"] == "codex", "the pane must exec the CLI that owns the session"
+    assert seen["resume_id"] == "01a0eb9f-a0ca-78e0-8b17-faf6bd71775c", \
+        "codex resume takes its own thread id, never jRemote's board handle"
+    assert seen["cwd"] == "/ws/chat"
+    assert registered == [("atlas", {"engine": "codex"})], \
+        "the board row states the engine it was reopened as"
+
+
+def test_a_session_that_is_standing_is_never_not_found(monkeypatch):
+    """Every managed session spends its first minutes with nothing on disk to
+    be found by, and the app calls this route before it attaches. A 404 there
+    refused to open the session the caller is already looking at."""
+    def fake(sid, cwd, **kw):
+        raise AssertionError("an open session is not stood up twice")
+    out = _open_route(monkeypatch, live=False, open_managed=fake,
+                      target=None, is_open=True)
+    assert out == {"ok": True, "open": True}
+
+
+def test_a_session_nothing_on_disk_can_place_is_still_a_404(monkeypatch):
+    def fake(sid, cwd, **kw):
+        raise AssertionError("nothing to open")
+    with pytest.raises(HTTPException) as e:
+        _open_route(monkeypatch, live=False, open_managed=fake, target=None)
+    assert e.value.status_code == 404

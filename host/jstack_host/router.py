@@ -3000,15 +3000,36 @@ def open_session_managed(sid: str):
     A session taken mid-turn auto-continues: the working judgment is read from
     the transcript tail before the kill, and the resumed claude gets a continue
     message typed in once it is back at its prompt — taking over a working
-    session must not silently park its work."""
+    session must not silently park its work.
+
+    **What it takes to reopen is asked of `managed.reopen_target`, not of
+    `~/.claude/projects`.** This route is the one every client reopen goes
+    through (`APIClient.openManaged`: the thread's own Open, and the take onto
+    the phone), and it used to resolve the session by walking the Claude
+    project dirs for `{sid}.jsonl`. A Codex session never writes one and its
+    board handle is not its rollout's name, so every closed Codex session
+    answered 404 here — the PTY socket deliberately does not revive, so that
+    404 was the end of the road and a dead Codex thread could not be reopened
+    at all. `reopen_target` answers for both engines and carries the two facts
+    a Codex resume cannot do without: which CLI the pane must exec, and the
+    native thread id `codex resume` takes (jRemote's sid is a board handle
+    only). `/focus` has asked it since it existed; this is the same
+    question."""
     _check_sid(sid)
     import signal
     from . import managed
-    from .transcripts import _find_session_cwd
-    from .hostenv import project_dir_to_agent
-    cwd = _find_session_cwd(sid)
-    if not cwd:
+    target = managed.reopen_target(sid)
+    if not target:
+        # A session that is standing right now is never "not found", whatever
+        # disk says. Every managed session spends its first minutes with no
+        # transcript to be found by — a Codex rollout is not indexed under its
+        # board handle until the folder catches up — and the app calls this
+        # route before it attaches. A 404 there refused to open the session the
+        # caller is already looking at.
+        if managed.is_open(sid):
+            return {"ok": True, "open": True}
         raise HTTPException(status_code=404, detail="session not found")
+    cwd = target["cwd"]
     # A raw claude and a `--resume` would be two writers on one transcript, so
     # the raw one is displaced — but from inside `open_managed`, after the
     # window, never before it. Reopening an already-managed session is idempotent
@@ -3036,19 +3057,13 @@ def open_session_managed(sid: str):
                 return False
             managed.close_windows(ttys)
             return True
-    base = ""
-    for pd in (Path.home() / ".claude" / "projects").iterdir():
-        if (pd / f"{sid}.jsonl").exists():
-            parsed = project_dir_to_agent(pd.name)
-            if parsed:
-                base = parsed[0]
-            break
     # Registered-first: the board row is the visibility, so it exists before
     # claude does. open_managed's failure paths clear the registration.
-    managed.record_open(sid, base)
+    managed.record_open(sid, target["agent"], engine=target["engine"])
     try:
         managed.open_managed(sid, cwd, resume=True, displace=displace,
-                             nudge=nudge)
+                             nudge=nudge, engine=target["engine"],
+                             resume_id=target["resume_id"])
     except managed.TakeoverFailed as e:
         raise HTTPException(status_code=409, detail=str(e))
     _board_changed()
