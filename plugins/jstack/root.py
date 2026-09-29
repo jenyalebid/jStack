@@ -95,18 +95,70 @@ def _refuse_shipping_tree(path: Path, env_var: str) -> Path:
     return path
 
 
-def root(cfg: "dict|None" = None) -> Path:
-    """The install root: $JSTACK_ROOT, else the caller's cfg["root"], else $HOME.
+def _marker(name: str) -> "Path|None":
+    """A root the installer recorded, or None when it recorded none.
 
-    No walk-up marker search, no probing — one declaration, stated or
-    defaulted. `cfg` is the caller's own already-parsed config file, so there
-    is exactly one opinion about which file is authoritative: the caller's.
+    `~/.config/jstack/{root,instance_root}`, keyed off HOME and nothing else —
+    the same two files `hostenv.stack_root_marker()` and
+    `hostenv.instance_root_marker()` write and read. Keep the paths in step.
+    Plain `~/.config` rather than `~/Library/Application Support`, which is
+    TCC-gated and pops a permission dialog on any non-owning reader.
+
+    A relative line is ignored rather than refused: this is a file the caller
+    did not type, so there is nobody standing there to correct it, and falling
+    through to the next witness beats raising out of a resolver every tool in
+    the package calls.
+    """
+    try:
+        text = (Path.home() / ".config" / "jstack" / name).read_text().strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    return path if path.is_absolute() else None
+
+
+def root(cfg: "dict|None" = None) -> Path:
+    """The install root: $JSTACK_ROOT, else cfg["root"], else the install-time
+    marker, else $HOME.
+
+    No walk-up search, no probing — declarations in order, then the default.
+    `cfg` is the caller's own already-parsed config file, so there is exactly
+    one opinion about which file is authoritative: the caller's.
+
+    WHY THE MARKER STEP EXISTS. The declaration a person makes is an
+    `export JSTACK_ROOT=` line in a shell profile, and a profile is a file
+    anything may rewrite — an uninstall strips it, a dotfile manager drops it.
+    So the installer asserts the root twice, and `~/.config/jstack/root` is the
+    witness that survives the lost export. `install.sh::recorded_root` reads it
+    and `hostenv.stack_root()` reads it; this module did not, which made the
+    two halves of one install disagree about where that install is.
+
+    Observed on a leaf rooted at ~/Documents/Alpine whose profile carried no
+    declaration: the Hub resolved its tree from the marker while everything
+    importing this file answered $HOME. `agents_dir()` pointed at a directory
+    that does not exist, so no session could resolve the seat it was sitting
+    in and the timeline injection went silently empty; `log_event` wrote into a
+    second timeline.db under $HOME that no reader of that install opens.
+
+    The last step before $HOME reads the AGENTS marker and only when it names
+    an `Agents` directory — the layout every installer writes. A migration
+    read, not a derivation: a machine installed before the root marker existed
+    has only that one, and a witness that can be right or absent but not wrong
+    beats resolving a tree to a directory nothing writes.
     """
     val = os.environ.get("JSTACK_ROOT")
     if not val and cfg:
         val = cfg.get("root")
     if val:
         return _absolute(val)
+    marked = _marker("root")
+    if marked is not None:
+        return marked
+    agents = _marker("instance_root")
+    if agents is not None and agents.name == "Agents":
+        return agents.parent
     return Path.home()
 
 
@@ -162,8 +214,21 @@ def agents_dir(cfg: "dict|None" = None) -> Path:
     The cfg key is the EXISTING `agent_root`: installs already declare it, and
     renaming a key every install has set breaks them for the sake of symmetry.
     Not guarded — a user may legitimately keep agent workspaces inside a repo.
+
+    Its own marker sits between the declarations and the derived default, and
+    is read rather than derived from `root()` for the reason the installer
+    writes two files: `--agent-root` may legitimately put agents outside the
+    root, so neither answer follows from the other.
     """
-    return _derived(cfg, "JSTACK_AGENTS_DIR", "agent_root", "Agents", guarded=False)
+    val = os.environ.get("JSTACK_AGENTS_DIR")
+    if not val and cfg:
+        val = cfg.get("agent_root")
+    if val:
+        return _absolute(val, "JSTACK_AGENTS_DIR")
+    marked = _marker("instance_root")
+    if marked is not None:
+        return marked
+    return root(cfg) / "Agents"
 
 
 def systems_dir(cfg: "dict|None" = None) -> Path:
