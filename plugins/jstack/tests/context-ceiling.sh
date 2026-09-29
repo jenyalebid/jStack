@@ -157,8 +157,21 @@ check("a Codex session is told a sha survives and a sentence does not",
 # Nothing can steer a server-side summary, so promising a summarizer would be a lie.
 check("a Codex session is not promised a summarizer",
       "summarizer" not in note.replace("summary you never see", ""))
+# THE ASKING HALF IS NOT CLAUDE'S. `compact_delivery` gates both engines on the marker as
+# the closing line, and Codex was handed the survival paragraph INSTEAD of the marker -- so
+# 13 Codex Stops over the cut on work-main all logged "ended without asking to be
+# continued" and not one Codex session ever took a seam. A band note that cannot be acted
+# on is the whole defect, so both engines' notes are checked for the request itself.
+check("a Codex session is told how to ask for the seam",
+      "<!-- to-be-continued -->" in note and "LAST line" in note)
+check("a Codex session is told the marker is read on the closing line only",
+      "mid-sentence declares nothing" in note)
+check("a Codex session is told silence means finished",
+      "write no marker" in note)
 code, note = run(claude("claude-declare.jsonl", [50_000, 150_000, 165_000]))
 check("a Claude session is not told its turns are dropped", "server-side" not in note)
+check("a Claude session is told how to ask for the seam",
+      "<!-- to-be-continued -->" in note and "LAST line" in note)
 
 # Below the bands the meter still speaks, once per 10k line and in one sentence: a
 # reading nobody can check is how a session gets to 223k believing it is fine.
