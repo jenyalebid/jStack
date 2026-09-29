@@ -80,6 +80,28 @@ def quarantined_state(tmp_path, monkeypatch):
     monkeypatch.setattr(cod, "RETRY_WINDOWS", (0.05, 0.05))  # the real schedule is ~15 min
 
 
+@pytest.fixture
+def clock(monkeypatch):
+    """Polls counted, not timed. The busy-pane tests hand out a fixed number of busy
+    screens and need the waits to outlast them — ~15 reads at POLL_SECS 0.01. A loaded host
+    stretched each `sleep(0.01)` to ~75ms, the windows closed after four reads, and the
+    suite went red on every push. A sleep that only moves this clock reads the pane the
+    same number of times on any machine."""
+    class Clock:
+        now = time.time()
+
+        def time(self):
+            return self.now
+
+        def sleep(self, secs):
+            self.now += secs
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+    monkeypatch.setattr(cod, "time", Clock())
+
+
 def screen(composer="", body="⏺ Building it."):
     """A pane as Claude Code actually draws it — captured live, 2026-09-02."""
     return "\n".join([body, "", RULE, f"❯ {composer}", RULE, "", FOOTER])
@@ -975,7 +997,7 @@ def test_an_in_place_continue_never_types_over_a_half_written_message(
     assert typed == []
 
 
-def test_an_in_place_continue_waits_out_a_busy_pane(near_ceiling, typed, monkeypatch):
+def test_an_in_place_continue_waits_out_a_busy_pane(near_ceiling, typed, clock, monkeypatch):
     """244ca668: the pane was not ready for the first window and idle twelve minutes later.
     A parked session has no next Stop, so the child that owns the seam has to look again."""
     panes = itertools.chain([screen("wait, first check the")] * 10, itertools.repeat(screen()))
@@ -1000,7 +1022,7 @@ def test_a_pane_that_stays_busy_is_given_up_on_in_the_log(near_ceiling, typed, m
     assert typed == []
 
 
-def test_a_person_typing_ends_the_retry(near_ceiling, typed, monkeypatch):
+def test_a_person_typing_ends_the_retry(near_ceiling, typed, clock, monkeypatch):
     """The retry holds this session's lock, so it must let go the moment a real turn lands —
     that turn's own Stop needs the lock."""
     offset = os.path.getsize(near_ceiling)
@@ -1526,7 +1548,7 @@ def test_a_compaction_that_never_fired_never_continues(near_ceiling, spy, nudged
     assert spy == [] and nudged == []
 
 
-def test_a_busy_pane_at_the_seam_is_compacted_once_it_clears(near_ceiling, nudged,
+def test_a_busy_pane_at_the_seam_is_compacted_once_it_clears(near_ceiling, nudged, clock,
                                                              monkeypatch):
     """244ca668's exact path: decided `compact`, pane not ready for twenty seconds, and the
     session parked for good. The compaction and the continue across it both still happen."""
@@ -1547,7 +1569,7 @@ def test_a_busy_pane_at_the_seam_is_compacted_once_it_clears(near_ceiling, nudge
     assert [r for r in rows if r.get("stage") == "compact" and r.get("outcome") == "busy"]
 
 
-def test_a_busy_pane_after_the_boundary_still_gets_its_continue(near_ceiling, nudged,
+def test_a_busy_pane_after_the_boundary_still_gets_its_continue(near_ceiling, nudged, clock,
                                                                 monkeypatch):
     """The third `busy` exit: the boundary landed, the TUI was still settling — and the
     session that asked to be handed back sat compacted and abandoned."""
@@ -1635,7 +1657,7 @@ def test_the_outcome_line_says_what_the_pane_refused_on(near_ceiling, spy, monke
         assert row["waited"] >= 0
 
 
-def test_the_note_never_lands_on_a_later_outcome(near_ceiling, typed, monkeypatch):
+def test_the_note_never_lands_on_a_later_outcome(near_ceiling, typed, clock, monkeypatch):
     """One note, one outcome. A stale `blocked` on a delivery that worked would be a
     diagnostic lying about the one thing it exists to explain."""
     offset = os.path.getsize(near_ceiling)
