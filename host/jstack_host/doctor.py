@@ -654,13 +654,56 @@ def check_file_sharing() -> dict:
                   "`sudo jstack-host files setup --apply`")
 
 
+def check_windows() -> dict:
+    """Does the Hub hold the desk grant — and is this the session that can say?
+
+    Two different falses wear the same word. One is a machine nobody has
+    granted yet, which one dialog fixes forever. The other is this check
+    running somewhere macOS attributes to a terminal or to sshd, where the
+    answer is about *that* session's holder and says nothing at all about the
+    Hub. Reporting the second as the first is how days go into re-granting a
+    permission that was never missing (jStack#239), so the two never share a
+    line here.
+    """
+    from . import windows
+    try:
+        observed = windows.trust()
+    except windows.WindowsError as e:
+        if e.reason == "absent":
+            return _check("windows", OK, str(e))
+        return _check("windows", WARN, str(e))
+    if observed["trusted"] and observed["hub_session"]:
+        return _check("windows", OK, "jStack Hub holds Accessibility")
+    if observed["trusted"]:
+        # A grant that answers from outside the Hub is a *second* permission
+        # holder on this machine — which is the thing the single-holder model
+        # exists to prevent, and it is how one gets created: a prompt fired
+        # from an ssh session, approved once, and now sshd holds the desk.
+        under = " ← ".join(row["path"] or "?" for row in observed["ancestry"])
+        return _check("windows", WARN,
+                      f"the desk grant answering here belongs to this session ({under}), "
+                      "not to jStack Hub — a second permission holder",
+                      "System Settings → Privacy & Security → Accessibility: leave "
+                      "jStack Hub and remove the rest, then `jstack-host windows authorize`")
+    if not observed["hub_session"]:
+        under = " ← ".join(row["path"] or "?" for row in observed["ancestry"])
+        return _check("windows", WARN,
+                      f"asked from outside the Hub ({under}), so this says nothing "
+                      "about what the Hub holds",
+                      "ask the running Hub instead: POST /api/jremote/v1/windows/trust")
+    return _check("windows", WARN, "jStack Hub does not hold Accessibility on this Mac",
+                  "run `jstack-host windows authorize` and approve the dialog — "
+                  "it names jStack Hub, and it is asked once per machine")
+
+
 CHECKS = (check_python, check_claude, check_tmux, check_websocket, check_fd_limit,
           check_token, check_profile, check_agents, check_registry, check_timeline,
           check_transcripts, check_scheduler, check_allowance, check_codex_hooks,
           check_hook_owners, check_activation,
           check_git_hooks,
           check_repos,
-          check_service, check_source, check_app, check_file_sharing)
+          check_service, check_source, check_app, check_file_sharing,
+          check_windows)
 
 
 def checks() -> list[dict]:

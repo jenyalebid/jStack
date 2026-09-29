@@ -58,6 +58,7 @@ MODULES = (
     "jstack_host.board_watch",
     "jstack_host.desk",
     "jstack_host.fileshare",
+    "jstack_host.windows",
     "jstack_host.grants",
     "jstack_host.audit",
     "jstack_host.mode",

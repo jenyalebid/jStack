@@ -480,6 +480,7 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
              "-DJSTACK_PYTHON", "-I" + str(source / "include/python3.12"),
              str(stack / "host/macos/Runtime.c"), str(source / "Python"), "-o", str(macos / "JStackPython")])
     for name, relative in (("JStackHub", "host/macos/ServiceControl.swift"),
+                           ("JStackWindows", "host/macos/Windows.swift"),
                            ("JStackHostBar", "host/menubar/JStackHostBar.swift")):
         command(["xcrun", "swiftc", "-O", "-o", str(macos / name), str(stack / relative)], timeout=180)
     from .bundle_tools import bundle

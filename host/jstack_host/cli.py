@@ -1152,6 +1152,38 @@ def _cmd_version(args) -> int:
     return 0
 
 
+def _cmd_windows(args) -> int:
+    """The desk capability from a terminal — for the machine you are sitting at.
+
+    `authorize` is deliberately strict about where it is run from: a terminal
+    is not the Hub, and a dialog raised from one names the terminal. On a Mac
+    whose Hub is running, the answer is to ask that Hub
+    (`POST /api/jremote/v1/windows/authorize`); the helper's refusal says so
+    with the process chain it actually found, rather than failing silently and
+    leaving a grant nobody can explain.
+    """
+    import json
+    from . import windows
+    try:
+        if args.windows_cmd == "list":
+            result = windows.listing()
+        elif args.windows_cmd == "trust":
+            result = windows.trust()
+        elif args.windows_cmd == "authorize":
+            result = windows.authorize()
+        elif args.windows_cmd == "restore":
+            result = windows.restore(args.index, args.title)
+        elif args.windows_cmd in ("hide", "unhide"):
+            result = windows.set_hidden(args.pid, args.windows_cmd == "hide")
+        else:
+            result = windows.act(args.windows_cmd, args.pid, args.window, args.title)
+    except windows.WindowsError as e:
+        print(f"jstack-host windows: {e}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("ok", True) else 1
+
+
 def _cmd_files(args) -> int:
     import json
     import os
@@ -1972,6 +2004,36 @@ def build_parser() -> argparse.ArgumentParser:
                     help="run it here (default: the plan's repo, else this shell's directory)")
     pl.add_argument("--state-dir", default=None)
     pl.set_defaults(fn=_cmd_plan_verify)
+
+    p = sub.add_parser("windows", help="read and move windows on this Mac's desk, "
+                                       "under the Hub's own permission")
+    wins = p.add_subparsers(dest="windows_cmd", required=True)
+    wc = wins.add_parser("list", help="every application with windows, and every "
+                                      "window's title, state and rectangle")
+    wc.set_defaults(fn=_cmd_windows)
+    wc = wins.add_parser("trust", help="whether the Hub holds Accessibility — asked, never prompting")
+    wc.set_defaults(fn=_cmd_windows)
+    wc = wins.add_parser("authorize", help="raise the Accessibility request from inside the Hub, "
+                                           "so the dialog names jStack Hub")
+    wc.set_defaults(fn=_cmd_windows)
+    for verb, help_text in (("minimize", "minimize one named window"),
+                            ("unminimize", "restore one named window"),
+                            ("raise", "bring one named window to the front of its application")):
+        wc = wins.add_parser(verb, help=help_text)
+        wc.add_argument("pid", type=int, help="the application's process id, from `list`")
+        wc.add_argument("window", type=int, help="the window's index, from `list`")
+        wc.add_argument("title", help="the window's exact title, from `list` — the verb is "
+                                      "refused if that window has moved since")
+        wc.set_defaults(fn=_cmd_windows)
+    wc = wins.add_parser("restore", help="bring a minimized window back from the Dock")
+    wc.add_argument("index", type=int, help="its index in `list`'s minimized array")
+    wc.add_argument("title", help="its exact Dock title, from `list`")
+    wc.set_defaults(fn=_cmd_windows)
+    for verb, help_text in (("hide", "hide a whole application"),
+                            ("unhide", "unhide a whole application")):
+        wc = wins.add_parser(verb, help=help_text)
+        wc.add_argument("pid", type=int, help="the application's process id, from `list`")
+        wc.set_defaults(fn=_cmd_windows)
 
     p = sub.add_parser("files", help="declare and inspect selected-folder SMB access")
     files = p.add_subparsers(dest="files_cmd", required=True)
