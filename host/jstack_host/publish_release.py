@@ -366,16 +366,24 @@ def build_client(config: dict, notes: str, work: Path) -> tuple[Path, dict, str,
     app_script = client / "jRemote-Code/jRemote/release-mac.sh"
     project = client / "jRemote-Code/jRemote/jRemote.xcodeproj/project.pbxproj"
     current = max(map(int, re.findall(r"CURRENT_PROJECT_VERSION = (\d+);", project.read_text())))
-    number = allocate_client_build(Path(config["candidates_dir"]), current)
-    log_path = work / "client-build.log"
-    print(f"Building, signing and notarizing client {number} from {client_sha[:8]}", flush=True)
-    with log_path.open("w") as log:
-        process = subprocess.run(["bash", str(app_script), "--build-number", str(number),
-                                  "--candidate-dir", str(app_output), "--notes", notes],
-                                 timeout=2400, stdout=log, stderr=subprocess.STDOUT,
-                                 env={**os.environ, "JSTACK_CHECKOUT": str(stack)})
-    if process.returncode:
-        raise releases.ReleaseError(f"client build failed; see {log_path}\n{log_path.read_text()[-4000:]}")
+    # The same guest, on the same terms, as a stack publication's client build:
+    # release-mac.sh's preflight demands one whichever road called it, and this
+    # road did not bring one. So the client's own road — the ordinary road for a
+    # client build since 2026-09-28 — could only be driven by an operator who
+    # had already booted, marked and exported a guest by hand, and died at the
+    # preflight for everyone else.
+    with launch_guest(config, app_script.parent / "Scripts/check-launch.py") as host:
+        number = allocate_client_build(Path(config["candidates_dir"]), current)
+        log_path = work / "client-build.log"
+        print(f"Building, signing and notarizing client {number} from {client_sha[:8]}", flush=True)
+        with log_path.open("w") as log:
+            process = subprocess.run(["bash", str(app_script), "--build-number", str(number),
+                                      "--candidate-dir", str(app_output), "--notes", notes],
+                                     timeout=2400, stdout=log, stderr=subprocess.STDOUT,
+                                     env={**os.environ, "JSTACK_CHECKOUT": str(stack),
+                                          "JREMOTE_RELEASE_TEST_HOST": host})
+        if process.returncode:
+            raise releases.ReleaseError(f"client build failed; see {log_path}\n{log_path.read_text()[-4000:]}")
     app_manifest = json.loads((app_output / "latest.json").read_text())
     releases.identifier(app_manifest["file"])
     app = app_output / app_manifest["file"]
