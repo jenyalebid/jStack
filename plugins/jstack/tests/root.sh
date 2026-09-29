@@ -470,6 +470,102 @@ else
     fail "relative override guard — $out"
 fi
 
+# --- the install-time markers: the witness that survives a lost export -------
+#
+# The root a person declares lives in a shell profile, and a profile is a file
+# anything may rewrite. So install.sh asserts it twice and records it in
+# ~/.config/jstack/root; the sealed Hub, which launches with no login shell,
+# has only that copy. This module read neither, so on a machine whose profile
+# had lost its export the Hub resolved the real tree while every tool
+# importing root.py answered $HOME — agents under a directory that does not
+# exist, and the timeline written into a second db nobody opens.
+
+MHOME="$TMP/markerhome"; mkdir -p "$MHOME/.config/jstack"
+printf '%s\n' "$ROOT_A" > "$MHOME/.config/jstack/root"
+
+out=$(HOME="$MHOME" EXPECT="$ROOT_A" "$PY" - <<'EOF' 2>&1
+import os, root
+from pathlib import Path
+r = Path(os.environ["EXPECT"])
+assert root.root() == r, root.root()
+assert root.agents_dir() == r / "Agents", root.agents_dir()
+assert root.timeline_dir() == r / "Logs" / "Timeline", root.timeline_dir()
+print("OK")
+EOF
+)
+[ "$out" = "OK" ] \
+    && pass "the recorded root answers when no export survives, and the tree derives from it" \
+    || fail "marker root: $out"
+
+# A declaration still outranks the record — the marker is the last witness,
+# never a new authority. A daemon pointed at its own tree must stay there.
+out=$(HOME="$MHOME" JSTACK_ROOT="$ROOT_B" "$PY" -c '
+import os, root
+from pathlib import Path
+assert root.root() == Path(os.environ["JSTACK_ROOT"]), root.root()
+print("OK")' 2>&1)
+[ "$out" = "OK" ] && pass "JSTACK_ROOT outranks the recorded root" \
+                  || fail "marker precedence (env): $out"
+
+out=$(HOME="$MHOME" ROOT_B="$ROOT_B" "$PY" -c '
+import root
+from pathlib import Path
+import os
+got = root.root({"root": os.environ["ROOT_B"]})
+assert got == Path(os.environ["ROOT_B"]), got
+print("OK")' 2>&1)
+[ "$out" = "OK" ] && pass "cfg[\"root\"] outranks the recorded root" \
+                  || fail "marker precedence (cfg): $out"
+
+# The agents marker is read, never derived: --agent-root may legitimately put
+# workspaces outside the root, so neither answer follows from the other.
+printf '%s\n' "$ROOT_B/elsewhere" > "$MHOME/.config/jstack/instance_root"
+out=$(HOME="$MHOME" ROOT_A="$ROOT_A" ROOT_B="$ROOT_B" "$PY" -c '
+import os, root
+from pathlib import Path
+assert root.root() == Path(os.environ["ROOT_A"]), root.root()
+assert root.agents_dir() == Path(os.environ["ROOT_B"]) / "elsewhere", root.agents_dir()
+print("OK")' 2>&1)
+[ "$out" = "OK" ] && pass "the agents marker answers agents_dir without moving the root" \
+                  || fail "agents marker: $out"
+
+# A machine installed before the root marker existed carries only the agents
+# one. When it names an Agents dir the root is its parent — a migration read,
+# so that install stops resolving its logs into a directory nothing writes.
+MIG="$TMP/mighome"; mkdir -p "$MIG/.config/jstack"
+printf '%s\n' "$ROOT_B/Agents" > "$MIG/.config/jstack/instance_root"
+out=$(HOME="$MIG" ROOT_B="$ROOT_B" "$PY" -c '
+import os, root
+from pathlib import Path
+b = Path(os.environ["ROOT_B"])
+assert root.root() == b, root.root()
+assert root.agents_dir() == b / "Agents", root.agents_dir()
+print("OK")' 2>&1)
+[ "$out" = "OK" ] && pass "an Agents-named agents marker supplies the root it sits in" \
+                  || fail "agents marker migration: $out"
+
+# A marker naming a relative path is ignored, not refused: nobody typed it, so
+# there is no one standing there to correct a raise, and the next witness is
+# still better than dying inside a resolver every tool calls.
+BAD="$TMP/badhome"; mkdir -p "$BAD/.config/jstack"
+printf '%s\n' "not/absolute" > "$BAD/.config/jstack/root"
+out=$(HOME="$BAD" "$PY" -c '
+import os, root
+from pathlib import Path
+assert root.root() == Path(os.environ["HOME"]), root.root()
+print("OK")' 2>&1)
+[ "$out" = "OK" ] && pass "a relative recorded root is ignored, falling through to HOME" \
+                  || fail "relative marker: $out"
+
+# No marker at all is the common machine, and it must not have moved.
+out=$(HOME="$FAKEHOME" "$PY" -c '
+import os, root
+from pathlib import Path
+assert root.root() == Path(os.environ["HOME"]), root.root()
+print("OK")' 2>&1)
+[ "$out" = "OK" ] && pass "a machine with no marker still answers HOME" \
+                  || fail "no marker: $out"
+
 echo
 if [ "$fails" -eq 0 ]; then
     echo "PASS — one declaration, the whole tree derives; precedence holds the live install"
