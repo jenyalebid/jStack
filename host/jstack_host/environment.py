@@ -307,7 +307,7 @@ def delta_lines(before: dict[str, str], after: dict[str, str]) -> list[str]:
     this it announced `DELIVERY METHOD SWITCHED: DISTRIBUTE` and nothing else —
     a value name the model has to guess the meaning of. The sentence itself did
     not arrive until some later tool call happened to match a trigger, which in
-    ted/chat 47b6d55d was six minutes and forty turns after the switch.
+    the session that measured it was six minutes and forty turns after the switch.
     """
     lines = []
     for s in SETTINGS:

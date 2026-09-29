@@ -198,7 +198,7 @@ seed "$S" sim_verify off
 got="$(ctx "$(prompt $S)")"
 # The switch carries its instruction: a value name alone is a change the model has
 # to guess the meaning of, and the sentence used to wait for the next matching tool
-# call — six minutes after the user flipped it, in ted/chat 47b6d55d.
+# call — six minutes after the user flipped it, in the session that measured it.
 [[ "$got" == "SIM VERIFY TURNED OFF — Skip the simulator verification"* ]] \
   || fail "delta-flip" "got: $got"
 [[ -z "$(prompt $S)" ]] || fail "delta-settled" "an unchanged prompt spoke"

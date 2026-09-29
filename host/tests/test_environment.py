@@ -148,7 +148,7 @@ def test_a_switch_announces_the_instruction_not_just_the_value():
     """The switch is the one moment the user is sure the model should act
     differently. `DELIVERY METHOD SWITCHED: DISTRIBUTE` alone is a value name —
     the sentence saying what distribute means used to wait for a later tool call
-    to match a trigger, six minutes and forty turns in ted/chat 47b6d55d."""
+    to match a trigger, six minutes and forty turns in the session that measured it."""
     line, = env.delta_lines({}, {"delivery_method": "distribute"})
     assert "ship it through this project's distribute path" in line
 
