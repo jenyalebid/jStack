@@ -52,6 +52,27 @@ import pytest
 _STATE_DIR = Path(tempfile.mkdtemp(prefix="jstack-host-tests-state-"))
 os.environ["JREMOTE_STATE_DIR"] = str(_STATE_DIR)
 
+# ── The suite's tmux sockets live in a directory the run takes away ─────────
+#
+# THE SUITE LEFT 15,926 SOCKET FILES IN THE MACHINE'S TMUX DIR (#259). Every
+# tmux fixture here names a private server (`-L jr-<case>-<hex>`) and kills it
+# on teardown, scoped and correctly — and `tmux kill-server` ends the server
+# process without unlinking its socket path. So each case left one inert file
+# in `/tmp/tmux-<uid>`, the directory the live `jremote` server shares, at
+# ~1,500 a day; during the #257 outage the one socket that mattered sat in a
+# 1.5 MB haystack of them. Unlinking after each kill would be a line at every
+# creation site that a fifth site forgets. `TMUX_TMPDIR` is tmux's own seam
+# for where the socket dir goes, and it is read by every tmux process —
+# fixture, code under test, the server they start — because all of them are
+# children of this one. Set at import for the reason the state dir is: a
+# module-level constant or a spawned client would otherwise read the machine.
+#
+# Under /tmp, not $TMPDIR: a unix socket path is capped at 104 bytes on macOS,
+# and `/var/folders/<40 chars>/T/<prefix>/tmux-<uid>/jr-invariant-<32 hex>`
+# is over it — tmux fails with "File name too long" and every fixture dies.
+_TMUX_TMPDIR = Path(tempfile.mkdtemp(prefix="jsh-tmux-", dir="/tmp"))
+os.environ["TMUX_TMPDIR"] = str(_TMUX_TMPDIR)
+
 # ── The suite never sees the operator's home ───────────────────────────────
 #
 # THE SUITE WAS REWRITING THE OPERATOR'S SSH FILES (#186). Shell access writes
@@ -168,6 +189,7 @@ def _isolated_home(monkeypatch):
     own yet, and a test that still reached the real ~/.ssh fails by name
     instead of passing with the damage on the machine."""
     monkeypatch.setenv("HOME", str(_SESSION_HOME))
+    monkeypatch.setenv("TMUX_TMPDIR", str(_TMUX_TMPDIR))
     shutil.rmtree(_SESSION_HOME / ".ssh", ignore_errors=True)
     del REAL_SSH_WRITES[:]
     yield _SESSION_HOME
@@ -183,6 +205,7 @@ def pytest_sessionfinish(session, exitstatus):
     directory is untidy, and failing the run over one would be worse."""
     shutil.rmtree(_STATE_DIR, ignore_errors=True)
     shutil.rmtree(_SESSION_HOME, ignore_errors=True)
+    shutil.rmtree(_TMUX_TMPDIR, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")

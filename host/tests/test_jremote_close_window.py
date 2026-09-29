@@ -60,7 +60,10 @@ def clients():
 
     def spawn(name: str, phone: bool) -> int:
         env = {"PATH": managed._PATH, "TERM": "xterm-256color",
-               "HOME": os.path.expanduser("~")}
+               "HOME": os.path.expanduser("~"),
+               # the suite's socket dir (conftest), or the client looks for
+               # the server in the machine's and never attaches
+               "TMUX_TMPDIR": os.environ["TMUX_TMPDIR"]}
         if phone:
             env[managed.PHONE_CLIENT_ENV] = "1"
         pid, _master = _pty.fork()
