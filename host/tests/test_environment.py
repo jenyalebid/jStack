@@ -13,7 +13,8 @@ refusals, each checked for having written nothing rather than merely raised.
 
 Then `announced` — a filesystem fact, not a store one — whose failure is
 reporting a sentence as delivered that nothing emitted: a default, or a value
-since flipped away from. The last two hold its spelling to the hooks' own copy.
+since flipped away from. The last two hold its spelling to the hooks' own copy,
+and the group after them asks the hook whether a trigger fires at all.
 """
 
 import importlib.util
@@ -287,3 +288,46 @@ def test_the_plugins_session_dir_is_the_hosts_session_cache():
     assert env.session_cache(sid).is_dir()
     assert shared.announce_marker(env, sid, "sim_verify", "off") == (
         env.announce_marker(sid, "sim_verify", "off"))
+
+
+def _fires():
+    """`env-announce.py`'s `fires`, loaded by path — its filename has dashes.
+
+    Nothing else in the suite reaches it, and a trigger is the only thing that
+    decides whether a sentence ever arrives: a registry pattern that matches
+    nothing leaves a setting resolved, stored, rendered and mute, with every
+    other test in this file green.
+    """
+    loader = SourceFileLoader("jstack_env_announce_fires",
+                              str(PLUGIN / "hooks/env-announce.py"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module.fires
+
+
+@pytest.mark.parametrize("command", [
+    "git push -u origin fix/thing",
+    "gh pr create --fill --label fix",
+    "gh pr merge 254 --squash --delete-branch",
+])
+def test_landing_speaks_where_a_branch_could_be_called_finished(command):
+    fires, rules = _fires(), _path_rules()
+    assert any(fires(t, "PreToolUse", "Bash", {"command": command}, rules)
+               for t in env.setting("landing").triggers)
+
+
+def test_landing_speaks_on_the_turn_that_hands_work_back():
+    """Stop is the trigger that catches the session ending on a branch —
+    the failure the setting exists for, and the one no Bash pattern sees."""
+    fires, rules = _fires(), _path_rules()
+    triggers = env.setting("landing").triggers
+    assert any(fires(t, "Stop", "", {}, rules) for t in triggers)
+    assert not any(
+        fires(t, "PreToolUse", "Bash", {"command": "git status"}, rules)
+        for t in triggers)
+
+
+def test_landing_moves_as_a_switch_and_not_as_a_toggle():
+    assert env.delta_lines({}, {"landing": "merged"}) == [
+        "LANDING SWITCHED: MERGED"]

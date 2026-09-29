@@ -1883,8 +1883,9 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--state-dir", default=None)
     up.set_defaults(fn=_cmd_updates_build)
 
-    p = sub.add_parser("env", help="how this session works — delivery, "
-                                   "verification, one agent or one per stage")
+    p = sub.add_parser("env", help="how this session works — where work lands, "
+                                   "delivery, verification, one agent or one "
+                                   "per stage")
     envs = p.add_subparsers(dest="env_cmd", required=True)
 
     def _layer_args(q):
