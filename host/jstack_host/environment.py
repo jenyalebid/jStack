@@ -1,9 +1,9 @@
 """Session environment — how a session WORKS, not what it works on.
 
-The same few preferences get re-stated at the top of every sitting: deliver by
-distribute or by build, run the simulator journey or skip it, one agent or one
-per plan stage. Said once here, per session or per agent, announced by the
-hooks from then on.
+The same few preferences get re-stated at the top of every sitting: where work
+stops being work, deliver by distribute or by build, run the simulator journey
+or skip it, one agent or one per plan stage. Said once here, per session or per
+agent, announced by the hooks from then on.
 
 A value equal to its default announces NOTHING: `instruction[default]` is `""`
 and every renderer below drops it. That is the safety property the module is
@@ -117,6 +117,26 @@ SETTINGS: tuple[Setting, ...] = (
         instruction={
             "on": "Dispatch one subagent per plan stage and have it verify its own stage before reporting.",
             "off": "",
+        },
+    ),
+    Setting(
+        key="landing",
+        kind="enum",
+        values=("merged", "pr_open", "none"),
+        default="none",
+        label="Landing",
+        triggers=(
+            # The push is where a branch stops being reachable only from here,
+            # and `gh pr create` is where a session is most likely to call an
+            # open PR the finish line. Stop catches the turn that hands work
+            # back having done neither.
+            Trigger("PreToolUse", "Bash", r"git push|gh pr create|gh pr merge"),
+            Trigger("Stop"),
+        ),
+        instruction={
+            "merged": "Work is not finished until it is merged to the line its repo integrates to, with whatever test the change warranted run against what landed — an open pull request is Not Done, reported with its number and who must merge it.",
+            "pr_open": "Work is finished when its pull request is open and green — report the number and leave the merge to the user.",
+            "none": "",
         },
     ),
 )
