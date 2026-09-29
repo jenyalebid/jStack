@@ -42,6 +42,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
@@ -228,15 +229,51 @@ def check_agents() -> dict:
     return _check("agents", OK, f"{len(found)} in {d}: {', '.join(sorted(found))}")
 
 
+# sqlite's read-only open needs to place a -shm beside a db in WAL mode, so a
+# writer mid-checkpoint makes it fail with "unable to open database file" — the
+# same words an actually-missing file produces. Seen live on a leaf whose
+# timeline was perfectly healthy: 438 entries a second later, graded
+# "not a readable timeline" with the hint "move it aside and let log_event
+# recreate it". A doctor that tells an operator to discard real history over a
+# race is worse than one that says nothing.
+_BUSY = ("unable to open database file", "database is locked", "database is busy")
+
+
+def _busy(err: Exception) -> bool:
+    """A read that lost a race, as opposed to a file that is not a database."""
+    return isinstance(err, sqlite3.OperationalError) and \
+        any(w in str(err).lower() for w in _BUSY)
+
+
+def _read_db(db: Path, query: str, attempts: int = 3):
+    """Run one read-only query, retrying a busy open. Raises what it cannot get.
+
+    Read-only on purpose: this tool's first version created three directories
+    with its own writability probe and then reported them healthy. A retry is
+    the honest way to beat a race — opening read-write to dodge it would place
+    a -shm next to the db and make the doctor a writer.
+    """
+    last: Exception = sqlite3.Error("never ran")
+    for i in range(attempts):
+        try:
+            with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+                return conn.execute(query).fetchone()
+        except sqlite3.Error as e:
+            last = e
+            if not _busy(e):
+                raise
+            time.sleep(0.15 * (i + 1))
+    raise last
+
+
 def _timeline_rows(db: Path) -> str:
     """"<n> entries" for a timeline db, or why it could not be counted. A
     stray file is worth naming whether or not it parses — an unreadable one
     at a path nothing should be writing is the same finding."""
     try:
-        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
-            n = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
-    except sqlite3.Error:
-        return "unreadable"
+        n = _read_db(db, "SELECT count(*) FROM entries")[0]
+    except sqlite3.Error as e:
+        return "busy, not counted" if _busy(e) else "unreadable"
     return f"{n} entr{'y' if n == 1 else 'ies'}"
 
 
@@ -322,6 +359,13 @@ def check_timeline() -> dict:
                               "normal until the first `log_event`")
             rows = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
     except sqlite3.Error as e:
+        if _busy(e):
+            # Busy is not broken, and the difference decides whether an
+            # operator moves a live database aside.
+            return _check("timeline", WARN,
+                          f"{db} could not be read just now: {e}",
+                          "a writer holds it — re-run. This is not a verdict "
+                          "on the file, and nothing here should be moved")
         return _check("timeline", FAIL, f"{db} is not a readable timeline: {e}",
                       "move it aside and let log_event recreate it")
     return _check("timeline", OK, f"{db} — {rows} entr{'y' if rows == 1 else 'ies'}")
