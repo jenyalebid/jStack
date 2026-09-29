@@ -94,3 +94,68 @@ def test_an_operator_named_guest_is_used_and_left_alone(tmp_path, monkeypatch):
     monkeypatch.setenv("JREMOTE_RELEASE_TEST_HOST", "admin@10.0.0.5")
     publish_release.build_candidate_client(_config(tmp_path), _work(tmp_path), "notes")
     assert _events(tmp_path) == ["preflight admin@10.0.0.5", "build admin@10.0.0.5 120"]
+
+
+def _client_road(tmp_path: Path, monkeypatch, *, preflight_ok: bool = True) -> Path:
+    """The standalone client publication's build, with its snapshots stubbed.
+
+    `build_client` clones committed HEADs into the work dir; what is under test
+    is the guest, so the clone is replaced by the same stand-in scripts the
+    stack road's tests use. The stand-in release-mac.sh writes the candidate dir
+    the real one writes, because build_client reads it back.
+    """
+    work = tmp_path / "client-x"
+    work.mkdir()
+
+    def fake_snapshot(repo: str, target: Path) -> str:
+        target = Path(target)
+        target.mkdir(parents=True, exist_ok=True)
+        if target.name == "client":
+            app = target / "jRemote-Code/jRemote"
+            (app / "jRemote.xcodeproj").mkdir(parents=True)
+            (app / "jRemote.xcodeproj/project.pbxproj").write_text(
+                "CURRENT_PROJECT_VERSION = 119;\n")
+            events = tmp_path / "events"
+            _script(app / "Scripts/check-launch.py",
+                    "import os, sys\n"
+                    f"open({str(events)!r}, 'a').write('preflight ' + "
+                    "os.environ.get('JREMOTE_RELEASE_TEST_HOST', '') + '\\n')\n"
+                    f"sys.exit({0 if preflight_ok else 1})\n")
+            _script(app / "release-mac.sh",
+                    f'echo "build $JREMOTE_RELEASE_TEST_HOST $2" >> {events}\n'
+                    'mkdir -p "$4"\n'
+                    'printf mac > "$4/jRemote-$2.zip"\n'
+                    'printf \'{"file": "jRemote-%s.zip", "build": %s}\' "$2" "$2" '
+                    '> "$4/latest.json"\n')
+        return "c" * 40
+
+    monkeypatch.setattr(publish_release, "snapshot", fake_snapshot)
+    return work
+
+
+def test_the_clients_own_road_brings_the_same_guest(tmp_path, monkeypatch):
+    """`release.sh client` is the ordinary road for a client build since jRemote
+    got its own clock, and it had no guest at all: release-mac.sh's preflight
+    refuses without one whichever road called it, so this road only ran for an
+    operator already holding a guest by hand, and died at the preflight for
+    everyone else (#19)."""
+    work = _client_road(tmp_path, monkeypatch)
+    config = _config(tmp_path) | {"stack_repo": "/stack", "client_repo": "/client"}
+
+    app, item, sha, dependencies = publish_release.build_client(config, "notes", work)
+
+    assert _events(tmp_path) == ["up", "preflight admin@192.168.64.9",
+                                 "build admin@192.168.64.9 120", "down"]
+    assert item["version"] == "120" and app.name == "jRemote-120.zip"
+    assert sha == "c" * 40 and dependencies == {}
+
+
+def test_the_clients_own_road_spends_no_number_on_a_bad_guest(tmp_path, monkeypatch):
+    work = _client_road(tmp_path, monkeypatch, preflight_ok=False)
+    config = _config(tmp_path) | {"stack_repo": "/stack", "client_repo": "/client"}
+
+    with pytest.raises(releases.ReleaseError, match="preflight"):
+        publish_release.build_client(config, "notes", work)
+
+    assert _reserved(tmp_path) is None
+    assert _events(tmp_path)[-1] == "down"
