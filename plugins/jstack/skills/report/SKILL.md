@@ -33,11 +33,11 @@ The user skims. Declarative, no narration, no filler — full sentences, short o
 - `Blocker` — work stopped. What is needed, and from whom
 - `Issues` — `#N — title`
 - `Fixed` — `sha — what`, for repairs beyond the ask
-- `Done` — the result of the request
+- `Done` — the result of the request, naming where it landed on the branch its repo integrates to. A test green on a feature branch is not a delivery: while the PR is open the line belongs under `Not Done`. Where the change warrants a test, it ran on what landed
 - `Not Done` — each line carries `#N` or a blocker
 - `Extra` — one line each, no numbers
 - `Next Move` — what happens next
 
-Read it back. Every **Issues** line carries `#N`, every **Fixed** line carries a sha, no finding sits in another block's prose. Nothing found is a normal outcome — send `Done` alone.
+Read it back. Every **Issues** line carries `#N`, every **Fixed** line carries a sha, no **Done** line rests on an unmerged branch, no finding sits in another block's prose. Nothing found is a normal outcome — send `Done` alone.
 
 Asked for it spoken instead — a few short blocks, nothing in them to open — that is `/jstack:elevator`, which settles the same way first.
