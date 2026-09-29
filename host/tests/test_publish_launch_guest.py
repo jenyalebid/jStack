@@ -58,39 +58,39 @@ def _no_operator_guest(monkeypatch):
 
 
 def test_one_command_boots_the_guest_builds_against_it_and_tears_it_down(tmp_path):
-    publish_release.build_client(_config(tmp_path), _work(tmp_path), "notes")
+    publish_release.build_candidate_client(_config(tmp_path), _work(tmp_path), "notes")
     assert _events(tmp_path) == ["up", "preflight admin@192.168.64.9",
                                  "build admin@192.168.64.9 120", "down"]
 
 
 def test_a_guest_that_does_not_boot_costs_no_build_number(tmp_path):
     with pytest.raises(releases.ReleaseError, match="did not come up"):
-        publish_release.build_client(_config(tmp_path, up_ok=False), _work(tmp_path), "notes")
+        publish_release.build_candidate_client(_config(tmp_path, up_ok=False), _work(tmp_path), "notes")
     assert _reserved(tmp_path) is None
     assert _events(tmp_path) == ["up", "down"]
 
 
 def test_a_guest_that_fails_preflight_costs_no_build_number(tmp_path):
     with pytest.raises(releases.ReleaseError, match="preflight"):
-        publish_release.build_client(_config(tmp_path), _work(tmp_path, preflight_ok=False), "notes")
+        publish_release.build_candidate_client(_config(tmp_path), _work(tmp_path, preflight_ok=False), "notes")
     assert _reserved(tmp_path) is None
     assert _events(tmp_path) == ["up", "preflight admin@192.168.64.9", "down"]
 
 
 def test_a_failed_build_still_tears_the_guest_down(tmp_path):
     with pytest.raises(releases.ReleaseError, match="client build failed"):
-        publish_release.build_client(_config(tmp_path), _work(tmp_path, build_ok=False), "notes")
+        publish_release.build_candidate_client(_config(tmp_path), _work(tmp_path, build_ok=False), "notes")
     assert _events(tmp_path)[-1] == "down"
 
 
 def test_no_guest_at_all_is_refused_before_a_number_is_reserved(tmp_path):
     config = {"candidates_dir": str(tmp_path / "candidates")}
     with pytest.raises(releases.ReleaseError, match="preflight"):
-        publish_release.build_client(config, _work(tmp_path, preflight_ok=False), "notes")
+        publish_release.build_candidate_client(config, _work(tmp_path, preflight_ok=False), "notes")
     assert _reserved(tmp_path) is None
 
 
 def test_an_operator_named_guest_is_used_and_left_alone(tmp_path, monkeypatch):
     monkeypatch.setenv("JREMOTE_RELEASE_TEST_HOST", "admin@10.0.0.5")
-    publish_release.build_client(_config(tmp_path), _work(tmp_path), "notes")
+    publish_release.build_candidate_client(_config(tmp_path), _work(tmp_path), "notes")
     assert _events(tmp_path) == ["preflight admin@10.0.0.5", "build admin@10.0.0.5 120"]

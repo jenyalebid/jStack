@@ -210,7 +210,7 @@ def build(config: dict, notes: str, reuse_client: Path | None = None) -> Path:
         atomic_json(app_output / "latest.json", {**item, "build": item["version"]})
         print("Reusing the signed client artifact from identical committed sources", flush=True)
         return seal(work, config, notes)
-    build_client(config, work, notes)
+    build_candidate_client(config, work, notes)
     return seal(work, config, notes)
 
 
@@ -263,8 +263,13 @@ def launch_guest(config: dict, check_script: Path):
                       + " ".join(guest["down"]), flush=True)
 
 
-def build_client(config: dict, work: Path, notes: str) -> None:
-    """Build, sign and notarize the client candidate into work/client-output."""
+def build_candidate_client(config: dict, work: Path, notes: str) -> None:
+    """Build, sign and notarize the client candidate into work/client-output.
+
+    The client build of a full stack publication, which is not the standalone
+    client publication `build_client` below serves: this one lands the artifact
+    in the candidate's work dir for `seal` to record, and boots the launch-check
+    guest that release-mac.sh's preflight needs."""
     stack, client = work / "stack", work / "Projects/client"
     candidates = Path(config["candidates_dir"])
     app_script = client / "jRemote-Code/jRemote/release-mac.sh"
