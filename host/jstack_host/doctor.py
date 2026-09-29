@@ -294,16 +294,40 @@ def check_codex_hooks() -> dict:
     try:
         live = codex_hooks.MANAGED_CONFIG.read_text()
     except OSError:
+        hint = (f"run host/tools/codex_setup.py; it needs one sudo write to "
+                f"{codex_hooks.MANAGED_CONFIG}")
+        # Absent operator file is not the same fact as no registration: the
+        # installed plugin copy registers the same hooks on its own, and
+        # reporting "none active" on a machine that has them would be this
+        # check inventing state it cannot see. What it can see is which
+        # surface declares them; what neither it nor anything outside Codex
+        # can see is whether that surface has been trusted.
+        if codex_hooks.plugin_manifests():
+            return _check("codex hooks", WARN,
+                          f"{hooks} hooks registered by the installed plugin copy "
+                          "only, which Codex runs only once a person has approved "
+                          "them there — a scheduled session gets no prompt and no "
+                          "hooks", hint)
         return _check("codex hooks", WARN,
-                      f"{hooks} hooks declared, none active — a session gets no "
-                      "seat timeline, no path rules and no session review",
-                      f"run host/tools/codex_setup.py; it needs one sudo write to "
-                      f"{codex_hooks.MANAGED_CONFIG}")
+                      f"{hooks} hooks declared, none registered — a session gets no "
+                      "seat timeline, no path rules and no session review", hint)
     if live != wanted:
         return _check("codex hooks", WARN,
                       f"{codex_hooks.MANAGED_CONFIG} no longer matches the plugin's "
                       "manifest, so some hooks run stale and some not at all",
                       "re-run host/tools/codex_setup.py")
+    # Codex reads an installed plugin copy's own hooks/hooks.json as a hook
+    # source beside the operator file, and runs both — so the machine that
+    # passes every check above can still be running each hook twice. What that
+    # looks like from the outside is `/takeover` opening two sessions off one
+    # keystroke; everything else doubles in silence.
+    doubled = codex_hooks.plugin_manifests()
+    if doubled:
+        return _check("codex hooks", WARN,
+                      f"{hooks} hooks registered twice — the installed plugin copy "
+                      f"at {doubled[0].parent.parent} declares them as well, so every "
+                      "hook runs twice and /takeover spawns two sessions",
+                      "re-run host/tools/codex_setup.py; it silences the plugin's copy")
     note = f"not translated: {', '.join(dropped)}" if dropped else ""
     return _check("codex hooks", OK, f"{hooks} hooks active for every session", note)
 

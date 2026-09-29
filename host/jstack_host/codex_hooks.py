@@ -26,6 +26,29 @@ from pathlib import Path
 # because root put them there, and need no per-machine approval at all.
 MANAGED_CONFIG = Path("/etc/codex/managed_config.toml")
 
+# The second surface, and the one that made `/takeover` open two windows off a
+# single keystroke. `codex plugin add` unpacks the plugin into CODEX_HOME and
+# Codex reads that copy's `hooks/hooks.json` as a hook source in its own right
+# — so an install that also writes MANAGED_CONFIG has registered every hook
+# twice, at two paths, and Codex runs BOTH: measured 2026-09-29 on a scratch
+# CODEX_HOME with one hook script registered from two layers, one prompt, two
+# runs, two "Hook stopped" panels. There is no de-duplication to rely on; the
+# only warning Codex prints is for two surfaces inside ONE layer, which this
+# pair is not.
+#
+# /takeover spawning twice is just the visible end of it. A doubled timeline
+# injection, a doubled attention clear, a doubled session-end review look like
+# nothing at all, which is why this ran unnoticed on every machine the
+# installer touched.
+PLUGIN_HOOKS = "plugins/cache/*/jstack/*/hooks/hooks.json"
+
+#: What an installed copy's manifest becomes once MANAGED_CONFIG carries the
+#: hooks. Emptied, not deleted: an empty manifest states that this surface is
+#: deliberately silent, where a missing file reads as a damaged install — and
+#: the next `codex plugin add` writes the real one back, so this is re-applied
+#: after every install and every update rather than once.
+SILENCED_MANIFEST = '{"hooks": {}}\n'
+
 # Codex's own event names. A name it does not know is not an error either — the
 # hook simply never runs, which is the same silence again, so we translate only
 # what it will actually honour and say out loud what we dropped.
@@ -119,6 +142,56 @@ def managed_config(plugin, manifest_path=None):
               "# untrusted hook in silence, so the alternative was fifteen hooks that\n"
               "# looked wired on every machine and fired on none.\n\n")
     return header + body, dropped
+
+
+def codex_home() -> Path:
+    """Where this machine keeps Codex's state, CODEX_HOME honoured."""
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+
+
+def plugin_manifests(home=None) -> list:
+    """Installed plugin copies whose own manifest still registers hooks.
+
+    Read, not assumed: a copy this function already silenced declares nothing
+    and is not a second registration, and a marketplace under any name is one
+    all the same — what makes a copy ours is the plugin directory's name.
+    """
+    home = codex_home() if home is None else home
+    live = []
+    for manifest in sorted(home.glob(PLUGIN_HOOKS)):
+        try:
+            if json.loads(manifest.read_text()).get("hooks"):
+                live.append(manifest)
+        except (OSError, ValueError):
+            continue
+    return live
+
+
+def managed_active(plugin, path=None, manifest_path=None) -> bool:
+    """Is MANAGED_CONFIG live AND current for this plugin?"""
+    path = MANAGED_CONFIG if path is None else path
+    try:
+        return path.read_text() == managed_config(plugin, manifest_path)[0]
+    except OSError:
+        return False
+
+
+def silence_plugin_hooks(plugin, home=None, path=None, manifest_path=None) -> list:
+    """Leave exactly one registration of each hook on this machine.
+
+    Only ever against a MANAGED_CONFIG that is live and current. Silencing the
+    plugin's copy while the operator file is absent or stale would take the
+    machine's last working hook surface away — a machine running every hook
+    twice is wrong, a machine running none is worse, and only one of the two
+    announces itself.
+    """
+    if not managed_active(plugin, path, manifest_path):
+        return []
+    silenced = []
+    for manifest in plugin_manifests(home):
+        manifest.write_text(SILENCED_MANIFEST)
+        silenced.append(manifest)
+    return silenced
 
 
 def install_managed_config(plugin, path=None, runner=None, manifest_path=None):

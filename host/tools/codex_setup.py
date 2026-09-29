@@ -14,7 +14,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from jstack_host.codex_hooks import install_managed_config  # noqa: E402
+from jstack_host.codex_hooks import (  # noqa: E402
+    MANAGED_CONFIG, install_managed_config, silence_plugin_hooks)
 
 
 _SKIP_TREES = {"pad", "git", "scratch", "node_modules", "__pycache__", ".venv",
@@ -156,6 +157,17 @@ def main():
         print(install_managed_config(plugin))
     subprocess.run(["codex", "plugin", "marketplace", "add", str(checkout)], check=True)
     subprocess.run(["codex", "plugin", "add", "jstack@jstack"], check=True)
+    # `plugin add` just unpacked a second copy of hooks/hooks.json, and Codex
+    # reads it as a hook source beside the operator file written above — two
+    # registrations of every hook, both of which run. That is what made one
+    # `/takeover` open two sessions. The plugin stays installed for its skills
+    # and commands; only its hook manifest goes quiet, and only while the
+    # operator file is live and current.
+    silenced = silence_plugin_hooks(plugin, codex)
+    if silenced:
+        copies = "copy" if len(silenced) == 1 else "copies"
+        print(f"plugin hook manifest silenced in {len(silenced)} installed "
+              f"{copies} — {MANAGED_CONFIG} is the one registration")
     link_skills(home / ".claude/skills", home / ".agents/skills")
     link_commands(home / ".claude/commands", home / ".agents/skills")
     if args.workspace:

@@ -519,3 +519,36 @@ def test_codex_hooks_reads_the_plugin_the_machine_runs(tmp_path, monkeypatch):
 
     assert seen == [plugin]
     assert result["grade"] == doctor.OK, result
+
+
+def test_codex_hooks_calls_out_a_second_registration_of_every_hook(tmp_path, monkeypatch):
+    """The machine that passes every other check and still runs each hook twice.
+
+    `codex plugin add` unpacks a copy of hooks/hooks.json that Codex reads as
+    a hook source beside the operator file, and it runs both. What that looked
+    like from outside was one `/takeover` opening two sessions; nothing else
+    doubling showed at all, which is why the check has to say it.
+    """
+    from jstack_host import codex_hooks, plugin_paths
+
+    plugin = tmp_path / "cache" / "jstack"
+    (plugin / "hooks").mkdir(parents=True)
+    managed = tmp_path / "managed_config.toml"
+    managed.write_text("[[hooks.x]]\n")
+    copy = tmp_path / "codex/plugins/cache/jstack/jstack/26.9.8/hooks/hooks.json"
+    copy.parent.mkdir(parents=True)
+    copy.write_text('{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "x"}]}]}}')
+
+    monkeypatch.setattr(doctor, "_which", lambda name: "/usr/local/bin/codex")
+    monkeypatch.setattr(plugin_paths, "jstack_root", lambda: plugin)
+    monkeypatch.setattr(codex_hooks, "managed_config", lambda root, manifest_path=None: ("[[hooks.x]]\n", []))
+    monkeypatch.setattr(codex_hooks, "MANAGED_CONFIG", managed)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+
+    result = doctor.check_codex_hooks()
+
+    assert result["grade"] == doctor.WARN, result
+    assert "twice" in result["detail"] and "/takeover" in result["detail"]
+
+    copy.write_text('{"hooks": {}}')
+    assert doctor.check_codex_hooks()["grade"] == doctor.OK

@@ -225,11 +225,22 @@ def install(providers: list[dict], stack: Path, sha: str | None = None):
             # that drift and names the manual re-run that clears it. Never
             # fatal to the update itself, on the same reasoning as the doctor
             # check reading this same manifest.
-            from .codex_hooks import install_managed_config
+            from .codex_hooks import install_managed_config, silence_plugin_hooks
+            plugin = Path(source) / "plugins/jstack"
             try:
-                print(install_managed_config(Path(source) / "plugins/jstack"))
+                print(install_managed_config(plugin))
             except OSError as exc:
                 print(f"codex hooks not refreshed: {exc}")
+            # The `plugin add` above unpacked a fresh hooks/hooks.json into the
+            # new version's cache directory, which Codex reads as a second
+            # registration of every hook the operator file already carries. An
+            # update is exactly when it comes back, so it is silenced here and
+            # not only at install time.
+            try:
+                for manifest in silence_plugin_hooks(plugin):
+                    print(f"silenced the plugin's own hook manifest: {manifest}")
+            except OSError as exc:
+                print(f"codex plugin hooks not silenced: {exc}")
 
 
 def registered_codex_root(binary: str) -> Path | None:
