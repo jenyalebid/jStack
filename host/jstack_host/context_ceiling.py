@@ -301,7 +301,21 @@ def tick_text(cur):
 #: answered "nothing left". Nothing in the mechanism was wrong; the sentence below was, by
 #: saying "nothing waiting on you" and letting a backlog answer it. The test is whether
 #: THIS TURN stopped early, so the wording asks that and names the near misses by name.
-DECLARE = (
+#:
+#: BOTH ENGINES ASK THE SAME WAY, and for a week only one of them knew how. The marker is
+#: a statement about THIS SESSION'S TURN -- it parked, hand it back -- and nothing in it
+#: depends on how a client summarises. Codex was handed the survival half of this note and
+#: not the asking half, so a Codex session was told to finish and end the turn and given no
+#: way to ask for the seam. It shows in the delivery log exactly as you would expect: 39
+#: Codex deliveries across this Mac and work-main, every single one recorded `the turn ended
+#: without asking to be continued`, and ZERO Codex compactions against 136 Claude ones in
+#: the same file -- including a Codex session that sat at 177,982 and was skipped as a
+#: finished delivery. `compact_delivery` had carried full Codex grammar since bc7a76d -- the
+#: pane, the `compacted` boundary, the rollout read of the closing line -- and could not
+#: fire once, because the only side that can send the request was never told the request
+#: exists. The asking half is shared from here; only what survives the boundary is
+#: per-engine.
+MARKER = (
     "HOW TO END THE TURN. If you are stopping mid-work BECAUSE of this notice — parking "
     "the docket at a good seam — make `<!-- to-be-continued -->` the LAST line of your "
     "final message, alone on that line. That is what triggers the compaction and hands "
@@ -315,6 +329,10 @@ DECLARE = (
     "marker, however much is still on the board. A finished delivery is left alone."
 )
 
+#: Claude asks with the marker and nothing else: its summariser is local and instructable,
+#: so there is no survival caveat to add.
+DECLARE = MARKER
+
 #: The Codex half, and it is a different instruction because the machine is different.
 #: Codex compacts SERVER-SIDE: the `compacted` record carries `message: ''` and an opaque
 #: `encrypted_content`, and the window it replaces is rebuilt from the developer prompts
@@ -326,7 +344,11 @@ DECLARE = (
 #: the conversation. the carry hook reads the mechanical residue back off the rollout at
 #: the boundary, and that is deliberately not advertised here — a session told its context
 #: comes back writes less of it down, and what comes back is the commands it ran, never why.
-CODEX_DECLARE = (
+#:
+#: This is the half that is genuinely Codex's. It is an ADDITION to `MARKER`, never a
+#: replacement for it: what a summary keeps and how a session asks for the boundary are two
+#: questions, and answering only the first is what left this engine unable to ask at all.
+CODEX_SURVIVES = (
     "WHAT SURVIVES. Codex compacts server-side: when the window fills it is rebuilt from "
     "the developer prompts, your user's own messages verbatim, and a summary you never see. "
     "Every assistant message and every tool result in this session is dropped — what you "
@@ -337,6 +359,8 @@ CODEX_DECLARE = (
     "before you end the turn. A sentence in your closing message does not survive; a sha "
     "does."
 )
+
+CODEX_DECLARE = MARKER + "\n\n" + CODEX_SURVIVES
 
 #: Why the heavy band is worth interrupting for. One sentence, both engines.
 COST = (
