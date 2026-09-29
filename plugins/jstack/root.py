@@ -148,22 +148,46 @@ def candidate_roots(cfg: "dict|None" = None) -> "list[Path]":
     still wins in the shell that never exported the variable, which is the
     whole mechanism being looked for.
     """
-    out: "list[Path]" = []
+    return [path for path, _ in _rungs(cfg)]
 
-    def add(path: "Path|None") -> None:
-        if path is not None and path not in out:
-            out.append(path)
+
+def root_source(cfg: "dict|None" = None) -> str:
+    """What answered `root()` — the name of the rung, for a reader.
+
+    A tool that prints the root prints where it came from, and computing that
+    from $JSTACK_ROOT alone reports every other rung as "nothing declared".
+    The doctor did exactly that on the leaf this whole thread came from: the
+    right path, under the sentence "no root declared", on a machine whose root
+    is recorded in `~/.config/jstack/root`. That sentence is what sends a
+    reader off to add an export that already exists — or to conclude the
+    marker is being ignored, which is the bug that was just fixed.
+    """
+    return _rungs(cfg)[0][1]
+
+
+def _rungs(cfg: "dict|None" = None) -> "list[tuple[Path, str]]":
+    """Each root this resolver could answer, paired with what named it.
+
+    The one place the order lives. `root()`, `candidate_roots()` and
+    `root_source()` are all reads of this list, so a rung cannot be added to
+    the resolution and missed by the search or by the reader.
+    """
+    out: "list[tuple[Path, str]]" = []
+
+    def add(path: "Path|None", source: str) -> None:
+        if path is not None and not any(p == path for p, _ in out):
+            out.append((path, source))
 
     val = os.environ.get("JSTACK_ROOT")
     if val:
-        add(_absolute(val))
+        add(_absolute(val), "$JSTACK_ROOT")
     if cfg and cfg.get("root"):
-        add(_absolute(cfg["root"]))
-    add(_marker("root"))
+        add(_absolute(cfg["root"]), 'cfg["root"]')
+    add(_marker("root"), "the install marker ~/.config/jstack/root")
     agents = _marker("instance_root")
     if agents is not None and agents.name == "Agents":
-        add(agents.parent)
-    add(Path.home())
+        add(agents.parent, "the agents marker ~/.config/jstack/instance_root")
+    add(Path.home(), "$HOME (no root declared)")
     return out
 
 
@@ -196,7 +220,7 @@ def root(cfg: "dict|None" = None) -> Path:
     has only that one, and a witness that can be right or absent but not wrong
     beats resolving a tree to a directory nothing writes.
     """
-    return candidate_roots(cfg)[0]
+    return _rungs(cfg)[0][0]
 
 
 def _absolute(val, name: str = "JSTACK_ROOT") -> Path:

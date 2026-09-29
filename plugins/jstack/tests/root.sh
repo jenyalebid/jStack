@@ -623,6 +623,59 @@ print("OK")' 2>&1)
 [ "$out" = "OK" ] && pass "an undeclared machine has exactly one candidate root" \
                   || fail "candidate_roots default: $out"
 
+# ── root_source: the rung that answered, by name ───────────────────────────
+# A tool that prints the root prints where it came from, and every rung below
+# the environment used to be reported as "nothing declared" — the right path
+# under the one sentence that sends its reader off to declare it again.
+out=$(HOME="$CAND" JSTACK_ROOT="$ENVROOT" "$PY" -c '
+import root
+assert root.root_source() == "$JSTACK_ROOT", root.root_source()
+print("OK")' 2>&1)
+[ "$out" = "OK" ] && pass "root_source names the environment when it answered" \
+                  || fail "root_source env: $out"
+
+out=$(HOME="$CAND" "$PY" -c '
+import root
+src = root.root_source()
+assert "install marker" in src, src
+print("OK")' 2>&1)
+[ "$out" = "OK" ] && pass "root_source names the install marker, not \"no root declared\"" \
+                  || fail "root_source marker: $out"
+
+out=$(HOME="$MIG" "$PY" -c '
+import root
+src = root.root_source()
+assert "agents marker" in src, src
+print("OK")' 2>&1)
+[ "$out" = "OK" ] && pass "root_source names the agents marker on a migrated install" \
+                  || fail "root_source agents marker: $out"
+
+# The undeclared machine is the ONLY one allowed to say so.
+out=$(HOME="$FAKEHOME" "$PY" -c '
+import root
+assert root.root_source() == "$HOME (no root declared)", root.root_source()
+print("OK")' 2>&1)
+[ "$out" = "OK" ] && pass "only an undeclared machine reports no declaration" \
+                  || fail "root_source default: $out"
+
+out=$(HOME="$CAND" ROOT_B="$ROOT_B" "$PY" -c '
+import os, root
+src = root.root_source({"root": os.environ["ROOT_B"]})
+assert src == "cfg[\"root\"]", src
+print("OK")' 2>&1)
+[ "$out" = "OK" ] && pass "root_source names the cfg when the cfg answered" \
+                  || fail "root_source cfg: $out"
+
+# One list behind all three readers: whatever root() answers, root_source()
+# names, and candidate_roots() leads with. Drift here is the whole defect.
+out=$(HOME="$CAND" JSTACK_ROOT="$ENVROOT" "$PY" -c '
+import root
+assert root.candidate_roots()[0] == root.root(), (root.candidate_roots(), root.root())
+assert root.root_source() == root._rungs()[0][1]
+print("OK")' 2>&1)
+[ "$out" = "OK" ] && pass "root, root_source and candidate_roots read one list" \
+                  || fail "rung agreement: $out"
+
 echo
 if [ "$fails" -eq 0 ]; then
     echo "PASS — one declaration, the whole tree derives; precedence holds the live install"

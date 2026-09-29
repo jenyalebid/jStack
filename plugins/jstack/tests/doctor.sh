@@ -480,6 +480,28 @@ g=$(grade_of "$TMP/inj-off.json" injection)
 [ "$g" = "warn" ] && pass "the kill switch is reported, not silently obeyed"
 rm -f "$CFG"
 
+# ── the root line names the rung that answered ─────────────────────────────
+# It printed the correct path under "(from $HOME (no root declared))" on a
+# machine whose root is recorded in the install marker. A reader acting on
+# that sentence goes and declares a root that is already declared.
+mkdir -p "$TMP/home/.config/jstack" "$TMP/markedroot"
+printf '%s\n' "$TMP/markedroot" > "$TMP/home/.config/jstack/root"
+HOME="$TMP/home" SCHEDULER_INSTALL_FILE="$TMP/root/absent-scheduler.json" \
+SCHEDULER_API_PORT=59992 "$PY" "$TOOL" --json > "$TMP/marked.json" 2>/dev/null
+if grep -q "install marker" "$TMP/marked.json" && ! grep -q "no root declared" "$TMP/marked.json"; then
+    pass "the root line names the install marker instead of claiming nothing is declared"
+else
+    fail "the root line does not name the marker that answered"
+fi
+rm -rf "$TMP/home/.config" "$TMP/markedroot"
+
+# And the machine that really has declared nothing still says so — the phrase
+# is not being retired, it is being reserved for the one case it is true of.
+run_doctor --json > "$TMP/undeclared.json" 2>/dev/null
+grep -q 'from .JSTACK_ROOT' "$TMP/undeclared.json" \
+  && pass "a declared environment is still named as the source" \
+  || fail "the environment rung lost its name"
+
 # ── a forked timeline is a failure, not a clean bill ───────────────────────
 # The defect this covers: a root declared in one place and not another, so one
 # tool writes history into a tree the rest of the install never opens. The
