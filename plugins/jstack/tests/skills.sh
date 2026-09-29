@@ -7,6 +7,7 @@
 #   - frontmatter `name:` matches the directory name (skill ID must be stable)
 #   - SKILL.md stays under the size ceiling (read whole on every invocation)
 #   - any bin/* adapters the skill references actually exist + are executable
+#   - a skill that opens a pull request says an unmerged one is `Not Done`
 #
 # Validation is per-skill so failures localize. Each systems.json skill entry
 # points at this same script — running it produces a full report. Exit 0 = all
@@ -95,6 +96,21 @@ check_size() {
   return 0
 }
 
+# A skill that tells a session to open a pull request has to say what an
+# unmerged one is. Three PRs sat green and unmerged in one day because `issue`
+# said "without explicit landing authorization, do not merge or close" and
+# nothing anywhere said an open PR is not a finished state — so every session
+# that read it stopped at the PR and called the work done.
+check_unmerged_is_not_done() {
+  local skill_md="$1"
+  grep -qiE 'gh pr create|open(s|ing)? (a|the) pull request' "$skill_md" || return 0
+  if ! grep -q 'Not Done' "$skill_md"; then
+    echo "tells a session to open a pull request but never says an unmerged one is \`Not Done\` — read as written, the session stops at the PR"
+    return 1
+  fi
+  return 0
+}
+
 check_bin_refs() {
   local skill_md="$1"
   shift
@@ -134,6 +150,12 @@ run_skill() {
   fi
 
   if ! err=$(check_size "$skill_md" 2>&1); then
+    echo "FAIL [$name]: $err" >&2
+    fails=$((fails+1))
+    return
+  fi
+
+  if ! err=$(check_unmerged_is_not_done "$skill_md" 2>&1); then
     echo "FAIL [$name]: $err" >&2
     fails=$((fails+1))
     return

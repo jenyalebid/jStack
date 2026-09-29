@@ -10,7 +10,7 @@ argument-hint: "<owner/repo#N>"
 
 Take the issue to a verified PR. Read the user's current instructions and record the outcome on the issue.
 
-Two contracts hold the machinery together. **The branch is `issue-<N>`**, exactly: closing the issue merges the open PR whose head is `issue-<N>`. And **never switch branches in the shared checkout** — every agent on this machine shares one working tree per repo, so `git checkout -b` moves the branch under other sessions mid-edit. Use a worktree, with no exception for a small change.
+**The branch is `issue-<N>`**, exactly: closing the issue merges the open PR whose head is `issue-<N>`. And **never switch branches in the shared checkout** — every agent on this machine shares one working tree per repo, so `git checkout -b` moves the branch under other sessions mid-edit. Use a worktree, with no exception for a small change.
 
 ## 1. Read the issue, all of it
 
@@ -59,7 +59,7 @@ gh pr create --repo <owner/repo> --head issue-<N> --title "<title>" --body "Fixe
 P=$(jstack-host plan current) && jstack-host plan set "$P" --pr <PR URL>
 ```
 
-`Fixes #<N>` ties the PR to its issue. Without explicit landing authorization, do not merge or close: this installation may treat closing as a merge request. With authorization, run the required gates, merge through the repository's workflow, and verify the requested runtime outcome before closing. Authorization to merge is not authorization to publish a release unless the user requested that too.
+`Fixes #<N>` ties the PR to its issue. Without explicit landing authorization, do not merge or close: this installation may treat closing as a merge request. With authorization, the merge is this turn's work: run the required gates, merge through the repository's workflow, and verify the requested runtime outcome before closing. Authorization to merge is not authorization to publish a release unless the user requested that too.
 
 ## 5. Answer on the issue
 
@@ -69,7 +69,7 @@ gh issue comment <N> --repo <owner/repo> --body "..."
 
 Short and specific: what changed as behaviour rather than a file tour, the PR number, the actual test result, and anything you left undone and why.
 
-For a review-only assignment, the verified PR and issue answer complete the work. For an authorized landing or release, an open PR is intermediate progress, not completion. A later comment resumes the conversation; read it as the live instruction and answer on the issue again.
+For a review-only assignment, the verified PR and issue answer complete the work. An open PR is never completion: it is **Not Done**, carrying its `#N` and who must merge it. A later comment resumes the conversation; read it as the live instruction and answer on the issue again.
 
 ## Blocked
 
