@@ -21,6 +21,9 @@ CHECKOUT="${JSTACK_CHECKOUT:-$HOME/jStack}"
 # The line this machine follows. Nothing is downloaded pre-built any more: the
 # Hub this Mac runs is the commit at the tip of this branch, compiled here.
 REF="${JSTACK_REF:-main}"
+# A commit on that line to install instead of its tip. The line is still what
+# the Mac follows afterwards; this only says where on it to start.
+PIN_SHA=""
 AGENT_ROOT="${JSTACK_AGENT_ROOT:-$HOME/Agents}"
 # A release is built only off main or dev. Any other branch installs as a
 # debug build, asked for in as many words, and says so wherever it is shown.
@@ -71,6 +74,8 @@ usage: install.sh [options]
   --ref REF           branch to build and install (default: main); main and
                       dev are release lines, anything else needs --debug
   --debug             build --ref as a debug build: any branch, never a release
+  --sha SHA           install this commit of --ref rather than its tip; it
+                      has to be on --ref
   --no-scheduler      don't register the Hub's scheduler service (no recurring wakes)
   --no-claude         don't install Claude Code even if it is missing
   --no-host           use the client with another Hub; no local Hub or menu
@@ -105,6 +110,7 @@ while [ $# -gt 0 ]; do
         --checkout)    CHECKOUT="${2:-}"; shift ;;
         --ref)         REF="${2:-}"; shift ;;
         --debug)       DEBUG_BUILD=1 ;;
+        --sha)         PIN_SHA="${2:-}"; shift ;;
         # ROOT_FROM_FLAG separates "someone asked for this root, now" from "this
         # shell happens to export one". Both arrive as $JSTACK_ROOT and they
         # need opposite handling: an exported root is already declared
@@ -129,6 +135,9 @@ case "$REF" in
     ""|-*|*" "*|*".."*|*"~"*|*"^"*|*":"*)
         echo "--ref must name a branch, got: ${REF:-<empty>}" >&2; exit 2 ;;
 esac
+if [ -n "$PIN_SHA" ] && ! printf '%s' "$PIN_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+    echo "--sha must be a full 40-hex commit, got: $PIN_SHA" >&2; exit 2
+fi
 # Said here rather than after the clone and the build interpreter: the Hub
 # build refuses a release off anything but a line, and so does this.
 if [ "$DEBUG_BUILD" = 0 ] && [ "$WANT_HOST" = 1 ] && [ "$DO_UNINSTALL" = 0 ]; then
@@ -815,6 +824,22 @@ else
         git clone --quiet --single-branch --branch "$REF" "$REPO_URL" "$CHECKOUT" \
         || die "clone of $REF failed — see $LAST_LOG"
     [ "$DRY_RUN" = "1" ] || ok "cloned in ${LAST_ELAPSED}s at $(git -C "$CHECKOUT" log --oneline -1)"
+fi
+
+# Pinned: the checkout is on the line, then taken back to the commit asked
+# for. A tip read at clone time is whatever merged since the caller chose the
+# commit (#248). The branch still names the line, so the next install or
+# update fast-forwards it as usual; `--keep` refuses rather than lose a byte.
+if [ -n "$PIN_SHA" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+        would "git -C $CHECKOUT reset --keep $PIN_SHA"
+    else
+        git -C "$CHECKOUT" merge-base --is-ancestor "$PIN_SHA" HEAD 2>/dev/null \
+            || die "$PIN_SHA is not on $REF (its tip is $(git -C "$CHECKOUT" rev-parse --short HEAD))"
+        git -C "$CHECKOUT" reset --quiet --keep "$PIN_SHA" \
+            || die "could not put $CHECKOUT on $PIN_SHA"
+        ok "pinned to $(git -C "$CHECKOUT" log --oneline -1)"
+    fi
 fi
 
 PLUGIN="$CHECKOUT/plugins/jstack"

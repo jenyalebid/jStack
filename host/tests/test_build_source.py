@@ -417,6 +417,46 @@ def test_a_build_lands_an_offer_this_hub_signed_itself(builder, publisher):
     assert json.loads((root / "build.json").read_text())["state"] == "built"
 
 
+PINNED = "a" * 40
+
+
+def test_a_pinned_build_builds_the_commit_it_names_not_the_tip(builder, monkeypatch):
+    """#248. A caller that chose a commit gets that commit, however far the
+    line moved before the hub fetched it."""
+    root, feed, config, calls = builder
+    asked = []
+    monkeypatch.setattr(build_source.subprocess, "run", lambda argv, **k: (
+        asked.append(argv), SimpleNamespace(returncode=0))[1])
+    result = build_source.build(root, config, ref="dev", debug=True, sha=PINNED)
+    assert result["sha"] == PINNED
+    assert ["git", "-C", str(root / "source"), "merge-base", "--is-ancestor", PINNED, HEAD] in asked
+    worktree = next(c for c in calls if "worktree" in c and "add" in c)
+    assert worktree[-1] == PINNED
+    _, public = build_source.build_key(root)
+    manifest = releases.verify(json.loads((feed / "latest-dev.json").read_text()), public)
+    assert manifest["sources"]["stack"] == PINNED
+
+
+def test_a_pinned_commit_that_is_not_on_the_line_is_refused(builder, monkeypatch):
+    root, _, config, _ = builder
+    monkeypatch.setattr(build_source.subprocess, "run",
+                        lambda argv, **k: SimpleNamespace(returncode=1))
+    with pytest.raises(releases.ReleaseError, match="is not on dev"):
+        build_source.build(root, config, ref="dev", debug=True, sha=PINNED)
+
+
+def test_an_unpinned_build_reports_the_tip_it_built(builder):
+    root, _, config, _ = builder
+    assert build_source.build(root, config, ref="dev", debug=True)["sha"] == HEAD
+
+
+def test_a_pin_that_is_not_a_commit_is_refused_before_anything_is_fetched(builder):
+    root, _, config, calls = builder
+    with pytest.raises(releases.ReleaseError, match="full 40-hex"):
+        build_source.build(root, config, ref="dev", debug=True, sha="HEAD~1")
+    assert not calls
+
+
 def test_a_build_lands_the_shape_stage_already_consumes(builder):
     root, feed, config, _ = builder
     release = build_source.build(root, config)["release"]
@@ -771,11 +811,23 @@ def test_a_first_build_that_rotates_the_key_withdraws_the_other_lines_stale_offe
     releases.verify(json.loads((feed / "latest-dev.json").read_text()), config["public_key"])
 
 
+
+def test_updates_build_will_not_pin_a_commit_on_no_line(tmp_path, monkeypatch, capsys):
+    from jstack_host import cli, hostenv
+    state = tmp_path / "state"
+    (state / "updates").mkdir(parents=True)
+    (state / "updates/config.json").write_text('{"github_repo": "example/stack"}')
+    monkeypatch.setattr(hostenv, "state_dir", lambda: state)
+    monkeypatch.setattr("sys.argv", ["jstack-host", "updates", "build", "--sha", "a" * 40])
+    assert cli.main() == 1
+    assert "name it with --ref" in capsys.readouterr().err
+
 @pytest.mark.parametrize("argv,expected", [
     ([], ("lines",)),
-    (["--ref", "dev"], ("build", "dev", False)),
-    (["--ref", "feature/x", "--debug"], ("build", "feature/x", True)),
-    (["--debug"], ("build", None, True)),
+    (["--ref", "dev"], ("build", "dev", False, None)),
+    (["--ref", "feature/x", "--debug"], ("build", "feature/x", True, None)),
+    (["--debug"], ("build", None, True, None)),
+    (["--ref", "dev", "--sha", "a" * 40], ("build", "dev", False, "a" * 40)),
 ])
 def test_updates_build_builds_the_lines_unless_told_one_ref(tmp_path, monkeypatch, capsys,
                                                              argv, expected):
@@ -787,8 +839,8 @@ def test_updates_build_builds_the_lines_unless_told_one_ref(tmp_path, monkeypatc
     seen = []
     monkeypatch.setattr(build_source, "build_lines",
                         lambda root, config: seen.append(("lines",)) or {"main": {}})
-    monkeypatch.setattr(build_source, "build", lambda root, config, ref=None, debug=False:
-                        seen.append(("build", ref, debug)) or {"release": "r"})
+    monkeypatch.setattr(build_source, "build", lambda root, config, ref=None, debug=False, sha=None:
+                        seen.append(("build", ref, debug, sha)) or {"release": "r"})
     monkeypatch.setattr("sys.argv", ["jstack-host", "updates", "build", *argv])
     assert cli.main() in (0, None) and seen == [expected]
     assert json.loads(capsys.readouterr().out)

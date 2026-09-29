@@ -518,7 +518,7 @@ def build_refusal(root: Path, config: dict) -> str:
 
 
 def build(root: Path, config: dict, *, ref: str | None = None, debug: bool = False,
-          now=None) -> dict:
+          sha: str | None = None, now=None) -> dict:
     """Build the Hub from the newest commit on this hub's ref, and offer it.
 
     Explicit by construction: nothing in the supervisor's tick reaches here.
@@ -526,8 +526,15 @@ def build(root: Path, config: dict, *, ref: str | None = None, debug: bool = Fal
     so stage/install/verify take over from here unchanged. A release is built
     only off a line and only from a bumped commit; `debug` is the one way past
     both, and the build it makes says so in its identity.
+
+    `sha` pins the commit instead of taking the tip: `ref` stays the line the
+    build is filed under, and the commit has to be on it. Whoever asked for a
+    commit gets that commit, or a refusal — never the tip of whatever merged
+    since they asked (#248).
     """
     from .update_supervisor import atomic_json
+    if sha is not None and not SHA.fullmatch(sha):
+        raise releases.ReleaseError(f"--sha must be a full 40-hex commit, got {sha!r}")
     refusal = build_refusal(root, config)
     if refusal:
         raise releases.ReleaseError(refusal)
@@ -537,7 +544,7 @@ def build(root: Path, config: dict, *, ref: str | None = None, debug: bool = Fal
     atomic_json(progress, {"state": "building", "ref": ref,
                            "started": time.time() if now is None else now})
     try:
-        result = _build(root, config, ref, debug=debug)
+        result = _build(root, config, ref, debug=debug, sha=sha)
         atomic_json(progress, {"state": "built", "ref": ref, "release": result["release"],
                                "finished": time.time()})
         return result
@@ -642,7 +649,8 @@ def build_lines(root: Path, config: dict, *, client=None) -> dict:
     return results
 
 
-def _build(root: Path, config: dict, ref: str, *, debug: bool = False) -> dict:
+def _build(root: Path, config: dict, ref: str, *, debug: bool = False,
+           sha: str | None = None) -> dict:
     from . import build_hub
     from .update_macos import command
     from .update_supervisor import atomic_json
@@ -650,7 +658,13 @@ def _build(root: Path, config: dict, ref: str, *, debug: bool = False) -> dict:
     feed = Path(config["feed_dir"])
     private, public = build_key(root)
     source = Path(config.get("source_dir") or root / "source")
-    sha = fetch(source, repo, branch(ref))
+    tip = fetch(source, repo, branch(ref))
+    if sha is None:
+        sha = tip
+    elif sha != tip and subprocess.run(
+            ["git", "-C", str(source), "merge-base", "--is-ancestor", sha, tip],
+            capture_output=True, timeout=120).returncode:
+        raise releases.ReleaseError(f"{sha} is not on {ref} (its tip is {tip[:8]})")
     previous = inherited(config, ref)
     # The stack version at the commit being built, read before the worktree
     # exists: which client this build carries is part of its name.
@@ -683,7 +697,7 @@ def _build(root: Path, config: dict, ref: str, *, debug: bool = False) -> dict:
         for item in manifest["components"].values():
             releases.check_artifact(feed / release_id / item["file"], item)
         variant_present(config, release_id)
-        return _offer(root, config, feed, envelope, public, ref)
+        return {**_offer(root, config, feed, envelope, public, ref), "sha": sha}
     work = Path(tempfile.mkdtemp(prefix="build-", suffix=".noindex", dir=root))
     stack, output = work / "stack", work / release_id
     output.mkdir(parents=True)
@@ -750,7 +764,7 @@ def _build(root: Path, config: dict, ref: str, *, debug: bool = False) -> dict:
             compatibility=previous["compatibility"])
         envelope = releases.sign(manifest, private)
         land(feed, output, envelope, public)
-        return _offer(root, config, feed, envelope, public, ref)
+        return {**_offer(root, config, feed, envelope, public, ref), "sha": sha}
     finally:
         subprocess.run(["git", "-C", str(source), "worktree", "remove", "--force", str(stack)],
                        capture_output=True, timeout=300)

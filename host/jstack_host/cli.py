@@ -138,11 +138,13 @@ def _cmd_updates_build(args) -> int:
     if config_path is None:
         return 1
     try:
+        if args.sha and args.ref is None:
+            raise release_manifest.ReleaseError("--sha pins a commit on a ref: name it with --ref")
         if args.ref is None and not args.debug:
             result = build_source.build_lines(config_path.parent, config)
         else:
             result = build_source.build(config_path.parent, config, ref=args.ref,
-                                        debug=args.debug)
+                                        debug=args.debug, sha=args.sha)
         print(json.dumps(result))
     except release_manifest.ReleaseError as exc:
         print(str(exc), file=sys.stderr)
@@ -1880,6 +1882,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="build this ref only; without it every line whose tip moved is built")
     up.add_argument("--debug", action="store_true",
                     help="a debug build: any branch, no version bump required, never a release")
+    up.add_argument("--sha", default=None,
+                    help="with --ref: build this commit on it rather than its tip")
     up.add_argument("--state-dir", default=None)
     up.set_defaults(fn=_cmd_updates_build)
 
