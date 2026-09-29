@@ -312,6 +312,8 @@ check("context-ceiling.py run FROM THE CACHE COPY speaks on a 160k crossing",
 check("…with nothing on stderr", err == "", err)
 check("…and leaves no receipt", reason(h) is None, repr(reason(h)))
 code, note, err = ceiling(h, transcript("light.jsonl", [50_000, 90_000]))
+check("the cache hook speaks a light reading too", code == 0 and note.endswith("90,000 tokens."))
+code, note, err = ceiling(h, transcript("still.jsonl", [91_000, 92_000]))
 check("the cache hook is still silent when there is nothing to say", code == 0 and note == "")
 
 h = home("e2e-codex")

@@ -17,12 +17,16 @@ delivered turn that is over the heavy cut, so ending is what puts the boundary a
 instead of inside the next task. That is the whole loop: this hook makes the session want to
 stop, and the Stop hook makes stopping worth something.
 
-Warns on the CROSSING, not on the level -- the last two readings are compared, and each band
-fires the once. No state anywhere: the transcript already knows, and a warning repeated on 40
-consecutive tool calls is a warning switched off. It re-arms after a compaction for free,
-because the reading drops below the band on its own. In practice `extreme` fires only when
-delivery compaction could not run, which makes the loud band self-silencing when the system
-is working.
+WHAT SPEAKS, AND HOW OFTEN. Every 10,000 tokens of growth gets one sentence, and the two
+bands get their full note on the way past. Crossings only, so a line speaks on the turn that
+passes it and never again. Bands alone were not enough: 47b6d55d took the heavy note at
+160,061 and climbed to 223,333 without another word, because the extreme crossing landed on
+a reading the transcript had not flushed yet. A 10k line is close enough that losing one
+costs a tick, not the session.
+
+That same unflushed tail makes a hook re-read the previous pair and fire its crossing twice,
+so `already_said` looks for the figure in the window before speaking. It re-arms after a
+compaction for free: the reading drops, and every figure above it is new.
 
 The cuts are `compaction`'s -- one definition of what a session weighs, kept a leaf module
 so callers like this can use it. Reading a transcript is this module's, in both dialects a
@@ -41,8 +45,14 @@ from . import compaction  # leaf module, no host import chain
 CLAUDE = "claude"
 CODEX = "codex"
 
+#: How often the meter speaks between bands. 10k is roughly one line every eight turns on a
+#: session growing at the median rate, and it bounds what a lost crossing costs: the next
+#: line is never more than 10k away, where a lost band was silence to the end of the session.
+STEP = 10_000
+
 #: The bands that speak, heaviest first so a turn that jumps both takes the louder one.
-#: `light` and `working` say nothing: a meter that always speaks is a meter nobody reads.
+#: `light` and `working` have no note of their own -- between the bands a crossing gets the
+#: one-sentence tick, and only these two are worth interrupting a turn to read.
 BANDS = [("extreme", compaction.EXTREME), ("heavy", compaction.HEAVY)]
 
 #: The newest readings are at the end, so the tail is read rather than the file — but a
@@ -195,21 +205,53 @@ def last_readings(path, want=2, engine=None):
     A compaction between two readings needs no special case: it drops the newer below the
     older, and a fall crosses nothing.
     """
+    return last_window(path, want, engine)[0]
+
+
+def last_window(path, want=2, engine=None):
+    """`(readings, blob)` — the newest readings and the exact text they were read from.
+
+    The blob comes back because the caller needs the same window twice: once for the
+    readings, once to ask whether this figure has already been spoken into it. Reading the
+    tail a second time would be a second answer to that question, from a file that may have
+    grown between the two reads.
+    """
     try:
         size = os.path.getsize(path)
     except OSError:
-        return []
+        return [], ""
     if engine is None:
         engine = engine_of(path)
     span = TAIL_BYTES
     while True:
         blob = tail(path, span)
         if blob is None:
-            return []
+            return [], ""
         readings = scan(blob, engine)
         if len(readings) >= want or span >= MAX_SCAN or span >= size:
-            return readings[-want:]
+            return readings[-want:], blob
         span = min(span * 2, MAX_SCAN)
+
+
+def already_said(blob, cur):
+    """Has this exact figure already been injected into the window we just read?
+
+    Every note this module writes opens `CONTEXT — {cur:,} tokens`, and the client writes it
+    back into the transcript more than once and at more than one depth of escaping: raw on
+    the `hook_additional_context` record, and inside `hook_success` as a JSON string holding
+    the hook's stdout, which is itself JSON — so the em dash arrives as a literal backslash-u
+    twice over. Matching the two ends on one line sidesteps the escaping entirely, where a
+    spelling-by-spelling list would silently stop covering a client that adds a layer.
+
+    The figure is the identity, not the band and not the 10k line: a duplicate arises only
+    from re-reading an unflushed tail, and a re-read carries the identical `cur`. That makes
+    the check exact where a band-wide or step-wide marker would also swallow the legitimate
+    second crossing of the same line after a compaction. The cost is that a session reading
+    a transcript quoting this figure goes quiet for one line — which is a session that has
+    the number in front of it either way.
+    """
+    stamp = f"{cur:,} tokens"
+    return any("CONTEXT" in line and stamp in line for line in blob.splitlines())
 
 
 def crossed(prev, cur):
@@ -218,6 +260,26 @@ def crossed(prev, cur):
         if prev < cut <= cur:
             return name, cut
     return None
+
+
+def due(prev, cur):
+    """What this rise has earned: a band name, `"tick"`, or None.
+
+    A band wins over a tick on the turn that crosses both, which is most band crossings --
+    160,000 and 200,000 are themselves 10k lines, so the two fire together and only the
+    louder one is worth the turn.
+    """
+    hit = crossed(prev, cur)
+    if hit:
+        return hit[0]
+    return "tick" if cur // STEP > prev // STEP else None
+
+
+def tick_text(cur):
+    """The one-line form for a 10k crossing, sharpened by where the reading sits."""
+    if cur >= compaction.EXTREME:
+        return TICK_EXTREME
+    return TICK_HEAVY if cur >= compaction.HEAVY else TICK
 
 
 #: The one thing the session has to tell us, and the only thing it can tell us that we
@@ -318,6 +380,18 @@ CODEX_EXTREME = (
     "\n\n" + CODEX_DECLARE
 )
 
+#: The 10k line between bands: ONE sentence, and the same one on both engines. What a tick
+#: has to do is let a session check its own weight without being told how to work -- the
+#: bands carry the instructions, and a tick that argued with them would be four paragraphs
+#: the reader learns to skip by the third. Above a cut it names the cut rather than
+#: repeating the note, because the note is already upstream in the same conversation.
+TICK = "CONTEXT — {cur:,} tokens."
+TICK_HEAVY = "CONTEXT — {cur:,} tokens, still over the heavy cut. Finish, push, end the turn."
+TICK_EXTREME = (
+    "CONTEXT — {cur:,} tokens, still past the extreme cut. Nothing is going to take this "
+    "session down but you."
+)
+
 #: The text a band gets, per dialect. An engine with no entry falls back to Claude's, which
 #: is what every session was handed before Codex was read at all.
 NOTES = {
@@ -387,18 +461,20 @@ def main():
         return 0
 
     engine = engine_of(path)
-    readings = last_readings(path, engine=engine)
+    readings, blob = last_window(path, engine=engine)
     if len(readings) < 2:
         return 0
 
     prev, cur = readings
-    hit = crossed(prev, cur)
-    if not hit:
+    band = due(prev, cur)
+    if not band or already_said(blob, cur):
         return 0
 
-    band, _ = hit
-    template = NOTES.get((engine, band)) or NOTES[(CLAUDE, band)]
-    note = template.format(cur=cur, recovery=recovery_note(path, cur, engine))
+    if band == "tick":
+        note = tick_text(cur).format(cur=cur)
+    else:
+        template = NOTES.get((engine, band)) or NOTES[(CLAUDE, band)]
+        note = template.format(cur=cur, recovery=recovery_note(path, cur, engine))
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",

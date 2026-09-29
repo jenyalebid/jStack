@@ -196,7 +196,11 @@ S=delta-$$
 [[ -z "$(prompt $S)" ]] || fail "delta-first-prompt" "the first prompt deltaed"
 seed "$S" sim_verify off
 got="$(ctx "$(prompt $S)")"
-[[ "$got" == "SIM VERIFY TURNED OFF" ]] || fail "delta-flip" "got: $got"
+# The switch carries its instruction: a value name alone is a change the model has
+# to guess the meaning of, and the sentence used to wait for the next matching tool
+# call — six minutes after the user flipped it, in the session that measured it.
+[[ "$got" == "SIM VERIFY TURNED OFF — Skip the simulator verification"* ]] \
+  || fail "delta-flip" "got: $got"
 [[ -z "$(prompt $S)" ]] || fail "delta-settled" "an unchanged prompt spoke"
 pass "delta-one-line"
 
@@ -209,7 +213,8 @@ S=late-$$
 [[ -z "$(prompt $S "$SEAT")" ]] || fail "late-agent-delta" "the first prompt deltaed"
 seed_agent probeagent sim_verify off
 got="$(ctx "$(prompt $S "$SEAT")")"
-[[ "$got" == "SIM VERIFY TURNED OFF" ]] || fail "late-agent-delta" "an agent flip under an unindexed session was not said: '$got'"
+[[ "$got" == "SIM VERIFY TURNED OFF — Skip the simulator verification"* ]] \
+  || fail "late-agent-delta" "an agent flip under an unindexed session was not said: '$got'"
 got="$(ctx "$(edited $S /work/ui/View.swift "$SEAT")")"
 [[ "$got" == *"sim_verify=off"* ]] || fail "late-agent-announce" "an agent value under an unindexed session was not reinforced: '$got'"
 [[ -z "$(edited late-other-$$ /work/ui/View.swift)" ]] \

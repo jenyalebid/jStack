@@ -86,26 +86,78 @@ def fire(path, env=None):
     return json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
 
 
-def test_at_most_two_warnings_per_climb(tmp_path):
-    """How often does this nag? Crossings only: twice per climb, not once per turn.
+def test_speaks_once_per_10k_line_not_once_per_turn(tmp_path):
+    """How often does this nag? Once per 10k line, which on a real climb is one turn in
+    twelve — and the bands still get the turn they cross on.
 
-    A session climbing straight through both cuts gets one line at heavy and one at
-    extreme; every other turn is silent. Because delivery-time compaction fires at the
-    heavy cut, a session where that mechanism works never reaches the second one — the
-    loud band is a backstop that goes quiet on its own when nothing is broken. A
-    compaction re-arms both, which is correct: the climb after it is a new climb.
-
-    This is the contract that decides whether the hook survives contact with a user.
-    A note on every turn above the cut is a note that gets switched off, and a hook
-    switched off is worth exactly nothing, however right each individual line was.
+    This is the contract that decides whether the hook survives contact with a user. A note
+    on every turn above the cut is a note that gets switched off, and a hook switched off is
+    worth exactly nothing however right each line was. The opposite failure is the one that
+    actually happened: bands alone gave 47b6d55d two lines in thirty-three minutes and then
+    nothing at all from 160k to 223k.
     """
-    climb = [80_000, 120_000, 150_000, 165_000, 180_000, 195_000, 210_000, 240_000]
+    climb = list(range(120_000, 180_001, 800))   # ~800 tokens a turn, a measured rate
     spoke = []
     for i in range(1, len(climb)):
         path = write_transcript(tmp_path / f"c{i}.jsonl", 30_000, climb[i - 1:i + 1])
-        if fire(path) is not None:
-            spoke.append(climb[i])
-    assert spoke == [165_000, 210_000], f"expected two warnings, got {len(spoke)}: {spoke}"
+        note = fire(path)
+        if note is not None:
+            spoke.append((climb[i], note))
+
+    lines = [r for r, _ in spoke]
+    assert len(lines) == 6, f"expected one line per 10k crossed, got {lines}"
+    assert [r // 10_000 for r in lines] == [13, 14, 15, 16, 17, 18]
+    assert len(spoke) < len(climb) // 10, "speaking this often is speaking every turn"
+
+    # The band's full note on the turn that crosses it, the one-sentence tick everywhere
+    # else. 160,000 is itself a 10k line, so the two are due together and the band wins.
+    at_heavy = next(n for r, n in spoke if r // 10_000 == 16)
+    assert "heavy band" in at_heavy and "END THE TURN" in at_heavy
+    for reading, note in spoke:
+        if reading // 10_000 == 16:
+            continue
+        assert note.count(".") <= 2 and "\n" not in note, f"a tick grew a paragraph: {note}"
+
+
+def test_a_tick_above_the_cut_names_the_cut(tmp_path):
+    """Between 160k and 200k the reading alone is not the whole fact — the session is over
+    a cut it was already told about, and a bare number reads like everything is fine."""
+    below = fire(write_transcript(tmp_path / "b.jsonl", 30_000, [138_000, 142_000]))
+    over = fire(write_transcript(tmp_path / "o.jsonl", 30_000, [168_000, 172_000]))
+    past = fire(write_transcript(tmp_path / "p.jsonl", 30_000, [208_000, 212_000]))
+    assert below == "CONTEXT — 142,000 tokens."
+    assert "still over the heavy cut" in over
+    assert "still past the extreme cut" in past
+
+
+def test_an_unflushed_tail_does_not_speak_the_same_figure_twice(tmp_path):
+    """The regression from 47b6d55d: the PreToolUse hook of a tool call can run before the
+    client has flushed the usage line of the message making that call — 359ms measured —
+    and the reader then hands back the PREVIOUS pair, whose crossing has already been
+    injected. The injection is in the transcript by then, in both the spellings the client
+    writes it, so the figure is looked for before it is spoken again.
+    """
+    path = write_transcript(tmp_path / "t.jsonl", 30_000, [HEAVY - 5_000, HEAVY + 5_000])
+    first = fire(path)
+    assert first is not None
+
+    for record in (json.dumps({"type": "attachment", "attachment": {
+                        "type": "hook_additional_context", "content": [first]}}),
+                   json.dumps({"type": "attachment", "attachment": {
+                        "type": "hook_success", "stdout": json.dumps(
+                            {"hookSpecificOutput": {"additionalContext": first}})}})):
+        again = tmp_path / "again.jsonl"
+        again.write_text(path.read_text() + record + "\n")
+        assert fire(again) is None, "the same figure spoke twice"
+
+    # A genuinely new reading still speaks, one 10k line further up.
+    moved = tmp_path / "moved.jsonl"
+    moved.write_text(path.read_text())
+    with moved.open("a") as fh:
+        for _ in range(DUPES):
+            fh.write(json.dumps({"type": "assistant", "message": {
+                "id": "mx", "usage": {"input_tokens": HEAVY + 15_000}}}) + "\n")
+    assert fire(moved) is not None
 
 
 def test_the_cuts_do_not_move_with_the_clients_window(tmp_path, monkeypatch):
