@@ -288,6 +288,12 @@ def state_line(resolved: dict[str, tuple[str, str]]) -> str:
     return "SESSION ENVIRONMENT: " + " · ".join(parts) if parts else ""
 
 
+#: What a switch back to a default says. The instruction for a default is `""` by
+#: construction, so without this the line would name a value and leave the sentence
+#: the session is still carrying in force.
+CLEARED = "the instruction that came with the previous value no longer applies"
+
+
 def delta_lines(before: dict[str, str], after: dict[str, str]) -> list[str]:
     """One line per setting that moved mid-session, in registry order.
 
@@ -295,6 +301,13 @@ def delta_lines(before: dict[str, str], after: dict[str, str]) -> list[str]:
     `before` for a caller is a capture of the non-defaults it already knows
     about — requiring a complete dict would turn the first setting ever set in
     a session into a silent change.
+
+    THE LINE CARRIES THE INSTRUCTION, not just the value's name. A switch is the
+    one moment the user is certain the model should act differently, and until
+    this it announced `DELIVERY METHOD SWITCHED: DISTRIBUTE` and nothing else —
+    a value name the model has to guess the meaning of. The sentence itself did
+    not arrive until some later tool call happened to match a trigger, which in
+    ted/chat 47b6d55d was six minutes and forty turns after the switch.
     """
     lines = []
     for s in SETTINGS:
@@ -303,8 +316,9 @@ def delta_lines(before: dict[str, str], after: dict[str, str]) -> list[str]:
         if was == now or now not in s.values:
             continue
         name = s.key.upper().replace("_", " ")
-        lines.append(f"{name} TURNED {now.upper()}" if s.kind == "bool"
-                     else f"{name} SWITCHED: {now.upper()}")
+        head = (f"{name} TURNED {now.upper()}" if s.kind == "bool"
+                else f"{name} SWITCHED: {now.upper()}")
+        lines.append(f"{head} — {s.instruction.get(now) or CLEARED}")
     return lines
 
 

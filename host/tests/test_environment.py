@@ -136,11 +136,29 @@ def test_delta_lines_one_per_moved_key():
     before = {"delivery_method": "none", "sim_verify": "on", "use_subagents": "off"}
     after = dict(before, delivery_method="distribute", sim_verify="off")
     assert env.delta_lines(before, after) == [
-        "DELIVERY METHOD SWITCHED: DISTRIBUTE",
-        "SIM VERIFY TURNED OFF",
+        "DELIVERY METHOD SWITCHED: DISTRIBUTE — "
+        + env.announce("delivery_method", "distribute"),
+        "SIM VERIFY TURNED OFF — " + env.announce("sim_verify", "off"),
     ]
     assert env.delta_lines(before, before) == []
     assert env.delta_lines(after, after) == []
+
+
+def test_a_switch_announces_the_instruction_not_just_the_value():
+    """The switch is the one moment the user is sure the model should act
+    differently. `DELIVERY METHOD SWITCHED: DISTRIBUTE` alone is a value name —
+    the sentence saying what distribute means used to wait for a later tool call
+    to match a trigger, six minutes and forty turns in ted/chat 47b6d55d."""
+    line, = env.delta_lines({}, {"delivery_method": "distribute"})
+    assert "ship it through this project's distribute path" in line
+
+
+def test_a_switch_back_to_the_default_retires_the_old_sentence():
+    """A default has no instruction by construction, so a bare line would name a
+    value while the session still carries the sentence the old one came with."""
+    line, = env.delta_lines({"delivery_method": "distribute"},
+                            {"delivery_method": "none"})
+    assert line == "DELIVERY METHOD SWITCHED: NONE — " + env.CLEARED
 
 
 def test_every_non_default_value_has_a_sentence():
@@ -330,4 +348,4 @@ def test_landing_speaks_on_the_turn_that_hands_work_back():
 
 def test_landing_moves_as_a_switch_and_not_as_a_toggle():
     assert env.delta_lines({}, {"landing": "merged"}) == [
-        "LANDING SWITCHED: MERGED"]
+        "LANDING SWITCHED: MERGED — " + env.announce("landing", "merged")]
