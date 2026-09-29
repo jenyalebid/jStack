@@ -60,7 +60,15 @@ def block(message: str) -> "None":
     if _native:
         # The native TUI renders the common stopped-hook result. Its prompt
         # rejection path can discard decision/reason and the UI warning.
-        output = {"continue": False, "stopReason": text, "systemMessage": text}
+        #
+        # `stopReason` ALONE. Codex renders every channel it is handed, so the
+        # belt-and-braces version that also set `systemMessage` printed the
+        # whole answer twice under one "Hook stopped" — measured on codex-cli
+        # 0.159.0, where each field renders on its own and neither needs the
+        # other. Two answers to one command read as two things having
+        # happened, which for /takeover and /splitoff is exactly the thing
+        # that DID go wrong elsewhere.
+        output = {"continue": False, "stopReason": text}
     print(json.dumps(output))
     if _native:
         # Codex parses structured stdout on exit 0. Exit 2 blocks as well,

@@ -129,14 +129,20 @@ def test_native_command_matching_preserves_arguments_and_rejects_suffixes(name):
 
 
 def test_native_hook_answer_is_visible_and_blocks_on_structured_success(native):
+    """One channel, because Codex renders every channel it is handed.
+
+    Setting `systemMessage` as well printed the whole answer twice under one
+    "Hook stopped" panel, which for a command that spawns something reads as
+    two spawns. Measured on codex-cli 0.159.0: either field renders on its
+    own, so the second one buys nothing and costs a duplicate.
+    """
     result = subprocess.run([sys.executable, str(PLUGIN / "hooks/print-command.py")],
                             input=json.dumps({"prompt": "$jstack:print",
                                               "transcript_path": str(native)}),
                             capture_output=True, text=True)
     assert result.returncode == 0 and not result.stderr
     output = json.loads(result.stdout)
-    assert output == {"continue": False, "stopReason": str(native),
-                      "systemMessage": str(native)}
+    assert output == {"continue": False, "stopReason": str(native)}
 
 
 @pytest.mark.parametrize("completed", [False, True])
