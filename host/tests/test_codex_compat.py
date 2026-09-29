@@ -469,3 +469,68 @@ def test_a_refused_sudo_is_reported_as_hooks_not_installed(tmp_path):
     message = module.install_managed_config(PLUGIN, unwritable / "managed_config.toml",
                                             lambda cmd, **kw: Result())
     assert "NOT installed" in message
+
+
+# ── one registration per hook ───────────────────────────────────────────────
+#
+# Codex reads an installed plugin copy's hooks/hooks.json as a hook source of
+# its own, beside the operator-owned managed config, and runs BOTH — measured
+# 2026-09-29 on a scratch CODEX_HOME: one hook script, registered from the two
+# layers, fired twice on one prompt and drew two "Hook stopped" panels. The
+# visible end of it was `/takeover` opening two sessions off one keystroke;
+# the timeline injection, the attention clear and the session-end review had
+# been doubling in silence on every machine the installer touched.
+
+
+def _installed_copy(home, version="26.9.6", marketplace="jstack"):
+    manifest = home / "plugins/cache" / marketplace / "jstack" / version / "hooks/hooks.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+        {"hooks": [{"type": "command", "command": "takeover-command.py"}]}]}}))
+    return manifest
+
+
+def test_the_plugins_own_manifest_goes_quiet_once_the_operator_file_carries_it(tmp_path):
+    from jstack_host import codex_hooks as module
+    home = tmp_path / "codex"
+    manifest = _installed_copy(home)
+    managed = tmp_path / "managed_config.toml"
+    module.install_managed_config(PLUGIN, managed, lambda cmd, **kw: None)
+
+    assert module.plugin_manifests(home) == [manifest]
+    assert module.silence_plugin_hooks(PLUGIN, home, managed) == [manifest]
+    assert json.loads(manifest.read_text()) == {"hooks": {}}
+    # And the surface stays countable as silent rather than as missing.
+    assert module.plugin_manifests(home) == []
+
+
+def test_a_copy_from_any_marketplace_or_version_is_the_same_second_surface(tmp_path):
+    from jstack_host import codex_hooks as module
+    home = tmp_path / "codex"
+    first = _installed_copy(home, "26.9.6")
+    second = _installed_copy(home, "26.9.8", marketplace="jStack-local")
+    managed = tmp_path / "managed_config.toml"
+    module.install_managed_config(PLUGIN, managed, lambda cmd, **kw: None)
+
+    assert sorted(module.silence_plugin_hooks(PLUGIN, home, managed)) == sorted([first, second])
+
+
+def test_nothing_is_silenced_while_the_operator_file_is_absent_or_stale(tmp_path):
+    """Running every hook twice is wrong; running none is worse.
+
+    Only one of the two announces itself — a doubled hook at least leaves two
+    panels on screen, where a machine whose last surface was taken away looks
+    exactly like a machine with nothing to do.
+    """
+    from jstack_host import codex_hooks as module
+    home = tmp_path / "codex"
+    manifest = _installed_copy(home)
+    before = manifest.read_text()
+    absent = tmp_path / "never-written.toml"
+
+    assert module.silence_plugin_hooks(PLUGIN, home, absent) == []
+
+    stale = tmp_path / "stale.toml"
+    stale.write_text("[[hooks.UserPromptSubmit]]\n")
+    assert module.silence_plugin_hooks(PLUGIN, home, stale) == []
+    assert manifest.read_text() == before
