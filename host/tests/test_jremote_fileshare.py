@@ -1,6 +1,8 @@
 """Selected-folder SMB: one observed contract from CLI through API and audit."""
 
 import asyncio
+import getpass
+import platform
 import subprocess
 from pathlib import Path
 
@@ -18,7 +20,8 @@ def _done(argv, code=0, out="", err=""):
 
 
 def _machine(tmp_path, monkeypatch, *, actual=None, account=False,
-             guest=False, service=True, acl=False, smb_hash=True):
+             guest=False, service=True, acl=False, smb_hash=True,
+             hash_readable=True):
     root = tmp_path / "stack"
     for name in fileshare.SHARE_NAMES:
         (root / name).mkdir(parents=True)
@@ -43,8 +46,13 @@ def _machine(tmp_path, monkeypatch, *, actual=None, account=False,
                                         "UniqueID: 502\n"))
             return _done(argv, code=40, err="not found")
         if argv[0] == fileshare.DSEDITGROUP:
-            return _done(argv, code=1, out="no jstackshare is NOT a member of admin")
+            # macOS 26's own exit code for a non-member, with its own sentence.
+            return _done(argv, code=67, out="no jstackshare is NOT a member of admin")
         if argv[0] == fileshare.PWPOLICY:
+            # Reading hash types is root-only: to anyone else it prints nothing
+            # and still exits 0.
+            if not hash_readable:
+                return _done(argv)
             return _done(argv, out="SMB-NT\n" if smb_hash else
                          "SALTED-SHA512-PBKDF2\n")
         if argv[0] == fileshare.SYSADMINCTL:
@@ -146,14 +154,52 @@ def test_wrong_named_share_is_removed_only_once(tmp_path, monkeypatch):
     assert all(c[0] == fileshare.SHARING for c in commands[first_share:])
 
 
-@pytest.mark.parametrize("probe", [fileshare.DSEDITGROUP, fileshare.PWPOLICY])
-def test_unknown_account_security_is_not_ready(tmp_path, monkeypatch, probe):
+def test_unknown_account_membership_is_not_ready(tmp_path, monkeypatch):
     root = tmp_path / "stack"
     _machine(tmp_path, monkeypatch, actual={n: _share(root / n) for n in fileshare.SHARE_NAMES},
              account=True, acl=True)
     run = fileshare._run
-    monkeypatch.setattr(fileshare, "_run", lambda argv: _done(argv, code=77, err="denied")
-                        if argv[0] == probe else run(argv))
+    monkeypatch.setattr(fileshare, "_run",
+                        lambda argv: _done(argv, code=77, err="denied")
+                        if argv[0] == fileshare.DSEDITGROUP else run(argv))
+    assert fileshare.status()["ready"] is False
+
+
+def test_membership_is_read_from_the_sentence_not_the_exit_code():
+    assert fileshare._parse_membership("no x is NOT a member of admin") is False
+    assert fileshare._parse_membership("yes x is a member of admin") is True
+    assert fileshare._parse_membership("") is None
+
+
+@pytest.mark.skipif(not Path(fileshare.DSEDITGROUP).exists(),
+                    reason="macOS membership tool absent")
+def test_the_real_membership_tool_still_answers_in_those_words():
+    """The probe that went blind: read the live tool, not a fixture of it."""
+    for user, expected in (("nobody", False), ("root", True)):
+        r = subprocess.run([fileshare.DSEDITGROUP, "-o", "checkmember",
+                            "-m", user, "admin"], capture_output=True, text=True)
+        assert fileshare._parse_membership(f"{r.stdout} {r.stderr}") is expected
+
+
+def test_an_unreadable_hash_is_named_rather_than_blocking(tmp_path, monkeypatch):
+    """Hash types are root-only and the host is sealed against root; an
+    unknown there must not make `ready` unreachable in the shipped
+    configuration."""
+    root = tmp_path / "stack"
+    _machine(tmp_path, monkeypatch, actual={n: _share(root / n) for n in fileshare.SHARE_NAMES},
+             account=True, acl=True, hash_readable=False)
+
+    observed = fileshare.status()
+
+    assert observed["account"]["smb_hash"] is None
+    assert observed["unverified"] == ["account.smb_hash"]
+    assert observed["ready"] is True
+
+
+def test_an_observed_missing_hash_still_blocks(tmp_path, monkeypatch):
+    root = tmp_path / "stack"
+    _machine(tmp_path, monkeypatch, actual={n: _share(root / n) for n in fileshare.SHARE_NAMES},
+             account=True, acl=True, smb_hash=False)
     assert fileshare.status()["ready"] is False
 
 
@@ -223,6 +269,70 @@ def test_acl_accepts_macos_directory_rights_normalization(tmp_path, monkeypatch)
             ",".join(fileshare.ACL_OBSERVED_RIGHTS) + "\n")
     monkeypatch.setattr(fileshare, "_run", lambda argv: _done(argv, out=text))
     assert fileshare._acl_ok(root / "Agents") is True
+
+
+@pytest.mark.skipif(platform.system() != "Darwin", reason="macOS ACLs")
+def test_an_inherited_grant_does_not_reach_the_tree_that_predates_it(tmp_path):
+    """The share mounted, listed and read, and refused every save: the grant
+    was on the root, and inheritance governs only what comes after it."""
+    me = getpass.getuser()
+    root = tmp_path / "Agents"
+    (root / "seat" / "pad").mkdir(parents=True)
+    (root / "seat" / "pad" / "note.md").write_text("before the grant\n")
+    (root / "top.txt").write_text("before the grant\n")
+    entry = fileshare._acl_entry(me)
+
+    subprocess.run([fileshare.CHMOD, "+a", entry, str(root)], check=True)
+    assert fileshare._acl_ok(root, me) is True
+    assert fileshare._children_acl_ok(root, me) is False
+
+    subprocess.run([fileshare.CHMOD, "-R", "+a", entry, str(root)], check=True)
+    assert fileshare._children_acl_ok(root, me) is True
+    assert fileshare._acl_ok(root / "top.txt", me, directory=False) is True
+
+
+def test_a_root_whose_tree_was_never_granted_is_not_secure(tmp_path, monkeypatch):
+    root = tmp_path / "stack"
+    actual = {name: _share(root / name) for name in fileshare.SHARE_NAMES}
+    _machine(tmp_path, monkeypatch, actual=actual, account=True, acl=False)
+    (root / "Agents" / "seat").mkdir(parents=True)
+
+    observed = fileshare.status()
+    agents = next(r for r in observed["shares"] if r["name"] == "Agents")
+
+    assert agents["children_acl_ok"] is False
+    assert observed["secure"] is False
+    assert {"children_acl_ok", "owner_children_acl_ok"}.issubset(
+        set(next(p["failed"] for p in observed["security_problems"]
+                 if p.get("name") == "Agents")))
+
+
+def test_setup_plans_the_tree_grant_unprivileged(tmp_path, monkeypatch):
+    root = tmp_path / "stack"
+    actual = {name: _share(root / name) for name in fileshare.SHARE_NAMES}
+    _machine(tmp_path, monkeypatch, actual=actual, account=True, acl=False)
+    (root / "Agents" / "seat").mkdir(parents=True)
+
+    plan = fileshare.setup(apply=False)
+
+    assert any(c.startswith(f"{fileshare.CHMOD} -R +a") and c.endswith("Agents")
+               for c in plan["tree_commands"])
+    # It belongs to the owner, not to the administrator prompt.
+    assert not any("-R" in c for c in plan["commands"])
+
+
+def test_a_file_the_owner_cannot_relabel_is_named_not_fatal():
+    calls = []
+
+    def runner(argv, **kw):
+        calls.append(argv)
+        return _done(argv, code=1, err="chmod: Failed to set ACL on file a: Permission denied\n")
+
+    out = fileshare._apply_tree([[fileshare.CHMOD, "-R", "+a", "ace", "/x"]], runner)
+
+    assert len(calls) == 1
+    assert out[0]["returncode"] == 1 and out[0]["refused"] == 1
+    assert "Permission denied" in out[0]["first_refusal"]
 
 
 def test_audit_alerts_once_per_distinct_unsafe_state(monkeypatch):

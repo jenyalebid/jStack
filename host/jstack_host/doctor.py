@@ -640,18 +640,20 @@ def check_file_sharing() -> dict:
         grade = FAIL if observed.get("service_enabled") else WARN
         return _check("files", grade, f"undeclared SMB share point(s): {names}",
                       "run `jstack-host files status`, then "
-                      "`sudo jstack-host files setup --apply`")
+                      "`jstack-host files setup --apply` (no sudo)")
     if not observed["configured"]:
         return _check("files", OK, "selected-folder sharing not configured")
     if observed["ready"]:
         names = ", ".join(row["name"] for row in observed["shares"])
-        return _check("files", OK, f"ready: {names}")
+        unverified = observed.get("unverified") or []
+        note = f" ({', '.join(unverified)} needs root to read)" if unverified else ""
+        return _check("files", OK, f"ready: {names}{note}")
     if observed.get("secure") and not observed.get("service_enabled"):
         return _check("files", WARN, "selected shares are secure but File Sharing is off",
                       "enable File Sharing in System Settings")
     return _check("files", WARN, "selected shares are configured but drifted",
                   "run `jstack-host files status`, then "
-                  "`sudo jstack-host files setup --apply`")
+                  "`jstack-host files setup --apply` (no sudo)")
 
 
 def check_windows() -> dict:

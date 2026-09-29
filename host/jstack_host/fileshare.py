@@ -13,7 +13,9 @@ This module owns both sides of that contract:
 * :func:`setup` is a dry-run unless explicitly applied as root.  It creates a
   non-admin, non-login account, removes every undeclared share point, declares
   the three roots with guest access disabled and SMB3 encryption required, and
-  gives that account one inherited read/write ACL on each root.
+  gives that account an inherited read/write ACL on each root.  Inheritance
+  governs only what is created after it, so setup then carries the same grant
+  through the existing tree -- unprivileged, as the owner of those files.
 
 It deliberately does not turn File Sharing on.  The System Settings action is
 the supported macOS path and carries OS-owned privacy authorization that a
@@ -63,6 +65,12 @@ ACL_RIGHTS = (
 # These are the canonical words `ls -lde` must therefore show.
 ACL_OBSERVED_RIGHTS = tuple(
     right for right in ACL_RIGHTS if right not in {"read", "write", "append"}
+)
+# On a file the same grant prints in file words, and inheritance is meaningless
+# there.  These are what `ls -le` must show on an existing file inside a root.
+ACL_OBSERVED_FILE_RIGHTS = (
+    "read", "write", "append", "delete",
+    "readattr", "writeattr", "readextattr", "writeextattr",
 )
 
 AUDIT_INTERVAL = 300.0
@@ -141,6 +149,21 @@ def _guest_enabled() -> bool | None:
     return None
 
 
+def _parse_membership(text: str) -> bool | None:
+    """Read `dseditgroup -o checkmember`'s answer out of its sentence.
+
+    Its exit code is not the contract and has moved: macOS 26 answers a
+    non-member with 67, where the parser once demanded 1 and read a clear
+    "is NOT a member" as unknown -- which withheld readiness forever.
+    """
+    said = text.strip().lower()
+    if "is not a member" in said:
+        return False
+    if "is a member" in said:
+        return True
+    return None
+
+
 def _account() -> dict:
     r = _run([DSCL, ".", "-read", f"/Users/{ACCOUNT}", "NFSHomeDirectory",
               "UserShell", "UniqueID"])
@@ -158,12 +181,7 @@ def _account() -> dict:
     # unknown instead of pretending the credential is either armed or broken.
     smb_hash = (None if hashes.returncode or not hashes.stdout.strip()
                 else "SMB-NT" in hashes.stdout.split())
-    membership = admin.stdout.strip().lower()
-    is_admin = None
-    if admin.returncode == 0 and membership.startswith("yes "):
-        is_admin = True
-    elif admin.returncode == 1 and membership.startswith("no ") and "not a member" in membership:
-        is_admin = False
+    is_admin = _parse_membership(f"{admin.stdout} {admin.stderr}")
     return {
         "exists": True,
         "name": ACCOUNT,
@@ -183,7 +201,8 @@ def _root_owner(path: Path) -> str:
     return pwd.getpwuid(path.stat().st_uid).pw_name
 
 
-def _acl_ok(path: Path, user: str = ACCOUNT) -> bool:
+def _acl_ok(path: Path, user: str = ACCOUNT, *, directory: bool = True) -> bool:
+    expected = ACL_OBSERVED_RIGHTS if directory else ACL_OBSERVED_FILE_RIGHTS
     r = _run([LS, "-lde", str(path)])
     if r.returncode != 0:
         return False
@@ -198,9 +217,33 @@ def _acl_ok(path: Path, user: str = ACCOUNT) -> bool:
         if permission == "deny":
             return False
         rights = raw.replace(" ", "").split(",")
-        if principal == f"user:{user}" and set(ACL_OBSERVED_RIGHTS).issubset(rights):
+        if principal == f"user:{user}" and set(expected).issubset(rights):
             allowed = True
     return allowed
+
+
+def _children_acl_ok(path: Path, user: str = ACCOUNT) -> bool | None:
+    """Whether the root's existing children carry the grant too.
+
+    An inheriting ACE reaches only what is created after it is laid.  A tree
+    that predates setup keeps exactly what it had -- for a world-readable home
+    that is read without write, which presents as a browsable share that
+    refuses every save.  This observes the root's immediate children: one
+    level, named for what it sees, and enough to tell a granted root from a
+    granted tree.
+    """
+    try:
+        children = [c for c in sorted(path.iterdir()) if not c.is_symlink()]
+    except OSError:
+        return None
+    for child in children:
+        try:
+            directory = child.is_dir()
+        except OSError:
+            return None
+        if not _acl_ok(child, user, directory=directory):
+            return False
+    return True
 
 
 def _row(name: str, path: Path, actual: dict | None) -> dict:
@@ -221,6 +264,8 @@ def _row(name: str, path: Path, actual: dict | None) -> dict:
         # An SMB-created file belongs to the sharing account.  This inherited
         # ACE keeps the host's normal user able to edit that same live file.
         "owner_acl_ok": _acl_ok(path, owner),
+        "children_acl_ok": _children_acl_ok(path),
+        "owner_children_acl_ok": owner == ACCOUNT or _children_acl_ok(path, owner),
     }
 
 
@@ -232,7 +277,7 @@ def status() -> dict:
                 "ready": False,
                 "reason": "macOS SMB sharing is not available", "shares": [],
                 "unexpected": [], "security_problems": [], "service_enabled": None,
-                "guest_enabled": None,
+                "guest_enabled": None, "unverified": [],
                 "account": {"exists": False, "name": ACCOUNT, "ok": False,
                             "smb_hash": False}}
 
@@ -252,17 +297,25 @@ def status() -> dict:
     guest = _guest_enabled()
     service = _service_enabled()
     configured = bool(rows) and all(row["present"] for row in rows)
+    # Reading the account's hash types is root-only, and the host is sealed
+    # against root: demanding a `True` there made `ready` unreachable in the
+    # one configuration this ships in.  Unknown blocks nothing and is named in
+    # `unverified`; an observed `False` still blocks.
+    unverified = [f"account.{key}" for key in ("admin", "smb_hash")
+                  if account.get(key) is None]
     secure = (configured and not unexpected and account_ok and
-              account.get("smb_hash") is True and guest is False and
+              account.get("smb_hash") is not False and guest is False and
               all(all(row[k] for k in ("path_ok", "guest_off", "writable",
                                        "encrypted", "shared", "acl_ok",
-                                       "owner_acl_ok"))
+                                       "owner_acl_ok", "children_acl_ok",
+                                       "owner_children_acl_ok"))
                   for row in rows))
     problems = [{"kind": "unexpected_share", **row} for row in unexpected]
     for row in rows:
         if not row["present"]:
             continue
-        failed = [key for key in ("path_ok", "guest_off", "encrypted", "shared")
+        failed = [key for key in ("path_ok", "guest_off", "encrypted", "shared",
+                                  "children_acl_ok", "owner_children_acl_ok")
                   if not row[key]]
         if failed:
             problems.append({"kind": "share_security_drift", "name": row["name"],
@@ -281,6 +334,7 @@ def status() -> dict:
         "security_problems": problems,
         "service_enabled": service,
         "guest_enabled": guest,
+        "unverified": unverified,
         "account": {**account, "ok": account_ok},
     }
 
@@ -429,6 +483,48 @@ def setup_plan(observed: dict | None = None) -> list[list[str]]:
             [c for c in commands if c[0] == SHARING])
 
 
+def tree_plan(observed: dict | None = None) -> list[list[str]]:
+    """The unprivileged second half of setup: carry the grant into the tree.
+
+    The privileged plan lays an inheriting ACE on each root, which governs
+    what is created from then on.  Everything already in the tree keeps the
+    permissions it had, so a share can mount, list and read while refusing
+    every write -- the state this pass exists to end.  `chmod -R` needs no
+    root: the roots and what is under them belong to the host's own user, and
+    an owner may set an ACL on what it owns.
+    """
+    observed = observed or status()
+    rows = {row["name"]: row for row in observed.get("shares", [])}
+    commands: list[list[str]] = []
+    for name, path in desired_shares().items():
+        row = rows.get(name, {})
+        if not row.get("children_acl_ok"):
+            commands.append([CHMOD, "-R", "+a", _acl_entry(ACCOUNT), str(path)])
+        owner = row.get("owner") or _root_owner(path)
+        if owner != ACCOUNT and not row.get("owner_children_acl_ok"):
+            commands.append([CHMOD, "-R", "+a", _acl_entry(owner), str(path)])
+    return commands
+
+
+def _apply_tree(commands: list[list[str]], runner=subprocess.run) -> list[dict]:
+    """Run the recursive grants, reporting what each one could not reach.
+
+    A file owned by someone other than the host user -- one the sharing
+    account itself created before the grant existed -- refuses an ACL change
+    from that user.  `chmod -R` walks past it and exits non-zero; that is a
+    named leftover, not a reason to abandon the rest of the tree.
+    """
+    out = []
+    for argv in commands:
+        print(f"granting access across {argv[-1]} (large trees take minutes)",
+              file=sys.stderr, flush=True)
+        r = runner(argv, capture_output=True, text=True)
+        refused = [line for line in (r.stderr or "").splitlines() if line.strip()]
+        out.append({"command": _display(argv), "returncode": r.returncode,
+                    "refused": len(refused), "first_refusal": refused[0] if refused else ""})
+    return out
+
+
 def setup(*, apply: bool = False, runner=subprocess.run) -> dict:
     """Print the plan, or apply it.  Applying as the logged-in user goes
     through the OS administrator prompt (the sealed `jstack-host` cannot be
@@ -436,8 +532,10 @@ def setup(*, apply: bool = False, runner=subprocess.run) -> dict:
     plan directly."""
     before = status()
     commands = setup_plan(before)
+    tree = tree_plan(before)
     if not apply:
         return {"applied": False, "commands": [_display(c) for c in commands],
+                "tree_commands": [_display(c) for c in tree],
                 "status": before,
                 "note": "dry run; re-run with --apply (an administrator prompt "
                         "opens), then enable File Sharing in System Settings"}
@@ -451,11 +549,12 @@ def setup(*, apply: bool = False, runner=subprocess.run) -> dict:
         finally:
             if password_file is not None:
                 _discard(password_file)
+        granted = _apply_tree(tree)
         after = status()
         if not after["secure"]:
             raise FileShareError("setup commands completed but observed state is still not secure")
         return {"applied": True, "commands": [_display(c) for c in commands],
-                "status": after,
+                "tree": granted, "status": after,
                 "note": "share points are ready; enable File Sharing in System Settings"}
     roots = desired_shares()
     identities = {name: (path.stat().st_dev, path.stat().st_ino) for name, path in roots.items()}
@@ -468,11 +567,12 @@ def setup(*, apply: bool = False, runner=subprocess.run) -> dict:
         if r.returncode != 0:
             raise FileShareError(f"partial setup: {completed} commands applied; command failed ({r.returncode}): {_display(argv)}")
         completed += 1
+    granted = _apply_tree(tree)
     after = status()
     if not after["secure"]:
         raise FileShareError("setup commands completed but observed state is still not secure")
     return {"applied": True, "commands": [_display(c) for c in commands],
-            "status": after,
+            "tree": granted, "status": after,
             "note": "share points are ready; enable File Sharing in System Settings"}
 
 
