@@ -178,9 +178,12 @@ def check_root() -> dict:
     message arrives now instead of at the first write), and a root nobody can
     write to.
     """
-    declared = os.environ.get("JSTACK_ROOT")
     r = root.root()
-    source = "$JSTACK_ROOT" if declared else "$HOME (no root declared)"
+    # Asked, never re-derived. Computing this from $JSTACK_ROOT alone printed
+    # "no root declared" on a machine whose root is recorded in the install
+    # marker — the right path under the one sentence that sends its reader to
+    # declare it again.
+    source = root.root_source()
     dirs = {
         "Agents": root.agents_dir(),
         "Systems": root.systems_dir(),
