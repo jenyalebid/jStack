@@ -134,6 +134,162 @@ def _t(*args) -> list[str]:
     return [_TMUX, "-L", _SOCK, *args]
 
 
+# ── The pane keeps its identity and loses its reach (#257) ──────────────────
+#
+# THE WHOLE STACK DIED TO ONE UNSCOPED `tmux kill-server` TYPED IN A PANE.
+# tmux sets `TMUX=<socket>,<pid>,<idx>` in every pane it spawns, and a bare
+# `tmux` inside the pane follows it — so an agent's scratch tmux (a parked
+# xcodebuild, an acceptance run) lands on THIS server as a sibling of every
+# live agent, and `kill-server` there means "all of them". The pane's shell is
+# therefore started with `TMUX` cleared and `TMUX_TMPDIR` pointed at a scratch
+# dir of its own: a bare `tmux` in the pane creates and addresses a private
+# server there, and no verb it knows can name the control socket. The one
+# legitimate reader of `TMUX` — `spawn.origin_sid`, which learns which session
+# a handoff was typed into — reads `JREMOTE_SESSION` instead, exported here
+# under the session's own name. `TMUX_PANE` stays: it is harmless without
+# the socket and still tells the pane which pane it is.
+#
+# The wrapper is the pane's COMMAND, not the session environment: tmux writes
+# `TMUX` into the child env after the session's environ is applied, so
+# `set-environment -r TMUX` cannot remove it. It is also the session's
+# `default-command`, so a window opened in the session later (prefix-c, or a
+# respawn) runs under the same wrapper as the first pane.
+_SCRATCH_TAG = "jremote-scratch"
+PANE_SESSION_ENV = "JREMOTE_SESSION"
+
+
+def _scratch_root() -> Path:
+    """Where the panes' private tmux dirs live: beside the control socket's
+    own dir, under whatever `TMUX_TMPDIR` this process resolves (`/tmp` when
+    unset — the socket-path cap is 104 bytes, so never `$TMPDIR`)."""
+    return Path(os.environ.get("TMUX_TMPDIR") or "/tmp") / _SCRATCH_TAG
+
+
+def scratch_dir(sid: str) -> Path:
+    return _scratch_root() / _name(sid)
+
+
+def _leave_scratch(environ=os.environ) -> None:
+    """A jstack_host process started INSIDE a managed pane inherits that
+    pane's scratch `TMUX_TMPDIR` — and a handoff typed in a pane runs
+    `open_managed` in-process (`spawn.py`), whose `-L jremote` client would
+    then resolve to a private, empty server and create the new session where
+    no board can see it. Put the process back on the dir the scratch was
+    carved from: `<root>/jremote-scratch/jr-x` came from `TMUX_TMPDIR=<root>`,
+    or from the variable unset when the root is `/tmp`. Anything that is not
+    a scratch dir (a test run's own `TMUX_TMPDIR`) is left exactly as set."""
+    cur = environ.get("TMUX_TMPDIR")
+    if not cur:
+        return
+    p = Path(cur)
+    if p.parent.name != _SCRATCH_TAG:
+        return
+    root = p.parent.parent
+    if str(root) == "/tmp":
+        environ.pop("TMUX_TMPDIR", None)
+    else:
+        environ["TMUX_TMPDIR"] = str(root)
+
+
+_leave_scratch()
+
+
+def _pane_shell() -> str:
+    """The shell the pane runs: the user's login shell, the way tmux itself
+    picks `default-shell` — `$SHELL` when it names an executable, else the
+    passwd entry, else `/bin/sh`."""
+    cand = os.environ.get("SHELL", "")
+    if cand.startswith("/") and os.access(cand, os.X_OK):
+        return cand
+    try:
+        import pwd
+        cand = pwd.getpwuid(os.getuid()).pw_shell
+        if cand.startswith("/") and os.access(cand, os.X_OK):
+            return cand
+    except (KeyError, OSError):
+        pass
+    return "/bin/sh"
+
+
+def _pane_command(sid: str) -> str:
+    """The shell line tmux runs in the pane (via `default-shell -c`): a login
+    shell of the user's own, with `TMUX` gone, a private `TMUX_TMPDIR`, and
+    the session's name exported as `JREMOTE_SESSION`. `exec` so the shell IS
+    the pane process (tmux binds the pane's life to it, and `respawn-pane`
+    re-runs this same line)."""
+    return (f"exec env -u TMUX TMUX_TMPDIR={shlex.quote(str(scratch_dir(sid)))} "
+            f"{PANE_SESSION_ENV}={shlex.quote(_name(sid))} "
+            f"{shlex.quote(_pane_shell())} -l")
+
+
+def _make_scratch(sid: str) -> Path:
+    """tmux creates `$TMUX_TMPDIR/tmux-<uid>` but not `$TMUX_TMPDIR` itself:
+    a pane pointed at a missing dir would fail every bare `tmux` with
+    "No such file or directory". Owner-only, like tmux's own dir."""
+    d = scratch_dir(sid)
+    d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    return d
+
+
+def _scratch_sockets(d: Path) -> list[Path]:
+    try:
+        return [s for sub in d.glob("tmux-*") if sub.is_dir()
+                for s in sub.iterdir() if s.is_socket()]
+    except OSError:
+        return []
+
+
+def _server_answers(sock: Path) -> bool:
+    try:
+        r = subprocess.run([_TMUX, "-S", str(sock), "list-sessions"],
+                           capture_output=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
+
+
+def dispose_scratch(sid: str) -> bool:
+    """Take the session's scratch dir away with the session. True if gone.
+
+    Never kills what lives there: a server an agent parked in its scratch
+    (a build still running) was named by nobody but that agent, and ending
+    it because the session closed is the collateral this whole change exists
+    to stop. A dead socket file is unlinked — `kill-server` never unlinks its
+    own (#259) — and the dir goes once nothing in it answers. A dir still
+    holding a live server stays, and the reaper's sweep gets it later."""
+    d = scratch_dir(sid)
+    if not d.exists():
+        return True
+    for sock in _scratch_sockets(d):
+        if _server_answers(sock):
+            _log(f"scratch for {sid[:8]} kept — a tmux server of its own "
+                 f"still answers at {sock}")
+            return False
+        try:
+            sock.unlink()
+        except OSError:
+            pass
+    shutil.rmtree(d, ignore_errors=True)
+    return not d.exists()
+
+
+def sweep_scratch(live_names: set[str]) -> list[str]:
+    """Dispose every scratch dir whose session is not among `live_names` —
+    sessions that ended on their own never pass through `close_managed`.
+    Returns the names disposed."""
+    root = _scratch_root()
+    if not root.is_dir():
+        return []
+    gone = []
+    for d in root.iterdir():
+        if not d.name.startswith("jr-") or d.name in live_names:
+            continue
+        if dispose_scratch(d.name[3:]):
+            gone.append(d.name)
+    return gone
+
+
 def _type_argv(name: str, text: str) -> list[list[str]]:
     """The tmux calls that type `text` into `name`'s input box — as written.
 
@@ -584,6 +740,7 @@ def _attach_window_or_die(sid: str) -> None:
         _log(f"window for {sid[:8]} failed — {why}; destroying the session")
         record_close(sid)
         subprocess.run(_t("kill-session", "-t", _name(sid)), capture_output=True)
+        dispose_scratch(sid)
         raise WindowRequired(
             "could not open a terminal window on the Mac for this spawn")
 
@@ -624,6 +781,12 @@ def reconcile(grace: float = 60.0) -> list[str]:
          `open_registry`, which filters to live sessions — so this is hygiene
          on the file, not a correctness fix, and it happens last: a row is
          only litter once the reaping above has settled what is alive.
+
+      4. Dispose the scratch tmux dirs (#257) of sessions no longer live —
+         a session whose claude exited on its own never reached
+         `close_managed`, so its scratch would otherwise sit under
+         `jremote-scratch` forever. Only when the socket answered, for the
+         reason duty 3 gives; a dir holding a live server is kept.
 
     Liveness is judged the way the board judges it — the pane's tty against the
     live agent scan — never by pane_current_command string-matching. The scan
@@ -669,6 +832,7 @@ def reconcile(grace: float = 60.0) -> list[str]:
                 del d[sid]
 
         _reg_mutate(_drop_dead_rows)
+        sweep_scratch(open_names())
     return reaped
 
 
@@ -763,8 +927,14 @@ def open_managed(sid: str, cwd: str, resume: bool = True, displace=None,
     # always present, so it anchors the search path.
     env.setdefault("TERMINFO_DIRS",
                    "/usr/share/terminfo:/opt/homebrew/share/terminfo")
-    subprocess.run(_t("new-session", "-d", "-s", name, "-c", cwd),
+    _make_scratch(sid)
+    pane_cmd = _pane_command(sid)
+    subprocess.run(_t("new-session", "-d", "-s", name, "-c", cwd, pane_cmd),
                    check=True, env=env)
+    # Later windows in this session (prefix-c, respawn-pane) run the same
+    # wrapper — a session option, so it names this session's scratch only.
+    subprocess.run(_t("set-option", "-t", name, "default-command", pane_cmd),
+                   capture_output=True, env=env)
     # Mouse on, server-wide: wheel events scroll tmux copy-mode, which is how
     # both iTerm on the Mac and the phone's terminal scroll these sessions.
     subprocess.run(_t("set-option", "-g", "mouse", "on"),
@@ -801,6 +971,7 @@ def open_managed(sid: str, cwd: str, resume: bool = True, displace=None,
              "destroying the session that was standing up for it")
         record_close(sid)
         subprocess.run(_t("kill-session", "-t", name), capture_output=True)
+        dispose_scratch(sid)
         raise TakeoverFailed(
             "the claude on the Mac wouldn't exit — close that window there")
     inner = _inner_command(sid, resume, extra, prelude, engine, model,
@@ -1258,6 +1429,7 @@ def close_managed(sid: str, review: bool = True) -> bool:
             subprocess.run(["kill", "-9", str(pid)], capture_output=True)
         subprocess.run(_t("kill-session", "-t", name))
         close_windows(ttys)
+        dispose_scratch(sid)
         return True
     subprocess.run(_t("send-keys", "-t", name, "C-c"))
     subprocess.run(_t("send-keys", "-t", name, "C-d"))
@@ -1279,6 +1451,10 @@ def close_managed(sid: str, review: bool = True) -> bool:
         start_new_session=True,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+    # The scratch is the pane's, not the exiting claude's: nothing in the 2s
+    # grace above reaches it, so it goes now rather than riding the detached
+    # script. A server the agent parked there is kept (see dispose_scratch).
+    dispose_scratch(sid)
     return True
 
 

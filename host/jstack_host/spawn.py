@@ -98,27 +98,19 @@ def agent_base_for(cwd: str) -> str:
 def origin_sid() -> str:
     """The managed session this spawn was typed into, '' when not in one.
 
-    A handoff/splitoff runs inside the origin session's own tmux pane, so
-    the pane's env names it: $TMUX carries the socket (only the jremote
-    socket counts) and $TMUX_PANE resolves to the `jr-<sid>` session name.
-    Raw iTerm windows and headless runs have neither — no origin, and the
-    window stays on the Mac."""
-    tmux_env = os.environ.get("TMUX", "")
-    pane = os.environ.get("TMUX_PANE", "")
-    if not tmux_env or not pane:
-        return ""
-    sock = tmux_env.split(",")[0]
+    A handoff/splitoff runs inside the origin session's own tmux pane, and
+    the pane's env names it. Since #257 the pane carries `JREMOTE_SESSION`
+    (`jr-<sid8>`, exported by `managed._pane_command`) and NO `$TMUX` — the
+    socket was taken out of the pane's reach on purpose. Panes created by a
+    Hub from before that carry `$TMUX` + `$TMUX_PANE` instead, and are
+    resolved the old way: the socket (only the jremote socket counts) and the
+    pane resolve to the `jr-<sid>` session name. Raw iTerm windows and
+    headless runs have neither — no origin, and the window stays on the Mac."""
     from . import managed
-    if Path(sock).name != managed._SOCK:
-        return ""
-    try:
-        r = subprocess.run([managed._TMUX, "-S", sock, "display-message",
-                            "-t", pane, "-p", "#S"],
-                           capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    name = (r.stdout or "").strip()
-    if r.returncode != 0 or not name.startswith("jr-"):
+    name = os.environ.get(managed.PANE_SESSION_ENV, "")
+    if not name:
+        name = _legacy_origin_name(managed)
+    if not name.startswith("jr-"):
         return ""
     # tmux names truncate (`jr-` + sid[:8]); the open registry holds the
     # full sid — same reverse mapping the reaper uses. Unknown to the
@@ -127,6 +119,28 @@ def origin_sid() -> str:
         if managed._name(sid) == name:
             return sid
     return ""
+
+
+def _legacy_origin_name(managed) -> str:
+    """The pane's session name read off `$TMUX` + `$TMUX_PANE` — the pre-#257
+    pane env, kept so a handoff typed in a session an older Hub created still
+    lands where it was typed. '' when the env does not name a jremote pane."""
+    tmux_env = os.environ.get("TMUX", "")
+    pane = os.environ.get("TMUX_PANE", "")
+    if not tmux_env or not pane:
+        return ""
+    sock = tmux_env.split(",")[0]
+    if Path(sock).name != managed._SOCK:
+        return ""
+    try:
+        r = subprocess.run([managed._TMUX, "-S", sock, "display-message",
+                            "-t", pane, "-p", "#S"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if r.returncode != 0:
+        return ""
+    return (r.stdout or "").strip()
 
 
 def _dashboard_post(url, json=None, headers=None, timeout=None):
