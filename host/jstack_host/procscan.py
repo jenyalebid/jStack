@@ -13,6 +13,7 @@ The HTTP route stays in `routes/system.py` and calls `get_claude_processes()`
 here, so `/api/claude-processes` is unchanged for every existing caller.
 """
 
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -80,6 +81,42 @@ def _agent_engine(name: str | None, cmdline: list) -> str | None:
     if n in ("codex", "codex.exe") or arg0 == "codex" or arg0.endswith("/codex"):
         return "codex"
     return None
+
+
+#: A Codex thread id, as it appears bare in argv — `codex exec resume <id>`
+#: names its target positionally, with no flag to key on.
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+def _subcommand(cmdline: list) -> str:
+    """The first bare word after argv[0] — `exec` in `codex exec resume …`.
+
+    Scanned rather than indexed at [1] because a global flag may sit in front
+    of the subcommand, and `--flag value` must not have its value read as one.
+    """
+    for arg in cmdline[1:]:
+        if arg.startswith("-"):
+            continue
+        return arg
+    return ""
+
+
+def _codex_native_id(cmdline: list) -> str:
+    """Codex's own thread id, when this argv is a `codex exec resume <id>` run.
+
+    '' for anything else — an interactive pane, a fresh `codex exec` with no
+    session to resume, `claude` in any shape. The first UUID-shaped element
+    wins rather than the element at a fixed position, because the prompt text
+    follows the id and a prompt is free to quote one; and because the flags
+    jRemote passes (`--json`, `--model m`, the bypasses) are not a fixed
+    prefix."""
+    if _subcommand(cmdline) != "exec":
+        return ""
+    for arg in cmdline[1:]:
+        if _UUID_RE.match(arg):
+            return arg
+    return ""
 
 
 def _is_claude_proc(name: str | None, cmdline: list) -> bool:
@@ -260,6 +297,15 @@ def get_claude_processes():
                         session_id = parts[i + 1]
                         break
 
+            # `codex exec resume <thread-id> <text>` states its target as a
+            # bare positional, and that id is Codex's own thread — never a
+            # board handle, so it cannot go in `session_id`. Carried on its own
+            # so the board can resolve it to the card it belongs to instead of
+            # minting an anonymous `pid-` row beside it (#281). The first
+            # UUID-shaped element wins: the prompt text follows the id, so a
+            # position-based read would trip over a prompt that quotes one.
+            native_id = _codex_native_id(cmdline) if engine == "codex" else ""
+
             # Identify source by parent process, cmdline, and working directory
             ppid = info.get("ppid")
             proc_cwd = ""
@@ -272,6 +318,13 @@ def get_claude_processes():
             elif "vscode" in cmd_str:
                 source = "vscode"
             elif "-p" in cmdline or "--print" in cmdline:
+                source = "cli-pipe"
+            elif engine == "codex" and _subcommand(cmdline) == "exec":
+                # Codex's non-interactive mode, and the exact thing jRemote
+                # runs for a phone chat-turn (`turns.py`). It is a pipe run
+                # under another name — calling it "cli" said a person had
+                # launched it in a terminal, which is how it came to read as a
+                # loose interactive session.
                 source = "cli-pipe"
             else:
                 source = "cli"
@@ -319,6 +372,7 @@ def get_claude_processes():
             processes.append({
                 "pid": info["pid"],
                 "session_id": session_id,
+                "native_id": native_id,
                 "label": label,
                 "source": source,
                 # Which agent CLI is running here. Always present and always a
