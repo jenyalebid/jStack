@@ -87,10 +87,17 @@ check("the note asks for the turn to END", "END THE TURN" in note)
 # The point of stopping is where the boundary lands, not that it is avoided.
 check("the note says why ending is the move", "seam" in note)
 
+# Inside a band the full note is not repeated — the 10k line it crossed is, in one
+# sentence. Re-reading four paragraphs is how a session learns to skip them.
 code, note = run(claude("inband.jsonl", [165_000, 170_000]))
-check("already inside the band says nothing", note == "")
+check("already inside the band does not repeat the note", "heavy band" not in note)
+check("already inside the band still reports the reading",
+      note == "CONTEXT \u2014 170,000 tokens, still over the heavy cut. "
+              "Finish, push, end the turn.")
 code, note = run(claude("light.jsonl", [50_000, 90_000]))
-check("a light session says nothing", note == "")
+check("a light session gets its reading", note == "CONTEXT \u2014 90,000 tokens.")
+code, note = run(claude("light-still.jsonl", [91_000, 92_000]))
+check("a light session inside one 10k line says nothing", note == "")
 code, note = run(claude("falling.jsonl", [180_000, 60_000]))
 check("a fall across a cut crosses nothing", note == "")
 
@@ -153,8 +160,16 @@ check("a Codex session is not promised a summarizer",
 code, note = run(claude("claude-declare.jsonl", [50_000, 150_000, 165_000]))
 check("a Claude session is not told its turns are dropped", "server-side" not in note)
 
+# Below the bands the meter still speaks, once per 10k line and in one sentence: a
+# reading nobody can check is how a session gets to 223k believing it is fine.
 code, note = run(codex("codex-light.jsonl", [26_000, 90_000]))
-check("a light rollout says nothing", note == "")
+check("a light rollout gets its reading", note == "CONTEXT \u2014 90,000 tokens.")
+code, note = run(codex("codex-still.jsonl", [91_000, 92_000]))
+check("a rise inside one 10k line says nothing", note == "")
+code, note = run(claude("claude-tick-heavy.jsonl", [50_000, 168_000, 172_000]))
+check("a tick over the heavy cut names the cut", "still over the heavy cut" in note)
+check("a tick does not repeat the band's instructions", "DECLARE" not in note
+      and "to-be-continued" not in note)
 
 # Codex re-emits an unchanged figure when a turn ends without a request. A repeat
 # landing on a cut would eat the one warning that cut ever gives.
