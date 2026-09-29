@@ -502,6 +502,41 @@ grep -q 'from .JSTACK_ROOT' "$TMP/undeclared.json" \
   && pass "a declared environment is still named as the source" \
   || fail "the environment rung lost its name"
 
+# ── a db that cannot be opened right now is not a broken db ───────────────
+# A read-only sqlite open must place a -shm beside a WAL database, so a writer
+# mid-checkpoint fails it with the same words a missing file gives. Seen live
+# on a leaf whose timeline held 438 entries a second later, graded "not a
+# readable timeline" under the hint "move it aside and let log_event recreate
+# it". Proxied here by a db the process cannot open at all.
+mkdir -p "$TMP/root/Logs/Timeline"
+BUSYDB="$TMP/root/Logs/Timeline/timeline.db"
+"$PY" -c '
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("CREATE TABLE entries (id INTEGER PRIMARY KEY)")
+c.commit(); c.close()' "$BUSYDB"
+chmod 000 "$BUSYDB"
+run_doctor --json > "$TMP/busy.json" 2>/dev/null
+g=$(grade_of "$TMP/busy.json" timeline)
+if [ "$g" = "warn" ]; then
+    pass "a timeline that cannot be opened right now warns instead of failing"
+else
+    fail "an unopenable timeline was graded '$g', not warn"
+fi
+grep -q "nothing here should be moved" "$TMP/busy.json" \
+  && pass "the busy hint does not tell the operator to move a live db aside" \
+  || fail "the busy hint still suggests moving the db"
+chmod 644 "$BUSYDB"
+
+# Genuine corruption keeps its FAIL — the retry is for a race, not a shield.
+printf 'this is not a database at all' > "$BUSYDB"
+run_doctor --json > "$TMP/corrupt.json" 2>/dev/null
+g=$(grade_of "$TMP/corrupt.json" timeline)
+[ "$g" = "fail" ] \
+  && pass "a file that is not a database still fails" \
+  || fail "corruption was graded '$g', not fail"
+rm -rf "$TMP/root/Logs"
+
 # ── a forked timeline is a failure, not a clean bill ───────────────────────
 # The defect this covers: a root declared in one place and not another, so one
 # tool writes history into a tree the rest of the install never opens. The
