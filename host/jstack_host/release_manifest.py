@@ -36,8 +36,16 @@ LINES = ("main", "dev")
 #: marker is inside the signed manifest so only the pinned key can grant the
 #: exemption below, and never alongside receipts.
 SOURCE_BUILD = "source-build"
+#: Where a feed shelves client (jRemote.app) publications, beside the releases.
+#: The client is released on its own clock — one signed build at a time, each
+#: naming the oldest stack it runs on — and every hub build carries the newest
+#: one its stack version satisfies (`build_source.carried_client`). Not a
+#: release directory: nothing in here is offered to a machine directly.
+CLIENTS = "clients"
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 HEX = re.compile(r"[a-f0-9]{64}\Z")
+SHA = re.compile(r"[a-f0-9]{40}\Z")
+VERSION = re.compile(r"\d+(?:\.\d+)*\Z")
 
 
 class ReleaseError(ValueError):
@@ -59,6 +67,63 @@ def digest(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def artifact(name: str, item: object) -> dict:
+    """One signed component: a file name, a version, and the bytes it must be."""
+    if not isinstance(item, dict):
+        raise ReleaseError(f"invalid {name} artifact")
+    identifier(item.get("file"))
+    identifier(item.get("version"))
+    if not HEX.fullmatch(str(item.get("sha256", ""))):
+        raise ReleaseError(f"invalid {name} checksum")
+    size = item.get("bytes")
+    if type(size) is not int or not 0 < size <= 4 * 1024**3:
+        raise ReleaseError(f"invalid {name} size")
+    return item
+
+
+def version_key(version: str) -> tuple[int, ...]:
+    """`26.9.5` orders after `26.9.10`? No — as numbers, never as text; and
+    `1.0` is `1`, so a floor of either reads the same against a stack of both."""
+    if not VERSION.fullmatch(str(version)):
+        raise ReleaseError(f"not a stack version: {version!r}")
+    parts = [int(part) for part in str(version).split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def validate_client(manifest: dict) -> dict:
+    """A client publication: one build of jRemote.app, and the oldest stack it
+    runs on. Signed by the publisher, read by the hub that carries it."""
+    if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA \
+            or manifest.get("kind") != "client":
+        raise ReleaseError("unsupported client publication schema")
+    build = manifest.get("build")
+    if type(build) is not int or build <= 0:
+        raise ReleaseError("a client publication names its build number")
+    item = artifact("client", manifest.get("component"))
+    if item["version"] != str(build):
+        raise ReleaseError("client artifact version is not its build number")
+    if not SHA.fullmatch(str(manifest.get("source", ""))):
+        raise ReleaseError("exact committed client source revision required")
+    packages = manifest.get("packages", {})
+    if not isinstance(packages, dict) or any(
+            not IDENTIFIER.fullmatch(str(k)) or not SHA.fullmatch(str(v)) for k, v in packages.items()):
+        raise ReleaseError("exact committed client package revisions required")
+    compatibility = manifest.get("compatibility", {})
+    if not isinstance(compatibility, dict) or compatibility.get("protocol") != 1:
+        raise ReleaseError("unsupported client protocol")
+    version_key(compatibility.get("stack_minimum", ""))
+    return manifest
+
+
+def client_runs_on(manifest: dict, version: str) -> bool:
+    """Whether a client publication runs on a stack of `version`."""
+    compatibility = manifest["compatibility"]
+    return compatibility.get("protocol") == 1 and \
+        version_key(compatibility["stack_minimum"]) <= version_key(version)
+
+
 def validate(manifest: dict, *, promoted: bool = True) -> dict:
     if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
         raise ReleaseError("unsupported release schema")
@@ -67,15 +132,7 @@ def validate(manifest: dict, *, promoted: bool = True) -> dict:
     if not isinstance(components, dict) or set(components) != COMPONENTS:
         raise ReleaseError("release components do not match its schema")
     for name, item in components.items():
-        if not isinstance(item, dict):
-            raise ReleaseError(f"invalid {name} artifact")
-        identifier(item.get("file"))
-        identifier(item.get("version"))
-        if not HEX.fullmatch(str(item.get("sha256", ""))):
-            raise ReleaseError(f"invalid {name} checksum")
-        size = item.get("bytes")
-        if type(size) is not int or not 0 < size <= 4 * 1024**3:
-            raise ReleaseError(f"invalid {name} size")
+        artifact(name, item)
     if len({item["file"] for item in components.values()}) != len(components):
         raise ReleaseError("release artifacts require distinct filenames")
     compatibility = manifest.get("compatibility", {})
@@ -132,7 +189,8 @@ def validate(manifest: dict, *, promoted: bool = True) -> dict:
     return manifest
 
 
-def verify(envelope: dict, public_key: str, *, promoted: bool = True) -> dict:
+def signed_by(envelope: dict, public_key: str) -> dict:
+    """The manifest inside an envelope this key signed, and nothing else."""
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     try:
@@ -141,14 +199,31 @@ def verify(envelope: dict, public_key: str, *, promoted: bool = True) -> dict:
         key.verify(base64.b64decode(envelope["signature"], validate=True), canonical(manifest))
     except (KeyError, TypeError, ValueError, InvalidSignature) as exc:
         raise ReleaseError("release signature not trusted") from exc
-    return validate(manifest, promoted=promoted)
+    return manifest
+
+
+def verify(envelope: dict, public_key: str, *, promoted: bool = True) -> dict:
+    return validate(signed_by(envelope, public_key), promoted=promoted)
+
+
+def verify_client(envelope: dict, public_key: str) -> dict:
+    return validate_client(signed_by(envelope, public_key))
+
+
+def _seal(manifest: dict, private_key: bytes) -> dict:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    signature = Ed25519PrivateKey.from_private_bytes(private_key).sign(canonical(manifest))
+    return {"manifest": manifest, "signature": base64.b64encode(signature).decode()}
 
 
 def sign(manifest: dict, private_key: bytes, *, promoted: bool = True) -> dict:
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     validate(manifest, promoted=promoted)
-    signature = Ed25519PrivateKey.from_private_bytes(private_key).sign(canonical(manifest))
-    return {"manifest": manifest, "signature": base64.b64encode(signature).decode()}
+    return _seal(manifest, private_key)
+
+
+def sign_client(manifest: dict, private_key: bytes) -> dict:
+    validate_client(manifest)
+    return _seal(manifest, private_key)
 
 
 def check_artifact(path: Path, item: dict) -> None:

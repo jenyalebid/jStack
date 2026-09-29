@@ -26,6 +26,29 @@ def test_client_and_dependency_fixes_cannot_reuse_an_installed_release_identity(
     assert releases.identifier(first) == first
 
 
+def test_two_lines_cut_from_one_commit_on_one_day_are_two_releases():
+    """#235. The line is inside the signed manifest and a hub declines an
+    offer naming another line — so main and dev off one commit are two
+    releases, and were one name carrying two manifests."""
+    identify = publish_release.source_identity
+    args = ("2026-09-22", "a" * 40, "b" * 40, {"kit": "c" * 40})
+    assert identify(*args, channel="main") != identify(*args, channel="dev")
+    assert identify(*args, channel="dev") == identify(*args, channel="dev")
+
+
+def test_a_hub_building_a_commit_the_publisher_already_released_names_it_differently():
+    """The collision that stopped a hub building at all: seeded with a
+    candidate built the same day off the same commit, it computed that exact
+    release id for its own build, found the publisher's manifest under it and
+    verified it against its own key."""
+    identify = publish_release.source_identity
+    args = ("2026-09-22", "a" * 40, "b" * 40, {"kit": "c" * 40})
+    publisher = identify(*args, channel="dev")
+    assert identify(*args, channel="dev", builder="hub-key") != publisher
+    assert (identify(*args, channel="dev", builder="hub-key")
+            != identify(*args, channel="dev", builder="other-hub-key"))
+
+
 def test_build_reservations_are_unique_and_survive_failed_builds(tmp_path):
     from concurrent.futures import ThreadPoolExecutor
 
@@ -281,6 +304,82 @@ def test_qualify_reports_what_a_runner_that_died_left_behind(tmp_path, candidate
         publish_release.promote(candidate["dir"], receipts, tmp_path / "feed", candidate["private"])
 
 
+def test_qualify_asks_the_runner_only_for_what_this_candidate_has_not_proven(
+        tmp_path, candidate, monkeypatch):
+    """One red journey restarted all twelve. On 2026-09-28 the same candidate
+    was run ten times from the top (~2h each) while eleven receipts had been
+    green since the first. The runner has `--only`; `qualify` must use it."""
+    import subprocess
+
+    receipts = tmp_path / "receipts"
+    pass_everything(acceptance.Run(receipts, candidate["build"]), skip={"shell_flip", "fleet"})
+    with acceptance.Run(receipts, candidate["build"]).journey("fleet") as journey:
+        raise RuntimeError("leaf never joined")
+    calls = []
+
+    def finish_the_rest(argv, **kwargs):
+        calls.append(argv)
+        run = acceptance.Run(receipts, candidate["build"])
+        for name in argv[argv.index("--only") + 1:]:
+            with run.journey(name) as journey:
+                for check in acceptance.REQUIRED[name]:
+                    journey.observe(check, {"observed": check})
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(publish_release.subprocess, "run", finish_the_rest)
+    state = publish_release.qualify({"acceptance": ["runner"]}, candidate["dir"], receipts,
+                                    candidate["private"])
+    assert calls[0][calls[0].index("--only") + 1:] == ["fleet", "shell_flip"]
+    assert all(entry["state"] == "passed" for entry in state.values())
+    # Everything green: the runner is not started again.
+    publish_release.qualify({"acceptance": ["runner"]}, candidate["dir"], receipts,
+                            candidate["private"])
+    assert len(calls) == 1
+
+
+def test_qualify_only_narrows_to_the_named_unproven_journeys(tmp_path, candidate, monkeypatch):
+    import subprocess
+
+    receipts = tmp_path / "receipts"
+    pass_everything(acceptance.Run(receipts, candidate["build"]),
+                    skip={"shell_flip", "fleet", "upgrade"})
+    calls = []
+
+    def fail_them(argv, **kwargs):
+        calls.append(argv)
+        run = acceptance.Run(receipts, candidate["build"])
+        for name in argv[argv.index("--only") + 1:]:
+            with run.journey(name):
+                raise RuntimeError("no")
+        return subprocess.CompletedProcess(argv, 1)
+
+    monkeypatch.setattr(publish_release.subprocess, "run", fail_them)
+    state = publish_release.qualify({"acceptance": ["runner"]}, candidate["dir"], receipts,
+                                    candidate["private"], only=["fleet", "upgrade"])
+    assert calls[0][calls[0].index("--only") + 1:] == ["fleet", "upgrade"]
+    assert state["upgrade"]["state"] == "failed" and state["shell_flip"]["state"] == "missing"
+    with pytest.raises(releases.ReleaseError, match="unknown acceptance journeys: teleport"):
+        publish_release.qualify({"acceptance": ["runner"]}, candidate["dir"], receipts,
+                                candidate["private"], only=["teleport"])
+
+
+def test_qualify_reruns_receipts_bound_to_another_commit(tmp_path, candidate, monkeypatch):
+    """Receipts prove a commit. A receipt from the previous candidate is not
+    carried over; it is on the runner's list again."""
+    import subprocess
+
+    receipts = tmp_path / "receipts"
+    elsewhere = dict(candidate["build"], sha="c" * 40)
+    pass_everything(acceptance.Run(receipts, elsewhere))
+    calls = []
+    monkeypatch.setattr(publish_release.subprocess, "run",
+                        lambda argv, **kwargs: (calls.append(argv), subprocess.CompletedProcess(argv, 1))[1])
+    with pytest.raises(releases.ReleaseError, match="without writing one receipt"):
+        publish_release.qualify({"acceptance": ["runner"]}, candidate["dir"], receipts,
+                                candidate["private"])
+    assert calls[0][calls[0].index("--only") + 1:] == sorted(releases.RECEIPTS)
+
+
 def test_qualify_without_a_configured_runner_refuses(tmp_path, candidate):
     with pytest.raises(releases.ReleaseError, match="acceptance runner"):
         publish_release.qualify({}, candidate["dir"], tmp_path / "receipts", candidate["private"])
@@ -328,3 +427,120 @@ def test_checks_that_honestly_agree_are_not_mistaken_for_a_paste(tmp_path, candi
                             else {"check": check})
     assert acceptance.inspect(receipts, candidate["build"])["fresh_install"]["state"] == "passed"
     assert acceptance.gate(receipts, candidate["build"])
+
+
+# ── The client is published on its own clock
+
+
+def test_client_publishes_a_candidates_signed_client_to_the_shelf(tmp_path, candidate, monkeypatch):
+    """Client 119 was built, signed and notarized inside a stack candidate that
+    never got promoted. The client alone goes to the shelf, with the sha it was
+    built from and the oldest stack it runs on; nothing about the stack rides."""
+    from jstack_host import build_source
+
+    feed, key_file = tmp_path / "feed", tmp_path / "key"
+    key_file.write_text(base64.b64encode(candidate["private"]).decode() + "\n")
+    config = {"feed_dir": str(feed), "private_key": str(key_file),
+              "client_repo": str(tmp_path / "no-repo")}
+    monkeypatch.setattr(publish_release, "main_version", lambda config: "26.9.5")
+    # The candidate fixture's client is version "1.2.3"; a client's version is its build.
+    manifest = dict(candidate["manifest"])
+    body = b"client 119"
+    (candidate["dir"] / "jRemote-119.zip").write_bytes(body)
+    manifest["components"] = {**manifest["components"], "client": {
+        "file": "jRemote-119.zip", "version": "119", "bytes": len(body),
+        "sha256": hashlib.sha256(body).hexdigest()}}
+    manifest["client_packages"] = {"JLibrary": "e" * 40}
+    (candidate["dir"] / "candidate.json").write_text(
+        json.dumps(releases.sign(manifest, candidate["private"], promoted=False)))
+    shelf = publish_release.client(config, "the client alone", candidate["dir"])
+    assert shelf == feed / "clients/119"
+    envelope = json.loads((feed / "clients/latest.json").read_text())
+    trust = json.loads((shelf / "trust.json").read_text())["public_key"]
+    assert trust == candidate["public"]
+    published = releases.verify_client(envelope, trust)
+    assert published["build"] == 119 and published["source"] == "b" * 40
+    assert published["packages"] == {"JLibrary": "e" * 40}
+    assert published["compatibility"] == {"protocol": 1, "stack_minimum": "26.9.5"}
+    assert (shelf / "jRemote-119.zip").read_bytes() == body
+    assert json.loads((shelf / "client.json").read_text()) == envelope
+    # What a hub building a 26.9.5 stack, or newer, now carries; an older one does not.
+    assert build_source.shelf_client(feed, "26.9.5")["build"] == 119
+    assert build_source.shelf_client(feed, "26.10")["build"] == 119
+    assert build_source.shelf_client(feed, "26.9.4") is None
+    # Publishing the same build again is the same shelf; different bytes are refused.
+    assert publish_release.client(config, "again", candidate["dir"]) == shelf
+    assert json.loads((shelf / "client.json").read_text()) == envelope
+    with pytest.raises(releases.ReleaseError, match="already on the shelf"):
+        publish_release.client(config, "narrower", candidate["dir"], stack_minimum="27.0")
+    with pytest.raises(releases.ReleaseError, match="not a stack version"):
+        publish_release.client(config, "typo", candidate["dir"], stack_minimum="latest")
+
+
+def test_the_default_client_floor_is_origin_mains_stack_version(tmp_path):
+    import subprocess
+
+    upstream, checkout = tmp_path / "upstream", tmp_path / "checkout"
+    (upstream / "plugins/jstack/.claude-plugin").mkdir(parents=True)
+    (upstream / "plugins/jstack/.claude-plugin/plugin.json").write_text('{"version": "26.9.4"}')
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@t", "HOME": str(tmp_path)}
+    for argv in (["git", "init", "-q", "-b", "main"], ["git", "add", "."],
+                 ["git", "commit", "-q", "-m", "main"]):
+        subprocess.run(argv, cwd=upstream, check=True, env=env, capture_output=True)
+    subprocess.run(["git", "clone", "-q", str(upstream), str(checkout)], check=True, env=env,
+                   capture_output=True)
+    subprocess.run(["git", "checkout", "-q", "-b", "dev"], cwd=checkout, check=True, env=env)
+    (checkout / "plugins/jstack/.claude-plugin/plugin.json").write_text('{"version": "26.9.5"}')
+    subprocess.run(["git", "commit", "-q", "-am", "dev"], cwd=checkout, check=True, env=env,
+                   capture_output=True)
+    assert publish_release.main_version({"stack_repo": str(checkout)}) == "26.9.4"
+
+
+# ── The publication reaches the line it was built for
+
+
+def test_qualify_fails_when_the_runner_never_reached_a_journey(tmp_path, candidate, monkeypatch):
+    """Twelve `missing` rows and exit 0 is what this call did for four days.
+
+    The runner was dying in argument parsing before it booted anything, and
+    `qualify` printed its exit status, returned the empty state and exited
+    clean — so the failure read as "acceptance is not done yet" rather than
+    "acceptance cannot run", and nobody looked at the publisher.
+    """
+    import subprocess
+
+    monkeypatch.setattr(publish_release.subprocess, "run",
+                        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 2))
+    with pytest.raises(releases.ReleaseError, match="without writing one receipt"):
+        publish_release.qualify({"acceptance": ["runner"]}, candidate["dir"],
+                                tmp_path / "receipts", candidate["private"])
+
+
+def test_a_dev_release_is_offered_on_the_dev_line(tmp_path, candidate):
+    """A dev candidate written to `latest.json` reaches every machine that
+    follows main and no machine that follows dev — which is every machine it
+    was built for."""
+    manifest = {**candidate["manifest"],
+                "channel": {"github_repo": "example/stack", "name": "dev"}}
+    (candidate["dir"] / "candidate.json").write_text(
+        json.dumps(releases.sign(manifest, candidate["private"], promoted=False)))
+    receipts = tmp_path / "receipts"
+    pass_everything(acceptance.Run(receipts, publish_release.build_of(manifest)))
+    feed = tmp_path / "feed"
+    envelope = publish_release.promote(candidate["dir"], receipts, feed, candidate["private"])
+    assert json.loads((feed / "latest-dev.json").read_text()) == envelope
+    assert not (feed / "latest.json").exists()
+
+
+def test_a_main_release_still_lands_in_the_file_every_leaf_has_always_read(tmp_path, candidate):
+    manifest = {**candidate["manifest"],
+                "channel": {"github_repo": "example/stack", "name": "main"}}
+    (candidate["dir"] / "candidate.json").write_text(
+        json.dumps(releases.sign(manifest, candidate["private"], promoted=False)))
+    receipts = tmp_path / "receipts"
+    pass_everything(acceptance.Run(receipts, publish_release.build_of(manifest)))
+    feed = tmp_path / "feed"
+    envelope = publish_release.promote(candidate["dir"], receipts, feed, candidate["private"])
+    assert json.loads((feed / "latest.json").read_text()) == envelope
+    assert not (feed / "latest-dev.json").exists()

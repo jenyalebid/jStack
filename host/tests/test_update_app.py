@@ -676,3 +676,20 @@ def test_an_automation_role_gone_after_the_swap_fails_by_name_and_settling_resto
     assert backend.settle(job) == {"error": ""}
     assert registry["tunnel"] == "enabled"
     assert backend.verify(job) and backend.unverified == ""
+
+
+def test_a_plugin_left_on_another_release_is_named(tmp_path, monkeypatch):
+    """A plugin the update did not move reads, unnamed, exactly like a bundle
+    that failed to land: same detail, and nothing on the machine to tell them
+    apart. It cost a lab run to do that by hand."""
+    app = bundle(tmp_path / "Hub.app", SEALED, {})
+    monkeypatch.setattr(update_app, "control", lambda app, action, role=None: {})
+    monkeypatch.setattr(update_plugins, "discover", lambda: {})
+    monkeypatch.setattr(update_plugins, "observed", lambda _: {"claude": {"version": "26.9.5"}})
+    backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app)})
+    job = {"id": "job-plugin",
+           "envelope": {"manifest": {"components": {"stack": {"version": "26.9.2"}}}},
+           "transaction": {"apps": {}, "services": {}}}
+    assert not backend.verify(job)
+    assert backend.unverified == ("the claude plugin is 26.9.5, not the 26.9.2 this "
+                                 "release carries")

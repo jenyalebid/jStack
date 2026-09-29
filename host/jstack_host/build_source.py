@@ -136,7 +136,7 @@ def release_date() -> str:
 
 
 def source_identity(date: str, stack: str, client: str, dependencies: dict, *,
-                    debug: bool = False) -> str:
+                    debug: bool = False, channel: str = "", builder: str = "") -> str:
     """The build's name: the day, the commit, and a hash of every source in it.
 
     Lives here rather than in `publish_release`, which is the only other
@@ -146,9 +146,27 @@ def source_identity(date: str, stack: str, client: str, dependencies: dict, *,
     already installed. A debug build is a different input from a release of
     the same commit, so it is a different name — a rebuild would otherwise
     re-offer one as the other.
+
+    Two things beyond the sources make a release a different release, and both
+    were missing (#235):
+
+    `channel`, because a line is inside the signed manifest and a hub declines
+    an offer naming another line. Cut main and dev from one commit on one day
+    and they were one release id holding two manifests.
+
+    `builder`, because the same commit built by the publisher and built by a
+    hub from source are not the same bytes — different signing key, different
+    origin — and a hub that finds the publisher's release already sitting under
+    the name it was about to use reads it as its own earlier build and verifies
+    it against its own key. Run 20260928-121855 is that: `release signature not
+    trusted`, from a hub that had been seeded with a candidate built the same
+    day off the same commit, and could not build at all until the date rolled
+    over. The publisher passes no builder; a hub passes its own build key.
     """
     sources = {"stack": stack, "client": client, "dependencies": dependencies,
-               **({"debug": True} if debug else {})}
+               **({"debug": True} if debug else {}),
+               **({"channel": channel} if channel else {}),
+               **({"builder": builder} if builder else {})}
     fingerprint = hashlib.sha256(releases.canonical(sources)).hexdigest()[:16]
     return f"{date}-{stack[:8]}-{fingerprint}"
 
@@ -197,15 +215,86 @@ def held(config: dict, ref: str | None = None) -> tuple[str, str]:
     uses, so a feed this hub cannot verify surfaces as a failed check rather
     than as a silent "up to date".
     """
+    manifest = offer(config, ref)
+    if manifest is None:
+        return "", ""
+    return manifest["release"], manifest["sources"]["stack"]
+
+
+def offer(config: dict, ref: str | None = None) -> dict | None:
+    """The verified manifest this hub offers on a line, or None with no offer."""
     feed = config.get("feed_dir")
     if not feed:
         raise releases.ReleaseError("no feed directory is configured")
     latest = Path(feed) / latest_name(ref or channel_ref(config))
     if not latest.exists():
-        return "", ""
-    manifest = releases.verify(json.loads(latest.read_text()), config.get("public_key", ""),
-                               promoted=not config.get("candidate_test", False))
-    return manifest["release"], manifest["sources"]["stack"]
+        return None
+    return releases.verify(json.loads(latest.read_text()), config.get("public_key", ""),
+                           promoted=not config.get("candidate_test", False))
+
+
+def shelf_client(feed: Path, version: str) -> dict | None:
+    """The client publication on the feed's shelf that a stack of `version`
+    runs, verified against the key it was published under; None when the
+    shelf is empty or its client needs a newer stack.
+
+    A shelf that cannot be verified raises. A publisher's mistake on the
+    machine the feed lives on is not a reason to carry an older client
+    forward without a word — that is the silence that kept the fleet on 109.
+    """
+    latest = Path(feed) / releases.CLIENTS / "latest.json"
+    if not latest.exists():
+        return None
+    try:
+        envelope = json.loads(latest.read_text())
+        directory = latest.parent / str(envelope["manifest"]["build"])
+        public = json.loads((directory / "trust.json").read_text())["public_key"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise releases.ReleaseError(f"the client shelf at {latest.parent} is unreadable: {exc}") from exc
+    manifest = releases.verify_client(envelope, public)
+    path = directory / manifest["component"]["file"]
+    releases.check_artifact(path, manifest["component"])
+    if not releases.client_runs_on(manifest, version):
+        return None
+    return {**manifest, "path": path}
+
+
+def carried_client(config: dict, ref: str, previous: dict, version: str) -> dict:
+    """The client a build of stack `version` carries: the shelf's, when it is
+    newer than the one the previous release holds and runs on this stack;
+    the previous release's otherwise, byte for byte.
+
+    The item, where its bytes are, the client sha and the package shas — the
+    four things a manifest names about its client, from one place.
+    """
+    feed = Path(config["feed_dir"])
+    item = previous["components"]["client"]
+    carried = {"item": item, "path": feed / previous["release"] / item["file"],
+               "source": previous["sources"]["client"],
+               "packages": previous.get("client_packages", {}), "from": previous["release"]}
+    shelf = shelf_client(feed, version)
+    if shelf and shelf["build"] > _number(item["version"]):
+        return {"item": shelf["component"], "path": shelf["path"], "source": shelf["source"],
+                "packages": shelf["packages"], "from": f"{releases.CLIENTS}/{shelf['build']}"}
+    return carried
+
+
+def _number(version: object) -> int:
+    try:
+        return int(str(version))
+    except ValueError:
+        return 0
+
+
+def client_behind(config: dict, ref: str) -> bool:
+    """Whether a line's offer carries an older client than the shelf holds
+    for its stack — the second reason to rebuild a line whose tip stood still."""
+    manifest = offer(config, ref)
+    if manifest is None:
+        return False
+    version = manifest["components"]["stack"]["version"]
+    shelf = shelf_client(Path(config["feed_dir"]), version)
+    return bool(shelf and shelf["build"] > _number(manifest["components"]["client"]["version"]))
 
 
 def skip(root: Path, config: dict) -> bool:
@@ -326,6 +415,37 @@ def inherited(config: dict, ref: str | None = None) -> dict:
     item = manifest["components"]["client"]
     releases.check_artifact(feed / manifest["release"] / item["file"], item)
     return manifest
+
+
+def client_drift(carried: str) -> str:
+    """Said out loud when this hub already serves a newer client than the one
+    its next build will carry forward, or "" when it does not.
+
+    A hub source-build inherits the client its feed holds, and only a signed
+    publication can advance that. `/app/mac/latest` — the door a Mac installs
+    the client from — is advanced by the publication of the Mac app alone. The
+    two therefore drift apart silently, and did: the fleet offer sat on client
+    109 from 2026-09-23 while this same hub served 119 at `/app/mac/latest`,
+    on TestFlight and on the public tag, and every `release deploy` in between
+    honestly re-offered 109 without a word.
+
+    A warning rather than a refusal. Carrying the client forward is what lets
+    a hub rebuild itself at all, and a hub that cannot build is worse than one
+    that builds behind — but it must not be the quiet option.
+    """
+    from . import releases as published
+    try:
+        latest = json.loads(published.MANIFEST.read_text())
+        newer = int(latest["build"]) > int(carried)
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+    if not newer:
+        return ""
+    return (f"warning: this build carries client {carried} forward, but this hub already "
+            f"serves client {latest['build']} at /app/mac/latest. A source build advances "
+            "the client only from the feed's shelf; publish it there "
+            "(`publish_release.py client`) and the fleet stays on "
+            f"{carried} until then.")
 
 
 def assemble(*, release_id: str, notes: str, sequence: int, repo: str, ref: str,
@@ -512,7 +632,7 @@ def build_lines(root: Path, config: dict, *, client=None) -> dict:
         for name in releases.LINES:
             sha = head(client, repo, branch(name))
             release, installed = held(config, name)
-            if installed == sha:
+            if installed == sha and not client_behind(config, name):
                 results[name] = {"skipped": "current", "release": release, "sha": sha}
                 continue
             results[name] = build(root, config, ref=name)
@@ -532,16 +652,34 @@ def _build(root: Path, config: dict, ref: str, *, debug: bool = False) -> dict:
     source = Path(config.get("source_dir") or root / "source")
     sha = fetch(source, repo, branch(ref))
     previous = inherited(config, ref)
-    client_sha = previous["sources"]["client"]
-    dependencies = previous.get("client_packages", {})
+    # The stack version at the commit being built, read before the worktree
+    # exists: which client this build carries is part of its name.
+    version = json.loads(command(
+        ["git", "-C", str(source), "show", f"{sha}:plugins/jstack/.claude-plugin/plugin.json"]))["version"]
+    carried = carried_client(config, ref, previous, version)
+    client_sha, dependencies = carried["source"], carried["packages"]
+    drift = client_drift(str(carried["item"]["version"]))
+    if drift:
+        print(drift, flush=True)
     date = release_date()
-    release_id = source_identity(date, sha, client_sha, dependencies, debug=debug)
+    release_id = source_identity(date, sha, client_sha, dependencies, debug=debug,
+                                 channel=ref, builder=public)
     envelope_path = feed / release_id / "manifest.json"
     if envelope_path.exists():
         # This hub already built these exact sources today. Re-offer those
         # bytes rather than building different ones under the same name.
         envelope = json.loads(envelope_path.read_text())
-        manifest = releases.verify(envelope, public)
+        try:
+            manifest = releases.verify(envelope, public)
+        except releases.ReleaseError as exc:
+            # Unreachable once `builder` is in the name above, and named
+            # anyway: a feed carrying someone else's release under a name this
+            # hub computed for itself is the one case where the bare
+            # "release signature not trusted" points at the wrong file.
+            raise releases.ReleaseError(
+                f"{release_id} is already in this hub's feed but was not built by this hub "
+                "— it does not verify against this machine's build key. Two builders have "
+                "named one release; move the other aside before building.") from exc
         for item in manifest["components"].values():
             releases.check_artifact(feed / release_id / item["file"], item)
         variant_present(config, release_id)
@@ -552,8 +690,6 @@ def _build(root: Path, config: dict, ref: str, *, debug: bool = False) -> dict:
     try:
         command(["git", "-C", str(source), "worktree", "add", "--detach", str(stack), sha],
                 timeout=600)
-        version = json.loads(
-            (stack / "plugins/jstack/.claude-plugin/plugin.json").read_text())["version"]
         if not debug:
             bump_gate(stack)
         # The only ordering a hub has. The identity is a date and two hashes,
@@ -598,17 +734,19 @@ def _build(root: Path, config: dict, ref: str, *, debug: bool = False) -> dict:
             for path in sorted(stack.iterdir()):
                 if path.name != ".git":
                     bundle.add(path, arcname=path.name)
-        item = previous["components"]["client"]
-        shutil.copy2(feed / previous["release"] / item["file"], output / item["file"])
+        item = carried["item"]
+        shutil.copy2(carried["path"], output / item["file"])
         manifest = assemble(
-            release_id=release_id, notes=f"built on this hub from {repo}@{ref} ({sha[:8]})",
+            release_id=release_id, notes=f"built on this hub from {repo}@{ref} ({sha[:8]}), "
+                                         f"carrying client {item['version']} from {carried['from']}",
             sequence=sequence, repo=repo, ref=ref, machine=config.get("machine", ""),
             sha=sha, client_sha=client_sha, dependencies=dependencies,
             components={"stack": component(archive, version),
                         "menubar": component(menu, build_hub.bundle_version(identity, version)),
                         "client": item},
-            # The client artifact is the one this hub already holds, so what it
-            # will run on is the previous manifest's answer, not a new claim.
+            # Platform, architecture and minimum macOS are the previous
+            # manifest's answer, not a new claim; a shelf client only says
+            # which stack it runs on, and this build's stack satisfied it.
             compatibility=previous["compatibility"])
         envelope = releases.sign(manifest, private)
         land(feed, output, envelope, public)
@@ -750,7 +888,8 @@ def bootstrap(checkout: Path, output: Path, key_dir: Path, *, repo: str, ref: st
         version = json.loads(
             (stack / "plugins/jstack/.claude-plugin/plugin.json").read_text())["version"]
         item, client_sha = client_component(client, output) if client else (None, "")
-        release_id = source_identity(date, sha, client_sha, {}, debug=debug)
+        release_id = source_identity(date, sha, client_sha, {}, debug=debug,
+                                     channel=ref, builder=public)
         built_by = source_origin(machine)
         identity = {"release": release_id, "sha": sha, "version": version, "date": date,
                     "github_repo": repo, "sequence": sequence, "channel": ref,

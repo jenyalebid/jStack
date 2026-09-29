@@ -14,6 +14,7 @@ import importlib.util
 import json
 import re
 import subprocess
+import types
 import sys
 from types import SimpleNamespace
 from pathlib import Path
@@ -39,6 +40,62 @@ def dated(build_id: str, version: str = "0.69.3") -> str:
     parts = build_id.split("-")
     release = re.fullmatch(r"\d{2}\.\d{1,2}\.(\d+)", version)
     return f"{''.join(parts[:3])}.{int(release[1]) if release else 0}.{int(parts[3], 16)}"
+
+
+class _Answer:
+    """Just enough of an `http.client.HTTPResponse` for the health poll."""
+
+    def __init__(self, status):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+def _health(runner, monkeypatch, answers):
+    """Script the leaf's /api/health: each entry is a status or an exception."""
+    seen = []
+
+    def urlopen(url, timeout=None):
+        seen.append(url)
+        answer = answers.pop(0) if answers else OSError("nothing left to say")
+        if isinstance(answer, BaseException):
+            raise answer
+        return _Answer(answer)
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    return seen
+
+
+def test_a_leaf_still_starting_is_waited_for_rather_than_flipped_at(runner, monkeypatch):
+    """Run 20260928-15xx: both leaves answered `[Errno 65] No route to host`
+    seconds after being adopted, and the hub recorded the key refresh as
+    `ok: False, its keys catch up at the next joiner run` — the right answer
+    for a Mac that is asleep, and the wrong one for a Mac that is booting.
+    `flip_pair` failed the journey on a step that was only ever early.
+
+    `await_lab` waited for the stub hub. Nothing waited for the two machines
+    the stub was about to call."""
+    seen = _health(runner, monkeypatch,
+                   [OSError(65, "No route to host"), OSError(65, "No route to host"), 200])
+    runner.await_leaf("192.168.2.140", "acc-leaf2")
+    assert seen == ["http://192.168.2.140:9090/api/health"] * 3
+
+
+def test_a_leaf_that_never_comes_back_says_so_instead_of_flipping(runner, monkeypatch):
+    """The other half: waiting is bounded, and the refusal names the machine
+    and the port rather than surfacing later as an unreachable refresh."""
+    _health(runner, monkeypatch, [])
+    monkeypatch.setattr(runner.time, "monotonic",
+                        iter([0, 0, 5, 10, 999]).__next__)
+    with pytest.raises(runner.AcceptanceFailure) as failure:
+        runner.await_leaf("192.168.2.139", "acc-leaf1", timeout=30)
+    said = str(failure.value)
+    assert "acc-leaf1" in said and "192.168.2.139:9090" in said and "still starting" in said
 
 
 def test_the_menu_bar_version_is_read_back_by_the_one_formula(runner):
@@ -111,7 +168,8 @@ def runner():
 def a_build(runner, monkeypatch, tmp_path, ref, sha, *, version="0.69.3", client="70"):
     """A `Build` without the network: what the ref resolves to is scripted."""
     app = tmp_path / (ref + "-jRemote.app")
-    app.mkdir(exist_ok=True)
+    # A real prior ref carries a slash (`prior/2026-09-23-b1a0212a`).
+    app.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(runner.subprocess, "run",
                         lambda *a, **k: subprocess.CompletedProcess(a, 0, sha + "\trefs/heads/" + ref, ""))
     monkeypatch.setattr(runner, "git", lambda checkout, *argv, **kwargs:
@@ -132,6 +190,16 @@ def earlier(tmp_path, runner, monkeypatch):
 
 #: What a hub answers when it has built the commit under test.
 IDENTITY = {"build": CANDIDATE, "sha": HEAD_SHA}
+
+
+#: What the lab's joiner prints on a guest with no app: the redeem lands, and
+#: the local pair link `attach` hands the leaf's own app last finds nothing to
+#: take it, so the script exits 1 on a successful adoption.
+ADOPT_NO_APP = ("attached Update lab leaf-a to http://hub.local:9090 — "
+                "this Mac is a managed hub now.\n"
+                "the app on this Mac did not take that link — open it, then type this code "
+                "into it:\n\n    YU5B-EHM8\n\ngood for 10 minutes.\n"
+                "adopt-exit=1\n")
 
 
 class ScriptedFleet:
@@ -158,6 +226,8 @@ class ScriptedFleet:
         self.denied_status = denied_status
         self.calls: list[list[str]] = []
         self.queued: list[str] = []
+        #: Guests the lab's joiner has run on: they record a parent afterwards.
+        self.joined: set[str] = set()
 
     def probe(self, name):
         return {"host_id": "machine-" + name,
@@ -189,7 +259,12 @@ class ScriptedFleet:
         elif "launchctl kickstart" in command:
             self.kicked.append(name)
             return subprocess.CompletedProcess(argv, 0, "", "")
+        elif "adopt-to-hub" in command:
+            self.joined.add(name)
+            return subprocess.CompletedProcess(argv, 0, ADOPT_NO_APP, "")
         elif "parent.json" in command:
+            if name in self.joined:
+                return subprocess.CompletedProcess(argv, 0, "http://hub.local:9090\n", "")
             # No credential recorded: nothing for the hub to have revoked.
             return subprocess.CompletedProcess(argv, 0, "\n", "")
         elif "--path /devices" in command:
@@ -358,6 +433,26 @@ def test_a_two_slot_host_never_boots_a_third_guest(runner, subject, tmp_path):
     assert scripted.peak <= 2, "the fleet journey booted more guests than the host has slots"
     assert any(call[1] == "stop" for call in scripted.calls), \
         "a two-slot plan must park a leaf to make room for the other"
+
+
+def test_the_hub_takes_a_slot_the_last_run_left_occupied(runner):
+    """A run begun over a previous run's guests must park them for the hub.
+
+    `cast` is the only thing that honours `vm_slots`, and the hub starts
+    before the first journey — outside it. Two leaves left running by the run
+    before make the hub the third boot, which Virtualization refuses and tart
+    reports as a connection reset, naming neither the limit nor the guests.
+    """
+    scripted = SlotCountingFleet()
+    fleet = build(runner, scripted, vm_slots=2)
+    for leaf in fleet.leaves:
+        leaf.start()
+    assert scripted.peak == 2 and not fleet.hub.name in scripted.booted
+    fleet.cast(fleet.hub)
+    assert fleet.hub.name in scripted.booted
+    assert scripted.peak <= 2, "the hub was booted beside the guests of the last run"
+    assert scripted.booted == {fleet.hub.name}, \
+        f"the last run's guests were not parked: {scripted.booted}"
 
 
 def test_a_cast_larger_than_the_slots_is_refused(runner):
@@ -561,6 +656,19 @@ def test_a_build_reads_what_the_commit_declares_not_the_working_tree(runner, tmp
     assert made.slug == "dev@" + HEAD_SHA[:8]
     assert made.raw_url == (
         "https://raw.githubusercontent.com/jenyalebid/jStack/" + HEAD_SHA + "/install.sh")
+
+
+def test_a_prior_from_before_the_source_build_escape_is_refused(runner, tmp_path, monkeypatch):
+    made = a_build(runner, monkeypatch, tmp_path, "prior/old", PRIOR_SHA)
+    unconditional = 'CFSTR("anchor apple generic and certificate leaf[subject.OU] = ...")'
+    monkeypatch.setattr(runner, "git", lambda *a, **k: unconditional)
+    assert runner.runs_when_source_built(made) is False
+
+
+def test_a_prior_that_carries_the_escape_is_allowed(runner, tmp_path, monkeypatch):
+    made = a_build(runner, monkeypatch, tmp_path, "prior/new", PRIOR_SHA)
+    monkeypatch.setattr(runner, "git", lambda *a, **k: "#ifdef JSTACK_SOURCE_BUILD\n")
+    assert runner.runs_when_source_built(made) is True
 
 
 def test_a_ref_the_repo_does_not_carry_is_named_not_guessed(runner, tmp_path, monkeypatch):
@@ -2070,14 +2178,72 @@ def test_a_leaf_recording_another_parent_is_not_adopted(runner, monkeypatch):
         runner.join(fleet, guest)
 
 
+VM_HUB_PLAN = {**LOCAL_PLAN, "hub": "acc-hub",
+               "adopt_command": "/bin/bash ~/adopt-to-hub.sh acc-hub.local"}
+
+
+def _joiner_shell(ran, *, report, parent):
+    """A guest shell answering what the VM-hub half of join() asks: the
+    joiner's transcript, and what parent.json names afterwards."""
+    def sh(command, **kw):
+        ran.append(command)
+        if "adopt-to-hub" in command:
+            return report
+        if "parent.json" in command:
+            return parent + "\n"
+        return ""
+    return sh
+
+
 def test_joining_a_vm_hub_still_runs_the_plan_s_joiner(runner, monkeypatch):
-    fleet = runner.Fleet({**LOCAL_PLAN, "hub": "acc-hub",
-                          "adopt_command": "/bin/bash ~/adopt-to-hub.sh acc-hub.local"},
-                         run=SlotCountingFleet())
-    ran = []
-    monkeypatch.setattr(fleet.leaves[0], "sh", lambda command, **kw: ran.append(command) or "")
+    fleet, ran = runner.Fleet(VM_HUB_PLAN, run=SlotCountingFleet()), []
+    monkeypatch.setattr(fleet.leaves[0], "sh", _joiner_shell(
+        ran, report="attach-exit=0\nadopt-exit=0\n", parent="http://acc-hub.local:9090"))
     runner.join(fleet, fleet.leaves[0])
-    assert ran == ["/bin/bash ~/adopt-to-hub.sh acc-hub.local"]
+    assert ran[0].startswith("/bin/bash ~/adopt-to-hub.sh acc-hub.local")
+
+
+def test_a_vm_hub_joiner_whose_app_declined_the_link_still_adopted_the_leaf(runner, monkeypatch):
+    """The joiner ends in `attach`, which hands the leaf's own app a local
+    pair link last and exits 1 when nothing spends it — on a lab guest, every
+    time. Run 20260928-105508 failed the upgrade on that exit while acc-leaf1
+    sat there recording the hub as its parent."""
+    fleet, ran = runner.Fleet(VM_HUB_PLAN, run=SlotCountingFleet()), []
+    monkeypatch.setattr(fleet.leaves[0], "sh", _joiner_shell(
+        ran, report=ADOPT_NO_APP, parent="http://acc-hub.local:9090"))
+    runner.join(fleet, fleet.leaves[0])
+    assert "adopt-exit=" in ran[0], \
+        "join must capture the joiner's exit itself; vm.sh ssh raises on the app's refusal"
+    assert any("parent.json" in command for command in ran), \
+        "a joiner that exited 1 was taken on its word, with no proof the redeem landed"
+
+
+def test_a_vm_hub_joiner_that_failed_to_redeem_fails_by_name(runner, monkeypatch):
+    fleet, ran = runner.Fleet(VM_HUB_PLAN, run=SlotCountingFleet()), []
+    monkeypatch.setattr(fleet.leaves[0], "sh", _joiner_shell(
+        ran, report="that code is not one this hub minted\nadopt-exit=1\n", parent=""))
+    with pytest.raises(runner.AcceptanceFailure, match="adopt-to-hub.sh acc-hub.local exited 1"):
+        runner.join(fleet, fleet.leaves[0])
+
+
+def test_a_vm_hub_joiner_that_does_not_read_as_managed_fails_even_without_an_app(
+        runner, monkeypatch):
+    fleet, ran = runner.Fleet(VM_HUB_PLAN, run=SlotCountingFleet()), []
+    report = ADOPT_NO_APP.replace(
+        "adopt-exit=1", "this machine is not reading as a managed hub yet\nadopt-exit=1")
+    monkeypatch.setattr(fleet.leaves[0], "sh", _joiner_shell(
+        ran, report=report, parent="http://acc-hub.local:9090"))
+    with pytest.raises(runner.AcceptanceFailure, match="exited 1"):
+        runner.join(fleet, fleet.leaves[0])
+
+
+def test_a_vm_hub_joiner_that_left_no_parent_record_fails(runner, monkeypatch):
+    """A declined app is forgiven; a leaf that recorded no parent is not."""
+    fleet, ran = runner.Fleet(VM_HUB_PLAN, run=SlotCountingFleet()), []
+    monkeypatch.setattr(fleet.leaves[0], "sh", _joiner_shell(
+        ran, report=ADOPT_NO_APP, parent=""))
+    with pytest.raises(runner.AcceptanceFailure, match="records no parent"):
+        runner.join(fleet, fleet.leaves[0])
 
 
 def test_a_local_hub_without_an_address_asks_the_guest_for_its_gateway(runner, monkeypatch):
@@ -2244,3 +2410,182 @@ def test_an_interpreter_without_the_host_dependencies_is_refused_before_any_jour
     assert exit_code.value.code == 2
     err = capsys.readouterr().err
     assert "jstack_host.enrolment" in err and "host/pyproject.toml" in err
+
+
+# ── The seam between the publisher and this runner
+
+
+def test_the_publishers_command_line_parses_under_the_runners_own_parser(runner, tmp_path,
+                                                                        monkeypatch):
+    """The one test that would have caught the four-day outage.
+
+    `publish_release.qualify` built a command line for this runner and nothing
+    ever checked that this runner accepts it. From 7bce523 it sent
+    `--candidate` alone to a parser that requires `--ref` and had no
+    `--candidate` at all, so every acceptance run died in argparse, every
+    journey stayed missing and nothing could be promoted.
+    """
+    import base64
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from jstack_host import publish_release, release_manifest as releases
+
+    directory = tmp_path / "candidate"
+    directory.mkdir()
+    components = {}
+    for name in sorted(releases.COMPONENTS):
+        body = (name + " artifact").encode()
+        (directory / (name + ".zip")).write_bytes(body)
+        components[name] = {"file": name + ".zip", "version": "119",
+                            "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+    manifest = {"schema": 1, "release": CANDIDATE, "notes": "test",
+                "channel": {"github_repo": "jenyalebid/jStack", "name": "dev"},
+                "sources": {"stack": HEAD_SHA, "client": "b" * 40},
+                "components": components,
+                "compatibility": {"protocol": 1, "rollback": True, "platform": "macos",
+                                  "architecture": "arm64", "minimum_os": "26.0"},
+                "receipts": {}}
+    key = Ed25519PrivateKey.generate()
+    private = key.private_bytes_raw()
+    (directory / "candidate.json").write_text(
+        json.dumps(releases.sign(manifest, private, promoted=False)))
+
+    prefix = [sys.executable, str(TOOLS), "--plan", str(tmp_path / "plan.json")]
+    sent = []
+
+    def record(argv, **kwargs):
+        sent.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(publish_release.subprocess, "run", record)
+    publish_release.qualify({"acceptance": prefix}, directory,
+                            tmp_path / "receipts", private)
+    assert sent and sent[0][:len(prefix)] == prefix
+    parsed = runner.build_parser().parse_args(sent[0][len(prefix):] + ["--plan", "p.json"])
+    # And it carries the two things the run cannot be done without: the commit
+    # the guests install, and the exact candidate they are held to.
+    assert parsed.ref == "dev"
+    assert parsed.candidate == directory
+    assert parsed.receipts == tmp_path / "receipts"
+
+
+def _prior_main(runner, tmp_path, monkeypatch, *extra):
+    """A run that names a prior, stopped just after the parser has had its say."""
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"vm_tool": str(tmp_path / "vm.sh"), "hub": "acc-hub",
+                                "leaves": ["acc-leaf1"], "disposable": True}))
+    monkeypatch.setattr(runner, "Build", lambda repo, ref, *, checkout, client=None:
+                        types.SimpleNamespace(client=client, slug=ref, ref=ref, sha="a" * 40))
+    monkeypatch.setattr(runner, "runs_when_source_built", lambda build: True)
+    monkeypatch.setattr("sys.argv", ["accept", "--ref", "dev", "--plan", str(plan),
+                                     "--receipts", str(tmp_path / "r"),
+                                     "--prior-ref", "prior/2026-09-26-3c78eb6", *extra])
+
+
+def test_a_prior_with_no_client_is_refused_before_a_guest_is_staged(runner, tmp_path,
+                                                                    monkeypatch, capsys):
+    """Run 20260928-122313, `upgrade`: the leaf reached 119 and the journey
+    still failed on `client is None, the build this Mac took carries 119`.
+
+    The prior is built from source on the guest and carries no client of its
+    own — `move()` installs `build.client` and skips the step when it is None
+    — so a pristine leaf staged onto the prior starts with no jRemote.app at
+    all. The managed update then declines to put one there, because
+    `client_distribution` answers `missing` for a bundle that is not present
+    and only `hub` is installed over. The leaf lands on the new build carrying
+    no client, and `component_check` fails on it forty minutes in.
+
+    The publisher's own command line never passed `--client`, so this was true
+    of every acceptance run that named a prior, not of one lab guest.
+    """
+    _prior_main(runner, tmp_path, monkeypatch)
+    with pytest.raises(SystemExit) as exit_code:
+        runner.main()
+    assert exit_code.value.code == 2
+    said = capsys.readouterr().err
+    assert "--client" in said and "prior/2026-09-26-3c78eb6" in said
+    assert not (tmp_path / "r").exists(), "a refusal wrote receipts"
+
+
+def test_a_prior_given_its_client_gets_past_the_parser(runner, tmp_path, monkeypatch):
+    """The other half: the refusal is about the missing argument, not about
+    naming a prior at all."""
+    bundle = tmp_path / "jRemote.app"
+    bundle.mkdir()
+    _prior_main(runner, tmp_path, monkeypatch, "--client", str(bundle))
+    monkeypatch.setattr(runner.Fleet, "prepare", lambda self, *guests: None)
+
+    class Started(Exception):
+        pass
+
+    monkeypatch.setattr(runner.Guest, "start", lambda self: (_ for _ in ()).throw(Started()))
+    with pytest.raises(Started):
+        runner.main()
+
+
+def test_a_hub_that_offers_an_older_client_than_the_candidate_fails_the_run(runner, tmp_path,
+                                                                           monkeypatch):
+    """What actually happened to the fleet, caught where it happens.
+
+    A hub's build carries forward the client its feed already holds, so a hub
+    seeded with nothing builds the new commit and goes on offering the old
+    client. Every hub-served journey then asserts its leaf against that old
+    client and passes, which is how three Macs sat on 109 while the other
+    three doors served 119.
+    """
+    plan = {"vm_tool": str(tmp_path / "vm.sh"), "hub": "acc-hub", "leaves": [], "disposable": True}
+    fleet = runner.Fleet(plan, run=lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
+    build = a_build(runner, monkeypatch, tmp_path, "dev", HEAD_SHA, client="119")
+    monkeypatch.setattr(type(fleet.hub), "sh",
+                        lambda self, command, timeout=600: json.dumps({"release": CANDIDATE}))
+    monkeypatch.setattr(type(fleet), "served_now",
+                        lambda self: {"build": CANDIDATE, "client": "109"})
+    # Unqualified, the same stale offer is simply what this hub serves.
+    assert fleet.offer(build) == CANDIDATE
+    fleet.candidate_client = "119"
+    fleet.candidate_ref = "dev"
+    with pytest.raises(runner.AcceptanceFailure, match="carried an older client forward"):
+        fleet.offer(build)
+
+
+def test_the_prior_may_offer_the_older_client_it_exists_to_serve(runner, tmp_path, monkeypatch):
+    """The upgrade journey builds the prior on purpose to serve the client a
+    leaf is upgraded FROM. Holding that build to the candidate's client would
+    fail every journey that stages a prior for doing its job.
+    """
+    plan = {"vm_tool": str(tmp_path / "vm.sh"), "hub": "acc-hub", "leaves": [], "disposable": True}
+    fleet = runner.Fleet(plan, run=lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
+    prior = a_build(runner, monkeypatch, tmp_path, "prior/2026-09-23", HEAD_SHA, client="109")
+    monkeypatch.setattr(type(fleet.hub), "sh",
+                        lambda self, command, timeout=600: json.dumps({"release": CANDIDATE}))
+    monkeypatch.setattr(type(fleet), "served_now",
+                        lambda self: {"build": CANDIDATE, "client": "109"})
+    fleet.candidate_client = "119"
+    fleet.candidate_ref = "dev"
+    assert fleet.offer(prior) == CANDIDATE
+    assert fleet.served["prior/2026-09-23"] == "109"
+
+
+def test_a_candidate_is_refused_unless_the_publisher_signed_it(runner, tmp_path):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from jstack_host import release_manifest as releases
+
+    directory = tmp_path / "candidate"
+    directory.mkdir()
+    components = {}
+    for name in sorted(releases.COMPONENTS):
+        body = (name + " artifact").encode()
+        (directory / (name + ".zip")).write_bytes(body)
+        components[name] = {"file": name + ".zip", "version": "119",
+                            "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+    manifest = {"schema": 1, "release": CANDIDATE, "notes": "test",
+                "channel": {"github_repo": "jenyalebid/jStack", "name": "dev"},
+                "sources": {"stack": HEAD_SHA, "client": "b" * 40},
+                "components": components,
+                "compatibility": {"protocol": 1, "rollback": True, "platform": "macos",
+                                  "architecture": "arm64", "minimum_os": "26.0"},
+                "receipts": {}}
+    forged = Ed25519PrivateKey.generate().private_bytes_raw()
+    (directory / "candidate.json").write_text(
+        json.dumps(releases.sign(manifest, forged, promoted=False)))
+    with pytest.raises(runner.AcceptanceFailure, match="not signed by the publisher"):
+        runner.staged_candidate(directory)
