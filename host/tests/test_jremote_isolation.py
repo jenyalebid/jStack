@@ -215,3 +215,42 @@ def test_state_paths_bound_at_import_follow_the_suites_state_dir():
                             capture_output=True, text=True, check=True)
     state, *paths = json.loads(result.stdout)
     assert all(Path(path).resolve().is_relative_to(Path(state).resolve()) for path in paths)
+
+
+def test_the_suite_leaves_no_socket_in_the_machines_tmux_dir():
+    """A tmux server this suite starts and kills leaves its socket file in the
+    run's own directory, not the machine's.
+
+    `tmux kill-server` ends the server and leaves the socket path behind — so
+    every scoped, correctly torn-down fixture server still left one inert file
+    in `/tmp/tmux-<uid>`, the directory the live `jremote` server shares:
+    15,926 of them at ~1,500 a day, burying the one socket that mattered
+    during the #257 outage (#259). The fix is `TMUX_TMPDIR`, set in conftest at
+    import so every tmux process this run spawns reads it. This does what a
+    fixture does — start a named server, kill it — and checks where the file
+    landed. If this fails, either the variable moved somewhere that runs too
+    late, or something reset it.
+    """
+    import shutil
+    import uuid
+
+    from jstack_host import managed
+    from conftest import _TMUX_TMPDIR
+
+    if not shutil.which(managed._TMUX):
+        import pytest
+        pytest.skip("tmux not installed")
+
+    name = "jr-pin-" + uuid.uuid4().hex
+    tmux = [managed._TMUX, "-L", name]
+    subprocess.run(tmux + ["new-session", "-d", "-s", "x"], check=True)
+    subprocess.run(tmux + ["kill-server"], capture_output=True)
+
+    # Where tmux puts a socket dir when nothing redirects it (its _PATH_TMP).
+    machine = Path("/tmp") / f"tmux-{os.getuid()}" / name
+    ours = _TMUX_TMPDIR / f"tmux-{os.getuid()}" / name
+    assert not machine.exists(), (
+        f"the suite's tmux server left its socket in the machine's dir: {machine}")
+    assert ours.exists(), (
+        f"the socket landed neither in the machine's dir nor the run's: {ours}")
+    assert os.environ.get("TMUX_TMPDIR") == str(_TMUX_TMPDIR)
