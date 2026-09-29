@@ -1177,6 +1177,25 @@ class SessionStore:
                 (session_id,)).fetchone()
         return str(row["path"]) if row else ""
 
+    def session_for_transcript(self, path: str) -> str:
+        """The board handle whose row was folded from this file — '' if none.
+
+        The other direction of `transcript_path`, and the only way back from a
+        fact Codex states about itself to the name jRemote knows it by: a
+        `codex exec resume` run carries its own thread id in argv, the rollout
+        file is what that id names, and this table is where the binding from
+        that file to the board handle is kept (#281). Undeleted rows first —
+        a deleted row is a record, and the live card is the one a running
+        process belongs to."""
+        if not path:
+            return ""
+        with self._conn() as db:
+            row = db.execute(
+                "SELECT session_id FROM sessions WHERE path=? "
+                "ORDER BY deleted, last_activity DESC LIMIT 1",
+                (str(path),)).fetchone()
+        return str(row["session_id"]) if row else ""
+
     # ── session closes: every end of a session, and who asked ──
     #
     # Rows here are neither derived from a transcript nor authored on a

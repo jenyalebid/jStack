@@ -2021,3 +2021,103 @@ def test_a_session_nothing_on_disk_can_place_is_still_a_404(monkeypatch):
     with pytest.raises(HTTPException) as e:
         _open_route(monkeypatch, live=False, open_managed=fake, target=None)
     assert e.value.status_code == 404
+import jstack_host.codex_transcript as codex_transcript
+import jstack_host.store as store
+
+
+class _Store:
+    """Only the one binding the scan asks for: rollout file → board handle."""
+
+    def __init__(self, by_path):
+        self._by_path = by_path
+
+    def session_for_transcript(self, path):
+        return self._by_path.get(str(path), "")
+
+
+def test_a_phone_turn_on_a_codex_session_is_that_session(ws, monkeypatch):
+    """`codex exec resume <thread-id>` — what a jRemote chat-turn from the
+    phone actually runs. Its argv names Codex's own thread and the board knows
+    the session by a handle of its own, so the process resolved to nothing and
+    the board grew an anonymous headless `pid-` row beside the real card for
+    the whole length of every turn (#281)."""
+    loc, _ = ws
+    _windows(monkeypatch, attached=set())
+    sid = "bbbb0001-1111-2222-3333-444444444444"
+    native = "0af7f092-aaaa-bbbb-cccc-dddddddddddd"
+    _reg(monkeypatch, {})
+    monkeypatch.setattr(board, "_NATIVE_SIDS", {})
+    rollout = pathlib.Path("/rollouts") / f"rollout-{native}.jsonl"
+    monkeypatch.setattr(codex_transcript, "path_for_id",
+                        lambda i: rollout if i == native else None)
+    monkeypatch.setattr(store, "get_store",
+                        lambda: _Store({str(rollout): sid}))
+    _procs(monkeypatch, [_raw(14, loc) | {"engine": "codex",
+                                          "native_id": native,
+                                          "source": "cli-pipe"}])
+
+    sessions, orphans = board._proc_scan()
+    assert list(sessions) == [sid], "the turn belongs to the session it resumes"
+    assert orphans == [], "and never to a headless card of its own"
+    assert sessions[sid]["headless"] is True, "a pipe run holds no terminal"
+
+
+def test_the_thread_binding_is_looked_up_once(ws, monkeypatch):
+    """The glob behind it walks every rollout the machine ever wrote, and the
+    scan asks once a second for the length of the turn. A thread id names one
+    file forever, so the answer is cached — and only the answer: a rollout that
+    has not written its first line yet is a miss that must become a hit."""
+    native = "0af7f092-aaaa-bbbb-cccc-dddddddddddd"
+    sid = "bbbb0001-1111-2222-3333-444444444444"
+    rollout = pathlib.Path("/rollouts") / f"rollout-{native}.jsonl"
+    monkeypatch.setattr(board, "_NATIVE_SIDS", {})
+    calls = []
+
+    def path_for_id(i):
+        calls.append(i)
+        return rollout if i == native else None
+
+    monkeypatch.setattr(codex_transcript, "path_for_id", path_for_id)
+    monkeypatch.setattr(store, "get_store",
+                        lambda: _Store({str(rollout): sid}))
+
+    assert board._native_sid(native) == sid
+    assert board._native_sid(native) == sid
+    assert calls == [native], "asked the filesystem twice for one binding"
+
+    assert board._native_sid("cccc0000-0000-0000-0000-000000000000") == ""
+    assert board._native_sid("cccc0000-0000-0000-0000-000000000000") == ""
+    assert len(calls) == 3, "a miss was cached, so the turn stayed anonymous"
+
+
+def test_an_unbindable_thread_id_stays_an_orphan(ws, monkeypatch):
+    """Identity is a convenience, never the price of being shown: a thread the
+    store cannot name is still a process spending tokens on this Mac."""
+    loc, _ = ws
+    _windows(monkeypatch, attached=set())
+    _reg(monkeypatch, {})
+    monkeypatch.setattr(board, "_NATIVE_SIDS", {})
+    monkeypatch.setattr(codex_transcript, "path_for_id", lambda i: None)
+    _procs(monkeypatch, [_raw(15, loc) | {"engine": "codex",
+                                          "native_id": "0af7f092-aaaa-bbbb-"
+                                                       "cccc-dddddddddddd"}])
+
+    sessions, orphans = board._proc_scan()
+    assert sessions == {} and [o["pid"] for o in orphans] == [15]
+
+
+def test_a_codex_exec_run_reads_as_a_pipe_not_a_terminal():
+    """Source classification, straight from argv. Calling `codex exec` "cli"
+    said a person had launched it in a terminal — the read that let a chat-turn
+    subprocess look like a loose interactive session."""
+    assert procscan._subcommand(["codex", "exec", "resume", "x"]) == "exec"
+    assert procscan._subcommand(["codex", "--json", "exec"]) == "exec"
+    assert procscan._subcommand(["codex"]) == ""
+    native = "0af7f092-aaaa-bbbb-cccc-dddddddddddd"
+    assert procscan._codex_native_id(
+        ["codex", "exec", "resume", "--json", "--model", "gpt-5",
+         native, "what is up"]) == native
+    assert procscan._codex_native_id(["codex", "exec", "hello"]) == "", \
+        "a fresh exec resumes nothing"
+    assert procscan._codex_native_id(["codex", "resume", native]) == "", \
+        "an interactive resume is a pane, named by its tty"

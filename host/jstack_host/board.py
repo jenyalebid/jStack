@@ -308,6 +308,47 @@ def _pane_sids(panes: dict[str, str]) -> dict[str, str]:
     return out
 
 
+#: Codex thread id → board handle, once resolved. See `_native_sid`.
+_NATIVE_SIDS: dict[str, str] = {}
+
+
+def _native_sid(native_id: str) -> str:
+    """The board handle for a Codex thread id — '' when nothing binds them.
+
+    A `codex exec resume <thread-id>` run — what a phone chat-turn on a Codex
+    session actually is — names its session by Codex's id, which appears on no
+    card. Without this the process had no identity at all and became an
+    anonymous `pid-` row for the length of every turn, so the board carried a
+    headless card beside the session the turn was running on (#281).
+
+    Resolved through the rollout file, because that is what both sides know:
+    the id names the file, and `sessions.path` binds the file to the handle.
+
+    Answers are memoized, and only the answers: finding the file is a glob over
+    every rollout Codex has ever written (24 ms against 108 of them, growing
+    with the machine's history), and this is asked once a second for as long as
+    the turn runs. The binding it caches cannot change — a thread id names one
+    file forever. A miss is never cached: the rollout of a turn that has not
+    written its first line yet is a miss that becomes a hit."""
+    if not native_id:
+        return ""
+    if native_id in _NATIVE_SIDS:
+        return _NATIVE_SIDS[native_id]
+    try:
+        from . import codex_transcript
+        from .store import get_store
+        path = codex_transcript.path_for_id(native_id)
+        sid = get_store().session_for_transcript(str(path)) if path else ""
+        if sid:
+            _NATIVE_SIDS[native_id] = sid
+        return sid
+    except Exception:
+        # Identity is a convenience here, never the price of being shown: a
+        # store that cannot answer must leave the process an orphan, not
+        # remove it from the board.
+        return ""
+
+
 def _proc_scan(procs: list[dict] | None = None) -> tuple[dict[str, dict], list[dict]]:
     """One pass over the live claude processes — the session truth every
     consumer shares (board rows, session lists, agent live flags, PTY gates).
@@ -337,6 +378,8 @@ def _proc_scan(procs: list[dict] | None = None) -> tuple[dict[str, dict], list[d
     Identity, in order: the sid in argv (resumed/headless runs); the managed
     pane the process sits in (`_pane_sids` — how a Codex session is named,
     since its argv says nothing and it has no Claude transcript); then
+    `_native_sid` for a `codex exec resume` run, whose argv names Codex's own
+    thread id and nothing the board shows; then
     `correlate_raw` for raw interactive `claude`s — the transcript born
     closest to that process's own start, assigned 1:1. Correlation never
     claims a JSONL another process already owns, and a process that resolves
@@ -400,7 +443,8 @@ def _proc_scan(procs: list[dict] | None = None) -> tuple[dict[str, dict], list[d
         # Codex session has: no sid in argv, no Claude transcript to correlate
         # — without it every managed Codex would show up twice, once as its
         # registry row and once as an anonymous pid- row for the same pane.
-        sid = by_pid.get(p.get("pid")) or pane_sids.get(tty or "")
+        sid = (by_pid.get(p.get("pid")) or pane_sids.get(tty or "")
+               or _native_sid(p.get("native_id") or ""))
         if sid:
             add(sid, window, headless, pd, label, p.get("pid"), engine, tty,
                 p.get("window_name") or "", p.get("model") or "")
