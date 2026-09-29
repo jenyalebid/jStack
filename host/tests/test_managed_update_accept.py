@@ -650,6 +650,37 @@ def test_the_installer_is_fetched_from_the_ref_and_clones_it(runner, subject, mo
                for command in commands)
 
 
+@pytest.mark.parametrize("knows_sha", [True, False])
+def test_the_guest_installs_the_commit_under_test_not_the_tip_of_its_branch(
+        runner, subject, monkeypatch, knows_sha):
+    """#248. The installer names the branch, and cloned the tip at the second
+    it ran: a merge mid-run swapped the code under every later journey."""
+    commands = []
+    monkeypatch.setattr(runner.time, "sleep", lambda _: None)
+    monkeypatch.setattr(runner.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
+    class Guest:
+        name = "fresh"
+        def sh(self, command, **kwargs):
+            commands.append(command)
+            if "grep -c -e '--sha)'" in command:
+                return "1" if knows_sha else "0"
+            return "lab=4" if "candidate_test" in command else ""
+        def copy(self, *args):
+            pass
+
+    runner.install_build(Guest(), subject, fresh=True)
+    install = next(command for command in commands if "install.sh --yes" in command)
+    assert "--ref dev" in install
+    assert ("--sha " + HEAD_SHA in install) == knows_sha
+
+
+def test_the_run_names_a_line_that_moved_under_it(runner, subject, monkeypatch):
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a, 0, PRIOR_SHA + "\trefs/heads/dev", ""))
+    assert subject.tip() == PRIOR_SHA and subject.sha == HEAD_SHA
+
+
 def test_a_build_reads_what_the_commit_declares_not_the_working_tree(runner, tmp_path, monkeypatch):
     made = a_build(runner, monkeypatch, tmp_path, "dev", HEAD_SHA, version="9.9.9")
     assert made.sha == HEAD_SHA and made.version("stack") == "9.9.9"
@@ -1113,7 +1144,7 @@ def test_the_hub_is_driven_through_the_refusal_older_code_raises(runner, subject
     scripted = Building(served_client="68")
     fleet = build(runner, scripted)
     assert fleet.offer(subject) == CANDIDATE
-    built = next(c[3] for c in scripted.calls if "updates build" in c[3])
+    built = next(c[3] for c in scripted.calls if "updates build --ref" in c[3])
     assert built.startswith("JSTACK_BUILD_DESPITE_LEAVES=1 ") and "updates build --ref dev" in built
     # The build's answer names no parts; the client it carries is read off
     # the feed the hub now serves, and it is the hub's, not this run's.
@@ -1142,6 +1173,43 @@ def test_a_feature_branch_is_built_as_a_debug_build_where_the_hub_knows_one(
     fleet.offer(subject)
     built = next(c[3] for c in scripted.calls if "updates build --ref" in c[3])
     assert built.endswith("updates build --ref feature/x" + flag)
+
+
+@pytest.mark.parametrize("help_text,pinned", [("  --sha SHA  build this commit", True),
+                                              ("  --ref REF", False)])
+def test_the_hub_builds_the_commit_under_test_not_the_tip_of_its_branch(
+        runner, subject, help_text, pinned):
+    """#248. `offer` runs mid-run too, to put the offer back; `--ref` alone
+    builds whatever merged since the run chose its commit."""
+    class Building(ScriptedFleet):
+        def __call__(self, argv, **kwargs):
+            command = argv[3] if len(argv) > 3 else ""
+            if "updates build --help" in command:
+                return subprocess.CompletedProcess(argv, 0, help_text, "")
+            if "updates build" in command:
+                self.calls.append(list(argv))
+                return subprocess.CompletedProcess(argv, 0, json.dumps({"release": CANDIDATE}), "")
+            return super().__call__(argv, **kwargs)
+
+    scripted = Building()
+    build(runner, scripted).offer(subject)
+    built = next(c[3] for c in scripted.calls if "updates build --ref" in c[3])
+    assert built.endswith("updates build --ref dev --sha " + HEAD_SHA) == pinned
+    assert ("--sha" in built) == pinned
+
+
+def test_a_hub_that_built_another_commit_fails_the_offer(runner, subject):
+    """#248. The line moved under the run and the hub built its new tip."""
+    class Moved(ScriptedFleet):
+        def __call__(self, argv, **kwargs):
+            command = argv[3] if len(argv) > 3 else ""
+            if "updates build" in command and "--help" not in command:
+                return subprocess.CompletedProcess(
+                    argv, 0, json.dumps({"release": CANDIDATE, "sha": PRIOR_SHA}), "")
+            return super().__call__(argv, **kwargs)
+
+    with pytest.raises(runner.AcceptanceFailure, match="moved since the run chose its commit"):
+        build(runner, Moved()).offer(subject)
 
 
 def test_a_hub_whose_feed_does_not_serve_what_it_built_fails_the_offer(runner, subject):

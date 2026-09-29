@@ -223,13 +223,7 @@ class Build:
         self.ref = ref
         self.checkout = Path(checkout).expanduser()
         self.client = Path(client).expanduser() if client else None
-        listing = subprocess.run(["git", "ls-remote", self.repo_url, "refs/heads/" + ref],
-                                 capture_output=True, text=True, timeout=120)
-        head = listing.stdout.split("\t", 1)[0].strip()
-        if listing.returncode or not re.fullmatch(r"[0-9a-f]{40}", head):
-            raise AcceptanceFailure(
-                f"{self.repo_url} has no branch {ref}: {(listing.stderr or listing.stdout)[-300:]}")
-        self.sha = head
+        self.sha = self.tip()
         # The version the guests will install is the one inside the commit,
         # never the one in this checkout's working tree.
         git(self.checkout, "fetch", "--quiet", self.repo_url, ref)
@@ -237,6 +231,19 @@ class Build:
                        self.sha + ":plugins/jstack/.claude-plugin/plugin.json")
         self.stack_version = str(json.loads(declared)["version"])
         self.client_version = bundle_build(self.client) if self.client else ""
+
+    def tip(self) -> str:
+        """Where the branch is on the remote right now. Read once to choose
+        the commit under test; everything after installs that commit by sha,
+        because the branch keeps moving under a run that takes an hour (#248).
+        """
+        listing = subprocess.run(["git", "ls-remote", self.repo_url, "refs/heads/" + self.ref],
+                                 capture_output=True, text=True, timeout=120)
+        head = listing.stdout.split("\t", 1)[0].strip()
+        if listing.returncode or not re.fullmatch(r"[0-9a-f]{40}", head):
+            raise AcceptanceFailure(f"{self.repo_url} has no branch {self.ref}: "
+                                    f"{(listing.stderr or listing.stdout)[-300:]}")
+        return head
 
     @property
     def slug(self) -> str:
@@ -912,18 +919,24 @@ class Fleet:
         self.hub.sh(host_cli(f"updates channel {shlex.quote(build.ref)}"), timeout=120)
         # A feature branch is a debug build: a hub builds a release only off a
         # line. A hub whose CLI predates the flag builds any ref without it.
-        debug = ""
-        if build.ref not in LINES and "--debug" in self.hub.sh(
-                host_cli("updates build --help"), timeout=120):
-            debug = " --debug"
+        usage = self.hub.sh(host_cli("updates build --help"), timeout=120)
+        debug = " --debug" if build.ref not in LINES and "--debug" in usage else ""
+        # The commit, not the branch: `--ref` alone builds whatever the tip is
+        # by the time the hub fetches, and this is called again mid-run to put
+        # the offer back (#248). A CLI from before `--sha` builds the tip, and
+        # the sha it reports — or the hub's own sha check after it — says so.
+        pin = f" --sha {build.sha}" if "--sha" in usage else ""
         output = self.hub.sh("JSTACK_BUILD_DESPITE_LEAVES=1 "
-                             + host_cli(f"updates build --ref {shlex.quote(build.ref)}{debug}"),
+                             + host_cli(f"updates build --ref {shlex.quote(build.ref)}{debug}{pin}"),
                              timeout=3600)
         try:
             built = json.loads(output[output.index("{"):])
         except ValueError as exc:
             raise AcceptanceFailure(
                 f"the hub did not report a build of {build.slug}: {output[-500:]}") from exc
+        expect(built.get("sha", build.sha) == build.sha,
+               f"the hub built {built.get('sha')}, not {build.slug}: {build.ref} moved "
+               "since the run chose its commit")
         self.offered[build.ref] = built["release"]
         served = self.served_now()
         expect(served["build"] == built["release"],
@@ -2097,13 +2110,18 @@ def install_build(guest: Guest, build: Build, *, fresh: bool = False) -> None:
              timeout=300)
     # A feature branch installs as a debug build; an installer from before
     # lines has no such flag and builds any ref.
-    debug = ""
-    if build.ref not in LINES and guest.sh(
-            f"/usr/bin/grep -c -e '--debug)' {remote}/install.sh || true").strip() not in ("", "0"):
-        debug = " --debug"
+    def knows(flag: str) -> bool:
+        return guest.sh(f"/usr/bin/grep -c -e '{flag})' {remote}/install.sh || true"
+                        ).strip() not in ("", "0")
+    debug = " --debug" if build.ref not in LINES and knows("--debug") else ""
+    # The installer is this commit's, but `--ref` alone clones the branch's tip
+    # as of this second, which is not the commit once anything merged since
+    # the run started (#248). An installer from before `--sha` still clones
+    # the tip; `move()` holds the result to `build.sha` either way.
+    pin = f" --sha {build.sha}" if knows("--sha") else ""
     guest.sh(f"JSTACK_REPO_URL={shlex.quote(build.repo_url)} "
              f"/bin/bash {remote}/install.sh --yes --no-claude --no-app "
-             f"--ref {shlex.quote(build.ref)}{debug}", timeout=3600)
+             f"--ref {shlex.quote(build.ref)}{debug}{pin}", timeout=3600)
     if build.client:
         guest.sh("/usr/bin/open -a /Applications/jRemote.app")
     lab_guest(guest)
@@ -2968,6 +2986,15 @@ def main() -> int:
     state = acceptance.inspect(args.receipts, identity)
     summary = {"build": identity["build"], "ref": build.ref, "sha": build.sha,
                "results": {name: row["state"] for name, row in state.items()}}
+    # Everything above installed by sha, so a line that moved is not a wrong
+    # measurement — but it is the first thing to rule out when one looks
+    # wrong, so the run says it rather than leaving it to be diagnosed (#248).
+    try:
+        moved = build.tip()
+    except AcceptanceFailure as exc:
+        moved = f"unknown: {exc}"
+    if moved != build.sha:
+        summary["line_moved_to"] = moved
     print(json.dumps(summary, indent=2), flush=True)
     return 0 if all(row["state"] == "passed" for row in state.values()) else 1
 

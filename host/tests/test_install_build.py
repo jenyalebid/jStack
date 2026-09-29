@@ -316,6 +316,60 @@ def test_install_sh_clones_one_branch_so_no_binary_rides_in_on_another():
         assert "--single-branch" in clone, f"clone fetches every branch: {clone}"
 
 
+def _pin_block() -> str:
+    start = INSTALL.index('if [ -n "$PIN_SHA" ]; then\n    if [ "$DRY_RUN"')
+    return INSTALL[start:INSTALL.index("\nfi\n", start) + 4]
+
+
+@pytest.mark.parametrize("pin", ["first", "second", "stranger"])
+def test_install_sh_puts_the_checkout_on_the_pinned_commit_of_its_line(tmp_path, pin):
+    """#248. The acceptance runner chose a commit; a clone of the branch takes
+    whatever merged since. `--sha` walks the checkout back to that commit on
+    the line, and refuses one the line never had."""
+    import subprocess
+    # Plain git, as a guest has it: nothing on this PATH wraps it.
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+
+    def git(*argv, cwd=tmp_path / "line"):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *argv],
+                              cwd=cwd, check=True, capture_output=True, text=True,
+                              env=env).stdout.strip()
+    (tmp_path / "line").mkdir()
+    git("init", "--quiet", "-b", "dev")
+    shas = {}
+    for name in ("first", "second", "tip"):
+        (tmp_path / "line" / "f").write_text(name)
+        git("add", "f")
+        git("commit", "--quiet", "-m", name)
+        shas[name] = git("rev-parse", "HEAD")
+    git("checkout", "--quiet", "-b", "other", shas["first"])
+    (tmp_path / "line" / "g").write_text("elsewhere")
+    git("add", "g")
+    git("commit", "--quiet", "-m", "elsewhere")
+    shas["stranger"] = git("rev-parse", "HEAD")
+    git("checkout", "--quiet", "dev")
+    git("clone", "--quiet", "--single-branch", "--branch", "dev",
+        str(tmp_path / "line"), str(tmp_path / "checkout"), cwd=tmp_path)
+    script = ('die() { echo "$*" >&2; exit 1; }; ok() { echo "$*"; }; would() { :; }\n'
+              f'CHECKOUT={tmp_path / "checkout"}; REF=dev; DRY_RUN=0; PIN_SHA={shas[pin]}\n'
+              + _pin_block())
+    ran = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, env=env)
+    head = git("rev-parse", "HEAD", cwd=tmp_path / "checkout")
+    if pin == "stranger":
+        assert ran.returncode and "is not on dev" in ran.stderr
+        assert head == shas["tip"]
+    else:
+        assert ran.returncode == 0, ran.stderr
+        assert head == shas[pin]
+        assert git("branch", "--show-current", cwd=tmp_path / "checkout") == "dev"
+
+
+def test_install_sh_pins_after_the_checkout_and_before_anything_is_built():
+    pin = INSTALL.index('if [ -n "$PIN_SHA" ]; then\n    if [ "$DRY_RUN"')
+    assert INSTALL.rindex("git clone", 0, pin) < pin < INSTALL.index('PLUGIN="$CHECKOUT/plugins/jstack"\n', pin)
+    assert "--sha)" in INSTALL
+
+
 def test_install_sh_moves_a_release_snapshot_forward_instead_of_refusing_it():
     """Every Mac installed before builds replaced releases has a $CHECKOUT that
     is not a checkout: the old installer untarred a publisher snapshot there,
