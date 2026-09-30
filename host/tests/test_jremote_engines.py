@@ -34,25 +34,32 @@ def isolated_state(tmp_path, monkeypatch):
 # ── The roster ───────────────────────────────────────────────────────────────
 
 def test_roster_ids_are_the_probed_set():
-    """Live-probed 2026-08-26 with `claude -p --model X` and `codex exec -m X`.
-    `gpt-5.6-pro` appears in the Codex binary's own strings and is REFUSED by
-    it — which is why nothing here is taken from a strings dump alone."""
+    """Live-probed 2026-09-30: Claude's family aliases were resolved through
+    `modelUsage`, Codex's rows came off `codex debug models`. Nothing here is
+    taken from a strings dump — `gpt-5.6-pro` appears in the Codex binary's
+    own strings and is REFUSED by it. `modelprobe` re-asks both CLIs nightly,
+    so this list going stale is a red check rather than a quiet generation
+    behind (see tests/test_model_probe.py)."""
     got = {e["id"]: [m["id"] for m in e["models"]] for e in engines.ENGINES}
     assert got == {
-        # No `[1m]` rows: Opus 5 and Sonnet 5 carry the 1M context window
-        # natively and the CLI strips the suffix, so a second row offered a
-        # choice that resolved to the identical session.
-        "claude": ["claude-opus-5", "claude-sonnet-5", "claude-fable-5",
+        # No `[1m]` rows: Opus and Sonnet carry the 1M context window natively
+        # and the CLI strips the suffix, so a second row offered a choice that
+        # resolved to the identical session.
+        "claude": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1",
                    "claude-haiku-4-5-20251001"],
-        "codex": ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
-                  "gpt-5.5", "gpt-5.4"],
+        # The catalog's top four by the vendor's own priority; the 5.6 and 5.5
+        # rows below them are legacy and were dropped rather than kept as
+        # museum pieces in a picker.
+        "codex": ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
     }
 
 
-def test_fleet_default_is_claude_opus_5():
+def test_fleet_default_is_claude_opus_5_5():
     assert engines.FLEET_ENGINE == "claude"
-    assert engines._BY_ID["claude"]["default_model"] == "claude-opus-5"
-    assert engines._BY_ID["codex"]["default_model"] == "gpt-5.6-sol"
+    assert engines._BY_ID["claude"]["default_model"] == "claude-opus-5-5"
+    # The same model this Mac's own Codex config opens on: one machine
+    # answering two ways about which Codex it runs is the drift, not a choice.
+    assert engines._BY_ID["codex"]["default_model"] == "gpt-6-astra"
 
 
 def test_every_engine_default_model_is_in_its_own_list():
@@ -71,18 +78,18 @@ def test_roster_carries_the_fleet_default_for_a_cold_device():
 def test_unset_agent_resolves_to_the_fleet_default():
     d = engines.defaults("wren")
     assert d["engine"] == "claude"
-    assert d["models"] == {"claude": "claude-opus-5", "codex": "gpt-5.6-sol"}
+    assert d["models"] == {"claude": "claude-opus-5-5", "codex": "gpt-6-astra"}
 
 
 def test_defaults_answer_for_every_engine_not_just_the_chosen_one():
     """The long-press menu can launch either engine, so an agent defaulting to
     Claude still needs a Codex model waiting."""
     engines.set_defaults("atlas", engine="claude",
-                         models={"codex": "gpt-5.6-luna"})
+                         models={"codex": "gpt-6-luna"})
     d = engines.defaults("atlas")
     assert d["engine"] == "claude"
-    assert d["models"]["claude"] == "claude-opus-5"   # untouched, still default
-    assert d["models"]["codex"] == "gpt-5.6-luna"     # ready if picked
+    assert d["models"]["claude"] == "claude-opus-5-5"   # untouched, still default
+    assert d["models"]["codex"] == "gpt-6-luna"     # ready if picked
 
 
 def test_preferences_key_on_the_agent_not_the_seat():
@@ -96,22 +103,22 @@ def test_preferences_key_on_the_agent_not_the_seat():
 
 def test_partial_write_leaves_the_other_half_alone():
     engines.set_defaults("bryn", engine="codex",
-                         models={"claude": "claude-sonnet-5"})
-    engines.set_defaults("bryn", models={"codex": "gpt-5.6-terra"})
+                         models={"claude": "claude-sonnet-5-5"})
+    engines.set_defaults("bryn", models={"codex": "gpt-6-sol"})
     d = engines.defaults("bryn")
     assert d["engine"] == "codex"
-    assert d["models"]["claude"] == "claude-sonnet-5"
-    assert d["models"]["codex"] == "gpt-5.6-terra"
+    assert d["models"]["claude"] == "claude-sonnet-5-5"
+    assert d["models"]["codex"] == "gpt-6-sol"
 
 
 def test_a_choice_equal_to_the_default_is_still_written():
     """Otherwise a later edit to ENGINES silently re-decides something the user
     decided by hand."""
     engines.set_defaults("iris", engine="claude",
-                         models={"claude": "claude-opus-5"})
+                         models={"claude": "claude-opus-5-5"})
     raw = json.loads(engines._STATE.read_text())
     assert raw["agents"]["iris"]["engine"] == "claude"
-    assert raw["agents"]["iris"]["models"]["claude"] == "claude-opus-5"
+    assert raw["agents"]["iris"]["models"]["claude"] == "claude-opus-5-5"
 
 
 def test_a_model_dropped_from_the_roster_falls_back_rather_than_spawning():
@@ -119,7 +126,7 @@ def test_a_model_dropped_from_the_roster_falls_back_rather_than_spawning():
     agent reverts to that engine's default and comes up."""
     engines._save({"agents": {"orin": {"engine": "claude",
                                         "models": {"claude": "claude-opus-4"}}}})
-    assert engines.defaults("orin")["models"]["claude"] == "claude-opus-5"
+    assert engines.defaults("orin")["models"]["claude"] == "claude-opus-5-5"
 
 
 def test_a_stored_engine_that_no_longer_exists_falls_back():
@@ -132,8 +139,8 @@ def test_a_stored_engine_that_no_longer_exists_falls_back():
 @pytest.mark.parametrize("kwargs", [
     {"engine": "gemini"},
     {"models": {"gemini": "whatever"}},
-    {"models": {"claude": "gpt-5.6-sol"}},      # right id, wrong engine
-    {"models": {"codex": "claude-opus-5"}},     # and the mirror of it
+    {"models": {"claude": "gpt-6-astra"}},      # right id, wrong engine
+    {"models": {"codex": "claude-opus-5-5"}},     # and the mirror of it
     {"models": {"codex": "gpt-5.6-pro"}},       # looks real, CLI refuses it
 ])
 def test_set_defaults_refuses_anything_unspawnable(kwargs):
@@ -151,8 +158,8 @@ def test_a_refused_write_stores_nothing():
 
 @pytest.mark.parametrize("engine,model", [
     ("gemini", None),
-    ("claude", "gpt-5.6-sol"),
-    ("codex", "claude-opus-5"),
+    ("claude", "gpt-6-astra"),
+    ("codex", "claude-opus-5-5"),
 ])
 def test_resolve_refuses_a_named_unknown_rather_than_falling_back(engine, model):
     with pytest.raises(ValueError):
@@ -163,8 +170,8 @@ def test_resolve_refuses_a_named_unknown_rather_than_falling_back(engine, model)
 
 def test_resolve_with_nothing_named_is_the_agents_default():
     engines.set_defaults("finch", engine="codex",
-                         models={"codex": "gpt-5.6-terra"})
-    assert engines.resolve("finch") == ("codex", "gpt-5.6-terra")
+                         models={"codex": "gpt-6-sol"})
+    assert engines.resolve("finch") == ("codex", "gpt-6-sol")
 
 
 def test_resolve_with_an_engine_named_uses_that_engines_model():
@@ -172,38 +179,38 @@ def test_resolve_with_an_engine_named_uses_that_engines_model():
     model must be the one chosen FOR Codex, never the Claude one and never the
     CLI's own."""
     engines.set_defaults("finch", engine="claude",
-                         models={"claude": "claude-fable-5",
-                                 "codex": "gpt-5.6-luna"})
-    assert engines.resolve("finch", "codex") == ("codex", "gpt-5.6-luna")
-    assert engines.resolve("finch") == ("claude", "claude-fable-5")
+                         models={"claude": "claude-fable-5-1",
+                                 "codex": "gpt-6-luna"})
+    assert engines.resolve("finch", "codex") == ("codex", "gpt-6-luna")
+    assert engines.resolve("finch") == ("claude", "claude-fable-5-1")
 
 
 def test_resolve_honours_an_explicit_model_over_the_stored_one():
-    engines.set_defaults("finch", models={"claude": "claude-sonnet-5"})
-    assert engines.resolve("finch", "claude", "claude-opus-5") \
-        == ("claude", "claude-opus-5")
+    engines.set_defaults("finch", models={"claude": "claude-sonnet-5-5"})
+    assert engines.resolve("finch", "claude", "claude-opus-5-5") \
+        == ("claude", "claude-opus-5-5")
 
 
 def test_resolve_is_case_and_space_tolerant_on_the_wire():
-    assert engines.resolve("finch", "  CODEX ") == ("codex", "gpt-5.6-sol")
+    assert engines.resolve("finch", "  CODEX ") == ("codex", "gpt-6-astra")
 
 
 # ── The command line it produces ─────────────────────────────────────────────
 
 def test_model_flag_uses_each_clis_own_spelling():
-    assert engines.model_flag("claude", "claude-opus-5") == "--model 'claude-opus-5'"
-    assert engines.model_flag("codex", "gpt-5.6-sol") == "-m 'gpt-5.6-sol'"
+    assert engines.model_flag("claude", "claude-opus-5-5") == "--model 'claude-opus-5-5'"
+    assert engines.model_flag("codex", "gpt-6-astra") == "-m 'gpt-6-astra'"
 
 
 def test_model_flag_quotes_ids_with_shell_metacharacters():
-    """Unquoted, `claude-opus-5[1m]` is a glob pattern to the pane's shell.
+    """Unquoted, `claude-opus-5-5[1m]` is a glob pattern to the pane's shell.
     It matches no file, so zsh errors and the session never starts; bash
     passes it through and it happens to work — a difference that would show up
     as 'sometimes that model doesn't launch'. No id in the roster carries
     brackets today, but a model id is vendor text we don't control, so the
     quoting stays and stays tested."""
-    flag = engines.model_flag("claude", "claude-opus-5[1m]")
-    assert flag == "--model 'claude-opus-5[1m]'"
+    flag = engines.model_flag("claude", "claude-opus-5-5[1m]")
+    assert flag == "--model 'claude-opus-5-5[1m]'"
 
 
 def test_no_model_means_no_flag_so_old_callers_are_unchanged():
@@ -211,13 +218,13 @@ def test_no_model_means_no_flag_so_old_callers_are_unchanged():
 
 
 def test_inner_command_pins_the_model_for_both_engines():
-    claude = managed._inner_command("SID", resume=False, model="claude-sonnet-5")
+    claude = managed._inner_command("SID", resume=False, model="claude-sonnet-5-5")
     assert "claude --session-id SID" in claude
-    assert "--model 'claude-sonnet-5'" in claude
+    assert "--model 'claude-sonnet-5-5'" in claude
 
     codex = managed._inner_command("SID", resume=False, engine="codex",
-                                   model="gpt-5.6-terra")
-    assert "-m 'gpt-5.6-terra'" in codex
+                                   model="gpt-6-sol")
+    assert "-m 'gpt-6-sol'" in codex
     # The trust flag is load-bearing and must survive the addition. Its former
     # companion `-c bypass_hook_trust=true` is pinned OUT: Codex 0.156 rejects it
     # as an unrecognised session flag and warns twice a session for nothing.
@@ -239,5 +246,5 @@ def test_model_flag_precedes_extra_so_a_caller_can_still_override():
     caller passing its own --model there must win, which only works if ours
     comes first."""
     cmd = managed._inner_command("SID", resume=False, extra="--model opus",
-                                 model="claude-sonnet-5")
-    assert cmd.index("claude-sonnet-5") < cmd.index("--model opus")
+                                 model="claude-sonnet-5-5")
+    assert cmd.index("claude-sonnet-5-5") < cmd.index("--model opus")
