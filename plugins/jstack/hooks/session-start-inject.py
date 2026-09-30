@@ -583,9 +583,7 @@ def main() -> int:
     if tag and not tag_known(tag):
         # Refusing quietly would boot the session with no history at all and
         # nothing on screen explaining why. Say it, then fall back to the seat.
-        note = (f"[This session was opened on tag '{tag}', which is not in the "
-                "timeline vocabulary (`log_event tag list`). Falling back to "
-                "this seat's own history.]")
+        note = load_prompt("session-start.md", "unknown-tag").format(tag=tag)
         tag = ""
 
     n = inject_count(cfg, agent, submode)

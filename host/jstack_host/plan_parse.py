@@ -22,6 +22,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from .prompt_files import load
+
 __all__ = ["KINDS", "Stage", "ParsedPlan", "parse", "is_plan"]
 
 #: The declared proof kinds. This tuple *is* the severity dial, which is why
@@ -197,23 +199,14 @@ def parse(markdown: str) -> ParsedPlan:
             if _STAGE_HEADING.match(text):
                 # Silently dropping this is the 2026-09-24 failure in miniature:
                 # something that reads like work, owned by nobody.
-                problems.append(
-                    f'"# {text}" is an H1, and H1s are structure, not stages. '
-                    "Make it `## Stage <N> — <deliverable>` if it is work, or "
-                    "rename it if it is a part heading."
-                )
+                problems.append(load("plan-parse.md", "h1").format(text=text))
             continue
         s = _STAGE_HEADING.match(text)
         if s:
             declared = int(s.group(1)) if s.group(1) else None
             found.append((level, s.group(2).strip(), declared, i + 1))
         elif _ORPHAN_VERIFICATION.match(text):
-            problems.append(
-                f'"## {text}" is not a stage and is not read. Move each of its '
-                "items onto the `Verify:` line of the stage that owns it — an "
-                "unowned verification checklist is the exact shape that shipped "
-                "8 commits on zero receipts."
-            )
+            problems.append(load("plan-parse.md", "orphan-verification").format(text=text))
 
     stages: list[Stage] = []
     for ordinal, (level, title, declared, start) in enumerate(found, start=1):
@@ -241,39 +234,19 @@ def parse(markdown: str) -> ParsedPlan:
             body_lines.append(lines[i])
 
         if not verify_seen:
-            problems.append(
-                f"{_label(ordinal, title)} has no `Verify:` line. Add one under the "
-                "heading — `Verify: <kind> · <spec>`, kind one of "
-                + ", ".join(KINDS)
-                + ". A stage that declares no proof is a stage nobody can close."
-            )
+            problems.append(load("plan-parse.md", "no-verify").format(label=_label(ordinal, title), kinds=", ".join(KINDS)))
         elif kind and kind not in KINDS:
-            problems.append(
-                f"{_label(ordinal, title)} declares `Verify: {kind}`, which is not a "
-                "proof kind. Use " + ", ".join(KINDS[:-1]) + " or none — `none` is the "
-                "right answer for genuinely trivial work, but it has to be that word."
-            )
+            problems.append(load("plan-parse.md", "unknown-kind").format(label=_label(ordinal, title), kind=kind, kinds=", ".join(KINDS[:-1])))
             kind = ""
         elif not kind:
-            problems.append(
-                f"{_label(ordinal, title)} has a `Verify:` line with no kind on it. "
-                "Write `Verify: <kind> · <spec>`, kind one of " + ", ".join(KINDS) + "."
-            )
+            problems.append(load("plan-parse.md", "no-kind").format(label=_label(ordinal, title), kinds=", ".join(KINDS)))
         elif kind in _SPEC_REQUIRED and not spec:
-            problems.append(
-                f"{_label(ordinal, title)} declares `Verify: {kind}` with nothing to "
-                f"run. Put it after the separator — `Verify: {kind} · ./verify/thing.sh` "
-                "— or declare a kind that needs no spec."
-            )
+            problems.append(load("plan-parse.md", "no-spec").format(label=_label(ordinal, title), kind=kind))
 
         if declared is not None and declared != ordinal:
             # A warning, never a refusal: the numbers are the author's notes to
             # themselves and the position is what everything downstream keys on.
-            problems.append(
-                f'{_label(ordinal, title)} is numbered {declared} but is the '
-                f"{ordinal}{_ordinal_suffix(ordinal)} stage in the document. Renumber "
-                "the headings or drop the numbers — document order is what is used."
-            )
+            problems.append(load("plan-parse.md", "misnumbered").format(label=_label(ordinal, title), declared=declared, ordinal=ordinal, suffix=_ordinal_suffix(ordinal)))
 
         stages.append(
             Stage(

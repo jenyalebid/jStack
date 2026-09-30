@@ -40,6 +40,7 @@ import os
 import sys
 
 from . import compaction  # leaf module, no host import chain
+from .prompt_files import load
 
 #: The two dialects, named so a caller passes an engine rather than spelling a string.
 CLAUDE = "claude"
@@ -289,10 +290,11 @@ def tick_text(cur):
 #: closing prose does not separate "Standing by." from "Looking at that transcript."
 #:
 #: So the session that is PARKING work declares it -- it is the one reading this injection
-#: right now, and writing the marker is part of obeying it. Silence means finished, which
-#: is the default: a finished delivery is left alone, never ghost-compacted over the
-#: only copy of its conversation. A forgotten marker costs a seam at worst; the client's
-#: own auto-compact is the backstop.
+#: right now, and writing the marker is part of obeying it. Silence means finished, and a
+#: finished delivery is never resumed; whether it is compacted is the agent's "Compact When
+#: Done" switch (`compact_delivery.compacts_when_done`), so the text tells the session it is
+#: not its call rather than promising either outcome. A forgotten marker costs a seam at
+#: worst; the client's own auto-compact is the backstop.
 #:
 #: THE ONE WAY IT IS MISREAD IS "WORK REMAINS SOMEWHERE". b7e61868 delivered the board-scan
 #: fix, committed three shas, pushed, wrote the report -- and closed it with the marker,
@@ -315,19 +317,7 @@ def tick_text(cur):
 #: fire once, because the only side that can send the request was never told the request
 #: exists. The asking half is shared from here; only what survives the boundary is
 #: per-engine.
-MARKER = (
-    "HOW TO END THE TURN. If you are stopping mid-work BECAUSE of this notice — parking "
-    "the docket at a good seam — make `<!-- to-be-continued -->` the LAST line of your "
-    "final message, alone on that line. That is what triggers the compaction and hands "
-    "the work back to you: the delivery hook compacts at the seam you picked, then "
-    "prompts you to carry on from the summary. Only the closing line is read, so "
-    "mentioning it mid-sentence declares nothing. The marker asks to be RESUMED IN THIS "
-    "RUN, so the question it answers is whether YOU STOPPED EARLY — not whether work "
-    "remains in the world. Open issues, follow-ups, a `Next Move` naming what comes later, "
-    "a backlog you are handing back: none of those are parked work. If you delivered and "
-    "pushed what you were asked for, you are finished — end the turn normally and write no "
-    "marker, however much is still on the board. A finished delivery is left alone."
-)
+MARKER = load("context-ceiling.md", "marker")
 
 #: Claude asks with the marker and nothing else: its summariser is local and instructable,
 #: so there is no survival caveat to add.
@@ -348,61 +338,20 @@ DECLARE = MARKER
 #: This is the half that is genuinely Codex's. It is an ADDITION to `MARKER`, never a
 #: replacement for it: what a summary keeps and how a session asks for the boundary are two
 #: questions, and answering only the first is what left this engine unable to ask at all.
-CODEX_SURVIVES = (
-    "WHAT SURVIVES. Codex compacts server-side: when the window fills it is rebuilt from "
-    "the developer prompts, your user's own messages verbatim, and a summary you never see. "
-    "Every assistant message and every tool result in this session is dropped — what you "
-    "read, what you ruled out, what you were part-way through. Nothing can steer that "
-    "summary, so the only place parked work survives is on disk. Commit and push what you "
-    "changed. Anything not committable — what you ruled out and why, what you were about "
-    "to do next, a wake you booked — write it into the file or the issue it belongs to "
-    "before you end the turn. A sentence in your closing message does not survive; a sha "
-    "does."
-)
+CODEX_SURVIVES = load("context-ceiling.md", "codex-survives")
 
 CODEX_DECLARE = MARKER + "\n\n" + CODEX_SURVIVES
 
 #: Why the heavy band is worth interrupting for. One sentence, both engines.
-COST = (
-    "That is the heavy band: every turn from here re-reads several times a fresh session's "
-    "whole footprint, and most of what it re-reads is spent — dead ends, superseded reads, "
-    "decisions already made."
-)
+COST = load("context-ceiling.md", "cost")
 
-HEAVY = (
-    "CONTEXT — {cur:,} tokens. " + COST + "\n\n"
-    "Finish the unit of work you are on, commit and push it, then END THE TURN. "
-    "The client's own boundary lands inside your next task; ending is what puts one at a "
-    "seam instead. Don't open a new thread of work, "
-    "don't start a broad search, and don't read a large file you could grep. {recovery}"
-    "\n\n" + DECLARE
-)
+HEAVY = "CONTEXT — {cur:,} tokens. " + COST + "\n\n" + load("context-ceiling.md", "heavy") + "\n\n" + DECLARE
 
-EXTREME = (
-    "CONTEXT — {cur:,} tokens, past the extreme cut. The seam compaction has not taken "
-    "this session down, so nothing is going to unless you stop.\n\n"
-    "Nothing new starts now. Write the file you are part-way through, stage and push what "
-    "you changed, and end the turn. Name anything unfinished in your reply: a summary keeps "
-    "what you wrote down, not what you were about to do. {recovery}"
-    "\n\n" + DECLARE
-)
+EXTREME = load("context-ceiling.md", "extreme") + "\n\n" + DECLARE
 
-CODEX_HEAVY = (
-    "CONTEXT — {cur:,} tokens. " + COST + "\n\n"
-    "Finish the unit of work you are on, commit and push it, then END THE TURN. "
-    "Don't open a new thread of work, don't start a broad search, and don't read a large "
-    "file you could grep. {recovery}"
-    "\n\n" + CODEX_DECLARE
-)
+CODEX_HEAVY = "CONTEXT — {cur:,} tokens. " + COST + "\n\n" + load("context-ceiling.md", "codex-heavy") + "\n\n" + CODEX_DECLARE
 
-CODEX_EXTREME = (
-    "CONTEXT — {cur:,} tokens, past the extreme cut. Codex takes its own boundary only with "
-    "the window nearly full, so it will land inside whatever you are doing then — stopping "
-    "now is what keeps it off a half-finished unit.\n\n"
-    "Nothing new starts now. Write the file you are part-way through, stage and push what "
-    "you changed, and end the turn. {recovery}"
-    "\n\n" + CODEX_DECLARE
-)
+CODEX_EXTREME = load("context-ceiling.md", "codex-extreme") + "\n\n" + CODEX_DECLARE
 
 #: The 10k line between bands: ONE sentence, and the same one on both engines. What a tick
 #: has to do is let a session check its own weight without being told how to work -- the
@@ -410,11 +359,8 @@ CODEX_EXTREME = (
 #: the reader learns to skip by the third. Above a cut it names the cut rather than
 #: repeating the note, because the note is already upstream in the same conversation.
 TICK = "CONTEXT — {cur:,} tokens."
-TICK_HEAVY = "CONTEXT — {cur:,} tokens, still over the heavy cut. Finish, push, end the turn."
-TICK_EXTREME = (
-    "CONTEXT — {cur:,} tokens, still past the extreme cut. Nothing is going to take this "
-    "session down but you."
-)
+TICK_HEAVY = load("context-ceiling.md", "tick-heavy")
+TICK_EXTREME = load("context-ceiling.md", "tick-extreme")
 
 #: The text a band gets, per dialect. An engine with no entry falls back to Claude's, which
 #: is what every session was handed before Codex was read at all.
@@ -428,21 +374,14 @@ NOTES = {
 #: What a compaction would actually buy, which is the number that decides whether compacting
 #: is even the right move. It is also the only part of this that is per-session: the cuts are
 #: fixed, the saving is measured, and a heavy session on a heavy floor gets told the truth.
-RECOVERS = (
-    "A compaction here lands you around {landing:,} — this session's own {floor:,}-token "
-    "floor plus the summary — freeing about {freed:,} off every remaining turn. Worth taking."
-)
+RECOVERS = load("context-ceiling.md", "recovers")
 
 #: No handoff advice, at any size. Measured across 76 real compactions, handing
 #: off lands a median 10k BELOW a compaction of the same session and pays that 10k with the
 #: entire live thread; `test_neither_surface_prescribes_handoff_by_size` guards the app
 #: against the same regression. When little is reclaimable the honest answer is that the
 #: weight is structural and compacting is not the lever — not that a fresh session is.
-RECOVERS_LITTLE = (
-    "Note: this session's fixed overhead is already {floor:,} tokens, so a compaction lands "
-    "at {landing:,} and frees only about {freed:,}. The weight here is structural — carry on "
-    "if the work needs it, but keep it tight; compacting is not the lever."
-)
+RECOVERS_LITTLE = load("context-ceiling.md", "recovers-little")
 
 
 #: What a compaction costs on Codex, measured over the 45 real compactions in

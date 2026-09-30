@@ -7,6 +7,9 @@ Sections are loaded by `hooks/_prompts.py`; runtime values arrive via
 
 Injected on entry by jStack — everything {seat} (your seat) wrote across its last {n} sessions, oldest first. This is your own recent history: you are not starting cold. Build on it — don't re-discover, re-propose, or re-litigate what's already below. A `↳ verdict:` line is the independent review's call on that run — if its note names a move to avoid, pick differently.
 
+## unknown-tag
+[This session was opened on tag '{tag}', which is not in the timeline vocabulary (`log_event tag list`). Falling back to this seat's own history.]
+
 ## tag-timeline
 
 Injected on entry by jStack — this session is pinned to **{tag}**, so what follows is the last {n} sittings ANY seat had on that subject, oldest first, each line naming who worked it. It is not {seat}'s own history: you are opening a subject, not a seat. Build on it — don't re-discover, re-propose, or re-litigate what's already below. Your own entries are tagged the same way automatically, so what you do here continues this thread. A `↳ verdict:` line is the independent review's call on that run.

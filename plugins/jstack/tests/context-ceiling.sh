@@ -131,7 +131,7 @@ check("one message written twice is still one reading", "165,000" in note)
 code, note = run(claude("recover.jsonl", [50_000, 150_000, 165_000]))
 check("the note names this session's own floor", "50,000-token floor" in note)
 check("the note names what a compaction would free", "freeing about" in note)
-check("the note says it is worth taking", "Worth taking" in note)
+check("the note never tells the session to go compact", "Worth taking" not in note)
 
 # A session already sitting on a heavy floor has nothing to give back, and is
 # told so instead of being sent to compact for nothing.

@@ -24,6 +24,7 @@ import time
 import uuid
 
 from . import environment, plan_parse, store
+from .prompt_files import load
 
 #: How much of a command's combined output a proof row keeps, from the END.
 #: A proof is evidence that a check ran and what it said, not an archive of it:
@@ -426,9 +427,9 @@ def _refusal(row, *, stale: bool = False) -> str:
     # the message says which of the two the proof belongs to.
     held = ("its passing proof predates this declaration and proves the gate "
             "this stage used to have" if stale else "has no passing proof")
-    return (f"stage {row['id']} (#{row['ordinal']} {row['title']!r}) declares "
-            f"verify_kind={kind!r} spec={spec!r} and {held}; "
-            f"it stays open. To satisfy it: {remedy}.")
+    return load("plans.md", "stays-open").format(
+        id=row["id"], ordinal=row["ordinal"], title=repr(row["title"]),
+        kind=repr(kind), spec=repr(spec), held=held, remedy=remedy)
 
 
 def subagent_env(stage_id: str) -> dict[str, str]:

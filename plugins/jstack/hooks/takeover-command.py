@@ -243,18 +243,10 @@ def main() -> None:
     source_seat = seat_label(source_cwd)
     if focus:
         focus_line = focus
-        continue_line = (
-            f"Your scope is: **{focus}**\n\n"
-            "That is an explicit narrowing from the person who opened you. Work it, "
-            "and leave the session's other threads alone unless one of them blocks "
-            "this. If the source session never got to this, say so plainly and start "
-            "it — a takeover is allowed to find that the answer is not in there.")
+        continue_line = load_prompt("takeover-focus.md", "scoped").format(focus=focus)
     else:
         focus_line = "(none — the session's live thread)"
-        continue_line = (
-            "No focus was given: pick up the thread that was live in the last "
-            "exchanges and carry it forward. If the session ended mid-step, finish "
-            "the step.")
+        continue_line = load_prompt("takeover-focus.md", "unscoped")
 
     briefing = load_prompt("takeover-briefing.md").format(
         sid=sid, source_seat=source_seat, source_cwd=source_cwd,
