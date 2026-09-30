@@ -335,15 +335,13 @@ def test_landing_speaks_where_a_branch_could_be_called_finished(command):
                for t in env.setting("landing").triggers)
 
 
-def test_landing_speaks_on_the_turn_that_hands_work_back():
-    """Stop is the trigger that catches the session ending on a branch —
-    the failure the setting exists for, and the one no Bash pattern sees."""
+def test_no_setting_speaks_on_stop():
+    """A Stop hook's additionalContext lands after the turn has already been
+    handed back, so it catches nothing and wakes the session into an empty
+    turn of its own. No setting may declare it."""
     fires, rules = _fires(), _path_rules()
-    triggers = env.setting("landing").triggers
-    assert any(fires(t, "Stop", "", {}, rules) for t in triggers)
-    assert not any(
-        fires(t, "PreToolUse", "Bash", {"command": "git status"}, rules)
-        for t in triggers)
+    for s in env.SETTINGS:
+        assert not any(fires(t, "Stop", "", {}, rules) for t in s.triggers), s.key
 
 
 def test_landing_moves_as_a_switch_and_not_as_a_toggle():

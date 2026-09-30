@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""PreToolUse / PostToolUse / Stop hook — the directive, at the moment it binds.
+"""PreToolUse / PostToolUse hook — the directive, at the moment it binds.
+
+Still wired on Stop (hooks.json is append-only), where no setting declares a
+trigger: text a Stop hook adds reaches the model after the turn has ended.
 
 Entry states the environment and the delta corrects it; this is the
 reinforcement, and it fires where a setting is about to be ignored rather than
