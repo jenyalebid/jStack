@@ -329,6 +329,20 @@ def test_a_codex_stop_fires_compact_on_the_real_rollout_shape(tmp_path, spawned)
     assert handoff["fire"] == row["fire"]
 
 
+def test_a_codex_fire_is_filed_under_the_managed_session_the_app_shows(tmp_path, spawned,
+                                                                        monkeypatch):
+    # Codex mints its own thread id; the app knows the session by the id it spawned it
+    # under. A fire keyed by the thread id never reaches that session's sidebar.
+    path = cx.rollout(tmp_path, cx.meta(), cx.assistant("seam. " + cod.CONTINUE_MARK),
+                      cx.token_count(90000), cx.task_complete())
+    monkeypatch.setattr(cod, "session_row", lambda sid, p: (
+        ("managed-1", {"transcript": p}) if p == path else (sid, None)))
+    tr.dispatch("Stop", payload(sid="thread-9", transcript_path=path))
+    assert log("thread-9") == []
+    [row] = log("managed-1")
+    assert row["engine"] == "codex" and row["fired"]
+
+
 def test_a_stop_right_after_a_boundary_is_not_met_and_says_why(tmp_path, spawned):
     path = cx.rollout(tmp_path, cx.meta(), cx.assistant("x"), cx.token_count(90000),
                       cx.compacted())
