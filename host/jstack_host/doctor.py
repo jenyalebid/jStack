@@ -652,6 +652,49 @@ def check_app() -> dict:
                   "binary is exactly the unaccounted-for copy")
 
 
+HUB_APP = Path("/Applications/jStack Hub.app")
+
+
+def check_hub_seal() -> dict:
+    """The installed Hub still matches what was signed.
+
+    Its runtime verifies the whole resource seal before it imports anything,
+    so one file written into the bundle — a `__pycache__` left by any other
+    Python that imported from `Contents/Resources/packages` — leaves every
+    Hub service refusing at launch with exit 78 (#285). The refusal itself is
+    in `~/Library/Logs/jStack/runtime.log`; this is the check that finds it
+    before the next launch does, and from a Python the seal does not gate.
+    """
+    from . import service_settings
+    try:
+        app = Path(service_settings.read().get("app") or HUB_APP)
+    except (OSError, ValueError):
+        app = HUB_APP
+    if not (app / "Contents/Info.plist").exists():
+        return _check("hub seal", OK, f"no Hub at {app} — nothing sealed to verify")
+    proc = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=1", str(app)],
+                          capture_output=True, text=True, timeout=120)
+    if proc.returncode == 0:
+        return _check("hub seal", OK, f"{app.name} verifies")
+    # The verdict is on stderr; the files that broke it are listed on stdout.
+    changed = re.findall(r"^file (added|modified|missing): (.+)$", proc.stdout + proc.stderr, re.M)
+    if not changed:
+        return _check("hub seal", FAIL, f"{app.name} does not verify: "
+                      f"{(proc.stderr.strip().splitlines() or ['codesign failed'])[0]}",
+                      "reinstall jStack Hub — its runtime refuses to start from this bundle")
+    prefix = str(app.resolve()) + "/"
+    shown = [f"{verb} {path.removeprefix(prefix)}" for verb, path in changed]
+    detail = (f"{app.name} seal broken, {len(changed)} file(s): " + "; ".join(shown[:5])
+              + (f"; … {len(shown) - 5} more" if len(shown) > 5 else "")
+              + " — every Hub service exits 78 at launch")
+    if all(verb == "added" and "/__pycache__/" in path for verb, path in changed):
+        return _check("hub seal", FAIL, detail,
+                      "a Python outside the Hub imported from its bundle and wrote bytecode: "
+                      f"find '{app}/Contents' -name __pycache__ -type d -prune -exec rm -rf {{}} + "
+                      "&& launchctl kickstart -k gui/$(id -u)/live.jstack.hub.host")
+    return _check("hub seal", FAIL, detail, "reinstall jStack Hub — this bundle is not the one that was signed")
+
+
 def check_file_sharing() -> dict:
     """An optional surface is quiet when absent and loud when unsafe."""
     from . import fileshare
@@ -728,7 +771,7 @@ CHECKS = (check_python, check_claude, check_tmux, check_websocket, check_fd_limi
           check_hook_owners, check_activation,
           check_git_hooks,
           check_repos,
-          check_service, check_source, check_app, check_file_sharing,
+          check_service, check_source, check_app, check_hub_seal, check_file_sharing,
           check_windows)
 
 
