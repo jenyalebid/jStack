@@ -392,3 +392,23 @@ def test_the_old_hook_no_longer_delivers():
     r = subprocess.run(["sh", hook], input='{"session_id":"s"}', capture_output=True,
                        text=True, timeout=10)
     assert r.returncode == 0 and r.stdout == ""
+
+
+# --- one event, two registrations ---------------------------------------------------------
+
+def test_the_same_hook_event_twice_acts_once(tdir, tmp_path, monkeypatch):
+    """The legacy Stop hook forwards to the dispatcher so a session whose hook list predates
+    the dispatcher still reaches it; a session on the new list runs both copies. The second
+    copy of one event (same session, same transcript length) must not fire again."""
+    monkeypatch.setattr(tr.tempfile, "gettempdir", lambda: str(tmp_path / "tmp"))
+    script(tdir, "hi.sh", 'cat >/dev/null; echo \'{"text": "heads up"}\'')
+    trigger(tdir, "hi")
+    t = tmp_path / "t.jsonl"
+    t.write_text("{}\n")
+    p = payload(prompt="x", transcript_path=str(t))
+    assert tr.dispatch("UserPromptSubmit", p) is not None
+    assert tr.dispatch("UserPromptSubmit", p) is None
+    assert len([r for r in log() if r.get("fired")]) == 1
+    # The next event on the same session is a new event: the transcript has grown.
+    t.write_text("{}\n{}\n")
+    assert tr.dispatch("UserPromptSubmit", p) is not None

@@ -26,9 +26,11 @@ timeline reads it, which is how a fire reaches the app's session view.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -298,9 +300,44 @@ def fires(sid: str | None = None, since: str | None = None) -> list[dict]:
 
 # --- dispatch ------------------------------------------------------------------------
 
+def first_delivery(event: str, payload: dict) -> bool:
+    """False when this exact hook event was already dispatched by another registration.
+
+    A session can carry the dispatcher twice: the legacy Stop hook forwards here so a
+    session that loaded its hook LIST before an update (and so has no dispatcher entry)
+    still reaches the environment, while a session on the new list runs both. Measured
+    2026-09-30: a Claude session started on 26.9.5 ran neither path for twelve hours after
+    the update, because its list predated the dispatcher and the legacy script it did list
+    had been switched off. Both copies fire on the same event at the same transcript
+    length, so that pair is the key; the first to create the stamp acts, the other returns.
+    """
+    sid = payload.get("session_id") or ""
+    path = payload.get("transcript_path") or ""
+    if not sid or not path:
+        return True
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return True
+    key = f"{event}|{sid}|{path}|{payload.get('tool_use_id') or ''}|{size}"
+    # Temp, not state: a stamp per hook event only has to outlive the other copy of it.
+    stamp = (Path(tempfile.gettempdir()) / "jstack-trigger-once" / sid.replace("/", "_")
+             / hashlib.sha1(key.encode()).hexdigest()[:20])
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        os.close(os.open(stamp, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def dispatch(event: str, payload: dict) -> dict | None:
     """Evaluate every trigger on this event and engine; act; log. Returns the hook's
     stdout object, or None when nothing is to be said."""
+    if not first_delivery(event, payload):
+        return None
     triggers, problems = registry()
     arm(triggers)
     ev = normalize(payload, event)
