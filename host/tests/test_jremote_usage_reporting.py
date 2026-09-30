@@ -73,6 +73,19 @@ def test_only_the_three_states_are_storable():
             usage_reporting.normalise(bad)
 
 
+def test_the_refusal_names_what_it_would_have_accepted():
+    """Caught by `hub/usage-reporting` on its first run: the 400 said what was
+    wrong and not what was right, which sends whoever reads it into this file
+    to find out what to send. The route passes this text through as `detail`,
+    so the message is the API's answer and not only a log line."""
+    with pytest.raises(usage_reporting.UnknownState) as raised:
+        usage_reporting.normalise("sideways")
+    said = str(raised.value)
+    assert "sideways" in said
+    for state in usage_reporting.STATES:
+        assert state in said
+
+
 def test_a_machine_that_never_chose_leaves_the_choice_to_the_client():
     """The default every already-adopted machine lives under.
 

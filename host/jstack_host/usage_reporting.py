@@ -66,7 +66,11 @@ class UnknownState(ValueError):
 
 def normalise(state) -> str:
     if state not in STATES:
-        raise UnknownState(f"unknown usage reporting state {state!r}")
+        # The accepted set is named, not just the rejection: the caller is a
+        # menu item today and an API tomorrow, and "unknown state 'x'" alone
+        # sends whoever reads it into this file to find out what to send.
+        raise UnknownState(f"unknown usage reporting state {state!r} — "
+                           f"expected one of {', '.join(STATES)}")
     return state
 
 
