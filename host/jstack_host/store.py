@@ -218,6 +218,12 @@ CREATE TABLE IF NOT EXISTS hosts (
   device_id TEXT NOT NULL DEFAULT '',
   sees_home INTEGER NOT NULL DEFAULT 1,
   sees_leaves INTEGER NOT NULL DEFAULT 1,
+  -- Whether that machine's own local client draws Home's Usage section:
+  -- 'client' (the setting in the app decides), 'hidden', 'available'. Per
+  -- leaf like the two above and flipped from the same menu, because a managed
+  -- Mac's visibility is its hub's word; `usage_reporting.py` is the half that
+  -- reads it, and the leaf caches it rather than asking on every /host.
+  usage_reporting TEXT NOT NULL DEFAULT 'client',
   -- The machine's SSH public key and enrolled account, presented at adoption.
   -- Public material only: the private key never leaves the machine that
   -- minted it, so like the rest of this table there is no column a secret
@@ -1568,6 +1574,21 @@ class SessionStore:
                 "UPDATE hosts SET sees_home=?, sees_leaves=?, updated_at=?, seq=? "
                 "WHERE key=? AND deleted=0",
                 (int(sees_home), int(sees_leaves), time.time(), seq, key))
+            return cur.rowcount > 0
+
+    def set_host_usage_reporting(self, key: str, state: str) -> bool:
+        """The hub's word on whether a leaf's own local client shows Usage.
+
+        The caller validates the state (`usage_reporting.normalise`) — this
+        writes what it was handed, the way `set_host_visibility` does, and a
+        forgotten row is refused so a policy cannot resurrect a machine.
+        """
+        with self._write_lock, self._conn() as db:
+            seq = self._bump_seq(db)
+            cur = db.execute(
+                "UPDATE hosts SET usage_reporting=?, updated_at=?, seq=? "
+                "WHERE key=? AND deleted=0",
+                (state, time.time(), seq, key))
             return cur.rowcount > 0
 
     def set_host_shell(self, key: str, pubkey: str, user: str) -> bool:

@@ -503,12 +503,41 @@ enum DeviceMenu {
 /// `/host` — the route that proves which machine this is. Behind the token by
 /// design, and that is the point: a host answering on loopback that rejects
 /// our token is not our host, whatever it would have claimed.
+/// The three words `usage_reporting` carries, in the order the menu offers
+/// them: the one that leaves the choice alone first, then the two that take it.
+///
+/// A word this menu does not know reads as `client` for the same reason an
+/// absent one does — the states that hide or force a section are the ones a
+/// menu must never infer, and inferring either from a string it cannot parse
+/// is how a section disappears on somebody with no item to bring it back.
+enum UsagePolicy: String, CaseIterable {
+    case client, hidden, available
+
+    static func read(_ wire: String?) -> UsagePolicy {
+        UsagePolicy(rawValue: wire ?? "") ?? .client
+    }
+
+    var title: String {
+        switch self {
+        case .client: return "Controlled by Client"
+        case .hidden: return "Hidden"
+        case .available: return "Available"
+        }
+    }
+}
+
 struct HostIdentity: Decodable {
     var hostId: String?
     var name: String?
     var profile: String?
     var features: [String: Bool]?
     var source: UpdateSource?
+
+    /// This Mac's own word on Usage reporting, which `/host` answers to
+    /// loopback and to nothing else — the policy governs the client app on
+    /// this machine and is no other device's business. Nil on a host too old
+    /// to carry it, read as `client`.
+    var usageReporting: String?
 
     /// local / open / managed — the host's own verdict on how a device off
     /// this network reaches it, computed by `jstack_host.mode`. Nil where an
@@ -572,6 +601,13 @@ struct AdoptedHost: Decodable {
     var delegated: Bool?
     var seesHome: Bool?
     var seesLeaves: Bool?
+
+    /// This machine's word on the Usage section of the client running on
+    /// *that* Mac — `client`, `hidden` or `available`. Nil where the host
+    /// predates the field, which is drawn as `client` rather than as a
+    /// refusal: a machine that never answered has not taken the choice away
+    /// from the device, it has said nothing at all.
+    var usageReporting: String?
 
     /// What to call it: the name given at adoption, else the key, which is the
     /// machine's own host id and always there.
@@ -1116,6 +1152,26 @@ final class HostProbe {
                     _ done: @escaping (Bool, String) -> Void) {
         post("/hosts/\(escaped(hostKey))/visibility", token: token, timeout: 10,
              body: ["sees_home": seesHome, "sees_leaves": seesLeaves], done)
+    }
+
+    /// A leaf's Usage policy, set on this hub — the one machine that owns it.
+    ///
+    /// The state word travels to *this* hub, not to the leaf: the hub's row is
+    /// the authority, and the poke the route sends afterwards is the leaf being
+    /// told to come and read it. A leaf that is asleep or off the mesh misses
+    /// the poke and still picks the answer up on its next roster pull, which is
+    /// why an unreachable machine is not a failed flip.
+    func leafUsage(hostKey: String, state: UsagePolicy, token: String,
+                   _ done: @escaping (Bool, String) -> Void) {
+        post("/hosts/\(escaped(hostKey))/usage", token: token, timeout: 10,
+             payload: try? JSONEncoder().encode(["state": state.rawValue]), done)
+    }
+
+    /// This machine's own word, for the client running on this machine.
+    func ownUsage(state: UsagePolicy, token: String,
+                  _ done: @escaping (Bool, String) -> Void) {
+        post("/usage/reporting", token: token, timeout: 10,
+             payload: try? JSONEncoder().encode(["state": state.rawValue]), done)
     }
 
     private func escaped(_ component: String) -> String {
@@ -2568,6 +2624,31 @@ final class StatusController: NSObject {
             sub.addItem(bar)
         }
 
+        // ── Usage on Home ───────────────────────────────────────────────────
+        //
+        // This Mac's word on the client running on this Mac, and on nothing
+        // else: a phone is never handed the flag, and an adopted machine's
+        // answer belongs to its hub — which is why the leaves carry theirs on
+        // their own rows and this group speaks only for the machine the menu
+        // is running on.
+        if state.isUp, state.identity?.canManageDevices == true {
+            sub.addItem(.separator())
+            let usage = Self.caption("Usage on Home (This Mac)")
+            usage.toolTip = "Whether the client on this Mac shows Home's Usage "
+                + "section — the headroom meters and the day's spend. "
+                + "Controlled by Client leaves it to that app's own setting."
+            sub.addItem(usage)
+            let policy = UsagePolicy.read(state.identity?.usageReporting)
+            for (index, option) in UsagePolicy.allCases.enumerated() {
+                let pick = Self.check(option.title, on: option == policy,
+                                      #selector(doSetOwnUsage), self)
+                pick.tag = index
+                pick.indentationLevel = 1
+                pick.setAccessibilityIdentifier("hub_usage_\(option.rawValue)")
+                sub.addItem(pick)
+            }
+        }
+
         // No agent label, state dir or token path on the menu. They are the
         // answer to "why is this menu wrong", which is a question asked while
         // something is broken and never while it works — and a permanent row
@@ -2823,6 +2904,27 @@ final class StatusController: NSObject {
             siblings.setAccessibilityIdentifier("leaf_toggle_siblings_\(machine.key)")
             siblings.representedObject = machine
             actions.addItem(siblings)
+            actions.addItem(.separator())
+            // The Usage section of the client running on *that* Mac, and only
+            // that one. It sits with the other two because it is the same kind
+            // of fact — what a machine lets the app in front of it show — and
+            // it is offered here because a leaf's answer is its hub's word,
+            // which is this menu.
+            let usage = Self.caption("Usage on Home")
+            usage.toolTip = "Whether the client on \(machine.title) shows "
+                + "Home's Usage section — the headroom meters and the day's "
+                + "spend. Controlled by Client leaves it to that app's setting."
+            actions.addItem(usage)
+            let policy = UsagePolicy.read(machine.usageReporting)
+            for (index, option) in UsagePolicy.allCases.enumerated() {
+                let pick = Self.check(option.title, on: option == policy,
+                                      #selector(doSetLeafUsage), self)
+                pick.tag = index
+                pick.indentationLevel = 1
+                pick.setAccessibilityIdentifier("leaf_usage_\(option.rawValue)_\(machine.key)")
+                pick.representedObject = machine
+                actions.addItem(pick)
+            }
             actions.addItem(.separator())
             let forget = Self.action("Forget", #selector(doForgetMachine), self,
                                      symbol: "minus.circle")
@@ -3182,6 +3284,42 @@ final class StatusController: NSObject {
             if !ok {
                 let alert = NSAlert()
                 alert.messageText = "Could Not Update Leaf Visibility"
+                alert.informativeText = detail
+                alert.runModal()
+            }
+            self?.refresh()
+        }
+    }
+
+    /// A leaf's Usage policy. The tag is the index into the three states, so
+    /// the one item the operator clicked is the whole request — no toggle
+    /// arithmetic, because this is a choice of three and not a switch.
+    @objc private func doSetLeafUsage(_ sender: NSMenuItem) {
+        guard state.identity?.canManageDevices == true,
+              let machine = sender.representedObject as? AdoptedHost,
+              let token = HostAgent.token(),
+              sender.tag >= 0, sender.tag < UsagePolicy.allCases.count else { return }
+        probe.leafUsage(hostKey: machine.key, state: UsagePolicy.allCases[sender.tag],
+                        token: token) { [weak self] ok, detail in
+            if !ok {
+                let alert = NSAlert()
+                alert.messageText = "Could Not Set Usage Reporting"
+                alert.informativeText = detail
+                alert.runModal()
+            }
+            self?.refresh()
+        }
+    }
+
+    @objc private func doSetOwnUsage(_ sender: NSMenuItem) {
+        guard state.identity?.canManageDevices == true,
+              let token = HostAgent.token(),
+              sender.tag >= 0, sender.tag < UsagePolicy.allCases.count else { return }
+        probe.ownUsage(state: UsagePolicy.allCases[sender.tag], token: token) {
+            [weak self] ok, detail in
+            if !ok {
+                let alert = NSAlert()
+                alert.messageText = "Could Not Set Usage Reporting"
                 alert.informativeText = detail
                 alert.runModal()
             }
@@ -3852,6 +3990,9 @@ final class StatusController: NSObject {
                          + (mode.live == false ? " (tunnel down)" : "")
                          + (mode.parent.map { $0.isEmpty ? "" : " ← \($0)" } ?? ""))
         }
+        lines.append("usage      "
+                     + "\(UsagePolicy.read(state.identity?.usageReporting).rawValue)"
+                     + " (Home's Usage section, this Mac's client)")
         lines.append("sessions   \(state.sessions.count) "
                      + "(\(state.liveCount) working)")
         if !state.leaves.isEmpty {
@@ -3863,7 +4004,8 @@ final class StatusController: NSObject {
                     ?? "access not reported"
                 lines.append("           \(machine.title) — "
                              + "\(machine.route.isEmpty ? "no address" : machine.route)"
-                             + " — \(access)")
+                             + " — \(access)"
+                             + " — usage \(UsagePolicy.read(machine.usageReporting).rawValue)")
             }
         }
         if state.unauthorized { lines.append("auth       token refused by the hub") }
