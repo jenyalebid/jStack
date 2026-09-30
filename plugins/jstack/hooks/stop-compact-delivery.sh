@@ -33,7 +33,12 @@ if [ "${1:-}" = "--which" ]; then
     exit 1
 fi
 
-[ "${SKIP_SESSION_HOOK:-}" = 1 ] && exit 0
+# DELIVERY MOVED TO THE ENVIRONMENT. Compact-on-delivery is now the built-in trigger
+# `compact-on-delivery` behind `trigger-dispatch.sh Stop`, which runs the same precheck
+# and the same detached child and records the fire and its outcome. This entry stays in
+# hooks.json only because Codex keys hook trust by position — removing it would shift
+# every ordinal after it. It still answers `--which` above; it no longer delivers.
+exit 0
 
 # No host anywhere on this machine: delivery is opt-in, most machines never install
 # one, and its absence is not a fault. This is the ONLY silent exit left.
