@@ -247,7 +247,7 @@ def get_host(request: Request):
     screen in turn learns the same thing four round trips later, and has to
     render four spinners to find out one of them was never coming.
     """
-    from . import addresses, mode, sourcestamp
+    from . import addresses, mode, sourcestamp, usage_reporting
     # The port the caller actually reached, not a constant: a host moved off
     # 9090 would otherwise hand out an address list that is wrong in the one
     # detail nobody checks, on the screen whose whole job is that address.
@@ -279,6 +279,14 @@ def get_host(request: Request):
                      "managed_host": managed_access.is_leaf(),
                      "self_disconnect": managed_access.can_disconnect(
                          getattr(request.state, "authorized_device", ""))},
+        # Home's Usage section, for the client running ON this Mac and for no
+        # other: a loopback caller is that client, and this flag governs
+        # nothing else (`usage_reporting.py`). A remote device is not handed a
+        # policy it is not subject to — it would read it as its own and hide a
+        # section this machine never spoke about. Absent means "the client's
+        # own setting decides", so a host predating the field hides nothing.
+        **({"usage_reporting": usage_reporting.effective()}
+           if _is_loopback(request.client.host if request.client else "") else {}),
     }
 
 
@@ -1144,11 +1152,14 @@ def _serve_host(row: dict, delegated: bool = False, *, policy: bool = False) -> 
     # public halves, but devices have no use for them and the console does.
     public = {k: v for k, v in row.items()
               if k not in ("device_id", "sees_home", "sees_leaves",
-                           "shell_pubkey", "shell_user")}
+                           "usage_reporting", "shell_pubkey", "shell_user")}
     if policy:
+        from . import usage_reporting
         from .store import get_store
         public.update(sees_home=bool(row.get("sees_home", True)),
                       sees_leaves=bool(row.get("sees_leaves", True)),
+                      usage_reporting=(row.get("usage_reporting")
+                                       or usage_reporting.CLIENT),
                       shell_user=row.get("shell_user", ""),
                       shell_sources=get_store().shell_sources_for(row["key"]))
     return {**public, "deleted": bool(row["deleted"]), "delegated": delegated,
@@ -1200,7 +1211,13 @@ def list_hosts(request: Request, device_id: str = Depends(current_device)):
     if managed_access.is_leaf():
         if not _is_loopback(request.client.host if request.client else ""):
             return {"hosts": []}
-        return managed_access.visible_hosts()
+        from . import usage_reporting
+        answer = managed_access.visible_hosts()
+        # The roster pull is also how this leaf learns its own Usage policy —
+        # `/host` answers out of this cache rather than spending a round trip
+        # to the hub on the one call that must work before any screen.
+        usage_reporting.note_parent((answer.get("self") or {}).get("usage_reporting"))
+        return answer
     live = {h["host_key"] for h in grants.holdings() if h["revoked_at"] is None}
     rows = [_serve_host(r, r["key"] in live, policy=_hub_console(request))
             for r in get_store().list_hosts()
@@ -1307,6 +1324,75 @@ def set_leaf_visibility(key: str, body: LeafVisibilityRequest, request: Request)
     return {"key": key, **body.model_dump()}
 
 
+class LeafUsageRequest(BaseModel):
+    #: "client" | "hidden" | "available" — `usage_reporting.STATES`.
+    state: str
+
+
+@router.post("/hosts/{key}/usage")
+def set_leaf_usage_reporting(key: str, body: LeafUsageRequest, request: Request):
+    """Whether that leaf's own local client draws Home's Usage section.
+
+    The hub's word, beside `sees_home`/`sees_leaves` and flipped from the same
+    menu, because a managed Mac's visibility is its hub's to decide. The row is
+    the authority; the poke only decides whether the leaf learns now or at its
+    next roster pull, so its failure is a graded step and never this call's.
+    """
+    managed_access.require_console(request)
+    from . import usage_reporting
+    from .store import get_store
+    try:
+        state = usage_reporting.normalise(body.state)
+    except usage_reporting.UnknownState as exc:
+        raise HTTPException(400, str(exc))
+    if not get_store().set_host_usage_reporting(key, state):
+        raise HTTPException(404, "unknown machine")
+    return {"key": key, "usage_reporting": state,
+            "steps": [usage_reporting.poke(key)]}
+
+
+class UsageReportingRequest(BaseModel):
+    #: "client" | "hidden" | "available" — `usage_reporting.STATES`.
+    state: str
+
+
+@router.post("/usage/reporting")
+def set_own_usage_reporting(body: UsageReportingRequest, request: Request):
+    """This machine's own word about its own client — the hub's menu bar.
+
+    A leaf is refused here rather than allowed to write a value its next pull
+    would overwrite: on a managed Mac this policy belongs to the hub, and a
+    control that stores something and then loses it is worse than one that
+    says no.
+    """
+    from . import usage_reporting
+    if managed_access.is_leaf():
+        raise HTTPException(409, "a managed machine's Usage policy belongs to its hub")
+    managed_access.require_console(request)
+    try:
+        state = usage_reporting.normalise(body.state)
+    except usage_reporting.UnknownState as exc:
+        raise HTTPException(400, str(exc))
+    return {"usage_reporting": usage_reporting.set_own(state)}
+
+
+@router.post("/usage/refresh")
+def usage_refresh(device_id: str = Depends(current_device)):
+    """A poke, not a payload: the leaf pulls its own policy from its parent.
+
+    The same shape as `/shell/refresh` — nothing here trusts the caller for
+    anything but the fact that something changed, and the answer comes from the
+    parent credential this machine holds.
+    """
+    from . import usage_reporting
+    if not managed_access.is_leaf():
+        raise HTTPException(409, "only a managed machine pulls its Usage policy")
+    answer = managed_access.visible_hosts()
+    state = usage_reporting.note_parent(
+        (answer.get("self") or {}).get("usage_reporting"))
+    return {"usage_reporting": state}
+
+
 class LeafShellGrantRequest(BaseModel):
     #: The machine whose agents get (or lose) shell on `{key}` — the same
     #: parent-held per-pair shape as sees-leaves, one pair per call.
@@ -1344,7 +1430,14 @@ def managed_hosts(request: Request, device_id: str = Depends(current_device)):
     if leaf["sees_leaves"]:
         rows.extend(_serve_host(row, bool(grants.held(row["key"])))
                     for row in get_store().list_hosts() if row["key"] != leaf["key"])
-    return {"hosts": rows}
+    # The asking machine's OWN row travels with the roster it asked for: the
+    # leaf has no other way to learn what its hub decided about it, and this is
+    # the call its client already makes. One field, so a poke is a nicety and
+    # not the mechanism — see usage_reporting.py.
+    from . import usage_reporting
+    return {"hosts": rows,
+            "self": {"usage_reporting": (leaf.get("usage_reporting")
+                                         or usage_reporting.CLIENT)}}
 
 
 class ManagedGrantRequest(BaseModel):
