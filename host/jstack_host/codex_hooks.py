@@ -176,22 +176,102 @@ def managed_active(plugin, path=None, manifest_path=None) -> bool:
         return False
 
 
+def _command_key(command) -> str:
+    """A hook command with the plugin location taken off, so one script is one key.
+
+    The operator file spells the plugin root out; the installed copy leaves it as
+    `${CLAUDE_PLUGIN_ROOT}`; and the root the operator file was written with need
+    not be where the plugin lives today. What names the hook is the part after it.
+    """
+    command = command.replace("${CLAUDE_PLUGIN_ROOT}", "plugins/jstack")
+    marker = "plugins/jstack/"
+    return command[command.rfind(marker) + len(marker):] if marker in command else command
+
+
+def managed_registrations(path=None) -> set:
+    """Every (event, matcher, command) the operator file registers, as Codex reads it."""
+    import tomllib
+    path = MANAGED_CONFIG if path is None else path
+    try:
+        hooks = tomllib.loads(path.read_text()).get("hooks") or {}
+    except (OSError, ValueError):
+        return set()
+    return {(event, group.get("matcher") or "", _command_key(handler.get("command", "")))
+            for event, groups in hooks.items() for group in groups
+            for handler in group.get("hooks") or []}
+
+
+def _codex_group(event, group):
+    """(codex event, matcher) for a manifest group, as `managed_hooks` would write it."""
+    event = CODEX_ALIASES.get(event, event)
+    matcher = group.get("matcher") or ""
+    if matcher:
+        matcher = "|".join(t for t in matcher.split("|") if t not in CODEX_ABSENT_TOOLS)
+    return event, matcher
+
+
+def trim_manifest(manifest, registered):
+    """The manifest minus every hook the operator file already registers."""
+    kept = {}
+    for event, groups in (manifest.get("hooks") or {}).items():
+        out = []
+        for group in groups:
+            codex_event, matcher = _codex_group(event, group)
+            handlers = [h for h in group.get("hooks") or []
+                        if (codex_event, matcher, _command_key(h.get("command", "")))
+                        not in registered]
+            if handlers:
+                out.append({**group, "hooks": handlers})
+        if out:
+            kept[event] = out
+    return {**manifest, "hooks": kept}
+
+
+def doubled_manifests(home=None, path=None) -> list:
+    """Installed copies that register a hook the operator file also registers."""
+    registered = managed_registrations(path)
+    if not registered:
+        return []
+    doubled = []
+    for manifest in plugin_manifests(home):
+        try:
+            data = json.loads(manifest.read_text())
+        except (OSError, ValueError):
+            continue
+        if trim_manifest(data, registered) != data:
+            doubled.append(manifest)
+    return doubled
+
+
 def silence_plugin_hooks(plugin, home=None, path=None, manifest_path=None) -> list:
     """Leave exactly one registration of each hook on this machine.
 
-    Only ever against a MANAGED_CONFIG that is live and current. Silencing the
-    plugin's copy while the operator file is absent or stale would take the
-    machine's last working hook surface away — a machine running every hook
-    twice is wrong, a machine running none is worse, and only one of the two
-    announces itself.
+    Against a MANAGED_CONFIG that is live and current, the plugin's copy goes
+    fully quiet. Against one that is STALE -- and it goes stale on every release
+    that touches hooks.json, because the unattended updater has no sudo to
+    rewrite it -- the copy keeps only what the operator file does not carry, so
+    a hook added since still runs, once, and an old one is not run twice.
+    Measured 2026-09-30 on work-main: a 26.9.12 plugin beside a 09-25 operator
+    file injected every CONTEXT line and the seat timeline twice (#307).
+
+    Absent, nothing is touched: silencing the plugin's copy with no operator
+    file would take the machine's last working hook surface away -- a machine
+    running every hook twice is wrong, a machine running none is worse, and only
+    one of the two announces itself.
     """
-    if not managed_active(plugin, path, manifest_path):
-        return []
-    silenced = []
-    for manifest in plugin_manifests(home):
-        manifest.write_text(SILENCED_MANIFEST)
-        silenced.append(manifest)
-    return silenced
+    if managed_active(plugin, path, manifest_path):
+        silenced = []
+        for manifest in plugin_manifests(home):
+            manifest.write_text(SILENCED_MANIFEST)
+            silenced.append(manifest)
+        return silenced
+    registered = managed_registrations(path)
+    trimmed = []
+    for manifest in doubled_manifests(home, path):
+        data = json.loads(manifest.read_text())
+        manifest.write_text(json.dumps(trim_manifest(data, registered), indent=2) + "\n")
+        trimmed.append(manifest)
+    return trimmed
 
 
 def install_managed_config(plugin, path=None, runner=None, manifest_path=None):

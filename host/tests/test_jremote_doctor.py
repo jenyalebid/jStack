@@ -534,14 +534,16 @@ def test_codex_hooks_calls_out_a_second_registration_of_every_hook(tmp_path, mon
     plugin = tmp_path / "cache" / "jstack"
     (plugin / "hooks").mkdir(parents=True)
     managed = tmp_path / "managed_config.toml"
-    managed.write_text("[[hooks.x]]\n")
+    wired = ('[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\n'
+             'type = "command"\ncommand = "x"\n')
+    managed.write_text(wired)
     copy = tmp_path / "codex/plugins/cache/jstack/jstack/26.9.8/hooks/hooks.json"
     copy.parent.mkdir(parents=True)
     copy.write_text('{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "x"}]}]}}')
 
     monkeypatch.setattr(doctor, "_which", lambda name: "/usr/local/bin/codex")
     monkeypatch.setattr(plugin_paths, "jstack_root", lambda: plugin)
-    monkeypatch.setattr(codex_hooks, "managed_config", lambda root, manifest_path=None: ("[[hooks.x]]\n", []))
+    monkeypatch.setattr(codex_hooks, "managed_config", lambda root, manifest_path=None: (wired, []))
     monkeypatch.setattr(codex_hooks, "MANAGED_CONFIG", managed)
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
 

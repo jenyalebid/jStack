@@ -321,7 +321,7 @@ def check_codex_hooks() -> dict:
     # passes every check above can still be running each hook twice. What that
     # looks like from the outside is `/takeover` opening two sessions off one
     # keystroke; everything else doubles in silence.
-    doubled = codex_hooks.plugin_manifests()
+    doubled = codex_hooks.doubled_manifests()
     if doubled:
         return _check("codex hooks", WARN,
                       f"{hooks} hooks registered twice — the installed plugin copy "
