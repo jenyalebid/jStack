@@ -44,6 +44,7 @@ MODULES = (
     "jstack_host.devices",
     "jstack_host.managed_access",
     "jstack_host.compact_delivery",
+    "jstack_host.triggers",
     "jstack_host.embed",
     "jstack_host.plugin_paths",
     "jstack_host.doctor",
