@@ -1047,6 +1047,10 @@ def took_effect(screen, engine="claude", turn=""):
     return turn == "working"  # no spinner to match: the rollout is the only witness
 
 
+#: The beat a Codex pane needs between a typed burst and its Enter (`managed.send_input`).
+CODEX_ENTER_DELAY = 0.3
+
+
 def submit(name, text, engine="claude", path=None, pre_enter_delay=0.0):
     """Type it, submit it, and prove it went — or take it back out.
 
@@ -1061,8 +1065,14 @@ def submit(name, text, engine="claude", path=None, pre_enter_delay=0.0):
     Failing that, a box no longer holding our text is gone. Only when neither is true for
     the whole window is it really stuck, and then it gets wiped.
     """
-    # The 2-arg call is kept for `pre_enter_delay=0.0` (every caller but Codex's
-    # `send_input`) — it is the shape every existing fake of `send_text` mocks.
+    # A Codex pane swallows an Enter that lands while a pasted burst is still drawing:
+    # the text sits in the box unsent, and this delivery's own `/compact` and continue
+    # were exactly that — typed, never submitted, reported `not-taken`. `send_input`
+    # always passed the beat; the delivery's own sends never did.
+    if engine == "codex" and not pre_enter_delay:
+        pre_enter_delay = CODEX_ENTER_DELAY
+    # The 2-arg call is kept for `pre_enter_delay=0.0` (every Claude caller) — it is the
+    # shape every existing fake of `send_text` mocks.
     if pre_enter_delay:
         send_text(name, text, pre_enter_delay)
     else:

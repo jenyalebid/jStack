@@ -411,3 +411,17 @@ def test_a_codex_boundary_already_on_file_stops_a_second_one(tmp_path, managed_p
     name, reason = cod.decide(path, "01a0ef3f", "codex", "agent/chat", wants_resume=True)
     assert name is None
     assert "boundary is already the newest thing" in reason
+
+
+def test_the_deliverys_own_codex_sends_wait_for_the_paste_before_enter(monkeypatch):
+    # /compact and the continue were typed into a Codex box and never submitted: the
+    # Enter landed mid-paste. Every Codex submit now carries the beat send_input had.
+    import jstack_host.compact_delivery as cd
+    seen = []
+    monkeypatch.setattr(cd, "send_text", lambda name, text, delay=0.0: seen.append(delay))
+    monkeypatch.setattr(cd, "pane", lambda name: "")
+    monkeypatch.setattr(cd, "took_effect", lambda *a: True)
+    monkeypatch.setattr(cd.time, "sleep", lambda s: None)
+    assert cd.submit("jr-x", cd.COMPACT_CMD, "codex")
+    assert cd.submit("jr-x", "go on", "claude")
+    assert seen == [cd.CODEX_ENTER_DELAY, 0.0]

@@ -1328,7 +1328,7 @@ def send_input(sid: str, text: str) -> bool:
     # Codex gets a beat between typing and Enter to finish drawing its paste
     # burst — `send_text`'s own `pre_enter_delay`, not a sleep before typing.
     ok = compact_delivery.submit(name, text, engine,
-                                 pre_enter_delay=0.3 if engine == "codex" else 0.0)
+                                 pre_enter_delay=compact_delivery.CODEX_ENTER_DELAY if engine == "codex" else 0.0)
     if not ok:
         _log(f"send_input: {sid} did not take — "
              f"{compact_delivery.why_not_ready(compact_delivery.pane(name), engine)}")
