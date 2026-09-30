@@ -15,10 +15,24 @@ Two facts live here, and they are different in kind:
   shares it, same as the notification mutes) and falling back to the fleet
   default when unset.
 
-Both model ids and both defaults were verified by live probe against the real
-CLIs (`claude -p --model X`, `codex exec -m X`) rather than read off a docs
-page — `gpt-5.6-pro` looks like a model, appears in the binary's own strings,
-and is refused. Anything added below earns its row the same way.
+Both model ids and both defaults come from the CLIs themselves, never from a
+docs page — `gpt-5.6-pro` looks like a model, appears in the Codex binary's
+own strings, and is refused. `modelprobe.py` asks each CLI what it has today
+(Claude: what its `opus`/`sonnet`/`fable`/`haiku` aliases resolve to; Codex:
+`codex debug models`) and reports every row here that has fallen behind, so
+the list is checked by a machine on a schedule rather than by whoever last
+happened to notice a launch announcement.
+
+The two rosters are each defined by a rule, which is what makes that check
+decidable rather than a matter of taste:
+
+* **Claude** — exactly the ids its four family aliases resolve to. Aliases are
+  not used as ids: `--model opus` moves under us mid-flight and records
+  nothing, while a pinned id is what the transcript and the open registry
+  carry. The alias is how we learn the id, not what we spawn on.
+* **Codex** — the list-visible catalog's top rows by the vendor's own
+  `priority`, as many as there are rows below. A hidden model (`gpt-reserve`,
+  the review model) is not a thing a person picks.
 
 **Resolution happens on the host, once.** `resolve()` is the only place a
 missing engine or model becomes a concrete one, so every spawn path — the
@@ -39,10 +53,10 @@ from . import hostenv
 _STATE = hostenv.state_dir() / "jremote_engines.json"
 _lock = threading.Lock()
 
-# The fleet default: Claude, Opus 5. Today this is also what the CLI picks with
-# no --model flag at all, so making it explicit changes nothing right now —
-# it starts mattering the moment the account default moves under us, which is
-# exactly the drift a named default exists to survive.
+# The fleet default: Claude, Opus 5.5. Today this is also what the CLI picks
+# with no --model flag at all, so making it explicit changes nothing right now
+# — it starts mattering the moment the account default moves under us, which
+# is exactly the drift a named default exists to survive.
 FLEET_ENGINE = "claude"
 
 # Engines and their models. `default_model` is what an agent gets when it has
@@ -56,13 +70,13 @@ ENGINES: list[dict] = [
     {
         "id": "claude",
         "name": "Claude Code",
-        "default_model": "claude-opus-5",
+        "default_model": "claude-opus-5-5",
         "models": [
-            {"id": "claude-opus-5", "name": "Opus 5",
+            {"id": "claude-opus-5-5", "name": "Opus 5.5",
              "detail": "The default. Most capable for everyday work."},
-            {"id": "claude-sonnet-5", "name": "Sonnet 5",
+            {"id": "claude-sonnet-5-5", "name": "Sonnet 5.5",
              "detail": "Faster and cheaper; strong on well-scoped work."},
-            {"id": "claude-fable-5", "name": "Fable 5",
+            {"id": "claude-fable-5-1", "name": "Fable 5.1",
              "detail": "Most capable for the hardest, longest-running tasks."},
             {"id": "claude-haiku-4-5-20251001", "name": "Haiku 4.5",
              "detail": "Fastest and cheapest; short mechanical work."},
@@ -71,20 +85,16 @@ ENGINES: list[dict] = [
     {
         "id": "codex",
         "name": "Codex",
-        "default_model": "gpt-5.6-sol",
+        "default_model": "gpt-6-astra",
         "models": [
+            {"id": "gpt-6.1-sol", "name": "GPT-6.1 Sol",
+             "detail": "Latest workhorse — coding and everyday work."},
             {"id": "gpt-6-astra", "name": "GPT-6 Astra",
-             "detail": "Complex reasoning and sustained coding work."},
-            {"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol",
-             "detail": "Quality-first flagship — reasoning and hard coding."},
-            {"id": "gpt-5.6-terra", "name": "GPT-5.6 Terra",
-             "detail": "Balanced quality, latency and cost."},
-            {"id": "gpt-5.6-luna", "name": "GPT-5.6 Luna",
-             "detail": "High-throughput, lower-latency work."},
-            {"id": "gpt-5.5", "name": "GPT-5.5",
-             "detail": "Previous generation flagship."},
-            {"id": "gpt-5.4", "name": "GPT-5.4",
-             "detail": "Older generation; kept for comparison runs."},
+             "detail": "Frontier intelligence for the most demanding work."},
+            {"id": "gpt-6-sol", "name": "GPT-6 Sol",
+             "detail": "Previous-generation workhorse."},
+            {"id": "gpt-6-luna", "name": "GPT-6 Luna",
+             "detail": "Fast and affordable; easier tasks."},
         ],
     },
 ]
