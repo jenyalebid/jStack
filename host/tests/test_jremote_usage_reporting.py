@@ -129,6 +129,40 @@ def test_an_unchanged_verdict_does_not_rewrite_the_state_dir(monkeypatch):
     assert writes == [{"parent": "hidden"}]
 
 
+# ── the column a running hub's store does not have yet ───────────────────────
+
+#: The `hosts` table exactly as it stood before this policy — the shape every
+#: already-adopting hub's store file has on disk.
+OLD_HOSTS = """CREATE TABLE hosts (
+  key TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '',
+  address TEXT NOT NULL DEFAULT '', port INTEGER NOT NULL DEFAULT 9090,
+  enrolled_at INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0,
+  updated_at REAL NOT NULL DEFAULT 0, seq INTEGER NOT NULL DEFAULT 0,
+  device_id TEXT NOT NULL DEFAULT '', sees_home INTEGER NOT NULL DEFAULT 1,
+  sees_leaves INTEGER NOT NULL DEFAULT 1,
+  shell_pubkey TEXT NOT NULL DEFAULT '', shell_user TEXT NOT NULL DEFAULT '')"""
+
+
+def test_a_store_that_predates_the_column_gains_it_and_defaults_to_client(tmp_path):
+    """The store is OPENED by a running hub, never created fresh on an upgrade.
+
+    Without the migration the first flip on an upgraded Mac raises, and every
+    already-adopted machine reads as having no policy at all — which is the
+    right answer by luck and the wrong one the moment somebody sets `hidden`.
+    """
+    import sqlite3
+
+    db = tmp_path / "old.sqlite"
+    with sqlite3.connect(db) as conn:
+        conn.execute(OLD_HOSTS)
+        conn.execute("INSERT INTO hosts (key, name) VALUES ('leaf-old', 'Office')")
+
+    s = SessionStore(db_path=db)
+    assert s.host_row("leaf-old")["usage_reporting"] == usage_reporting.CLIENT
+    assert s.set_host_usage_reporting("leaf-old", "hidden") is True
+    assert s.host_row("leaf-old")["usage_reporting"] == "hidden"
+
+
 # ── /host: the one route that answers before any screen ──────────────────────
 
 def test_the_policy_is_answered_to_loopback_and_to_nobody_else(client, monkeypatch):
