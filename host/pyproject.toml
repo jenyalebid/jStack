@@ -38,7 +38,7 @@ jstack-release = "jstack_host.publish_release:main"
 # jremote-compose-editor was dropped from every build ever made — leaving the installed
 # bundle's bin/ empty while the checkout's was not. `test_packaging.py` holds this list
 # against the tree so the next such file fails here instead of in a release.
-jstack_host = ["release-trust.json", "bin/*"]
+jstack_host = ["release-trust.json", "bin/*", "prompts/*.md"]
 
 [tool.setuptools.packages.find]
 include = ["jstack_host*"]

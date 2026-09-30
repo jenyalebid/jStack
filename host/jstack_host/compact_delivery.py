@@ -143,6 +143,7 @@ import time
 from pathlib import Path
 
 from . import agent_prefs, codex_transcript, compaction, context_ceiling, hostenv, managed
+from .prompt_files import load
 
 POLL_SECS = 0.5
 MAX_WAIT_SECS = 20  # one look at the pane; `persist` decides whether there is another
@@ -248,12 +249,7 @@ SETTLE_POLL = 0.1
 #: to a session that ASKED for it — the marker is what it is answering — so it can say so
 #: plainly. And it keeps an exit: a session whose summary reads as finished must be able to
 #: say that in a line instead of manufacturing work to justify the prompt.
-CONTINUE = (
-    "[compact-on-delivery hook, not the user] You ended your last turn asking to be "
-    "continued, so your context was compacted at the seam you picked — nobody has said "
-    "anything new. Pick up where the summary leaves off and keep going. If nothing is "
-    "actually left, say so in a line and stop rather than inventing work."
-)
+CONTINUE = load("compact-delivery.md", "continue")
 
 #: The same nudge for a session that parked but did not need a boundary.
 #:
@@ -262,13 +258,7 @@ CONTINUE = (
 #: has will go looking for what it thinks it dropped, which is the re-discovery waste the
 #: whole mechanism exists to reduce. Saying so plainly is also the useful half: everything
 #: the session had is still in front of it, so there is nothing to reconstruct.
-CONTINUE_IN_PLACE = (
-    "[compact-on-delivery hook, not the user] You ended your last turn asking to be "
-    "continued. Your context had room, so nothing was compacted — everything you had is "
-    "still here — and nobody has said anything new. Pick up where you left off and keep "
-    "going. If nothing is actually left, say so in a line and stop rather than inventing "
-    "work."
-)
+CONTINUE_IN_PLACE = load("compact-delivery.md", "continue-in-place")
 
 #: Appended to the nudge ONLY when this session's task store actually has an open row.
 #:
@@ -284,10 +274,7 @@ CONTINUE_IN_PLACE = (
 #: dirs held any rows at all — and the child already knows which kind this is: it computes
 #: `docket(sid)` for the decision log either way, so the answer costs nothing. Pointing a
 #: session at an empty store would teach it to distrust the whole nudge.
-DOCKET_LINE = (
-    " Your task list came through the boundary untouched — it lives on disk, not in the "
-    "summary — so read those rows first and work from them."
-)
+DOCKET_LINE = " " + load("compact-delivery.md", "docket-line")
 
 
 # --- where this host keeps things -------------------------------------------------------

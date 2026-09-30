@@ -24,6 +24,7 @@ from . import audit, board, devices, docfence, hostenv, plugin_paths
 from . import managed_access
 from .turns import stream_turn, TurnError
 from .messages import _blocks_to_segments, _flatten, _is_noise
+from .prompt_files import load
 
 @contextlib.asynccontextmanager
 async def _host_lifespan(_app: FastAPI):
@@ -2928,11 +2929,7 @@ class InputBody(BaseModel):
 # Typed into a taken-over session that was killed mid-turn, once its resumed
 # claude is back at the prompt — whatever the old process had in flight but not
 # yet persisted died with it, so the first order is re-verification.
-TAKEOVER_CONTINUE = (
-    "This session was just moved to a different terminal and the previous "
-    "claude process was interrupted mid-turn. Continue where you left off — "
-    "re-verify the step that was in flight before building on it, since work "
-    "not yet persisted was lost with the old process.")
+TAKEOVER_CONTINUE = load("takeover.md", "continue")
 
 
 class OpenNewBody(BaseModel):
