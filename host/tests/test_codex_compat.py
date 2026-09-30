@@ -515,7 +515,7 @@ def test_a_copy_from_any_marketplace_or_version_is_the_same_second_surface(tmp_p
     assert sorted(module.silence_plugin_hooks(PLUGIN, home, managed)) == sorted([first, second])
 
 
-def test_nothing_is_silenced_while_the_operator_file_is_absent_or_stale(tmp_path):
+def test_nothing_is_silenced_while_the_operator_file_is_absent(tmp_path):
     """Running every hook twice is wrong; running none is worse.
 
     Only one of the two announces itself — a doubled hook at least leaves two
@@ -529,8 +529,64 @@ def test_nothing_is_silenced_while_the_operator_file_is_absent_or_stale(tmp_path
     absent = tmp_path / "never-written.toml"
 
     assert module.silence_plugin_hooks(PLUGIN, home, absent) == []
-
-    stale = tmp_path / "stale.toml"
-    stale.write_text("[[hooks.UserPromptSubmit]]\n")
-    assert module.silence_plugin_hooks(PLUGIN, home, stale) == []
     assert manifest.read_text() == before
+
+
+def _manifest(*hooks):
+    """A Claude-spelled manifest: (event, matcher, script) per hook."""
+    out = {}
+    for event, matcher, script in hooks:
+        group = {"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/" + script,
+                            "timeout": 10}]}
+        if matcher:
+            group["matcher"] = matcher
+        out.setdefault(event, []).append(group)
+    return {"hooks": out}
+
+
+def test_a_stale_operator_file_leaves_the_copy_only_what_it_lacks(tmp_path):
+    """#307: the unattended updater cannot sudo, so the operator file goes stale
+    on every release that touches hooks.json — and a stale file used to leave the
+    plugin's copy whole, so every hook it still carried ran twice. Measured on
+    work-main: a 26.9.12 copy beside a 09-25 operator file injected each CONTEXT
+    line and the seat timeline twice. The copy now keeps exactly the hooks added
+    since, so each one runs once.
+    """
+    from jstack_host import codex_hooks as module
+    old = _manifest(("SessionStart", "", "timeline.py"),
+                    ("PreToolUse", "Bash|ExitPlanMode", "guard.py"),
+                    ("Notification", "", "attention.py set"),
+                    ("Stop", "", "stop-compact-delivery.sh"))
+    new = _manifest(("SessionStart", "", "timeline.py"),
+                    ("PreToolUse", "Bash|ExitPlanMode", "guard.py"),
+                    ("Notification", "", "attention.py set"),
+                    ("Stop", "", "stop-compact-delivery.sh"),
+                    ("Stop", "", "trigger-dispatch.sh Stop"))
+    # Written from another checkout path than the one the plugin lives at now.
+    body, _ = module.managed_hooks(old, Path("/opt/elsewhere/plugins/jstack"))
+    managed = tmp_path / "managed_config.toml"
+    managed.write_text(body)
+    home = tmp_path / "codex"
+    copy = home / "plugins/cache/jstack/jstack/26.9.12/hooks/hooks.json"
+    copy.parent.mkdir(parents=True)
+    copy.write_text(json.dumps(new))
+    plugin = tmp_path / "plugin"
+    (plugin / "hooks").mkdir(parents=True)
+    (plugin / "hooks/hooks.json").write_text(json.dumps(new))
+    assert not module.managed_active(plugin, managed)
+    assert module.doubled_manifests(home, managed) == [copy]
+
+    assert module.silence_plugin_hooks(plugin, home, managed) == [copy]
+    assert json.loads(copy.read_text()) == _manifest(("Stop", "", "trigger-dispatch.sh Stop"))
+    assert module.doubled_manifests(home, managed) == []
+    # Idempotent: the next update's pass finds nothing left to take.
+    assert module.silence_plugin_hooks(plugin, home, managed) == []
+
+
+def test_a_hook_only_the_copy_carries_is_never_trimmed(tmp_path):
+    """Same script, different event or matcher, is a different registration."""
+    from jstack_host import codex_hooks as module
+    managed = tmp_path / "managed_config.toml"
+    managed.write_text(module.managed_hooks(_manifest(("PreToolUse", "Bash", "guard.py")), PLUGIN)[0])
+    copy = _manifest(("PreToolUse", "Edit", "guard.py"), ("PostToolUse", "Bash", "guard.py"))
+    assert module.trim_manifest(copy, module.managed_registrations(managed)) == copy

@@ -238,7 +238,7 @@ def install(providers: list[dict], stack: Path, sha: str | None = None):
             # not only at install time.
             try:
                 for manifest in silence_plugin_hooks(plugin):
-                    print(f"silenced the plugin's own hook manifest: {manifest}")
+                    print(f"left the plugin's own hook manifest only what the operator file lacks: {manifest}")
             except OSError as exc:
                 print(f"codex plugin hooks not silenced: {exc}")
 
