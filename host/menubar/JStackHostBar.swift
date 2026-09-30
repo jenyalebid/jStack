@@ -2616,6 +2616,30 @@ final class StatusController: NSObject {
             return Self.opener("No Access", symbol: "lock", submenu: sub)
         }
         guard state.isUp else {
+            // A runtime that refused its own bundle says why in one file and
+            // nowhere else launchd would show: the sealed plist has no stderr
+            // path, so "not running" was all anyone saw (#285). The runtime
+            // removes the file once the bundle verifies, so it is never stale.
+            let refusal = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Logs/jStack/runtime.log")
+            if let text = try? String(contentsOf: refusal, encoding: .utf8), !text.isEmpty {
+                let lines = text.split(separator: "\n").map(String.init)
+                let changed = lines.filter { $0.hasPrefix("  ") }
+                sub.addItem(Self.caption("Its runtime refused this bundle: the"))
+                sub.addItem(Self.caption("signature or resource seal is broken."))
+                for line in changed.prefix(6) {
+                    sub.addItem(Self.caption(line.trimmingCharacters(in: .whitespaces), dim: false))
+                }
+                if changed.count > 6 { sub.addItem(Self.caption("… \(changed.count - 6) more")) }
+                if lines.contains(where: { $0.hasPrefix("Cause: Python bytecode") }) {
+                    sub.addItem(Self.caption("Bytecode was written into the app —"))
+                    sub.addItem(Self.caption("remove its __pycache__ and restart."))
+                } else {
+                    sub.addItem(Self.caption("Reinstall jStack Hub."))
+                }
+                sub.addItem(Self.caption("Details: ~/Library/Logs/jStack/runtime.log"))
+                return Self.opener("Hub refused to start", symbol: "exclamationmark.triangle", submenu: sub)
+            }
             let item = NSMenuItem(title: "Hub is not running", action: nil, keyEquivalent: "")
             item.image = Self.glyph("bolt.horizontal.circle", size: 14)
             item.isEnabled = false
