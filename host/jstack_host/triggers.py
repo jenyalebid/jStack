@@ -143,16 +143,22 @@ def arm(triggers: list[dict] | None = None) -> set[str]:
 
 def normalize(payload: dict, event: str) -> dict:
     """One shape for both engines. The engine is read off the transcript itself —
-    a Codex rollout and a Claude transcript differ on their first lines."""
+    a Codex rollout and a Claude transcript differ on their first lines.
+
+    The sid is the managed session's when the transcript belongs to one. Codex mints its
+    own thread id, so the hook's `session_id` is not the id the app files the session
+    under, and a fire keyed by it never reaches that session's sidebar."""
     path = payload.get("transcript_path") or ""
+    sid = payload.get("session_id") or ""
     engine = "claude"
     if path and os.path.isfile(path):
         from . import compact_delivery
         engine = compact_delivery.engine_of(path)
+        sid = compact_delivery.session_row(sid, path)[0] or sid
     return {
         "event": event,
         "engine": engine,
-        "sid": payload.get("session_id") or "",
+        "sid": sid,
         "transcript": path,
         "cwd": payload.get("cwd") or "",
         "tool": payload.get("tool_name") or "",
