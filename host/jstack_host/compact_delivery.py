@@ -1102,6 +1102,29 @@ def send_continue(name, has_rows=False, engine="claude", path=None):
 
 # --- the decision log --------------------------------------------------------------------
 
+#: The trigger fire this child is delivering, handed down by the environment's dispatcher.
+#: Every decision and outcome this process records is also settled onto that fire, so the
+#: fire log carries what happened rather than only that something was started.
+_FIRE = None
+
+
+def _settle_fire(fields):
+    if not _FIRE:
+        return
+    try:
+        from . import triggers
+        if "outcome" in fields:
+            outcome = fields["outcome"]
+        elif fields.get("decision") == "skip":
+            outcome = "skip: " + str(fields.get("reason") or "")
+        else:
+            outcome = fields.get("decision") or "noted"
+        extra = {k: fields[k] for k in ("weight", "resume", "docket", "engine") if k in fields}
+        triggers.settle(_FIRE, outcome, **extra)
+    except Exception:
+        pass
+
+
 def record(**fields):
     """Append one line to the decision log. Never raises, never blocks the hook.
 
@@ -1109,6 +1132,7 @@ def record(**fields):
     take years to matter, and a pruner nobody runs is a file that grows forever. Everything
     here is wrapped: a full disk must cost the log, not the compaction.
     """
+    _settle_fire(fields)
     try:
         path = log_path()
         line = dict(fields, ts=time.strftime("%Y-%m-%dT%H:%M:%S"))
@@ -1519,21 +1543,32 @@ def main():
         payload = json.load(sys.stdin)
     except Exception:
         return
+    ok, handoff = precheck(payload)
+    if ok:
+        spawn_child(handoff)
+
+
+def precheck(payload):
+    """`(True, handoff)` when this Stop is one the child should decide, else `(False,
+    reason)`. What `main` did before it detached, split out so the environment's trigger
+    dispatcher asks the same question the old hook did — one definition, two callers."""
+    if os.environ.get("SKIP_SESSION_HOOK") == "1":
+        return False, "SKIP_SESSION_HOOK"
     path = payload.get("transcript_path")
     sid = payload.get("session_id")
     if not path or not sid or not os.path.isfile(path):
-        return
+        return False, "no transcript on the payload"
     sid, row = session_row(sid, path)
     engine = engine_of(path, row)
 
     cur = reading(path, engine)
     if cur is None:
         record(sid=sid[:8], weight=None, decision="skip", reason="no reading")
-        return
+        return False, "no reading"
     if freshly_compacted(path, engine):
         record(sid=sid[:8], weight=cur, decision="skip",
                reason="a boundary is already the newest thing on file")
-        return
+        return False, "a boundary is already the newest thing on file"
 
     # THE WEIGHT IS NOT A PRE-GATE, and it cannot be one. Whether this turn parked is
     # written in the closing message, which does not exist yet (see above), so a parent that
@@ -1546,8 +1581,11 @@ def main():
     # Detach: Stop must return inside its timeout, and the closing message the decision needs
     # does not land until it does. The lock belongs to the child — taking it here would make
     # the parent race the process it just spawned.
-    handoff = {"path": path, "sid": sid, "agent": (row or {}).get("agent", ""),
-               "engine": engine, "size": os.path.getsize(path)}
+    return True, {"path": path, "sid": sid, "agent": (row or {}).get("agent", ""),
+                  "engine": engine, "size": os.path.getsize(path)}
+
+
+def spawn_child(handoff):
     # THE CHILD DOES NOT RE-DERIVE WHERE THIS HOST KEEPS ITS STATE. `jstack-host` adopted
     # the installed host's environment on the way in (`cli._adopt`), which is what points
     # this process at the dashboard's state dir; a child started as `python -m` runs none of
@@ -1599,7 +1637,9 @@ def run(name, path, sid, threshold, size_at_stop, wants_resume, has_rows=False,
 
 
 def child(argv):
+    global _FIRE
     handoff = json.loads(argv[0])
+    _FIRE = handoff.get("fire")
     sid = handoff["sid"]
     lock = held(sid)
     if lock is None:

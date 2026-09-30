@@ -2084,6 +2084,12 @@ def _cmd_doctor(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "trigger":
+        # A hook path like compact-delivery: no argparse, no audit, the installed
+        # host's environment adopted so the fire log is the one the host serves.
+        install_host.adopt_installed_environment(install_host.plist_path())
+        from . import triggers
+        return triggers.cli(argv[1:])
     if argv and argv[0] in ("spawn", "compact-delivery"):
         install_host.adopt_installed_environment(install_host.plist_path())
         if argv[0] == "compact-delivery":

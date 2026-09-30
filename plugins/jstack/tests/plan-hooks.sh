@@ -344,7 +344,9 @@ for event, group, index, name, matcher in (
         ("PreToolUse", 5, 0, "plan-exit.py", "ExitPlanMode"),
         ("PostToolUse", 3, 0, "plan-tasks.py", "TaskCreate|TaskUpdate|update_plan")):
     groups = manifest[event]
-    assert group == len(groups) - 1, f"{name}'s group is no longer last in {event}"
+    # Its position, not its being last: a group appended after it (the environment's
+    # dispatcher is one) shifts no ordinal, so it must not fail this pin.
+    assert group < len(groups), f"{event} lost the group {name} sat in"
     hooks = groups[group]["hooks"]
     assert hooks[index]["command"].endswith("/" + name), \
         f"{event}:{group}:{index} is not {name}"

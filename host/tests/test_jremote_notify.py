@@ -745,6 +745,25 @@ def test_timeline_overlay_lands_pushed_and_inserts_waiting(transcript):
     assert all(e["body"] != "never derived" for e in got)  # unmatched → dropped
 
 
+def test_timeline_carries_each_trigger_fire_with_its_outcome(transcript):
+    """A fire of the session's environment lands in its timeline, which is the jRemote
+    sidebar: trigger name first (the app shows the body, not the title), outcome last."""
+    from jstack_host import triggers
+    t0 = 1_700_000_000
+    sid = transcript([_u(t0, "go"), _a(t0 + 60, "all done")])
+    triggers.record(sid=sid, engine="claude", event="Stop", trigger="compact-on-delivery",
+                    met=True, fired=True, action="input", keys="/compact", fire="f1",
+                    outcome="pending")
+    triggers.settle("f1", "sent/continued")
+    triggers.record(sid=sid, engine="claude", event="Stop", trigger="compact-on-delivery",
+                    met=False, fired=False, reason="no reading")
+    triggers.record(sid="11111111-other", trigger="x", met=True, fired=True, fire="f2")
+    got = [e for e in events.timeline(sid) if e["kind"] == "trigger"]
+    assert [e["body"] for e in got] == ["compact-on-delivery · /compact → sent/continued"]
+    assert got[0]["session_id"] == sid and got[0]["title"] == "compact-on-delivery"
+    assert "." in got[0]["ts"]  # the same naive local ISO the derived entries sort by
+
+
 def test_timeline_missing_session_is_empty(transcript):
     assert events.timeline("00000000-0000-4000-8000-000000000000") == []
 

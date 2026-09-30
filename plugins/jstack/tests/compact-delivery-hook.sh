@@ -4,7 +4,7 @@
 # What it pins, and why each one is here rather than assumed:
 #   - PATH WINS. An explicitly installed `jstack-host` is the one that runs, because an
 #     install is a decision and a fallback is a guess.
-#   - A MISSING SYMLINK NO LONGER SILENCES THE HOOK. This is the whole reason the file
+#   - A MISSING SYMLINK NO LONGER SILENCES --which. This is the whole reason the file
 #     was rewritten: on 2026-09-24 ~/.local/bin/jstack-host disappeared while the host
 #     stayed installed and working, `command -v` returned nothing, and the hook exited 0
 #     on every Stop for hours. No session was compacted and nothing reported it. With
@@ -77,10 +77,11 @@ got=$(env -i HOME="$HOME_DIR" PATH="/usr/bin:/bin" SKIP_SESSION_HOOK=1 \
 # 4. `--which` is a question, not a delivery.
 [ ! -f "$TMP/ran" ]; check "--which never runs the engine" $?
 
-# 5. A real Stop reaches the engine through the fallback, not just the query path.
+# 5. A real Stop no longer delivers here: compact-on-delivery is the environment's
+#    built-in trigger behind trigger-dispatch.sh (tests/env-core.sh pins that hook's own
+#    search). This entry stays in hooks.json for Codex's trust ordinals only.
 run "/usr/bin:/bin" </dev/null >/dev/null 2>&1
-grep -q "compact-delivery" "$TMP/ran" 2>/dev/null
-check "a Stop with no jstack-host on PATH still delivers" $?
+[ ! -f "$TMP/ran" ]; check "a Stop here runs nothing; the trigger delivers" $?
 
 # 6. No host anywhere: silent, green, and nothing run.
 rm -f "$CHECKOUT_HOST"
