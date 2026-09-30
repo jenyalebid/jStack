@@ -946,11 +946,27 @@
       }
     },
     {
+      "id": "environment",
+      "kind": "hook",
+      "name": "Environment",
+      "status": "live",
+      "description": "Condition met, action lands: every environment feature is a trigger — `{id, events, engines, condition, action, dedup}` — evaluated by one dispatcher entry per event, so adding a trigger never edits hooks.json and never re-arms Codex's positional hook trust. A condition is a built-in or an outside script (normalized event JSON on stdin, exit 0 = met, stdout may carry text, keys or a dedup key); a script that errors or overruns is not met and logged, never a broken turn. Actions: inject (additionalContext, or the Stop block reason), block (PreToolUse deny), input (keys into the managed pane via an executor that settles the outcome). Every fire and its outcome land in triggers.jsonl, which the session timeline serves to the jRemote sidebar. Canonical doc: ~/Systems/environment/SYSTEM.md.",
+      "code": [
+        "hooks/trigger-dispatch.sh",
+        "../../host/jstack_host/triggers.py"
+      ],
+      "test": {
+        "type": "script",
+        "path": "tests/env-core.sh",
+        "description": "Runs the real dispatcher stub against fake hosts: PATH then ~/.local/bin then the checkout venv, an unarmed event never starting the host, the skip switch and a hostless machine silent and green, the retired compact hook delivering nothing; pins each dispatcher group as its event's last, alone; then host/tests/test_triggers.py — validation, outside-script conditions met/not met/crashed/timed out, dedup, per-event rendering, the fire log folding outcomes, and compact-on-delivery firing on a real Claude transcript and a real Codex rollout shape with the child's decision settled back onto the fire."
+      }
+    },
+    {
       "id": "compact-delivery",
       "kind": "hook",
       "name": "Compact Delivery",
       "status": "live",
-      "description": "Stop hook that types `/compact` into a session that parked at the seam, waits for the boundary to land, and hands the session back its own work. It is the PRIMARY delivery path and the only one that serves a busy session: the outside sweep only ever looks at a session that has already gone QUIET, so a session that parks at a seam and keeps working is invisible to it and this hook is all it has. The engine is resolved by address, not by name — PATH first because an install outranks a guess, then the locations install.sh writes — because the name resolves through one symlink that `install.sh --uninstall` removes and nothing re-creates, and a hook that could only see the name exited 0 on every Stop for hours while the host sat installed and working. `--which` reports the resolved engine without delivering, so a health probe grades the real thing rather than re-deriving the search.",
+      "description": "The environment's built-in `compact-on-delivery` trigger (Stop, both engines, input action): it types `/compact` into a session that parked at the seam, waits for the boundary to land, and hands the session back its own work. It is the PRIMARY delivery path and the only one that serves a busy session: the outside sweep only ever looks at a session that has already gone QUIET, so a session that parks at a seam and keeps working is invisible to it and this hook is all it has. The engine is resolved by address, not by name — PATH first because an install outranks a guess, then the locations install.sh writes — because the name resolves through one symlink that `install.sh --uninstall` removes and nothing re-creates, and a hook that could only see the name exited 0 on every Stop for hours while the host sat installed and working. `--which` reports the resolved engine without delivering, so a health probe grades the real thing rather than re-deriving the search.",
       "code": [
         "hooks/stop-compact-delivery.sh",
         "../../host/jstack_host/compact_delivery.py"

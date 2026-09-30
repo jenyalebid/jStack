@@ -19,7 +19,7 @@ ACTIONS:
            (`EXECUTORS`) that settles the row's outcome when delivery is done.
 
 THE FIRE LOG (`triggers.jsonl` in the host's state dir) holds one row per evaluation
-that matched an event, and one `settle` row per outcome, joined by `fire`. It is the
+that met, broke, or said why not, and one `settle` row per outcome, joined by `fire`. It is the
 system's health: a fire with no outcome is a defect, not a success. The session
 timeline reads it, which is how a fire reaches the jRemote sidebar.
 """
@@ -329,7 +329,10 @@ def dispatch(event: str, payload: dict) -> dict | None:
                 row["outcome"] = "delivered"
             elif t["action"] == "input":
                 row["outcome"] = "pending"
-        record(**row)
+        # A quiet miss is not news: an event every trigger passes over would otherwise
+        # write a row per tool call. A miss that says why, or broke, is kept.
+        if met or row.get("error") or row.get("reason"):
+            record(**row)
         if fired and t["action"] == "input":
             try:
                 EXECUTORS[t["executor"]](ev, res, row["fire"])

@@ -171,7 +171,34 @@ def timeline(session_id: str) -> list[dict]:
         # else: a quick conversational turn — no event, same as the pushes
 
     _overlay(session_id, out)
+    out.extend(_trigger_fires(session_id))
     out.sort(key=lambda e: e["ts"])
+    return out
+
+
+def _trigger_fires(session_id: str) -> list[dict]:
+    """Every environment trigger that fired on this session, as a `trigger` entry.
+
+    The fire log is where the session's environment acted — compact typed, text
+    injected, a tool blocked — and none of that is in the transcript as itself. The
+    app shows an entry's body, not its title, so the trigger's name leads the body
+    and the outcome closes it: a fire still `pending` is one whose delivery never
+    reported back.
+    """
+    from . import triggers
+
+    out = []
+    for f in triggers.fires(session_id):
+        if not f.get("fired"):
+            continue
+        what = f.get("text") or f.get("keys") or f.get("action") or ""
+        body = f"{f.get('trigger')} · {what}"
+        if f.get("outcome"):
+            body += f" → {f['outcome']}"
+        ts = f.get("ts") or ""
+        out.append({"ts": ts if "." in ts else f"{ts}.000", "session_id": session_id,
+                    "agent_id": "", "kind": "trigger", "title": f.get("trigger") or "",
+                    "body": body[:140], "pushed": False})
     return out
 
 
