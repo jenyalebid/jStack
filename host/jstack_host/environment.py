@@ -79,7 +79,6 @@ SETTINGS: tuple[Setting, ...] = (
         triggers=(
             Trigger("PreToolUse", "Bash",
                     r"git commit|git push|release\.sh|distribute"),
-            Trigger("Stop"),
         ),
         instruction={
             "distribute": "When the work is done, ship it through this project's distribute path without being asked.",
@@ -128,10 +127,10 @@ SETTINGS: tuple[Setting, ...] = (
         triggers=(
             # The push is where a branch stops being reachable only from here,
             # and `gh pr create` is where a session is most likely to call an
-            # open PR the finish line. Stop catches the turn that hands work
-            # back having done neither.
+            # open PR the finish line. Never Stop: text a Stop hook adds reaches
+            # the model only after the turn it meant to catch has ended, and
+            # wakes it into an empty turn of its own.
             Trigger("PreToolUse", "Bash", r"git push|gh pr create|gh pr merge"),
-            Trigger("Stop"),
         ),
         instruction={
             "merged": "Work is not finished until it is merged to the line its repo integrates to, with whatever test the change warranted run against what landed — an open pull request is Not Done, reported with its number and who must merge it.",

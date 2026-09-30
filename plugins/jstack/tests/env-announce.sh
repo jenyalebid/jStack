@@ -239,13 +239,21 @@ pass "announce-once"
 #     leave the session acting on the old one for the rest of its life.
 S=rearm-$$
 seed "$S" delivery_method distribute
-got="$(ctx "$(stopped $S)")"
+got="$(ctx "$(ran $S 'git push')")"
 [[ "$got" == *"delivery_method=distribute"* ]] || fail "rearm" "first value not announced: $got"
-[[ -z "$(stopped $S)" ]] || fail "rearm" "same value announced twice"
+[[ -z "$(ran $S 'git push')" ]] || fail "rearm" "same value announced twice"
 seed "$S" delivery_method build
-got="$(ctx "$(stopped $S)")"
+got="$(ctx "$(ran $S 'git push')")"
 [[ "$got" == *"delivery_method=build"* ]] || fail "rearm" "flip did not re-arm: $got"
 pass "rearm-on-value"
+
+# (5b) Stop never speaks, whatever is moved: its text would reach the model
+#      only after the turn was handed back, as an empty turn of its own.
+S=stop-$$
+seed "$S" landing merged
+seed "$S" delivery_method distribute
+[[ -z "$(stopped $S)" ]] || fail "stop-silent" "Stop announced: $(stopped $S)"
+pass "stop-silent"
 
 # (6) The case a session-type gate gets wrong: an infra session that grows one
 #     UI file. Nothing about the session says simulator until this edit does.
