@@ -191,14 +191,19 @@ def _trigger_fires(session_id: str) -> list[dict]:
     for f in triggers.fires(session_id):
         if not f.get("fired"):
             continue
+        # What the trigger WOULD do is not news when it decided not to: "/compact" on a
+        # row that compacted nothing read as though it had (#307 follow-up, 2026-09-30).
+        # Whole text, no cap — a cut reason is a reason nobody can read.
+        outcome = f.get("outcome") or ""
         what = f.get("text") or f.get("keys") or f.get("action") or ""
-        body = f"{f.get('trigger')} · {what}"
-        if f.get("outcome"):
-            body += f" → {f['outcome']}"
+        if outcome.startswith("skip"):
+            body = f"{f.get('trigger')} → did nothing: {outcome.split(':', 1)[-1].strip()}"
+        else:
+            body = f"{f.get('trigger')} · {what}" + (f" → {outcome}" if outcome else "")
         ts = f.get("ts") or ""
         out.append({"ts": ts if "." in ts else f"{ts}.000", "session_id": session_id,
                     "agent_id": "", "kind": "trigger", "title": f.get("trigger") or "",
-                    "body": body[:140], "pushed": False})
+                    "body": body, "pushed": False})
     return out
 
 

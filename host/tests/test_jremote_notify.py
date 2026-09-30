@@ -764,6 +764,23 @@ def test_timeline_carries_each_trigger_fire_with_its_outcome(transcript):
     assert "." in got[0]["ts"]  # the same naive local ISO the derived entries sort by
 
 
+def test_a_skipped_fire_says_it_did_nothing_and_is_never_cut(transcript):
+    """The row a user read on 2026-09-30: `/compact (when the child decides) → skip: …thi`.
+    It named a keystroke nobody typed and was cut at 140 characters mid-reason."""
+    from jstack_host import triggers
+    t0 = 1_700_000_000
+    sid = transcript([_u(t0, "go"), _a(t0 + 60, "all done")])
+    reason = ("the turn ended without asking to be continued — a finished delivery, "
+              "and this agent does not compact those")
+    triggers.record(sid=sid, engine="claude", event="Stop", trigger="compact-on-delivery",
+                    met=True, fired=True, action="input",
+                    keys="/compact (when the child decides)", fire="f9", outcome="pending")
+    triggers.settle("f9", f"skip: {reason}")
+    rows = [e["body"] for e in events.timeline(sid) if e["kind"] == "trigger"]
+    assert rows[-1] == f"compact-on-delivery → did nothing: {reason}"
+    assert not any("/compact" in b for b in rows if "did nothing" in b)
+
+
 def test_timeline_missing_session_is_empty(transcript):
     assert events.timeline("00000000-0000-4000-8000-000000000000") == []
 
