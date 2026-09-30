@@ -21,7 +21,7 @@ ACTIONS:
 THE FIRE LOG (`triggers.jsonl` in the host's state dir) holds one row per evaluation
 that met, broke, or said why not, and one `settle` row per outcome, joined by `fire`. It is the
 system's health: a fire with no outcome is a defect, not a success. The session
-timeline reads it, which is how a fire reaches the jRemote sidebar.
+timeline reads it, which is how a fire reaches the app's session view.
 """
 from __future__ import annotations
 

@@ -3,7 +3,7 @@
 # place in hooks.json.
 #
 # What it pins:
-#   - ONE ENTRY PER EVENT, APPENDED LAST. Codex keys hook trust by an entry's position:
+#   - ONE ENTRY PER EVENT, AT A PINNED ORDINAL. Codex keys hook trust by an entry's position:
 #     a group inserted above an existing one shifts every later ordinal and silently
 #     un-trusts whatever moved. The dispatcher groups are written out literally below,
 #     so a group added above one fails here instead of disarming Codex.
@@ -21,6 +21,11 @@ PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOST="$(cd "$PLUGIN_ROOT/../../host" && pwd)"
 HOOK="$PLUGIN_ROOT/hooks/trigger-dispatch.sh"
 PY="${JSTACK_TEST_PYTHON:-python3}"
+# pytest lives in the host's venv, not necessarily the PATH python the hook checks use.
+PYTEST="$PY"
+for cand in "$PY" "$HOST/.venv/bin/python3" "${JSTACK_CHECKOUT:-$HOME/jStack}/host/.venv/bin/python3"; do
+    if "$cand" -c "import pytest" >/dev/null 2>&1; then PYTEST=$cand; break; fi
+done
 
 [[ -x "$HOOK" ]] || { echo "FAIL: $HOOK not executable" >&2; exit 1; }
 
@@ -79,22 +84,22 @@ mk_stub "$CHECKOUT_HOST"; rm -f "$TMP/ran"
 echo '{}' | env -i HOME="$HOME_DIR" PATH=/usr/bin:/bin sh "$PLUGIN_ROOT/hooks/stop-compact-delivery.sh"
 [ ! -f "$TMP/ran" ]; check "stop-compact-delivery.sh no longer delivers" $?
 
-# 6. The ordinals, pinned: the dispatcher is its event's LAST group, alone in it.
+# 6. The ordinals, pinned: the dispatcher's group, alone in it, at the position it was
+#    appended to. A later group appended after it shifts nothing and passes.
 "$PY" - "$PLUGIN_ROOT/hooks/hooks.json" <<'PYEOF'
 import json, sys
 m = json.load(open(sys.argv[1]))["hooks"]
 for event, group in (("SessionStart", 1), ("UserPromptSubmit", 2), ("PreToolUse", 6),
                      ("PostToolUse", 4), ("Stop", 2), ("PreCompact", 1), ("SessionEnd", 1)):
     gs = m[event]
-    assert group == len(gs) - 1, f"{event}: the dispatcher group is no longer last"
     [h] = gs[group]["hooks"]
     assert h["command"] == "${CLAUDE_PLUGIN_ROOT}/hooks/trigger-dispatch.sh " + event, h
     assert "matcher" not in gs[group], f"{event}: the dispatcher sees every tool"
 PYEOF
-check "one dispatcher group per event, appended last" $?
+check "one dispatcher group per event, at its pinned ordinal" $?
 
 # 7. The registry, the conditions, the fire log, compact-on-delivery on both engines.
-( cd "$HOST" && "$PY" -m pytest -q tests/test_triggers.py >"$TMP/pytest.log" 2>&1 )
+( cd "$HOST" && "$PYTEST" -m pytest -q tests/test_triggers.py >"$TMP/pytest.log" 2>&1 )
 rc=$?; tail -1 "$TMP/pytest.log"; check "host/tests/test_triggers.py" $rc
 
 [ "$fails" = "0" ] || { echo "$fails check(s) failed" >&2; exit 1; }
