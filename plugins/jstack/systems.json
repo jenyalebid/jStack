@@ -1,5 +1,5 @@
 {
-  "_doc": "Org registry, jStack's half. A row lives in the half that owns the system: a jStack system here, a Jarvis system in the operation's own registry. Neither half duplicates the other, and a system moving into jStack moves its row here unchanged. A row POINTS, it does not describe: slug locates the docs, code and config the files, test what proves it, activation the wiring it needs to be live. description is one sentence of quick reference. What a system IS lives in its SYSTEM.md on the host's shelf — jStack ships no documentation of its own.",
+  "_doc": "The systems registry, jStack's half. A row lives in the half that owns the system: a jStack system here, a host's own system in the host's registry. Neither half duplicates the other, and a system moving into jStack moves its row here unchanged. A row POINTS, it does not describe: slug locates the docs, code and config the files, test what proves it, activation the wiring it needs to be live. description is one sentence of quick reference. What a system IS lives in its SYSTEM.md on the host's shelf — jStack ships no documentation of its own.",
   "_schema": {
     "id": "string — stable identifier, kebab-case. Never changes; the slug carries the grouping.",
     "name": "string — display name",
