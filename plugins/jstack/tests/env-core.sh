@@ -79,10 +79,11 @@ rm -f "$CHECKOUT_HOST"
 out=$(run "/usr/bin:/bin" Stop); rc=$?
 [ $rc = 0 ] && [ -z "$out" ] && [ ! -f "$TMP/ran" ]; check "no host anywhere exits 0 and says nothing" $?
 
-# 5. The retired compact hook no longer delivers (the trigger does), and still answers --which.
+# 5. The retired compact hook forwards to the dispatcher, so a session whose hook list
+#    predates the dispatcher still reaches the environment.
 mk_stub "$CHECKOUT_HOST"; rm -f "$TMP/ran"
 echo '{}' | env -i HOME="$HOME_DIR" PATH=/usr/bin:/bin sh "$PLUGIN_ROOT/hooks/stop-compact-delivery.sh"
-[ ! -f "$TMP/ran" ]; check "stop-compact-delivery.sh no longer delivers" $?
+[ -f "$TMP/ran" ]; check "stop-compact-delivery.sh forwards to the dispatcher" $?
 
 # 6. The ordinals, pinned: the dispatcher's group, alone in it, at the position it was
 #    appended to. A later group appended after it shifts nothing and passes.

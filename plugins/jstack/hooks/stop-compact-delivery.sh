@@ -33,17 +33,12 @@ if [ "${1:-}" = "--which" ]; then
     exit 1
 fi
 
-# DELIVERY MOVED TO THE ENVIRONMENT. Compact-on-delivery is now the built-in trigger
-# `compact-on-delivery` behind `trigger-dispatch.sh Stop`, which runs the same precheck
-# and the same detached child and records the fire and its outcome. This entry stays in
-# hooks.json only because Codex keys hook trust by position — removing it would shift
-# every ordinal after it. It still answers `--which` above; it no longer delivers.
-exit 0
-
-# No host anywhere on this machine: delivery is opt-in, most machines never install
-# one, and its absence is not a fault. This is the ONLY silent exit left.
-[ -n "$host" ] || exit 0
-
-# A shell opened through the Hub's tmux can carry the app interpreter's
-# PYTHONPATH; the host CLI locates its own packages, so it never gets it.
-exec env -u PYTHONPATH -u PYTHONDONTWRITEBYTECODE "$host" compact-delivery
+# DELIVERY MOVED TO THE ENVIRONMENT. Compact-on-delivery is the built-in trigger
+# `compact-on-delivery` behind `trigger-dispatch.sh Stop`. This entry stays in hooks.json
+# because Codex keys hook trust by position, and it FORWARDS rather than going quiet: a
+# session loads its hook list when it starts, so one that started before the dispatcher
+# shipped lists only this script — switched off, it left that session with no delivery at
+# all until restart (measured 2026-09-30: twelve hours of turn-ends, none recorded). A
+# session on the new list runs both; the dispatcher acts on the first copy of an event
+# and drops the second.
+exec "$(dirname "$0")/trigger-dispatch.sh" Stop

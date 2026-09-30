@@ -77,11 +77,11 @@ got=$(env -i HOME="$HOME_DIR" PATH="/usr/bin:/bin" SKIP_SESSION_HOOK=1 \
 # 4. `--which` is a question, not a delivery.
 [ ! -f "$TMP/ran" ]; check "--which never runs the engine" $?
 
-# 5. A real Stop no longer delivers here: compact-on-delivery is the environment's
-#    built-in trigger behind trigger-dispatch.sh (tests/env-core.sh pins that hook's own
-#    search). This entry stays in hooks.json for Codex's trust ordinals only.
+# 5. A real Stop forwards to trigger-dispatch.sh, so a session whose hook list predates
+#    the dispatcher still reaches compact-on-delivery (tests/env-core.sh pins that hook's
+#    own search and the dispatcher acting once per event).
 run "/usr/bin:/bin" </dev/null >/dev/null 2>&1
-[ ! -f "$TMP/ran" ]; check "a Stop here runs nothing; the trigger delivers" $?
+[ -f "$TMP/ran" ]; check "a Stop here forwards to the dispatcher" $?
 
 # 6. No host anywhere: silent, green, and nothing run.
 rm -f "$CHECKOUT_HOST"
