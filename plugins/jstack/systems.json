@@ -1,28 +1,23 @@
 {
-  "_doc": "jStack systems registry — every system bundled by the jStack plugin (hooks, skills, runtime mechanisms) that must be tracked, documented, and live-testable. A host machine may federate this file into its own systems registry via an `imports:` field and stamps each entry with `origin: \"jstack\"` + the resolved plugin version at read time. Maintenance rule: every entry lives where its code lives — edit jStack systems in jStack, host systems in the host registry, never both. Every entry MUST declare a `test` so verification is callable on demand from any surface (CLI, dashboard, work-Claude debugging).",
+  "_doc": "Org registry, jStack's half. A row lives in the half that owns the system: a jStack system here, a Jarvis system in the operation's own registry. Neither half duplicates the other, and a system moving into jStack moves its row here unchanged. A row POINTS, it does not describe: slug locates the docs, code and config the files, test what proves it, activation the wiring it needs to be live. description is one sentence of quick reference. What a system IS lives in its SYSTEM.md on the host's shelf — jStack ships no documentation of its own.",
   "_schema": {
-    "kind": "hook | skill | system | subsystem — 'hook' = Claude Code lifecycle hook (PreToolUse, SessionStart, etc.). 'skill' = invocable slash-command skill shipped under skills/. 'system' = composite mechanism (rules-injection pipeline, install flow). 'subsystem' = nested sub-feature inside a parent.",
-    "id": "string — stable identifier, kebab-case",
+    "id": "string — stable identifier, kebab-case. Never changes; the slug carries the grouping.",
     "name": "string — display name",
+    "slug": "string — path under the host's ~/Systems shelf where this system is documented, e.g. 'Agents/environment'. The root is always ~/Systems, so the row carries only the part that can change. null until documented; on a machine with no shelf it simply does not resolve, which is skipped and never a false green.",
     "status": "live | partial | down | deprecated",
-    "description": "one-line summary",
+    "description": "one sentence of quick reference — never the explanation, which is the system's SYSTEM.md",
     "code": "array of code paths (relative to plugin root)",
     "config": "array of config paths (relative to plugin root unless ~/-prefixed)",
-    "docs": "array of doc paths inside the plugin",
-    "test": {
-      "type": "script | endpoint — 'script' = CLI executable, runs in-place, exit 0 = pass. 'endpoint' = HTTP POST handled by a host process (reserved for host-side wrappers).",
-      "path": "string — for type=script, path relative to plugin root. for type=endpoint, URL path.",
-      "description": "string — one-line description of what the test verifies"
-    },
-    "subsystems": "array of nested entries",
-    "notes": "free-form operator notes",
-    "activation": "optional object — user-scope wiring this system needs to actually run, beyond shipping the files (jenyalebid/jStack#134). Keys are a CLOSED vocabulary interpreted by host/jstack_host/activation.py: claude_settings (~/.claude/settings.json — statusLine, hooks), codex_mcp (`codex mcp add` entries), codex_hooks (the managed Codex hooks config), codex_shell_env (shell profile exports), shell_path (a directory on PATH), user_links (symlinks into user-scope dirs). An unrecognized key is refused, never silently skipped — see activation.desired_from_systems. jstack-doctor's `activation` check grades every declared entry against the machine."
+    "test": "{'type': 'script | endpoint', 'path': 'for script, relative to plugin root', 'description': 'what it proves'} — or null. has_test and test_endpoint are DERIVED from this by the host's lib/systems.py, never stored.",
+    "activation": "optional object — user-scope wiring this system needs to actually run, beyond shipping the files. Closed vocabulary; see host/jstack_host/activation.py KINDS.",
+    "subsystems": "array of nested rows — a smaller part that earns a row so it can be pointed at and tested, never a system and never a folder on the shelf",
+    "notes": "free-form operator notes"
   },
   "systems": [
     {
       "id": "path-rule-injection",
-      "kind": "hook",
       "name": "Cross-Tree Rule Injection",
+      "slug": null,
       "status": "live",
       "description": "PreToolUse hook that injects path-matched ~/.claude/rules/*.md bodies into Edit/Write/MultiEdit/NotebookEdit calls — works regardless of session launch CWD, so cross-tree agents pick up the right conventions on every file mutation.",
       "code": [
@@ -30,7 +25,6 @@
         "hooks/hooks.json"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/path-rule-injection.sh",
@@ -41,8 +35,8 @@
     },
     {
       "id": "transcript-dialogue",
-      "kind": "hook",
       "name": "Transcript Dialogue Read",
+      "slug": null,
       "status": "live",
       "description": "PreToolUse hook on Read that answers a session transcript — Claude session file or Codex rollout — with speech only: what the user said and what the agent said, with tool calls, tool results, reasoning, snapshots and injected wrappers stripped. A session .jsonl is an append-only machine log in which speech is a rounding error (355KB renders to 4KB), so reading one whole spends a context window on text nobody said. This was a rule in rules-stage and was routinely ignored, because reading a handed-over path is the obvious move; the reader changed instead of the instruction. Deliberate raw access via jq or grep is untouched, and every failure path falls through to the real read.",
       "code": [
@@ -52,7 +46,6 @@
         "session_runtime.py"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/read-transcript.sh",
@@ -61,8 +54,8 @@
     },
     {
       "id": "timeline-injection",
-      "kind": "hook",
       "name": "SessionStart Timeline Injection",
+      "slug": null,
       "status": "live",
       "description": "SessionStart hook that injects the seat's last N timeline entries (via bin/log_event tail) into every new session as additionalContext — the READ half of the running-memory loop (the WRITE half is the session-end self-write / Stop-hook line). Which seats get injected and how many entries is the timeline_inject map in the review config ({\"agent/submode\": N, \"*/submode\": N}); unlisted seats get nothing. Sub-mode resolves from cwd: first segment under {agent_root}/{Name}, else 'chat' (cockpit sessions stay at the agent root, so the project-dir key / memory is never moved); 'review' is skipped. Liveness counts an IDE ancestor as well as a controlling terminal (JSTACK_IDE_ANCESTORS, default Xcode): an editor drives its embedded agent from a window, so no process in that chain holds a tty and a human would otherwise read as a headless spawn.",
       "code": [
@@ -72,7 +65,6 @@
       "config": [
         "~/.claude/jstack/review.json"
       ],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/timeline-injection.sh",
@@ -83,8 +75,8 @@
     },
     {
       "id": "install-rules",
-      "kind": "skill",
       "name": "Install Rules",
+      "slug": null,
       "status": "live",
       "description": "Symlinks (or copies, with --copy) both user-scope stages a plugin cannot ship itself: rules-stage/ into ~/.claude/rules/ so bodies auto-load by glob match, and commands-stage/ into ~/.claude/commands/ so bare slash commands exist unnamespaced.",
       "code": [
@@ -93,7 +85,6 @@
         "commands-stage/"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/skills.sh",
@@ -104,15 +95,14 @@
     },
     {
       "id": "work",
-      "kind": "skill",
       "name": "Work",
+      "slug": null,
       "status": "live",
       "description": "Gets the agent battle-ready on a topic before doing the work: orient (date + injected seat timeline), resolve project → repo, determine stack, load every relevant skill via the Skill tool, survey recent changes (git log/status + topic file search), read the core files, and report a grounded lay of the land. Preparation only — no code changes, no state writes, no PR.",
       "code": [
         "skills/work/SKILL.md"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/skills.sh",
@@ -123,8 +113,8 @@
     },
     {
       "id": "handoff",
-      "kind": "skill",
       "name": "Handoff",
+      "slug": null,
       "status": "live",
       "description": "Generates a concise session handoff doc and opens a fresh Claude Code terminal preloaded with it via bin/open-terminal-here. Supports @agent targeting: resolves another agent's workspace under user_config.agent_root and boots the new session there — walk-up does the identity switch.",
       "code": [
@@ -132,7 +122,6 @@
         "bin/open-terminal-here"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/skills.sh",
@@ -143,8 +132,8 @@
     },
     {
       "id": "audit",
-      "kind": "skill",
       "name": "Audit",
+      "slug": null,
       "status": "live",
       "description": "Writes a claims document (audit-brief.md: protocol + Original Issue / What Was Done / Claimed Verifications / Caution Flags / Blast Radius / Pitfalls) and opens a fresh terminal via bin/open-terminal-here where a trust-nothing auditor verifies every claim from source and reports CONFIRMED/REFUTED/UNVERIFIABLE. Report-only — the auditor changes nothing.",
       "code": [
@@ -152,7 +141,6 @@
         "bin/open-terminal-here"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/skills.sh",
@@ -163,8 +151,8 @@
     },
     {
       "id": "recall",
-      "kind": "skill",
       "name": "Recall",
+      "slug": null,
       "status": "live",
       "description": "Replays the timeline for a date or period and outlines what happened, scoped to an agent/submode or all seats. Reads through bin/log_event — the store is the only source, never a summary of it.",
       "code": [
@@ -172,7 +160,6 @@
         "bin/log_event"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/skills.sh",
@@ -183,8 +170,8 @@
     },
     {
       "id": "tag",
-      "kind": "skill",
       "name": "Tag",
+      "slug": null,
       "status": "live",
       "description": "Files a session under a timeline subject. Typed by the user, `/tag` never reaches the model: hooks/tag-command.py answers it at UserPromptSubmit and blocks the prompt, so listing, attaching, minting and detaching all cost zero turns. The SKILL.md remains for the model tagging a session mid-turn in light of the work it has been doing.",
       "code": [
@@ -194,7 +181,6 @@
         "bin/log_event"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/tag-command.sh",
@@ -205,8 +191,8 @@
     },
     {
       "id": "pict",
-      "kind": "skill",
       "name": "Pict",
+      "slug": null,
       "status": "live",
       "description": "Renders everything a session spawned from a directory is injected with, in wire order, and puts it on screen. Typed by the user, `/pict` never reaches the model: hooks/pict-command.py answers it at UserPromptSubmit and blocks the prompt. Render, place, open — three fixed steps, none of them a judgement, and a session asked to describe its own context describes what it believes is there, which is the guess the tool exists to replace.",
       "code": [
@@ -217,7 +203,6 @@
         "bin/open-artifact"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/pict-command.sh",
@@ -228,8 +213,8 @@
     },
     {
       "id": "splitoff",
-      "kind": "skill",
       "name": "Split Off",
+      "slug": null,
       "status": "live",
       "description": "Dubs the current session into a new terminal via bin/dub-session — a verbatim copy of the conversation under a fresh id, opened in its own window and diverging forward. Typed by the user, `/splitoff` never reaches the model: hooks/splitoff-command.py answers it at UserPromptSubmit and blocks the prompt. Where handoff distills to a brief, this keeps the whole transcript.",
       "code": [
@@ -240,7 +225,6 @@
         "bin/open-terminal-here"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/splitoff-command.sh",
@@ -251,8 +235,8 @@
     },
     {
       "id": "takeover",
-      "kind": "skill",
       "name": "Takeover",
+      "slug": null,
       "status": "live",
       "description": "Spawns a fresh session — here or in another agent's workspace — pointed at THIS session's transcript and told to take it over. It is handed no summary: it reads the JSONL from source, checks the claims against the tree, and continues. Typed by the user, `/takeover` never reaches the model: hooks/takeover-command.py answers it at UserPromptSubmit and blocks the prompt. Where handoff distills the session to a brief it wrote itself and splitoff dubs it whole, this one hands over a pointer and a mandate to verify.",
       "code": [
@@ -262,7 +246,6 @@
         "bin/open-terminal-here"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/takeover-command.sh",
@@ -273,8 +256,8 @@
     },
     {
       "id": "print",
-      "kind": "skill",
       "name": "Print Transcript Path",
+      "slug": null,
       "status": "live",
       "description": "Prints the absolute path of the session's local JSONL transcript file — the answer to \"where is this conversation stored on disk\". Typed by the user, `/print` never reaches the model: hooks/print-command.py answers it at UserPromptSubmit from the payload's own transcript_path and blocks the prompt.",
       "code": [
@@ -283,7 +266,6 @@
         "skills/print/SKILL.md"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/print-command.sh",
@@ -294,15 +276,14 @@
     },
     {
       "id": "pict",
-      "kind": "system",
       "name": "Prompt Injection Check (pict)",
+      "slug": null,
       "status": "live",
       "description": "bin/pict renders everything a session spawned from a given directory would actually receive — globals, CLAUDE.md walk-up, auto-memory, timeline injection, anchored path rules, hook injectors — as one ordered markdown document with per-source token weights. The way to see a seat's real context budget instead of reasoning about it. Two views: the default answers why each file is in the context and what it costs; --bare answers what the context IS — the injected bodies in wire order, no weights, no notes, no on-demand layer.",
       "code": [
         "bin/pict"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/pict.sh",
@@ -313,8 +294,8 @@
     },
     {
       "id": "timeline-log",
-      "kind": "system",
       "name": "Timeline Log",
+      "slug": null,
       "status": "live",
       "description": "Timeline sqlite store ({timeline_dir}/timeline.db) written and read by bin/log_event — block format, chronological order, pipeline-task consolidation, direct/indirect origin, and a session→tag relation naming the subject a stretch of work was about. The day's spine: feeds daily briefs, nightly reviews, and seat injection. `log_event where` names the db this writer resolved — the probe any other reader of the store uses to prove it is reading the same file, rather than deriving the path a second time and succeeding against a different one.",
       "code": [
@@ -322,7 +303,6 @@
         "rules-stage/timeline.md"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/log-event.sh",
@@ -331,15 +311,14 @@
       "subsystems": [
         {
           "id": "stop-timeline-remind",
-          "kind": "hook",
           "name": "Stop Timeline Reminder",
+          "slug": null,
           "status": "live",
           "description": "Stop hook that blocks an auto session's first stop once, with a log_event reminder, so a cron-spawned run cannot end without writing its timeline entry. A marker makes the second stop pass through, so it reminds rather than loops.",
           "code": [
             "hooks/stop-timeline-remind.py"
           ],
           "config": [],
-          "docs": [],
           "test": {
             "type": "script",
             "path": "tests/stop-timeline-remind.sh",
@@ -353,8 +332,8 @@
     },
     {
       "id": "post-session-review",
-      "kind": "system",
       "name": "Session-End Engine",
+      "slug": null,
       "status": "live",
       "description": "SessionEnd hook → bin/session-review-spawn engine → session_end_action. Default 'selfwrite': resume a disposable DUB of the just-ended session (bin/dub-session) for ONE turn to write its own seat-tagged timeline entry and pick the session's subject tag from the shared vocabulary, then delete the dub — the primary transcript never grows a self-write turn (clean future resume, clean picker; stale dubs pid-swept every engine run). A resumed session that ends again gets the engine-computed last-reviewed boundary injected, scoping the entry to the delta since the resume point. A COMPACTED session gets a second injected note: a compact starts a new root, so the resumed dub holds a summary of the earlier turns rather than the turns, and the note names the loss, lifts the prompt's no-re-read rule for the session's own transcript alone, and hands over the jq for the user prose (log line carries 'compacted xN'). Legacy 'review': claude --print from {agent_root}/{Name}/review/ running the review skill → output parser-validated → retry → escalate (thread extraction + doc reconciliation). Keeps the timeline truthful after every session.",
       "code": [
@@ -366,7 +345,6 @@
       "config": [
         "~/.claude/jstack/review.json"
       ],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/session-review.sh",
@@ -377,8 +355,8 @@
     },
     {
       "id": "push",
-      "kind": "skill",
       "name": "Push",
+      "slug": null,
       "status": "live",
       "description": "Commits and pushes the work touched in the current session to whatever repo(s) those files live in — supports session-scoped (default) or all-pending (`all`) modes, and `0` to commit without pushing.",
       "code": [
@@ -386,7 +364,6 @@
         "bin/session-files"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/skills.sh",
@@ -395,14 +372,13 @@
       "subsystems": [
         {
           "id": "session-files",
-          "kind": "subsystem",
           "name": "Session File List",
+          "slug": null,
           "description": "Prints the paths a session wrote, read from its own transcript — the stage list for /push, so which files are mine is never inferred from a shared working tree.",
           "code": [
             "bin/session-files"
           ],
           "config": [],
-          "docs": [],
           "test": {
             "type": "script",
             "path": "tests/session-files.sh",
@@ -416,8 +392,8 @@
     },
     {
       "id": "report",
-      "kind": "skill",
       "name": "Report",
+      "slug": null,
       "status": "live",
       "description": "Closes out a task: every finding is settled as its own commit or a filed GitHub issue before the report is written, so nothing real leaves the session as prose.",
       "code": [
@@ -425,7 +401,6 @@
         "bin/file-issue"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/skills.sh",
@@ -434,14 +409,13 @@
       "subsystems": [
         {
           "id": "file-issue",
-          "kind": "subsystem",
           "name": "Issue Filing",
+          "slug": null,
           "description": "Files a GitHub issue for an unfixed finding AND places it on the board its owner reads, resolving repo -> project -> intake column live from GitHub. Exactly one type label (bug / optimization / feature) is required and created on repos that lack it.",
           "code": [
             "bin/file-issue"
           ],
           "config": [],
-          "docs": [],
           "test": {
             "type": "script",
             "path": "tests/file-issue.sh",
@@ -455,8 +429,8 @@
     },
     {
       "id": "elevator",
-      "kind": "skill",
       "name": "Elevator",
+      "slug": null,
       "status": "live",
       "description": "Delivers a finished unit of work spoken aloud in three or four short blocks - where it stands, what it took, what is next - with no paths, symbol names, shas, issue numbers or counts in it. Carries report's settling obligation: unsettled work is fixed-or-filed and pushed before it is spoken.",
       "code": [
@@ -464,7 +438,6 @@
         "commands-stage/elevator.md"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/skills.sh",
@@ -475,15 +448,14 @@
     },
     {
       "id": "issue",
-      "kind": "skill",
       "name": "Issue",
+      "slug": null,
       "status": "live",
       "description": "Works one assigned GitHub issue from open to a PR: reads the brief, builds the fix in a worktree, opens the PR, answers on the issue. Cards move process-side on the events the worker fires; the session never places one.",
       "code": [
         "skills/issue/SKILL.md"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/skills.sh",
@@ -492,8 +464,8 @@
       "subsystems": [
         {
           "id": "place-issue",
-          "kind": "subsystem",
           "name": "Board Placement",
+          "slug": null,
           "description": "Puts an existing issue on a work board and sets its status column. The board is named by configuration (board.project_id, else board.org) or by --project-id/--owner; its title and columns are read live from GitHub.",
           "code": [
             "bin/place-issue"
@@ -501,7 +473,6 @@
           "config": [
             "$JSTACK_ISSUE_WORK_CONFIG, else {config_dir}/issue_work.json - board.org, board.project_id, board.title"
           ],
-          "docs": [],
           "test": {
             "type": "script",
             "path": "tests/place-issue.sh",
@@ -512,14 +483,13 @@
         },
         {
           "id": "issue-worktree",
-          "kind": "subsystem",
           "name": "Worktree Interlock",
+          "slug": null,
           "description": "Takes the worktree for an issue, or refuses to work beside a session that already holds it. Tries the create form first and treats its failure as the signal that somebody has been here, then scans the live process table for an owner before calling it a resume.",
           "code": [
             "bin/issue-worktree"
           ],
           "config": [],
-          "docs": [],
           "test": {
             "type": "script",
             "path": "tests/issue-worktree.sh",
@@ -532,8 +502,8 @@
     },
     {
       "id": "task",
-      "kind": "skill",
       "name": "Task",
+      "slug": null,
       "status": "live",
       "description": "Hands a unit of work to an agent as a GitHub task issue: the issue is the task, its comments are the conversation, its PR is the delivery, the merge is the close. Filing embeds the creating session in the body and assigns the executor account - the assignment is the spawn.",
       "code": [
@@ -541,7 +511,6 @@
         "bin/task-create"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/skills.sh",
@@ -550,14 +519,13 @@
       "subsystems": [
         {
           "id": "task-create",
-          "kind": "subsystem",
           "name": "Task Filing",
+          "slug": null,
           "description": "Files the issue through file-issue (which keeps type labels, board routing and every filing degradation), embeds the creator marker resolved through bin/msg's own session->seat logic, then assigns the executor account last so the loop the worker joins is fully formed.",
           "code": [
             "bin/task-create"
           ],
           "config": [],
-          "docs": [],
           "test": {
             "type": "script",
             "path": "tests/task-create.sh",
@@ -570,8 +538,8 @@
     },
     {
       "id": "showme",
-      "kind": "skill",
       "name": "Show Me",
+      "slug": null,
       "status": "live",
       "description": "Surfaces the result of the current topic in its real viewer instead of describing it. A fidelity-ladder command: mode token raw|live picks source-code vs live-running surface, default prefers an in-code preview. Classifies the artifact (code, preview, image, doc, mockup, data, app, web page, diff) and opens it via bin/open-artifact / Xcode (xed) / sim. Optional focus arg narrows which artifact.",
       "code": [
@@ -579,7 +547,6 @@
         "bin/open-artifact"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/skills.sh",
@@ -590,8 +557,8 @@
     },
     {
       "id": "day-audit",
-      "kind": "skill",
       "name": "Day Audit",
+      "slug": null,
       "status": "live",
       "description": "Reverifies a whole day's shipped work across every repo, each audited under its OWNING agent for real domain context. Treats that day's timeline (the agents' claims) as a claims document, gathers the day's commits in each repo under repo_root (all refs), resolves each repo to its owning agent via the agent registry, fans out one regression auditor per repo-with-commits told to load that agent's role file + the repo's CLAUDE.md first (focus on bug-fix commits: real fix? regressed another issue? broke a consumer? smuggled in something big?), then synthesizes an IMPROVED/NEUTRAL/REGRESSED verdict per app and flags claim<->commit gaps. Report-only on code; always writes one timeline block recording the verdict.",
       "code": [
@@ -599,7 +566,6 @@
         "bin/log_event"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/skills.sh",
@@ -610,8 +576,8 @@
     },
     {
       "id": "review-config",
-      "kind": "system",
       "name": "Review Config Resolution",
+      "slug": null,
       "status": "live",
       "description": "The one place review.json's location is decided. root.py reads no config file by contract, so thirteen readers (5 hooks, 8 bins) each carried the same $JSTACK_REVIEW_CONFIG / ~/.claude/jstack/review.json literal independently — agreeing by coincidence, not construction. review_config.py is a stdlib-only sibling of root.py exposing path() and load(); every reader imports it instead of restating the default.",
       "code": [
@@ -620,7 +586,6 @@
       "config": [
         "~/.claude/jstack/review.json"
       ],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/review-config.sh",
@@ -631,8 +596,8 @@
     },
     {
       "id": "root-derivation",
-      "kind": "system",
       "name": "Root Derivation",
+      "slug": null,
       "status": "live",
       "description": "The one declaration a jStack install derives its tree from. $JSTACK_ROOT (else a caller-supplied cfg 'root', else $HOME) yields Agents/, Systems/, Config/, State/, Logs/ and Credentials/ by structure — visible, declared folders, never a hidden dotfolder, because a hidden state dir is a second shadow root and that is the disease this cures. Each derived dir keeps its own env override above the derivation and a cfg key between them, so an install that names dirs explicitly is untouched by the derivation existing. Also the single definition of an agent — a directory under agents_dir() with a CLAUDE.md, or with a seat subdir carrying one — behind agents()/resolve_agent()/seats(), replacing copies that had drifted apart across the scheduler, both hooks, repo_seat and msg. Also the one seat-address grammar behind resolve_seat/seat_at/enclosing_seat and the `seat` CLI: an agent alone is its cockpit, hyphens walk down the seat tree, a seat holding its own chat/ resolves to that operator seat, and a pad is never a seat nor walked through to find one. The hyphen is structure here, which is why resolve_agent's separator fold is the wrong tool for an address — it reads work-ops and workops as one agent, so reached for by an addressing caller it answers None for every hyphenated seat id. A Seat derives all three spellings (the hyphen id, the timeline slash form, the directory) from one resolution, because hand-built at their use sites they drifted: a wake booked from alice/social/threads was labelled alice-social and booted one seat above the session that asked for it.",
       "code": [
@@ -640,7 +605,6 @@
         "bin/seat"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/root.sh",
@@ -651,8 +615,8 @@
     },
     {
       "id": "suite-tree-pin",
-      "kind": "system",
       "name": "Suite tree pin",
+      "slug": null,
       "status": "live",
       "description": "Makes jStack's own suite answer about the checkout it ships in. The pre-push gate runs the tests with JSTACK_PYTHON pointed at the host's venv (the scheduler suite needs dateutil), and that venv carries a .pth doing sys.path.insert(0, ~/jStack/plugins/jstack) so the host's daemon can find the plugin. Position 0 outranks PYTHONPATH, and every issue is worked in a worktree by mandate — so `import root` in a test resolved to the MAIN checkout: a false red on root.sh's shipping-tree guard, and a false green for any change to root.py, repo_seat.py or scheduler/* pushed from a worktree. tests/lib/pin-plugin-root.sh is sourced by every test that starts an interpreter touching plugin python; it fronts tests/lib on PYTHONPATH, where a sitecustomize imports jstack_pin — sitecustomize being the one hook imported after the last .pth — and then asserts the pin took, exiting the test if it did not.",
       "code": [
@@ -671,15 +635,14 @@
     },
     {
       "id": "doctor",
-      "kind": "tool",
       "name": "Doctor",
+      "slug": null,
       "status": "live",
       "description": "Install validator — one command that answers 'is this jStack working, and if not which part'. Thirteen checks over the same seams the tools read at runtime (root derivation, agent resolution, the spawn path, hooks.json, the rules/commands stages, the scheduler service), graded ok/warn/fail with the worst grade as the exit status. Read-only: it never creates the paths it reports on.",
       "code": [
         "bin/jstack-doctor"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/doctor.sh",
@@ -690,8 +653,8 @@
     },
     {
       "id": "scheduler",
-      "kind": "system",
       "name": "Scheduler",
+      "slug": null,
       "status": "live",
       "description": "Deterministic daemon that fires one-time and recurring agent runs on RFC-5545 RRULE schedules — the piece that lets jStack START a session, not just review and remember one. Timeout counts from spawn, the daemon owns child pgids, TTFT/stall watchdogs kill hung turns, catch-up covers downtime.",
       "code": [
@@ -701,7 +664,6 @@
         "{install}/config/scheduler.json",
         "{install}/config/schedule.json"
       ],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/scheduler.sh",
@@ -710,8 +672,8 @@
       "subsystems": [
         {
           "id": "scheduler-bare-install",
-          "kind": "system",
           "name": "Scheduler — bare install",
+          "slug": null,
           "status": "live",
           "description": "The guarantee that a fresh install can schedule before it has installed anything. python-dateutil is the package's only third-party dependency and only recurring jobs need it; one-shot jobs are how a message wake and a self-scheduled follow-up are delivered, so they must book on a stock interpreter. Held by a lazy accessor (occurrences.get_rrulestr) that both call sites and the registry validator go through.",
           "code": [
@@ -719,7 +681,6 @@
             "scheduler/registry.py"
           ],
           "config": [],
-          "docs": [],
           "test": {
             "type": "script",
             "path": "tests/scheduler-bare.sh",
@@ -730,8 +691,8 @@
         },
         {
           "id": "schedule-self",
-          "kind": "system",
           "name": "Scheduler — self-booked wakes",
+          "slug": null,
           "status": "live",
           "description": "The self-wake primitive: an agent's 'I'll check back at three' becomes a real one-shot or a loud non-zero exit, never a silent nothing. bin/schedule-self infers agent and seat from cwd through root.py, reads times in the scheduler's configured timezone rather than a hardcoded region, refuses a time already past, pins the seat as the job's workspace, and books through `scheduler.cli add-once` — the same subprocess path the inbox wake uses, so there is one way to book a job. --resume fork-resumes the calling conversation: session id from $CLAUDE_CODE_SESSION_ID, workspace pinned to the directory the session started in because that string is what names the transcript's project slug. An omitted timeout ships no per-job value so the category's runway governs; pinning the global default at the call site would silently override the category and kill a legitimately-long wake mid-flight.",
           "code": [
@@ -739,7 +700,6 @@
             "root.py"
           ],
           "config": [],
-          "docs": [],
           "test": {
             "type": "script",
             "path": "tests/schedule-self.sh",
@@ -750,15 +710,14 @@
         },
         {
           "id": "scheduler-service-install",
-          "kind": "system",
           "name": "Scheduler — service install",
+          "slug": null,
           "status": "live",
           "description": "The missing half of a fresh install: booking works everywhere, firing only works where a daemon runs, so the default experience of a second machine was 'I scheduled it and nothing happened' — the most confusing failure the system can produce. The daemon has two shapes and the machine decides which. Where jStack Hub is installed it is one of the HUB's own sealed services (live.jstack.hub.scheduler, plist inside the bundle, registered by the signed app through SMAppService, run by JStackRuntime) — so bin/jstack-scheduler REFUSES install there and its status/restart/logs/uninstall act on that service; macOS groups background items by the registering app, so all of jStack is one Login Items row instead of one row per daemon, and one plist means one claim on the daemon's port. Without a Hub bin/jstack-scheduler turns `python3 -m scheduler` into a supervised per-user service it owns (launchd LaunchAgent on macOS, systemd user unit on Linux) generated from the same resolution the daemon boots with: the resolved root frozen into the definition because launchd strips the environment, explicit SCHEDULER_*/JSTACK_* overrides passed through, spawn_dirs expanded into the service PATH so a stripped environment cannot lose `claude`, and stdout/stderr under root.state_dir() — never the checkout. Idempotent install, ownership-stamped files it refuses to overwrite when it did not write them, --dry-run on install and uninstall, and a status that probes definition, process and API separately rather than reporting one and implying the others.",
           "code": [
             "bin/jstack-scheduler"
           ],
           "config": [],
-          "docs": [],
           "test": {
             "type": "script",
             "path": "tests/scheduler-install.sh",
@@ -772,8 +731,8 @@
     },
     {
       "id": "agent-inbox",
-      "kind": "system",
       "name": "Agent Inbox",
+      "slug": null,
       "status": "live",
       "description": "Addressed messaging in two forms — an UPDATE to a seat, delivered once at its next SessionStart; a TASK to a session, which spawns one, ties it to the sender's, and opens a two-way channel enforced at Stop. bin/msg writes a `messages` table alongside the timeline and is its only sanctioned writer.",
       "code": [
@@ -782,7 +741,6 @@
         "hooks/session-start-inject.py"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/msg.sh",
@@ -791,14 +749,13 @@
       "subsystems": [
         {
           "id": "inbox-guard",
-          "kind": "subsystem",
           "name": "Inbox Stop Guard",
+          "slug": null,
           "description": "Serves both ends of a channel, once per (session, message) — blocks a session that owes an answer, and hands a session the answer it asked for. Binds only what is addressed to that exact session: the [inbox:N] its own first prompt was woken with, or a row bound to its session id.",
           "code": [
             "hooks/stop-inbox-guard.py"
           ],
           "config": [],
-          "docs": [],
           "test": {
             "type": "script",
             "path": "tests/inbox-guard.sh",
@@ -812,8 +769,8 @@
     },
     {
       "id": "repo-seats",
-      "kind": "system",
       "name": "Repo Seats",
+      "slug": null,
       "status": "live",
       "description": "Gives a seat to a session whose cwd is a repo instead of a workspace directory — the shape an IDE forces, since editors fix cwd to the checked-out repo. repo_seat.py resolves the directory to the agent that owns it via the agent registry's `repos` (the same map /jstack:day-audit dispatches on), and to that agent's own registered `workspace` read back as a seat, so IDE work joins the agent's one running memory instead of starting cold and ending silent. Resolution: git toplevel → basename → remote.origin.url (carries worktrees) → longest normalized prefix (carries `<Repo>-issue-42`), names normalized so Acme_iOS == Acme-iOS == git@github.com:org/Acme_iOS.git. A real seat directory always wins over the registry; `\"active\": false` entries never claim. Consulted by the SessionStart injection hook and the session-end engine only after normal {agent_root}-relative resolution comes up empty, so a host with no registry is unaffected. bin/ide-bridge wires the IDE half over ACP: an editor will run any Agent Client Protocol agent as a subprocess with the open project as its working directory, which is both halves at once — our own CLI, and the cwd the seat resolves from. bin/acp-agent is that subprocess; registration is one manual step in the IDE's own UI (Xcode: Settings > Intelligence > Add an Agent... > Add an ACP Agent, Executable = bin/acp-agent, everything else empty) because the IDE stores it with no documented defaults key, and one registration covers every repo. acp-agent fixes the two things that would otherwise leave the session a stranger: @zed-industries/claude-code-acp bundles its own CLI inside the Agent SDK which loads no plugins (so no hooks, no seat, no timeline, and the SDK's model rather than the host's), answered by pointing CLAUDE_CODE_EXECUTABLE at the installed CLI; and an IDE launches subprocesses login-less, with PATH down to /usr/bin:/bin:/usr/sbin:/sbin and often no USER, which hides node/claude/the adapter and alone makes the keychain read fail — both rebuilt before anything resolves, and the same bare PATH is why acp-agent carries `from __future__ import annotations` (system python3 is 3.9). CLAUDE_CONFIG_DIR is deliberately left unset so the CLI reads the login keychain: the IDE session is signed in because the terminal is, with no second sign-in and no download. ide-bridge also links each owned repo's auto-memory to its agent's, refusing to overwrite a repo that already holds memories of its own. The earlier approach — pointing the IDE's built-in agent at the host config directory via IDEChatOverrideAgenticHomeDirectory — is retired as unworkable and flagged by status if still set: setting CLAUDE_CONFIG_DIR at all (any path, the host's own included) moves Claude Code off the login keychain onto a credentials file, and the built-in agent authenticates through the IDE's own sign-in (com.apple.dt.Xcode.ClaudeAgent.*, passed to the CLI as CLAUDE_CODE_OAUTH_REFRESH_TOKEN) which no config directory satisfies. A repo-seated session is also handed its role files as a <jstack-identity> block — the shared protocol, the agent's role file and the seat's — because walk-up climbs ancestors and the workspace is a sibling of the checkout, so a repo session would otherwise arrive with no identity at all; a session already in the workspace gets nothing extra (inject_identity: false disables it).",
       "code": [
@@ -828,7 +785,6 @@
       "config": [
         "~/.claude/jstack/review.json"
       ],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/repo-seat.sh",
@@ -838,8 +794,8 @@
     },
     {
       "id": "commit-identity-guard",
-      "kind": "system",
       "name": "Commit identity guard",
+      "slug": null,
       "status": "live",
       "description": "Pre-commit hook for the jStack checkout itself: this repo is public, and a commit made under the wrong local git identity once put a private employer email into its history. The hook refuses any commit whose author or committer email is off an explicit allowlist (the org agent account, the owner's GitHub noreply, and the historical agent@local), and the refusal message states the `git config user.email` fix. Default-deny: a new identity is added to the allowlist in the hook file, never forced past it. .git/hooks is untracked, so the versioned copy lives at githooks/pre-commit and a clone restores it with `ln -s ../../plugins/jstack/githooks/pre-commit .git/hooks/pre-commit` — the same symlink pattern as the pre-push gate.",
       "code": [
@@ -853,8 +809,8 @@
     },
     {
       "id": "identity-scrub",
-      "kind": "system",
       "name": "Org-identity scrub gate",
+      "slug": null,
       "status": "live",
       "description": "The plugin was built inside one private operation before it shipped public, and its release history is squashed: whatever identity sits in the tree at a cut is permanent. This gate scans every file the working tree would ship — tracked, plus untracked files git does not ignore, since a new file is untracked exactly when its author runs the gate before `git add` — (contents and paths) for the terms of that operation — its people, its principal's persona, its closed-source siblings, its machine paths — and fails naming file, line and term. One extensible term list; a per-(file, term) allowlist where each load-bearing wire literal (the shipped default board name, the commit-identity allowlist's own addresses) carries its reason; a stale allowlist entry fails too, so an exemption outlives its carrier by zero releases. Lowercase `boss`/`@boss` is deliberately off the list: the refused address and the `--from boss` convention are shipped behavior, only the capitalized persona is banned.",
       "code": [
@@ -868,8 +824,8 @@
       "subsystems": [
         {
           "id": "identity-scrub-untracked",
-          "kind": "system",
           "name": "Scrub reach into unstaged files",
+          "slug": null,
           "status": "live",
           "description": "The scrub once listed only `git ls-files`, so a new file run through the gate before staging passed unread and reached public main. The scan now also lists `--others --exclude-standard`, and its count line splits tracked from untracked.",
           "code": [
@@ -885,8 +841,8 @@
     },
     {
       "id": "release-reachability",
-      "kind": "system",
       "name": "Version-bump gate",
+      "slug": null,
       "status": "live",
       "description": "A plugin is installed BY VERSION: the CLI caches the tree under <market>/<plugin>/<version>/ and `plugin update` compares numbers, never contents. So a runtime file changed on main without a bump is invisible — every installed machine keeps running the cached copy while `update` answers \"already at the latest version\", and nothing anywhere reports the drift. Five commits shipped that way behind an unbumped 0.59.0. This gate finds the commit that set the version now on disk (keyed on the version VALUE, so editing the manifest's description does not read as a release), then fails if anything under plugins/jstack outside tests/ moved since — naming each commit. tests/ is excluded because nothing an installed copy runs comes from there. It reads history, so where there is none to read — a shallow clone, an unpacked tarball — it says SKIP and stands down rather than reporting a green it cannot see.",
       "code": [
@@ -901,8 +857,8 @@
     },
     {
       "id": "structure-manifest",
-      "kind": "system",
       "name": "Structure manifest",
+      "slug": null,
       "status": "live",
       "description": "The repo is a closed set at both of its roots — the repo top and the plugin top — declared entry-by-entry with reasons in structure.json, the same treatment a host's home root gets. New addition = manifest edit with a reason in the same commit; a tracked entry the manifest does not name blocks the push (the gate's layer 2 runs every tests/*.sh), and a manifest entry with nothing tracked behind it is a stale claim that blocks the same way. The listing is derived from git-tracked files — what a clone gets — never a raw directory read, because the checkout is shared and untracked work-in-progress is not the repo's shape. The manifest's _doc also carries the boundary law this structure exists to defend: the plugin is mechanisms that run on a stranger's machine, parameterized only by userConfig and JSTACK_* env; the repo above it is distribution and products (catalogs, installer, app, host package); anything host-specific lives in that host's own repo on top of the plugin, never inside it.",
       "code": [],
@@ -917,8 +873,8 @@
     },
     {
       "id": "seat-pad-redirect",
-      "kind": "hook",
       "name": "Seat Pad Redirect",
+      "slug": null,
       "status": "live",
       "description": "SessionStart replaces the client's private scratchpad with a symlink to the seat's own `pad`, so everything a session writes for the user lands in the one folder the seat already shares with them instead of a per-session temp directory nobody opens. An existing scratchpad's contents are moved across rather than stranded, and a collision keeps the pad's copy and renames the incoming one by session id. Resolution is the deepest enclosing seat, so a checkout parked inside a pad belongs to the seat above it.",
       "code": [
@@ -932,8 +888,8 @@
     },
     {
       "id": "compaction-carry",
-      "kind": "hook",
       "name": "Compaction Carry",
+      "slug": null,
       "status": "live",
       "description": "PreCompact writes the checklist the summarizer must honour: uncommitted work by absolute path, the task in the user's own framing, what was ruled out and why, verification actually run, wakes booked and messages sent, and anything muted owed a restoration. Its stdout REPLACES whatever the user typed after `/compact`, so the user's own instructions are echoed first and marked as outranking the checklist, and the whole note stays short enough to read in a terminal because it is printed there too.",
       "code": [
@@ -947,8 +903,8 @@
     },
     {
       "id": "environment",
-      "kind": "hook",
       "name": "Environment",
+      "slug": "Agents/environment",
       "status": "live",
       "description": "Condition met, action lands: every environment feature is a trigger — `{id, events, engines, condition, action, dedup}` — evaluated by one dispatcher entry per event, so adding a trigger never edits hooks.json and never re-arms Codex's positional hook trust. A condition is a built-in or an outside script (normalized event JSON on stdin, exit 0 = met, stdout may carry text, keys or a dedup key); a script that errors or overruns is not met and logged, never a broken turn. Actions: inject (additionalContext, or the Stop block reason), block (PreToolUse deny), input (keys into the managed pane via an executor that settles the outcome). Every fire and its outcome land in triggers.jsonl, which the session timeline (GET /sessions/{sid}/timeline) serves as `trigger` entries.",
       "code": [
@@ -963,8 +919,8 @@
     },
     {
       "id": "compact-delivery",
-      "kind": "hook",
       "name": "Compact Delivery",
+      "slug": null,
       "status": "live",
       "description": "The environment's built-in `compact-on-delivery` trigger (Stop, both engines, input action): it types `/compact` into a session that parked at the seam, waits for the boundary to land, and hands the session back its own work. It is the PRIMARY delivery path and the only one that serves a busy session: the outside sweep only ever looks at a session that has already gone QUIET, so a session that parks at a seam and keeps working is invisible to it and this hook is all it has. The engine is resolved by address, not by name — PATH first because an install outranks a guess, then the locations install.sh writes — because the name resolves through one symlink that `install.sh --uninstall` removes and nothing re-creates, and a hook that could only see the name exited 0 on every Stop for hours while the host sat installed and working. `--which` reports the resolved engine without delivering, so a health probe grades the real thing rather than re-deriving the search.",
       "code": [
@@ -979,8 +935,8 @@
     },
     {
       "id": "codex-compaction-carry",
-      "kind": "hook",
       "name": "Codex Compaction Carry",
+      "slug": null,
       "status": "live",
       "description": "Codex compacts server-side: the window is rebuilt from the user's own messages plus the developer prompts, and every assistant message and every tool result in it is dropped. Neither compaction hook on that client carries `additionalContext`, so there is no summarizer to steer — this reads the residue back off the rollout, which compaction does not touch, and injects it at EVERY boundary because an injected developer message does not survive the next one. Only what a session cannot reconstruct: the commands it ran and its own last words, with the budget going to what cannot be re-run.",
       "code": [
@@ -995,8 +951,8 @@
     },
     {
       "id": "memory-index-ceiling",
-      "kind": "hook",
       "name": "Memory Index Ceiling",
+      "slug": null,
       "status": "live",
       "description": "PreToolUse caps the auto-memory index at a readable length, because an index that grows without bound is loaded into every session of that project and stops being an index. A Write is judged on the content in the payload; an Edit or MultiEdit is judged on the file as it stands on disk. The denial names the current count and the layers that own durable rules instead, so the answer to a full index is moving a line, not deleting one.",
       "code": [
@@ -1010,8 +966,8 @@
     },
     {
       "id": "attention-marker",
-      "kind": "hook",
       "name": "Attention Marker",
+      "slug": null,
       "status": "live",
       "description": "Raises the waiting dot when a session is blocked on a person and lowers it the moment anything resolves, so a remote board can tell a session that needs an answer from one that is simply thinking. Only a real dialog counts — the two dialog tools and a permission notification — while an idle notification does not. The marker lands in the state directory the Hub's embed marker DECLARES, not one the hook guesses, which is what makes it work on a machine whose Hub is mounted into another server; the same file also carries the turn clock, opened on a prompt and closed at the seam.",
       "code": [
@@ -1025,8 +981,8 @@
     },
     {
       "id": "host-loader",
-      "kind": "hook",
       "name": "Host Loader",
+      "slug": null,
       "status": "live",
       "description": "The one place a hook finds the host package. parents[3] of a hook is the repo only in a checkout; Claude Code and Codex run an installed plugin from their plugin cache, where that path holds nothing, so every host-importing hook exited 0 having done nothing on every installed machine while the suites, run from a checkout, passed. _host.py resolves the checkout beside the plugin or through the directory marketplace it was installed from, records a failed load in one line jstack-doctor's host check reads, and re-execs once under the checkout venv when the PATH python is below the host's floor, stdin handed over.",
       "code": [
@@ -1040,8 +996,8 @@
     },
     {
       "id": "context-ceiling",
-      "kind": "hook",
       "name": "Context Ceiling",
+      "slug": null,
       "status": "live",
       "description": "Tells a session it has got heavy while ending the turn is still cheap, on the load meter's measured cuts rather than the client's configured window — a running session resolves that window once at startup and never re-reads it. Fires once per band on the CROSSING, heaviest band first so a double jump takes the louder, and names the session's own measured floor and what a boundary would free rather than a generic figure. No band at any size prescribes a handoff, because handing off lands below a compaction of the same session and pays for it with the whole live thread.",
       "code": [
@@ -1056,8 +1012,8 @@
     },
     {
       "id": "turn-budget",
-      "kind": "hook",
       "name": "Turn Budget",
+      "slug": null,
       "status": "live",
       "description": "Caps how long an UNATTENDED run may keep taking turns, because the failure mode of a session nobody is watching is not a wrong answer but an endless one. A soft cut warns with the count, the share of turns that carried no tool call, and the hard cut ahead; the hard cut denies the tool and says to commit, push and book a wake rather than ask to continue. Only sessions with no human engaged are policed — a typed prompt, a mode row or a CLI rollout exempts a session at any count — and a missing or corrupt budget file fails open to the shipped default.",
       "code": [
@@ -1071,8 +1027,8 @@
     },
     {
       "id": "session-environment",
-      "kind": "system",
       "name": "Session Environment",
+      "slug": null,
       "status": "live",
       "description": "How a session WORKS — deliver by distribute or by build, run the simulator journey or skip it, one agent or one per plan stage — said once per session or per agent and carried by three hooks instead of restated at the top of every sitting. Entry states what is in force, a flip between prompts emits the one line that moved, and a matching tool call repeats the directive once per session per value. Every rendered string comes from the host registry, so the four surfaces cannot word a setting four ways, and a value at its default renders NOTHING anywhere: a host where nobody has set anything injects not one word into any session.",
       "code": [
@@ -1085,7 +1041,6 @@
         "../../host/jstack_host/environment.py"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/env-announce.sh",
@@ -1096,8 +1051,8 @@
     },
     {
       "id": "work-harness",
-      "kind": "system",
       "name": "Work Harness",
+      "slug": null,
       "status": "live",
       "description": "Plan mode becomes rows, on both engines. `permission_mode: \"plan\"` is on every hook payload of Claude and Codex alike and nothing read it before this; it is the whole cross-vendor seam. The row is minted at the first plan-mode prompt, the stages are parsed at approval, and each stage declares the proof that closes it — command, commit, artifact, manual or none. The writer refuses to close a stage whose declared gate has no passing proof, so \"is this done\" is answered by a stage id and its receipt rather than by a sentence. `none` is a real answer: the bureaucracy scales with the severity of the change instead of taxing a one-line tweak.",
       "code": [
@@ -1111,7 +1066,6 @@
         "../../host/jstack_host/plan_parse.py"
       ],
       "config": [],
-      "docs": [],
       "test": {
         "type": "script",
         "path": "tests/plan-hooks.sh",
