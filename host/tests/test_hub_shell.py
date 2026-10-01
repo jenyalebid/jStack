@@ -10,8 +10,11 @@ Runs against a real tmux server on a throwaway socket, never the live
 `jremote` one — same convention as `test_jremote_window_invariant.py`.
 """
 
+import os
+import select
 import shutil
 import subprocess
+import time
 
 import pytest
 
@@ -67,3 +70,41 @@ def test_the_reaper_never_touches_it(sock, monkeypatch):
                         lambda: {"processes": []})
     managed.reconcile(grace=0.0)
     assert hub_shell.is_open()
+
+
+def test_it_opens_at_the_install_root(sock, monkeypatch, tmp_path):
+    """Not the dashboard's cwd — wherever launchd started the host is a place
+    nobody chose to land in."""
+    monkeypatch.setenv("JSTACK_ROOT", str(tmp_path))
+    hub_shell.ensure()
+    r = subprocess.run(managed._t("display-message", "-p", "-t", hub_shell.NAME,
+                                  "#{pane_current_path}"),
+                       capture_output=True, text=True)
+    assert os.path.realpath(r.stdout.strip()) == os.path.realpath(tmp_path)
+
+
+def test_a_typed_line_runs_through_the_attach_client(sock, monkeypatch):
+    """The proof the shell is usable is a command's OUTPUT, not the echo of
+    what was typed: `printf` prints a string that appears nowhere in the line
+    itself, so seeing it means the line ran."""
+    # The attach client runs on the host's minimal env, which carries no
+    # TMUX_TMPDIR; a caller's scratch one would put the server elsewhere.
+    monkeypatch.delenv("TMUX_TMPDIR", raising=False)
+    hub_shell.ensure()
+    pid, master = hub_shell._spawn_attach(100, 30)
+    try:
+        time.sleep(1.5)
+        os.write(master, b"printf '%s-%s\\n' hubshell ran\r")
+        seen, deadline = b"", time.time() + 10
+        while b"hubshell-ran" not in seen and time.time() < deadline:
+            r, _, _ = select.select([master], [], [], 0.2)
+            if r:
+                try:
+                    seen += os.read(master, 65536)
+                except OSError:
+                    break
+        assert b"hubshell-ran" in seen
+    finally:
+        os.close(master)
+        os.kill(pid, 15)
+        os.waitpid(pid, 0)
