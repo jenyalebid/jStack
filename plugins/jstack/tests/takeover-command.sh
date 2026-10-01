@@ -122,6 +122,8 @@ BRIEF="$(opt --prompt-file)"
 KICK="$(opt --first-prompt)"
 [[ -n "$KICK" && "$KICK" == *"verify what it claims"* ]] \
   && pass "--first-prompt makes it a task, not a staged context" || fail "kick ($KICK)"
+[[ "$KICK" == "[system prompt] "* ]] \
+  && pass "the kick carries the shared injected tag" || fail "kick tag ($KICK)"
 
 # 3. The briefing is a pointer and a mandate. Not a summary — that is the
 #    whole reason this command is not handoff.

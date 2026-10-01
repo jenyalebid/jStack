@@ -45,8 +45,17 @@ def test_first_prompt_is_positional_and_last():
     It is quoted, not spliced like claude_args: this string is user prose."""
     _, extra = spawn.build_shell_parts("T", "/tmp/b", "--foo",
                                        first_prompt="it's \"live\" now")
-    assert extra.endswith(""" 'it'"'"'s "live" now'""")
-    assert extra.index("--foo") < extra.index("'it'")
+    assert extra.endswith(""" '[system prompt] it'"'"'s "live" now'""")
+    assert extra.index("--foo") < extra.index("'[system prompt] it'")
+
+
+def test_first_prompt_carries_the_injected_tag_once():
+    """Every spawn's kick is a machine speaking in the user's seat, so it is
+    tagged at delivery — and a caller that already tagged it gets no second."""
+    _, plain = spawn.build_shell_parts("T", "", "", first_prompt="begin working")
+    _, pre = spawn.build_shell_parts("T", "", "", first_prompt="[system prompt] begin working")
+    assert plain.endswith("'[system prompt] begin working'")
+    assert plain == pre
 
 
 def test_first_prompt_absent_changes_nothing():

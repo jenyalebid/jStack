@@ -82,7 +82,11 @@ def build_shell_parts(name: str, prompt_file: str, claude_args: str,
     if claude_args:
         extra += (" " if extra else "") + claude_args
     if first_prompt:
-        extra += (" " if extra else "") + shlex.quote(first_prompt)
+        # Every caller here is a machine — a person's own words reach a pane
+        # through the composer, never through a spawn — so the kick is tagged
+        # at delivery rather than trusted to each caller.
+        from .prompt_files import tagged
+        extra += (" " if extra else "") + shlex.quote(tagged(first_prompt))
     return prelude, extra
 
 

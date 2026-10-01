@@ -1194,7 +1194,7 @@ def test_the_nudge_points_a_resumed_session_at_rows_it_still_has(docket, monkeyp
 
     assert cod.send_continue("jr-x", cod.docket(docket("s", "in_progress")) == "open")
     assert cod.DOCKET_LINE in typed[-1]
-    assert typed[-1].startswith("[compact-on-delivery hook, not the user]")
+    assert typed[-1].startswith("[system prompt] Compact-on-delivery hook, not the user:")
 
 
 @pytest.mark.parametrize("statuses", [
@@ -1296,7 +1296,7 @@ def test_the_continue_claims_only_what_every_caller_knows():
     but it must not assert a task list (nobody checked one) and it must keep the exit for
     a session whose summary turns out to read as finished."""
     assert "task list" not in cod.CONTINUE
-    assert cod.CONTINUE.startswith("[compact-on-delivery hook, not the user]")
+    assert cod.CONTINUE.startswith("[system prompt] Compact-on-delivery hook, not the user:")
     assert "asking to be continued" in cod.CONTINUE
     assert "inventing work" in cod.CONTINUE
 
@@ -1495,7 +1495,7 @@ def test_the_nudge_cannot_be_mistaken_for_the_user(near_ceiling):
     """It arrives as a user turn. A bare "continue" would leave a transcript claiming the user
     asked for something nobody asked for — worse than a misplaced `/compact`, because
     that one has no voice."""
-    assert cod.CONTINUE.startswith("[compact-on-delivery hook, not the user]")
+    assert cod.CONTINUE.startswith("[system prompt] Compact-on-delivery hook, not the user:")
     assert "nobody has said anything new" in cod.CONTINUE
     assert "stop rather than inventing work" in cod.CONTINUE, "no exit for a done session"
 

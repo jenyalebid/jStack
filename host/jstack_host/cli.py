@@ -423,7 +423,8 @@ def _cmd_welcome(args) -> int:
         print(f"{agent_id}'s workspace is missing at {cwd}", file=sys.stderr)
         return 1
     try:
-        sid = desk.create(cwd, nudge=WELCOME_PROMPT)
+        from .prompt_files import tagged
+        sid = desk.create(cwd, nudge=tagged(WELCOME_PROMPT))
     except (OSError, RuntimeError) as e:
         print(f"could not start a session: {e}", file=sys.stderr)
         return 1
