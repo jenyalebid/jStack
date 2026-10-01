@@ -385,6 +385,47 @@ def stage_mesh_tools(stack: Path, packages: Path) -> Path:
     return staged
 
 
+#: Where a tree names the Swift executables its bundle seals. The recipe rides
+#: in the tree being built, never in the builder: a hub on one line builds the
+#: other, and a builder that named its own line's files asked main for a
+#: `Windows.swift` main has never had (#305).
+EXECUTABLES = "host/macos/executables.json"
+
+#: A tree cut before it carried `EXECUTABLES` — main through 26.9.x. The
+#: windows helper is the one executable those trees differ on, so it is built
+#: exactly where the tree has its source.
+PRE_RECIPE = {"JStackHub": "host/macos/ServiceControl.swift",
+              "JStackWindows": "host/macos/Windows.swift",
+              "JStackHostBar": "host/menubar/JStackHostBar.swift"}
+
+
+def swift_executables(stack: Path) -> dict[str, str]:
+    """`{executable: source}` for the tree at `stack`, read from that tree."""
+    recipe = stack / EXECUTABLES
+    if not recipe.is_file():
+        return {name: relative for name, relative in PRE_RECIPE.items()
+                if name != "JStackWindows" or (stack / relative).is_file()}
+    try:
+        targets = json.loads(recipe.read_text())
+    except ValueError as exc:
+        raise ValueError(f"{EXECUTABLES} is not JSON: {exc}") from exc
+    if not isinstance(targets, dict) or not targets:
+        raise ValueError(f"{EXECUTABLES} must map each executable to its source")
+    for name, relative in targets.items():
+        if not (isinstance(name, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", name)):
+            raise ValueError(f"{EXECUTABLES} names an invalid executable: {name!r}")
+        if not isinstance(relative, str) or Path(relative).is_absolute() or ".." in Path(relative).parts:
+            raise ValueError(f"{EXECUTABLES} gives {name} a source outside the tree: {relative!r}")
+        if not (stack / relative).is_file():
+            raise ValueError(f"{EXECUTABLES} names {relative} for {name}; the tree has no such file")
+    missing = {"JStackHub", "JStackHostBar"} - targets.keys()
+    if missing:
+        # The bundle's own executable and the menu role's: without them the
+        # build seals an app that cannot launch.
+        raise ValueError(f"{EXECUTABLES} leaves out {', '.join(sorted(missing))}")
+    return targets
+
+
 def build(stack: Path, output: Path, version: str, config: dict | None = None, *, catalog=None,
           release_id=None, github_repo=None, date=None, trust_key=None,
           channel=None, origin=None, debug=False) -> Path:
@@ -479,9 +520,7 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
              "-framework", "Security", "-framework", "CoreFoundation", *origin,
              "-DJSTACK_PYTHON", "-I" + str(source / "include/python3.12"),
              str(stack / "host/macos/Runtime.c"), str(source / "Python"), "-o", str(macos / "JStackPython")])
-    for name, relative in (("JStackHub", "host/macos/ServiceControl.swift"),
-                           ("JStackWindows", "host/macos/Windows.swift"),
-                           ("JStackHostBar", "host/menubar/JStackHostBar.swift")):
+    for name, relative in swift_executables(stack).items():
         command(["xcrun", "swiftc", "-O", "-o", str(macos / name), str(stack / relative)], timeout=180)
     from .bundle_tools import bundle
     bundle(build_tool("tmux", "JSTACK_BUILD_TMUX"), macos / "tmux",

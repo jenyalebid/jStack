@@ -626,7 +626,9 @@ def build_lines(root: Path, config: dict, *, client=None) -> dict:
 
     One question per line — the tip's sha, the same forty bytes a check asks
     for — and a build only where it differs from the line's own offer. What
-    `updates build` does when nobody names a ref.
+    `updates build` does when nobody names a ref. A line that fails is
+    answered as `{"failed": reason}` and the next line still builds: one
+    line's broken tree never holds another line's machines back (#305).
     """
     refusal = build_refusal(root, config)
     if refusal:
@@ -642,7 +644,10 @@ def build_lines(root: Path, config: dict, *, client=None) -> dict:
             if installed == sha and not client_behind(config, name):
                 results[name] = {"skipped": "current", "release": release, "sha": sha}
                 continue
-            results[name] = build(root, config, ref=name)
+            try:
+                results[name] = build(root, config, ref=name)
+            except Exception as exc:
+                results[name] = {"failed": str(exc) or type(exc).__name__}
     finally:
         if owned:
             client.close()

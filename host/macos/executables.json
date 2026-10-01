@@ -1,0 +1,5 @@
+{
+  "JStackHub": "host/macos/ServiceControl.swift",
+  "JStackWindows": "host/macos/Windows.swift",
+  "JStackHostBar": "host/menubar/JStackHostBar.swift"
+}

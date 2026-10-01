@@ -143,8 +143,8 @@ def test_the_helper_is_never_handed_a_shell(monkeypatch):
 # ── the source contract ─────────────────────────────────────────────────────
 
 def test_the_helper_is_compiled_into_the_bundle():
-    source = Path(build_hub.__file__).read_text()
-    assert '("JStackWindows", "host/macos/Windows.swift")' in source
+    tree = Path(__file__).resolve().parents[2]
+    assert build_hub.swift_executables(tree)["JStackWindows"] == "host/macos/Windows.swift"
 
 
 def test_the_helper_spawns_nothing_and_scripts_nothing():
