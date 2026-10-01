@@ -146,9 +146,11 @@ class AppBackend(MacBackend):
                 from .install_host import is_loaded
                 _, _, label = specification(Path(self.config["menubar_path"]), self.config, "host")
                 if is_loaded(label):
+                    self.unverified = "the host service is loaded, but this machine runs it off"
                     return False
             return True
-        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+            self.unverified = f"service approvals could not be read: {type(exc).__name__}: {exc}"
             return False
 
     def observe(self, job: dict) -> dict:

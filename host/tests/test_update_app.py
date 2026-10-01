@@ -693,3 +693,55 @@ def test_a_plugin_left_on_another_release_is_named(tmp_path, monkeypatch):
     assert not backend.verify(job)
     assert backend.unverified == ("the claude plugin is 26.9.5, not the 26.9.2 this "
                                  "release carries")
+
+
+def test_a_host_that_does_not_answer_is_named(tmp_path, monkeypatch):
+    """Work Main, 2026-09-30: verification ran while the host daemon was still
+    exiting, both API calls got nothing, and the job failed saying only that
+    "updated components failed verification" — which reads exactly like a
+    bundle that did not land, on a machine that had installed fine (#315)."""
+    import httpx
+    app = bundle(tmp_path / "Hub.app", SEALED, {})
+    token = tmp_path / "token"
+    token.write_text("t")
+    monkeypatch.setattr(update_app, "control", lambda app, action, role=None: {})
+    monkeypatch.setattr(update_plugins, "discover", lambda: {})
+    monkeypatch.setattr(update_plugins, "observed", lambda _: {})
+
+    def refused(self, url, **kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx.Client, "get", refused)
+    backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app), "token_path": str(token),
+                                               "local_url": "http://127.0.0.1:1", "machine": "m"})
+    job = {"id": "job-315", "release": "r",
+           "envelope": {"manifest": {"components": {"stack": {"version": "1"}}}},
+           "transaction": {"apps": {}, "services": {"host": "enabled"}}}
+    assert not backend.verify(job)
+    assert backend.unverified == "the host did not answer /host: connection refused"
+
+
+def test_a_host_on_another_release_is_named(tmp_path, monkeypatch):
+    app = bundle(tmp_path / "Hub.app", SEALED, {})
+    token = tmp_path / "token"
+    token.write_text("t")
+    monkeypatch.setattr(update_app, "control", lambda app, action, role=None: {})
+    monkeypatch.setattr(update_plugins, "discover", lambda: {})
+    monkeypatch.setattr(update_plugins, "observed", lambda _: {})
+
+    class Answer:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"host_id": "m", "source": {"release": "old", "sha": "a"}}
+
+    monkeypatch.setattr("httpx.Client.get", lambda self, url, **kwargs: Answer())
+    backend = update_app.AppBackend(tmp_path, {"menubar_path": str(app), "token_path": str(token),
+                                               "local_url": "http://127.0.0.1:1", "machine": "m"})
+    job = {"id": "job-315", "release": "new",
+           "envelope": {"manifest": {"components": {"stack": {"version": "1"}},
+                                     "sources": {"stack": "a"}}},
+           "transaction": {"apps": {}, "services": {"host": "enabled"}}}
+    assert not backend.verify(job)
+    assert backend.unverified == "the host is running old, not new"
