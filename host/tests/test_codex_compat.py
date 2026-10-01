@@ -40,7 +40,7 @@ def test_codex_briefing_preserves_prose_without_shell_execution(tmp_path):
     parts = shlex.split(flags)
     assert parts[0] == "-c"
     assert json.loads(parts[1].split("=", 1)[1]) == prose
-    assert parts[-1] == "go"
+    assert parts[-1] == "[system prompt] go"
     assert "--name" not in parts and "--append-system-prompt" not in parts
     assert "rm -f" in prelude
 
