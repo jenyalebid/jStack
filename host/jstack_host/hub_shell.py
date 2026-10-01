@@ -42,7 +42,7 @@ import termios
 from fastapi import APIRouter, Depends
 from starlette.websockets import WebSocket
 
-from . import managed
+from . import hostenv, managed
 from .auth import authenticate_ws, require_token
 
 NAME = "hub-shell"
@@ -60,12 +60,17 @@ def is_open() -> bool:
 
 
 def ensure() -> None:
-    """Idempotent: stands the shell up if it is not already running."""
+    """Idempotent: stands the shell up if it is not already running.
+
+    It opens at the install root, never in the host process's own cwd — that
+    is wherever launchd or a shell happened to start the dashboard, a place
+    nobody chose to land in."""
     if is_open():
         return
     shell = os.environ.get("SHELL", "/bin/zsh")
     env = {**os.environ, "PATH": managed._PATH}
-    subprocess.run(managed._t("new-session", "-d", "-s", NAME, shell, "-l"),
+    subprocess.run(managed._t("new-session", "-d", "-s", NAME,
+                              "-c", str(hostenv.stack_root()), shell, "-l"),
                   check=True, env=env)
     # Mouse and clipboard passthrough, same as a managed session's — this may
     # be the first session this tmux server ever creates, so nothing else can
