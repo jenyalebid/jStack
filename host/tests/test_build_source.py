@@ -862,3 +862,36 @@ def test_a_source_build_says_when_it_carries_a_client_the_hub_has_outgrown(tmp_p
     # A hub that publishes no Mac app of its own has nothing to compare with.
     monkeypatch.setattr(published, "MANIFEST", tmp_path / "gone.json")
     assert build_source.client_drift("109") == ""
+
+
+def test_a_line_that_cannot_build_does_not_hold_the_other_back(builder, monkeypatch):
+    """#305: main's tree failed to compile on a dev-era hub and the dev build
+    never ran. Each line is its own answer."""
+    root, feed, config, _ = builder
+    monkeypatch.setattr(build_source, "head", lambda client, repo, ref: HEAD)
+    monkeypatch.setattr(build_source, "held", lambda config, name: (None, None))
+
+    def build(where, settings, *, ref):
+        if ref == "main":
+            raise RuntimeError("xcrun failed: error opening input file Windows.swift")
+        return {"ref": ref, "release": f"r-{ref}"}
+
+    monkeypatch.setattr(build_source, "build", build)
+    result = build_source.build_lines(root, config, client=object())
+    assert result["main"] == {"failed": "xcrun failed: error opening input file Windows.swift"}
+    assert result["dev"] == {"ref": "dev", "release": "r-dev"}
+
+
+def test_updates_build_exits_nonzero_naming_the_line_that_did_not_build(tmp_path, monkeypatch, capsys):
+    from jstack_host import cli, hostenv
+    state = tmp_path / "state"
+    (state / "updates").mkdir(parents=True)
+    (state / "updates/config.json").write_text('{"github_repo": "example/stack"}')
+    monkeypatch.setattr(hostenv, "state_dir", lambda: state)
+    monkeypatch.setattr(build_source, "build_lines", lambda root, config: {
+        "main": {"failed": "no Windows.swift"}, "dev": {"ref": "dev", "release": "r"}})
+    monkeypatch.setattr("sys.argv", ["jstack-host", "updates", "build"])
+    assert cli.main() == 1
+    out = capsys.readouterr()
+    assert json.loads(out.out)["dev"]["release"] == "r"
+    assert "main did not build: no Windows.swift" in out.err

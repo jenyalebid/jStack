@@ -350,3 +350,58 @@ def test_developer_id_build_is_hardened_for_notarization(monkeypatch, tmp_path):
     signing = _signed(monkeypatch, tmp_path, {"sign_keychain": "k", "sign_identity": "Developer ID"})
     assert signing
     assert all(argv[argv.index("--options") + 1] == "runtime" for argv in signing)
+
+
+# ── the recipe rides in the tree being built (#305) ─────────────────────────
+
+def _tree(root, *files):
+    for relative in files:
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text("")
+    return root
+
+
+def test_a_tree_without_the_windows_helper_builds_without_it(tmp_path):
+    """main at 26.9.5 has no recipe and no Windows.swift; a dev-era hub
+    building it asked xcrun for the file and failed the whole build."""
+    tree = _tree(tmp_path, "host/macos/ServiceControl.swift", "host/menubar/JStackHostBar.swift")
+    assert build_hub.swift_executables(tree) == {
+        "JStackHub": "host/macos/ServiceControl.swift",
+        "JStackHostBar": "host/menubar/JStackHostBar.swift"}
+
+
+def test_a_pre_recipe_tree_that_has_the_helper_still_builds_it(tmp_path):
+    tree = _tree(tmp_path, "host/macos/ServiceControl.swift", "host/macos/Windows.swift",
+                 "host/menubar/JStackHostBar.swift")
+    assert "JStackWindows" in build_hub.swift_executables(tree)
+
+
+def test_the_tree_recipe_wins_over_the_builder(tmp_path):
+    tree = _tree(tmp_path, "host/macos/ServiceControl.swift", "host/menubar/JStackHostBar.swift",
+                 "host/macos/Later.swift")
+    (tree / build_hub.EXECUTABLES).write_text(json.dumps({
+        "JStackHub": "host/macos/ServiceControl.swift",
+        "JStackHostBar": "host/menubar/JStackHostBar.swift",
+        "JStackLater": "host/macos/Later.swift"}))
+    assert list(build_hub.swift_executables(tree)) == ["JStackHub", "JStackHostBar", "JStackLater"]
+
+
+@pytest.mark.parametrize("recipe, message", [
+    ({"JStackHub": "host/macos/ServiceControl.swift", "JStackHostBar": "host/macos/Gone.swift"},
+     "no such file"),
+    ({"JStackHub": "host/macos/ServiceControl.swift", "JStackHostBar": "../outside.swift"},
+     "outside the tree"),
+    ({"JStackHub": "host/macos/ServiceControl.swift"}, "leaves out JStackHostBar"),
+    ({"bad name": "host/macos/ServiceControl.swift"}, "invalid executable"),
+])
+def test_a_recipe_that_cannot_seal_a_bundle_is_refused(tmp_path, recipe, message):
+    tree = _tree(tmp_path, "host/macos/ServiceControl.swift", "host/menubar/JStackHostBar.swift")
+    (tree / build_hub.EXECUTABLES).write_text(json.dumps(recipe))
+    with pytest.raises(ValueError, match=message):
+        build_hub.swift_executables(tree)
+
+
+def test_this_tree_carries_a_recipe_every_source_of_which_exists():
+    tree = Path(__file__).resolve().parents[2]
+    assert (tree / build_hub.EXECUTABLES).is_file()
+    assert build_hub.swift_executables(tree)

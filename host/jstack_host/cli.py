@@ -137,11 +137,13 @@ def _cmd_updates_build(args) -> int:
     config_path, config = _updates_config(args)
     if config_path is None:
         return 1
+    failed = {}
     try:
         if args.sha and args.ref is None:
             raise release_manifest.ReleaseError("--sha pins a commit on a ref: name it with --ref")
         if args.ref is None and not args.debug:
             result = build_source.build_lines(config_path.parent, config)
+            failed = {line: item["failed"] for line, item in result.items() if "failed" in item}
         else:
             result = build_source.build(config_path.parent, config, ref=args.ref,
                                         debug=args.debug, sha=args.sha)
@@ -149,7 +151,10 @@ def _cmd_updates_build(args) -> int:
     except release_manifest.ReleaseError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    return 0
+    # The lines that built are offered either way; the exit names the one that did not.
+    for line, reason in failed.items():
+        print(f"{line} did not build: {reason}", file=sys.stderr)
+    return 1 if failed else 0
 
 
 def _cmd_emergency_stop(args) -> int:
