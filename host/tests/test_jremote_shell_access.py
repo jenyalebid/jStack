@@ -34,6 +34,8 @@ def _own_state_dir(tmp_path, monkeypatch):
     # Redeeming a shell-bearing enrolment writes the hub's own ~/.ssh/config;
     # HOME must never resolve to the real home under test.
     monkeypatch.setenv("HOME", str(tmp_path / "test-home"))
+    # The root steps lay files under the machine root; a test's is a temp dir.
+    monkeypatch.setenv("LEAF_DEST", str(tmp_path / "root"))
 
 
 class _Runner:
@@ -57,15 +59,27 @@ class _Sshd(_Runner):
     `print` answers from that state the way the real one does (stdout names
     the service only when it is loaded)."""
 
-    def __init__(self, on: bool, *, bootstrap_fails: bool = False):
+    def __init__(self, on: bool, *, bootstrap_fails: bool = False,
+                 policy_rejected: bool = False):
         super().__init__()
         self.on = on
         self.bootstrap_fails = bootstrap_fails
+        self.policy_rejected = policy_rejected
 
     def __call__(self, argv, **kw):
         self.calls.append(argv)
         out, err, rc = "", "", 0
-        if "bootstrap" in argv:
+        if shell_access.INSTALL in argv:
+            # `install src dst`, as root would: the drop-in lands in the root.
+            src, dst = Path(argv[-2]), Path(argv[-1])
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text(src.read_text())
+        elif shell_access.SSHD in argv:
+            if self.policy_rejected:
+                err, rc = "/etc/ssh/sshd_config.d/010-jremote-key-only.conf: line 3: Bad configuration option", 255
+        elif shell_access.RM in argv:
+            Path(argv[-1]).unlink(missing_ok=True)
+        elif "bootstrap" in argv:
             if self.bootstrap_fails:
                 err, rc = "Bootstrap failed: 5: Input/output error", 5
             else:
@@ -192,7 +206,7 @@ def test_a_grant_lays_no_sudoers_drop_in(tmp_path):
     steps = shell_access.enable(runner=runner, sudo=False)
     assert _step(steps, "sudoers") is None
     assert not (tmp_path / shell_access.SUDOERS_PATH).exists()
-    assert not any("sudoers" in " ".join(map(str, c)) for c in runner.calls)
+    assert not any("sudoers.d" in " ".join(map(str, c)) for c in runner.calls)
 
 
 def test_enable_leaves_remote_login_alone_when_it_was_already_on():
@@ -208,7 +222,9 @@ def test_enable_runs_launchctl_under_sudo_and_never_systemsetup():
     calling terminal; a joiner run from a stock Terminal has none (#181)."""
     runner = _Sshd(on=False)
     shell_access.enable(runner=runner, sudo=True)
-    assert all(c[0] == "sudo" and c[1] == shell_access.LAUNCHCTL for c in runner.calls)
+    assert all(c[0] == "sudo" and c[1] in (shell_access.LAUNCHCTL, shell_access.INSTALL,
+                                           shell_access.SSHD, shell_access.RM)
+               for c in runner.calls)
     assert not any("systemsetup" in " ".join(map(str, c)) for c in runner.calls)
 
 
@@ -225,6 +241,191 @@ def test_a_failed_enable_leaves_no_record_so_the_step_stays_owed():
     later = shell_access.apply_material({"authorized": [LINE_A], "peers": []},
                                         Path(os.environ["HOME"]))
     assert _step(later, "remote-login")["ok"] is False
+
+
+# ── the key-only sshd policy ────────────────────────────────────────────────
+#
+# Remote Login on is half the root step. The other half is what the open
+# door takes: a granted key, never a password — the drop-in is laid in the
+# same root moment, asked of sshd whether it parses, and lifted by detach.
+
+def test_enable_lays_the_key_only_policy_and_sshd_is_asked_to_parse_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEAF_DEST", str(tmp_path))
+    runner = _Sshd(on=True)
+    steps = shell_access.enable(runner=runner, sudo=False)
+
+    laid = tmp_path / shell_access.SSHD_POLICY_PATH
+    assert laid.read_text() == shell_access.SSHD_POLICY
+    assert _step(steps, "sshd-policy")["ok"] is True
+    assert [shell_access.SSHD, "-t"] in runner.calls
+    # First value wins in sshd_config, so the drop-in must sort before macOS's own.
+    assert laid.name < "100-macos.conf"
+    for line in ("PasswordAuthentication no", "KbdInteractiveAuthentication no",
+                 "AuthenticationMethods publickey", "PermitRootLogin no"):
+        assert line in shell_access.SSHD_POLICY
+
+
+def test_a_policy_sshd_rejects_is_lifted_in_the_same_breath(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEAF_DEST", str(tmp_path))
+    runner = _Sshd(on=True, policy_rejected=True)
+    steps = shell_access.enable(runner=runner, sudo=False)
+
+    step = _step(steps, "sshd-policy")
+    assert step["ok"] is False
+    assert "Bad configuration option" in step["note"]
+    assert not (tmp_path / shell_access.SSHD_POLICY_PATH).exists()
+    # Remote Login itself is unaffected by the policy's fate.
+    assert _step(steps, "remote-login")["ok"] is True
+
+
+def test_a_policy_already_laid_is_left_as_it_is(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEAF_DEST", str(tmp_path))
+    runner = _Sshd(on=True)
+    shell_access.enable(runner=runner, sudo=False)
+    installs = [c for c in runner.calls if shell_access.INSTALL in c]
+    assert len(installs) == 1
+
+    shell_access.enable(runner=runner, sudo=False)
+    assert len([c for c in runner.calls if shell_access.INSTALL in c]) == 1
+
+
+def test_no_policy_is_laid_when_remote_login_could_not_come_up(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEAF_DEST", str(tmp_path))
+    runner = _Sshd(on=False, bootstrap_fails=True)
+    steps = shell_access.enable(runner=runner, sudo=False)
+    assert _step(steps, "sshd-policy") is None
+    assert not (tmp_path / shell_access.SSHD_POLICY_PATH).exists()
+
+
+def test_disable_lifts_the_policy_with_the_rest(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEAF_DEST", str(tmp_path))
+    shell_access.enable(runner=_Sshd(on=True), sudo=False)
+    assert (tmp_path / shell_access.SSHD_POLICY_PATH).exists()
+
+    steps = shell_access.disable(runner=_Runner(), sudo=False, root=tmp_path,
+                                 authorized_keys=tmp_path / "authorized_keys")
+
+    assert not (tmp_path / shell_access.SSHD_POLICY_PATH).exists()
+    assert _step(steps, "sshd-policy")["ok"] is True
+
+
+def test_disable_on_a_machine_without_the_policy_says_so(tmp_path):
+    steps = shell_access.disable(runner=_Runner(), sudo=False, root=tmp_path,
+                                 authorized_keys=tmp_path / "authorized_keys")
+    assert _step(steps, "sshd-policy") == {
+        "step": "sshd-policy", "ok": True, "note": "no managed sshd policy was laid"}
+
+
+class _SshClient(_Runner):
+    """The ssh client's refusal, carrying the server's own list of methods."""
+
+    def __init__(self, offered=None, listening=True):
+        super().__init__()
+        self.offered, self.listening = offered, listening
+
+    def __call__(self, argv, **kw):
+        self.calls.append(argv)
+        if not self.listening:
+            err, rc = "ssh: connect to host 127.0.0.1 port 22: Connection refused", 255
+        else:
+            err, rc = f"someone@127.0.0.1: Permission denied ({','.join(self.offered)}).", 255
+        return type("P", (), {"returncode": rc, "stdout": "", "stderr": err})()
+
+
+def test_offered_methods_are_read_off_sshds_own_refusal():
+    client = _SshClient(["publickey", "password", "keyboard-interactive"])
+    assert shell_access.offered_methods(runner=client) == [
+        "publickey", "password", "keyboard-interactive"]
+    argv = client.calls[0]
+    # No key, no terminal, no secret: the refusal is the whole exchange.
+    assert "BatchMode=yes" in argv and "PubkeyAuthentication=no" in argv
+
+
+def test_nothing_listening_is_not_a_method_list():
+    assert shell_access.offered_methods(runner=_SshClient(listening=False)) is None
+
+
+def test_policy_status_reads_the_door_not_the_file(tmp_path):
+    (tmp_path / shell_access.SSHD_POLICY_PATH).parent.mkdir(parents=True)
+    (tmp_path / shell_access.SSHD_POLICY_PATH).write_text(shell_access.SSHD_POLICY)
+    status = shell_access.policy_status(
+        runner=_SshClient(["publickey", "password"]), root=tmp_path)
+    assert status["policy_laid"] is True
+    assert status["key_only"] is False
+
+    status = shell_access.policy_status(runner=_SshClient(["publickey"]), root=tmp_path)
+    assert status["key_only"] is True
+
+
+def test_apply_without_root_goes_through_the_administrator_prompt(tmp_path, monkeypatch):
+    monkeypatch.setattr(shell_access.os, "geteuid", lambda: 501)
+    monkeypatch.setattr(shell_access, "offered_methods",
+                        lambda runner=None, port=22: ["publickey", "password"])
+    seen = {}
+
+    def osascript(argv, **kw):
+        seen["argv"], seen["source"] = argv, kw.get("input", "")
+        return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    result = shell_access.apply_policy(apply=True, runner=osascript, root=tmp_path)
+
+    assert result["applied"] is True
+    assert seen["argv"][0].endswith("osascript")
+    source = seen["source"]
+    assert "with administrator privileges" in source
+    assert shell_access.INSTALL in source and "-o root -g wheel" in source
+    assert str(tmp_path / shell_access.SSHD_POLICY_PATH) in source
+    # sshd is asked to parse it, and a rejected policy is lifted by the same script.
+    assert f"{shell_access.SSHD} -t" in source
+    assert f"{shell_access.RM} -f" in source
+
+
+def test_a_refused_prompt_is_a_failed_step_not_an_exception(tmp_path, monkeypatch):
+    monkeypatch.setattr(shell_access.os, "geteuid", lambda: 501)
+    monkeypatch.setattr(shell_access, "offered_methods",
+                        lambda runner=None, port=22: ["publickey", "password"])
+
+    def refused(argv, **kw):
+        return type("P", (), {"returncode": 1, "stdout": "", "stderr": "User canceled. (-128)"})()
+
+    result = shell_access.apply_policy(apply=True, runner=refused, root=tmp_path)
+    assert result["applied"] is False
+    assert "canceled" in result["step"]["note"]
+
+
+def test_a_dry_run_prints_the_policy_and_what_sshd_offers(tmp_path, monkeypatch):
+    monkeypatch.setattr(shell_access, "offered_methods",
+                        lambda runner=None, port=22: ["publickey", "password"])
+    result = shell_access.apply_policy(apply=False, root=tmp_path)
+    assert result["applied"] is False
+    assert result["policy"] == shell_access.SSHD_POLICY
+    assert result["status"]["offered"] == ["publickey", "password"]
+
+
+def test_doctor_fails_a_managed_machine_a_password_opens(monkeypatch):
+    from jstack_host import doctor, mode
+    monkeypatch.setattr(shell_access, "policy_status", lambda: {
+        "sshd_answers": True, "key_only": False,
+        "offered": ["publickey", "password", "keyboard-interactive"], "policy_laid": False})
+    monkeypatch.setattr(mode, "is_hub", lambda: True)
+    result = doctor.check_sshd()
+    assert result["grade"] == doctor.FAIL
+    assert "password, keyboard-interactive" in result["detail"]
+    assert "ssh-policy --apply" in result["hint"]
+
+    monkeypatch.setattr(mode, "is_hub", lambda: False)
+    monkeypatch.setattr(mode, "is_managed", lambda: False)
+    assert doctor.check_sshd()["grade"] == doctor.WARN
+
+
+def test_doctor_is_quiet_when_ssh_is_off_or_keys_only(monkeypatch):
+    from jstack_host import doctor
+    monkeypatch.setattr(shell_access, "policy_status", lambda: {
+        "sshd_answers": False, "key_only": False, "offered": [], "policy_laid": False})
+    assert doctor.check_sshd()["grade"] == doctor.OK
+    monkeypatch.setattr(shell_access, "policy_status", lambda: {
+        "sshd_answers": True, "key_only": True, "offered": ["publickey"], "policy_laid": True})
+    assert doctor.check_sshd()["grade"] == doctor.OK
 
 
 # ── disable: detach's reverse ───────────────────────────────────────────────

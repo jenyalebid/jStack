@@ -1218,6 +1218,19 @@ def _cmd_files(args) -> int:
     return 0 if result.get("ready", result.get("status", {}).get("ready", True)) else 1
 
 
+def _cmd_ssh_policy(args) -> int:
+    """Key-only ssh on this machine: what sshd offers now, and the policy
+    that closes the password doors."""
+    import json
+    from . import shell_access
+    _adopt(args)
+    result = shell_access.apply_policy(apply=args.apply)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    if args.apply:
+        return 0 if result["applied"] else 1
+    return 0 if result["status"]["key_only"] or not result["status"]["sshd_answers"] else 1
+
+
 def _cmd_mesh(args) -> int:
     """The mesh roster against the device roster — and the purge that makes
     them agree. `audit` prints; `audit --bind` also records the inferred
@@ -2086,6 +2099,14 @@ def build_parser() -> argparse.ArgumentParser:
     ms.add_argument("--state-dir", default=None)
     ms.add_argument("--yes", action="store_true", help="remove (default: print what would go)")
     ms.set_defaults(fn=_cmd_mesh)
+
+    p = sub.add_parser("ssh-policy",
+                       help="what ssh into this machine accepts; --apply makes it keys only")
+    p.add_argument("--apply", action="store_true",
+                   help="lay the key-only sshd policy through the administrator prompt "
+                        "(default: print it and what sshd offers now)")
+    p.add_argument("--state-dir", default=None)
+    p.set_defaults(fn=_cmd_ssh_policy)
 
     p = sub.add_parser("files", help="declare and inspect selected-folder SMB access")
     files = p.add_subparsers(dest="files_cmd", required=True)

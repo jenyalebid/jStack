@@ -19,8 +19,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from . import hostenv
@@ -37,6 +39,26 @@ SUDOERS_PATH = "etc/sudoers.d/jremote-managed"
 
 KEY_FILE = "ssh/id_jremote"
 
+#: The sshd policy this module owns on a machine it grants shell on: a shell
+#: here is a granted key, never a password. A drop-in rather than an edit of
+#: sshd_config, so it is laid and lifted whole; numbered to sort before
+#: macOS's own `100-macos.conf`, because sshd keeps the *first* value it reads
+#: for a keyword. Relative to the machine root like `SUDOERS_PATH`.
+SSHD_POLICY_PATH = "etc/ssh/sshd_config.d/010-jremote-key-only.conf"
+SSHD_POLICY = (
+    "# >>> jremote managed sshd policy >>>\n"
+    "# Laid by jStack shell access; lifted whole by detach. Do not edit.\n"
+    "PasswordAuthentication no\n"
+    "KbdInteractiveAuthentication no\n"
+    "ChallengeResponseAuthentication no\n"
+    "PermitRootLogin no\n"
+    "AuthenticationMethods publickey\n"
+    "# <<< jremote managed sshd policy <<<\n"
+)
+#: What a probe may find sshd offering. Anything outside this set is a door a
+#: password opens.
+KEY_ONLY = frozenset({"publickey"})
+
 #: What survives being an unquoted word in sudoers or an ssh_config Host
 #: alias. Anything outside this set could smuggle a directive into a file
 #: another parser reads as configuration.
@@ -45,6 +67,10 @@ _SAFE_WORD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _RECORD = "shell_access.json"
 
 LAUNCHCTL = "/bin/launchctl"
+INSTALL = "/usr/bin/install"
+SSHD = "/usr/sbin/sshd"
+SSH = "/usr/bin/ssh"
+RM = "/bin/rm"
 #: Remote Login is sshd under launchd. `systemsetup -setremotelogin` is what
 #: the Settings toggle used to be scripted with, and on macOS 13+ it refuses
 #: unless the *calling terminal* holds Full Disk Access — which a joiner run
@@ -297,9 +323,156 @@ def _sshd_loaded(runner, prefix: list) -> bool:
     return "com.openssh.sshd" in (probe.stdout or "")
 
 
+def lay_policy(*, runner=None, sudo: bool = True,
+               root: Path | None = None) -> dict:
+    """Lay the key-only sshd policy, graded as one step.
+
+    The file is installed root-owned from a temp copy, then `sshd -t` is asked
+    whether the resulting configuration parses; a rejected policy is removed
+    in the same breath, because a drop-in sshd cannot read is a Mac nobody can
+    ssh into. macOS runs sshd per connection, so the next connection is
+    already under the policy — nothing is restarted.
+    """
+    runner, root, _ = _defaults(runner, root, None)
+    prefix = ["sudo"] if sudo else []
+    target = root / SSHD_POLICY_PATH
+    try:
+        if target.read_text() == SSHD_POLICY:
+            return {"step": "sshd-policy", "ok": True,
+                    "note": "ssh here already takes keys only"}
+    except OSError:
+        pass
+    fd, tmp = tempfile.mkstemp(prefix="jremote-sshd-", suffix=".conf")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(SSHD_POLICY)
+        os.chmod(tmp, 0o644)
+        proc = runner(prefix + [INSTALL, "-m", "0644", "-o", "root", "-g", "wheel",
+                                tmp, str(target)], capture_output=True, text=True)
+        if proc.returncode != 0:
+            return {"step": "sshd-policy", "ok": False,
+                    "note": "could not lay the sshd policy: "
+                            + ((proc.stderr or proc.stdout or "").strip() or "no output")}
+        check = runner(prefix + [SSHD, "-t"], capture_output=True, text=True)
+        if check.returncode != 0:
+            runner(prefix + [RM, "-f", str(target)], capture_output=True, text=True)
+            return {"step": "sshd-policy", "ok": False,
+                    "note": "sshd rejected the policy, so it was lifted again: "
+                            + ((check.stderr or check.stdout or "").strip() or "no output")}
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return {"step": "sshd-policy", "ok": True,
+            "note": "ssh here takes keys only — no password opens it"}
+
+
+def lift_policy(*, runner=None, sudo: bool = True,
+                root: Path | None = None) -> dict:
+    """Remove the policy drop-in, graded; a machine that never had it is clean."""
+    runner, root, _ = _defaults(runner, root, None)
+    prefix = ["sudo"] if sudo else []
+    target = root / SSHD_POLICY_PATH
+    if not target.exists():
+        return {"step": "sshd-policy", "ok": True, "note": "no managed sshd policy was laid"}
+    try:
+        target.unlink()
+    except OSError:
+        proc = runner(prefix + [RM, "-f", str(target)], capture_output=True, text=True)
+        if proc.returncode != 0 or target.exists():
+            return {"step": "sshd-policy", "ok": False,
+                    "note": f"could not remove {target}: "
+                            + ((proc.stderr or "").strip() or "no detail")}
+    return {"step": "sshd-policy", "ok": True,
+            "note": "the sshd policy is lifted — ssh here is back to the owner's settings"}
+
+
+_DENIED = re.compile(r"Permission denied \(([^)]*)\)")
+
+
+def offered_methods(*, runner=None, port: int = 22) -> list[str] | None:
+    """What sshd on this machine will take, asked of sshd itself.
+
+    A client that offers no key and has no terminal is refused with the
+    server's own list of methods — `Permission denied (publickey,password,
+    keyboard-interactive)` — before any secret changes hands. That list is
+    the fact the policy exists to change; the drop-in on disk is only the
+    means. None when nothing answers on the port.
+    """
+    runner = runner or subprocess.run
+    proc = runner([SSH, "-p", str(port), "-o", "BatchMode=yes",
+                   "-o", "PubkeyAuthentication=no", "-o", "IdentitiesOnly=yes",
+                   "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+                   "-o", "ConnectTimeout=3", "-o", "LogLevel=ERROR",
+                   "127.0.0.1", "true"], capture_output=True, text=True, timeout=15)
+    m = _DENIED.search(proc.stderr or "")
+    if not m:
+        return None
+    return [w.strip() for w in m.group(1).split(",") if w.strip()]
+
+
+def policy_status(*, runner=None, root: Path | None = None) -> dict:
+    """The drop-in on disk and the methods sshd actually offers, side by side."""
+    _, root, _ = _defaults(None, root, None)
+    target = root / SSHD_POLICY_PATH
+    try:
+        laid = target.read_text() == SSHD_POLICY
+    except OSError:
+        laid = False
+    offered = offered_methods(runner=runner)
+    return {
+        "policy_path": str(target),
+        "policy_laid": laid,
+        "sshd_answers": offered is not None,
+        "offered": offered or [],
+        "key_only": offered is not None and set(offered) <= KEY_ONLY,
+    }
+
+
+def apply_policy(*, apply: bool = False, runner=None, root: Path | None = None) -> dict:
+    """Print the policy, or lay it. As root, directly; as the logged-in user,
+    through the OS administrator prompt the way `files setup --apply` goes,
+    with `sshd -t` and the lift-on-rejection inside the same approved script."""
+    before = policy_status(runner=None, root=root)
+    if not apply:
+        return {"applied": False, "policy": SSHD_POLICY, "status": before,
+                "note": "dry run; re-run with --apply (an administrator prompt opens)"}
+    if os.geteuid() == 0:
+        step = lay_policy(runner=runner, sudo=False, root=root)
+    else:
+        from . import fileshare
+        _, machine, _ = _defaults(None, root, None)
+        target = machine / SSHD_POLICY_PATH
+        fd, tmp = tempfile.mkstemp(prefix="jremote-sshd-", suffix=".conf")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(SSHD_POLICY)
+            os.chmod(tmp, 0o644)
+            script = "\n".join([
+                "set -eu", "export LC_ALL=C",
+                shlex.join([INSTALL, "-m", "0644", "-o", "root", "-g", "wheel", tmp, str(target)]),
+                f"if ! {SSHD} -t; then {RM} -f {shlex.quote(str(target))}; exit 65; fi",
+            ])
+            try:
+                fileshare._run_as_administrator(
+                    script, "Make ssh into this Mac key-only", runner or subprocess.run)
+                step = {"step": "sshd-policy", "ok": True,
+                        "note": "ssh here takes keys only — no password opens it"}
+            except fileshare.FileShareError as exc:
+                step = {"step": "sshd-policy", "ok": False, "note": str(exc)}
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    return {"applied": step["ok"], "step": step,
+            "status": policy_status(runner=None, root=root)}
+
+
 def enable(*, runner=None, sudo: bool = True,
            state: Path | None = None) -> list[dict]:
-    """The joiner's root moment: Remote Login on — and nothing else.
+    """The joiner's root moment: Remote Login on, and keys-only on it.
 
     Remote Login's prior state is probed first and recorded, because turning
     it on is only this grant's to undo if it was off before — a Mac whose
@@ -334,6 +507,10 @@ def enable(*, runner=None, sudo: bool = True,
         state.mkdir(parents=True, exist_ok=True)
         _record_path(state).write_text(
             json.dumps({"remote_login_enabled": turned_on}))
+        # The door a grant opens takes the granted key and nothing else. Laid
+        # whether Remote Login was ours to turn on or already on: a machine we
+        # hold a shell on is a machine no password reaches.
+        steps.append(lay_policy(runner=runner, sudo=sudo))
     return steps
 
 
@@ -376,6 +553,7 @@ def disable(*, runner=None, sudo: bool = True,
     steps.append({"step": "sudoers", "ok": ok,
                   "note": ("the sudoers drop-in is gone" if ok else
                            f"could not remove {target}: {err or 'no detail'}")})
+    steps.append(lift_policy(runner=runner, sudo=sudo, root=root))
 
     ak = authorized_keys or Path.home() / ".ssh" / "authorized_keys"
     try:
