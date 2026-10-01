@@ -1,5 +1,5 @@
 {
-  "_doc": "The systems registry, jStack's half. A row lives in the half that owns the system: a jStack system here, a host's own system in the host's registry. Neither half duplicates the other, and a system moving into jStack moves its row here unchanged. A row POINTS, it does not describe: slug locates the docs, code and config the files, test what proves it, activation the wiring it needs to be live. description is one sentence of quick reference. What a system IS lives in its SYSTEM.md on the host's shelf — jStack ships no documentation of its own.",
+  "_doc": "The systems registry, jStack's half. A row lives in the half that owns the system: a jStack system here, a host's own system in the host's registry. Neither half duplicates the other, and a system moving into jStack moves its row here unchanged. A host row under an id this half owns is an overlay: it adds what only the host knows about its install and never restates a field set here; systems.py is the merge every host reads through. A row POINTS, it does not describe: slug locates the docs, code and config the files, test what proves it, activation the wiring it needs to be live. description is one sentence of quick reference. What a system IS lives in its SYSTEM.md on the host's shelf — jStack ships no documentation of its own.",
   "_schema": {
     "id": "string — stable identifier, kebab-case. Never changes; the slug carries the grouping.",
     "name": "string — display name",
@@ -605,6 +605,25 @@
       },
       "subsystems": [],
       "notes": "Imports nothing from the package and reads no config file — callers pass their own parsed cfg, so there is one opinion about which file is authoritative. scheduler/config.py carries its own copy of the shipping-tree guard deliberately: it must keep working on an older install where root.py is absent, and importing the other way would be a cycle. Only Config/State/Logs/Credentials are guarded; Agents/ and Systems/ may legitimately live inside a repo. Resolution is never cached at import — a constant captured at import answers with the environment of a process start nobody remembers."
+    },
+    {
+      "id": "org-registry",
+      "name": "Org registry",
+      "slug": null,
+      "status": "live",
+      "description": "The merge a host reads jStack's half and its own through: one row per id, a host row under a jStack id applied as an overlay that adds and never restates.",
+      "code": [
+        "systems.py",
+        "systems.json"
+      ],
+      "config": [],
+      "test": {
+        "type": "script",
+        "path": "tests/systems.sh",
+        "description": "Drives union() on fixture halves: inputs unmutated, an overlay consumed by its base row, one row per id, an empty base field filled by the host, a restated field kept at the base's value and named as a clash, components from both halves surviving base-first; then reads this half's own registry for any id held twice."
+      },
+      "subsystems": [],
+      "notes": ""
     },
     {
       "id": "suite-tree-pin",
