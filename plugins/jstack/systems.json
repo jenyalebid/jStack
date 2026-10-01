@@ -3,7 +3,7 @@
   "_schema": {
     "id": "string — stable identifier, kebab-case. Never changes; the slug carries the grouping.",
     "name": "string — display name",
-    "slug": "string — path under the host's ~/Systems shelf where this system is documented, e.g. 'Agents/environment'. The root is always ~/Systems, so the row carries only the part that can change. null until documented; on a machine with no shelf it simply does not resolve, which is skipped and never a false green.",
+    "slug": "string — path under the shelf jStack declares, where this system is documented. The row carries only the part that can change: renaming a grouping edits this field and nothing else. null until the system is documented.",
     "status": "live | partial | down | deprecated",
     "description": "one sentence of quick reference — never the explanation, which is the system's SYSTEM.md",
     "code": "array of code paths (relative to plugin root)",
