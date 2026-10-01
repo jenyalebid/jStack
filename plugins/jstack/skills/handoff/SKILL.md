@@ -1,14 +1,14 @@
 ---
 name: handoff
 description: Use when the user asks to hand this session off to a fresh terminal or to another agent.
-argument-hint: "[@agent[-seat]] [focus]"
+argument-hint: "[--stage] [@agent[-seat]] [focus]"
 ---
 
 # /jstack:handoff
 
 Opens a fresh session in the current provider with this session's actionable state. Target instructions establish identity; the doc carries context. In Codex, use [the native launcher](codex.md) for step 3.
 
-Arguments, both optional. `@agent` retargets the workspace: `seat @alice-social` prints the directory to boot in, and `seat --list` every address there is. That is the one address grammar, shared with mail and the scheduler — `@agent` alone is the cockpit, hyphens walk down the seat tree (`@alice-social-threads`), a seat holding its own `chat/` resolves to that operator seat. A miss exits non-zero naming the seats that exist; stop there, never join a path blind. The seat is the user's to name and not yours to infer from the focus: a sub-mode chosen by reading the wording lands the same command in different seats on different phrasings, and path-scoped rules load from whichever tree it picked. No `@agent` → the current cwd. Everything after the agent token is a **focus** that scopes the doc; it is an explicit narrowing instruction, so drop unrelated tangents rather than balancing them.
+Arguments, all optional. `--stage`, first if given, opens the session with the doc loaded and waits for the user; without it the session starts working on arrival — that is the default. `@agent` retargets the workspace: `seat @alice-social` prints the directory to boot in, and `seat --list` every address there is. That is the one address grammar, shared with mail and the scheduler — `@agent` alone is the cockpit, hyphens walk down the seat tree (`@alice-social-threads`), a seat holding its own `chat/` resolves to that operator seat. A miss exits non-zero naming the seats that exist; stop there, never join a path blind. The seat is the user's to name and not yours to infer from the focus: a sub-mode chosen by reading the wording lands the same command in different seats on different phrasings, and path-scoped rules load from whichever tree it picked. No `@agent` → the current cwd. Everything after the agent token is a **focus** that scopes the doc; it is an explicit narrowing instruction, so drop unrelated tangents rather than balancing them.
 
 ## 1. Write the doc
 
@@ -32,17 +32,11 @@ The `rm` is deliberate: an existing-but-unread file trips the Write tool's read-
 
 `--name` is required on every invocation — a handoff terminal without an `HF ·` title is a failed handoff. Plain handoff → `HF · <topic>`; `@agent` → `HF→<Agent> · <topic>`. Derive `<topic>` in 1–3 words from the doc you just wrote, never from the focus argument or the user's phrasing.
 
-`--prompt-file` and `--name` are adapter options. A stale PATH can resolve an older `open-terminal-here` that forwards them to `claude`, which dies on the unknown flag — so detect the contract rather than assuming it:
+The session starts working on arrival: `--first-prompt` carries the fixed kick `[system prompt] begin working` — never the doc restated, which already rides in the system prompt. The tag is the law for every machine-sent user turn (`rules-stage/prompt-sourcing.md`). Under `--stage`, drop the flag and the session opens waiting.
 
 ```bash
-if open-terminal-here 2>&1 | grep -q -- '--prompt-file'; then
-  open-terminal-here "$TARGET_CWD" --prompt-file "$HANDOFF_TMP" --name "$TITLE"
-else
-  SAFE_TITLE="${TITLE// · /·}"; SAFE_TITLE="${SAFE_TITLE// /-}"
-  open-terminal-here "$TARGET_CWD" --append-system-prompt-file "$HANDOFF_TMP" --name "$SAFE_TITLE"
-fi
+open-terminal-here "$TARGET_CWD" --prompt-file "$HANDOFF_TMP" --name "$TITLE" \
+  --first-prompt "[system prompt] begin working"
 ```
 
-The first branch inlines the briefing and deletes the temp file before Claude starts. The fallback uses a flag every version forwards verbatim and needs a single-token title, since pass-through adapters do not re-quote it; the temp file then lingers in `/tmp`, never in the workspace.
-
-The adapter self-detects the terminal. Nonzero exit means none started — give the user `$HANDOFF_TMP` and tell them to open a session in the target workspace with `--append-system-prompt-file`.
+The adapter inlines the doc, deletes the temp file before the provider starts, and self-detects the terminal. If `open-terminal-here` with no arguments does not print `--prompt-file` and `--first-prompt` in its usage, this PATH holds an older adapter: launch per [stale-adapter.md](stale-adapter.md) instead. Nonzero exit means none started — give the user `$HANDOFF_TMP` and tell them to open a session in the target workspace with `--append-system-prompt-file`.

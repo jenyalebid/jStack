@@ -5,8 +5,11 @@ identity routing. Keep the doc and title rules from SKILL.md.
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/bin/open-terminal-here" "$TARGET_CWD" \
-  --engine codex --prompt-file "$HANDOFF_TMP" --name "$TITLE"
+  --engine codex --prompt-file "$HANDOFF_TMP" --name "$TITLE" \
+  --first-prompt "[system prompt] begin working"
 ```
+
+Drop the `--first-prompt` line under `--stage`.
 
 The adapter inlines the doc as Codex developer instructions and removes the
 temporary file. A nonzero exit means no session started; report the retained

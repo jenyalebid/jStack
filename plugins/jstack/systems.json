@@ -115,9 +115,11 @@
       "name": "Handoff",
       "slug": null,
       "status": "live",
-      "description": "Generates a concise session handoff doc and opens a fresh Claude Code terminal preloaded with it via bin/open-terminal-here. Supports @agent targeting: resolves another agent's workspace under user_config.agent_root and boots the new session there — walk-up does the identity switch.",
+      "description": "The session writes its own actionable-state doc and opens a fresh session in the current provider preloaded with it via bin/open-terminal-here, already working: the default passes `--first-prompt \"[system prompt] begin working\"`; `--stage` opens it waiting instead. Supports @agent[-seat] targeting through the shared seat-address grammar — walk-up does the identity switch.",
       "code": [
         "skills/handoff/SKILL.md",
+        "skills/handoff/codex.md",
+        "skills/handoff/stale-adapter.md",
         "bin/open-terminal-here"
       ],
       "config": [],
@@ -127,7 +129,7 @@
         "description": "Validates SKILL.md exists, frontmatter is well-formed, bin/open-terminal-here adapter is executable."
       },
       "subsystems": [],
-      "notes": "Args: [@agent] [focus]. @agent resolves {Name} case-insensitively under agent_root; target cwd = chat/ subdir if present else agent root; unknown name → list available agents and stop. Focus narrows scope. Writes handoff-context.md to the TARGET cwd, then open-terminal-here with --append-system-prompt-file. Cross-agent docs are briefings: name who hands off, mark user-locked decisions. Adapter overridable earlier in PATH. /jstack:handoff."
+      "notes": "Args: [--stage] [@agent[-seat]] [focus]. @agent resolves through `seat` (root.resolve_seat), the one grammar mail and the scheduler share; a miss lists the seats and stops. Focus narrows the doc. The doc is staged in a mktemp file outside every workspace and opened with --prompt-file (the adapter inlines it as the appended system prompt and deletes it); an adapter predating --prompt-file gets --append-system-prompt-file and a single-token title. The kick is fixed text, never the doc restated, and carries the shared injected tag (rules-stage/prompt-sourcing.md); --first-prompt support is probed from the adapter's usage, and an adapter without it opens staged and the report says so. Titles: `HF · <topic>` / `HF→<Agent> · <topic>`, topic derived from the doc. /jstack:handoff."
     },
     {
       "id": "audit",
