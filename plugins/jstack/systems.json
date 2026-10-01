@@ -208,7 +208,25 @@
         "path": "tests/pict-command.sh",
         "description": "Pipes fixture UserPromptSubmit payloads through the real hook against a temp tree with a faked renderer and faked openers; asserts placement, view selection, opener precedence and every failure branch's exit code — an answer on exit 0 has spent the turn the hook exists to save."
       },
-      "subsystems": [],
+      "subsystems": [
+        {
+          "id": "pict-render",
+          "name": "Injection render",
+          "slug": null,
+          "status": "live",
+          "description": "bin/pict renders everything a session spawned from a given directory would actually receive — globals, CLAUDE.md walk-up, auto-memory, timeline injection, anchored path rules, hook injectors — as one ordered markdown document with per-source token weights. The way to see a seat's real context budget instead of reasoning about it. Two views: the default answers why each file is in the context and what it costs; --bare answers what the context IS — the injected bodies in wire order, no weights, no notes, no on-demand layer.",
+          "code": [
+            "bin/pict"
+          ],
+          "config": [],
+          "test": {
+            "type": "script",
+            "path": "tests/pict.sh",
+            "description": "Hermetic run against a fixture home tree, fixture rules, fixture review config and a stub log_event — no real ~/.claude or timeline touched."
+          },
+          "notes": "Answers \"what does this seat actually load\" from the real injectors rather than from what the mds claim. Resolves symlinks (macOS /var → /private/var) when keying a directory."
+        }
+      ],
       "notes": "Bare is the default: the injection itself, no weights and no on-demand layer, because rules that fire when a file is touched are not what a session opens with. `--full` is the hook's own flag and drops --bare rather than forwarding one; a leading directory argument renders that instead of the session's cwd, and everything after it goes to pict untouched. The render lands in the workspace's pad when there is one, else CLAUDE_CONFIG_DIR/jstack/pict, under a name stable per directory so a second ask refreshes one document. Opening delegates to show-doc where the host has one (it knows which screen drives the session), open-artifact otherwise; with neither, the file is still written and its path is the answer. The SKILL.md carries no work the hook does not do; it exists so pict is reachable as /jstack:pict on a plain plugin install — the bare /pict stub only lands once /jstack:install-rules has run — and as the by-hand fallback for a harness that does not fire UserPromptSubmit on commands."
     },
     {
@@ -273,24 +291,6 @@
       },
       "subsystems": [],
       "notes": "No args; trailing words are ignored rather than refused. The harness hands every hook the file it is writing to, so the answer needs no glob and no path-encoding guess — the session-id glob remains only as the fallback for a payload without transcript_path, and never degrades to the newest .jsonl in the project dir, which is another session's conversation. Recognized as /print, /jstack:print, and the JSTACK_PRINT_CMD sentinel the installed stub expands to. The SKILL.md is the by-hand fallback for a harness that does not fire UserPromptSubmit on commands."
-    },
-    {
-      "id": "pict",
-      "name": "Prompt Injection Check (pict)",
-      "slug": null,
-      "status": "live",
-      "description": "bin/pict renders everything a session spawned from a given directory would actually receive — globals, CLAUDE.md walk-up, auto-memory, timeline injection, anchored path rules, hook injectors — as one ordered markdown document with per-source token weights. The way to see a seat's real context budget instead of reasoning about it. Two views: the default answers why each file is in the context and what it costs; --bare answers what the context IS — the injected bodies in wire order, no weights, no notes, no on-demand layer.",
-      "code": [
-        "bin/pict"
-      ],
-      "config": [],
-      "test": {
-        "type": "script",
-        "path": "tests/pict.sh",
-        "description": "Hermetic run against a fixture home tree, fixture rules, fixture review config and a stub log_event — no real ~/.claude or timeline touched."
-      },
-      "subsystems": [],
-      "notes": "Answers \"what does this seat actually load\" from the real injectors rather than from what the mds claim. Resolves symlinks (macOS /var → /private/var) when keying a directory."
     },
     {
       "id": "timeline-log",
