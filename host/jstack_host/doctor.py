@@ -748,7 +748,7 @@ def check_sshd() -> dict:
     # local mode is its owner's to run as they like, and is only told.
     grade = FAIL if (mode.is_hub() or mode.is_managed()) else WARN
     return _check("sshd", grade, f"ssh here accepts {doors}",
-                  "run `jstack-host ssh-policy --apply` (an administrator prompt opens)")
+                  "run `jstack-host ssh-policy --apply` (it asks for your password)")
 
 
 def check_mesh() -> dict:

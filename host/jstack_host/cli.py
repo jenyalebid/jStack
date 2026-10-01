@@ -2103,8 +2103,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("ssh-policy",
                        help="what ssh into this machine accepts; --apply makes it keys only")
     p.add_argument("--apply", action="store_true",
-                   help="lay the key-only sshd policy through the administrator prompt "
-                        "(default: print it and what sshd offers now)")
+                   help="lay the key-only sshd policy; asks for your password in this "
+                        "terminal (default: print it and what sshd offers now)")
     p.add_argument("--state-dir", default=None)
     p.set_defaults(fn=_cmd_ssh_policy)
 
@@ -2115,11 +2115,11 @@ def build_parser() -> argparse.ArgumentParser:
     fs = files.add_parser("setup", help="print or apply the selected-folder setup")
     fs.add_argument("--agents-root", help="absolute installed Agents directory (required when run as root)")
     fs.add_argument("--apply", action="store_true",
-                    help="apply through the administrator prompt (default: print a dry run)")
+                    help="apply; asks for your password in this terminal (default: print a dry run)")
     fs.set_defaults(fn=_cmd_files)
     fs = files.add_parser("off", help="print or remove all SMB share points")
     fs.add_argument("--apply", action="store_true",
-                    help="remove through the administrator prompt (default: print a dry run)")
+                    help="remove; asks for your password in this terminal (default: print a dry run)")
     fs.set_defaults(fn=_cmd_files)
     return ap
 
