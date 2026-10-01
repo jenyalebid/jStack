@@ -2787,8 +2787,11 @@ def control_actions():
 
 @router.post("/control/{action}")
 def control_dispatch(action: str, payload: ControlBody | None = None):
-    """Run a convenience-tier action. System-level actions are NOT here — those
-    go to the root deadman daemon. Unknown action → 400.
+    """Run a convenience-tier action: the embedding host's own daemons, under
+    the same device token as a turn. There is no system tier behind it — no
+    shutdown, reboot or network kill reachable from a device; the one switch
+    that stops everything is `jstack-host emergency-stop`, run at the machine.
+    Unknown action → 400.
 
     503 rather than 400 where there is no control tier: the action is not
     misspelled, it is unsupported on this host, and a client that cannot tell

@@ -1723,6 +1723,16 @@ class SessionStore:
         except Exception:  # noqa: BLE001
             pass
 
+    def record_access(self, action: str, target_kind: str, target: str,
+                      target_name: str = "") -> None:
+        """One audit row for an act of access that is not a revocation and
+        would otherwise leave no record anywhere — the hub shell opening and
+        closing. Same table, same actor context, so `access history` names
+        it beside the revocations."""
+        with self._conn() as db:
+            self._audit(db, int(time.time()), action, target_kind,
+                        [(target, target_name)])
+
     @staticmethod
     def _host_name(db, key: str) -> str:
         row = db.execute("SELECT name FROM hosts WHERE key=?", (key,)).fetchone()
