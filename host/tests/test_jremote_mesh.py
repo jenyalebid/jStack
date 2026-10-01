@@ -266,6 +266,65 @@ def test_a_revoked_name_never_matches_a_peer_by_inference(mesh):
     assert tunnel.reconcile()["stale"] == ["owner-phone"]
 
 
+def test_a_live_host_holds_its_address_ahead_of_a_forgotten_twin(mesh):
+    """A machine forgotten and adopted again leaves a tombstone at the address
+    its live row holds. The live row must answer for the peer: let the
+    tombstone answer and the peer reads as revoked, and the purge takes a key
+    the machine is still using (#328)."""
+    old, _ = devices.mint("Work Main")
+    mesh.upsert_host("old-key", "Work Main", "10.66.0.2", 9090)
+    mesh.bind_host_device("old-key", old["id"])
+    mesh.forget_host("old-key")
+    mesh.revoke_device(old["id"])
+    new, _ = devices.mint("Work Main")
+    tunnel.issue("work-main")
+    assert tunnel.peer_table()["work-main"] == "10.66.0.2"
+    mesh.upsert_host("new-key", "Work Main", "10.66.0.2", 9090)
+    mesh.bind_host_device("new-key", new["id"])
+
+    report = tunnel.reconcile()
+    by = {p["peer"]: p for p in report["peers"]}
+    assert by["work-main"]["state"] == tunnel.BOUND
+    assert by["work-main"]["device_id"] == new["id"]
+    assert report["stale"] == []
+    assert tunnel.bind_inferred() == ["work-main"]
+    assert devices.peer_of(new["id"]) == "work-main"
+    assert tunnel.purge() == {"removed": [], "failed": {}}
+
+
+def test_an_address_two_forgotten_rows_share_matches_nobody(mesh):
+    """Two tombstones at one address with no live row: a guess between retired
+    credentials is not a match. The peer is unbound, not revoked-by-inference,
+    and binding writes nothing."""
+    first, _ = devices.mint("Lab Leaf")
+    second, _ = devices.mint("Lab Leaf")
+    tunnel.issue("lab-leaf")
+    addr = tunnel.peer_table()["lab-leaf"]
+    for key, row in (("k1", first), ("k2", second)):
+        mesh.upsert_host(key, "Lab Leaf", addr, 9090)
+        mesh.bind_host_device(key, row["id"])
+        mesh.forget_host(key)
+        mesh.revoke_device(row["id"])
+    by = {p["peer"]: p for p in tunnel.reconcile()["peers"]}
+    assert by["lab-leaf"]["state"] == tunnel.UNBOUND
+    assert by["lab-leaf"]["device_id"] == ""
+    assert tunnel.bind_inferred() == []
+
+
+def test_a_lone_forgotten_row_still_answers_for_its_address(mesh):
+    """One tombstone, no live row: that is a retired leaf whose key lingered,
+    and the address match is what lets the purge name it."""
+    gone, _ = devices.mint("Old Bench")
+    tunnel.issue("old-bench")
+    mesh.upsert_host("ob", "Old Bench", tunnel.peer_table()["old-bench"], 9090)
+    mesh.bind_host_device("ob", gone["id"])
+    mesh.forget_host("ob")
+    mesh.revoke_device(gone["id"])
+    by = {p["peer"]: p for p in tunnel.reconcile()["peers"]}
+    assert by["old-bench"]["state"] == tunnel.REVOKED
+    assert by["old-bench"]["matched_by"] == "host address"
+
+
 # ── the roster view and the doctor ───────────────────────────────────────────
 
 def test_the_peer_roster_is_console_only(mesh):

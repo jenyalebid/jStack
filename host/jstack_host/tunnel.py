@@ -245,6 +245,28 @@ def _slug(name: str) -> str:
     return slug if NAME_RE.match(slug) else ""
 
 
+def _hosts_by_address(hosts: list[dict]) -> dict[str, dict]:
+    """The host row a mesh address answers for.
+
+    A machine that was forgotten and adopted again leaves a tombstone at the
+    address its live row now holds, and the tombstone's device is revoked. Let
+    the tombstone answer and the live peer reads as revoked — the purge then
+    removes a key a machine is still using. So a live row owns its address
+    outright; a forgotten row answers only for an address no live row holds,
+    and an address two forgotten rows share answers for nobody, because a
+    guess between retired credentials is not a match a purge may act on.
+    """
+    live = {h["address"]: h for h in hosts
+            if h.get("device_id") and h.get("address") and not h.get("deleted")}
+    gone: dict[str, dict | None] = {}
+    for h in hosts:
+        addr = h.get("address")
+        if not h.get("device_id") or not addr or not h.get("deleted") or addr in live:
+            continue
+        gone[addr] = None if addr in gone else h
+    return {**{a: h for a, h in gone.items() if h is not None}, **live}
+
+
 def reconcile() -> dict:
     """Every peer on the mesh, matched to the device credential it belongs to.
 
@@ -255,7 +277,8 @@ def reconcile() -> dict:
     the match is worth: the row that *recorded* it (`devices.peer`, written at
     pairing from now on); a host row whose mesh address is the peer's (a leaf
     adopted before the column existed — its address is the one fact both sides
-    hold); and, last, a live device row whose name slugs to the peer's name,
+    hold, and a live row holds it ahead of any forgotten one, see
+    `_hosts_by_address`); and, last, a live device row whose name slugs to the peer's name,
     the way enrolment derives peer names. The third is an inference and is
     reported as one (`inferred`), so `bind_inferred()` can write it down and
     the next reconcile has a recorded match instead.
@@ -269,8 +292,7 @@ def reconcile() -> dict:
     peers = peer_table()
     rows = {r["id"]: r for r in devices.list_all()}
     by_peer = {r["peer"]: r for r in rows.values() if r.get("peer")}
-    hosts = [h for h in store.list_hosts(include_forgotten=True) if h.get("device_id")]
-    by_addr = {h["address"]: h for h in hosts if h.get("address")}
+    by_addr = _hosts_by_address(store.list_hosts(include_forgotten=True))
     by_slug = {}
     for r in rows.values():
         if not r["revoked"] and not r.get("peer"):
