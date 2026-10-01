@@ -47,7 +47,7 @@ KEY_FILE = "ssh/id_jremote"
 SSHD_POLICY_PATH = "etc/ssh/sshd_config.d/010-jremote-key-only.conf"
 SSHD_POLICY = (
     "# >>> jremote managed sshd policy >>>\n"
-    "# Laid by jStack shell access; lifted whole by detach. Do not edit.\n"
+    "# Laid by jStack shell access and lifted whole by detach, never edited by hand\n"
     "PasswordAuthentication no\n"
     "KbdInteractiveAuthentication no\n"
     "ChallengeResponseAuthentication no\n"
