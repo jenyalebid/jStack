@@ -418,6 +418,9 @@ def redeem(raw_code: str, client_ip: str, host_key: str = "",
         reachback = bool(previous["sees_home"]) if previous else True
 
     peer, note = (None, "") if kind == KIND_LOCAL else _tunnel_for(row["name"], leaf=kind == KIND_HOST)
+    if peer:
+        # Recorded on the row, so revoking the credential removes the peer.
+        devices.bind_peer(device_row["id"], peer_name(row["name"]))
     host_row = None
     if kind == KIND_HOST:
         # After the token, and never conditional on the tunnel: a machine with

@@ -723,6 +723,25 @@ def check_file_sharing() -> dict:
                   "`jstack-host files setup --apply` (no sudo)")
 
 
+def check_mesh() -> dict:
+    """Is every peer on the mesh a live device? Quiet on a host that owns no
+    mesh; FAIL on a hub where a peer outlived its credential or never had one,
+    because that peer still handshakes and the roster cannot revoke it."""
+    from . import tunnel
+    if not tunnel.can_pair():
+        return _check("mesh", OK, "no mesh owned here")
+    report = tunnel.reconcile()
+    if report["stale"]:
+        return _check("mesh", FAIL,
+                      f"{len(report['stale'])} peer(s) on the mesh with no live device: "
+                      + ", ".join(report["stale"]),
+                      "run `jstack-host mesh audit`, then `jstack-host mesh purge --yes`")
+    note = f"; {len(report['inferred'])} matched by inference" if report["inferred"] else ""
+    return _check("mesh", OK, f"{len(report['bound'])} peer(s), every one a live device{note}",
+                  "run `jstack-host mesh audit --bind` to record the inferred matches"
+                  if report["inferred"] else "")
+
+
 def check_windows() -> dict:
     """Does the Hub hold the desk grant — and is this the session that can say?
 
@@ -772,7 +791,7 @@ CHECKS = (check_python, check_claude, check_tmux, check_websocket, check_fd_limi
           check_git_hooks,
           check_repos,
           check_service, check_source, check_app, check_hub_seal, check_file_sharing,
-          check_windows)
+          check_mesh, check_windows)
 
 
 def checks() -> list[dict]:

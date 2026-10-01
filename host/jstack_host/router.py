@@ -969,7 +969,8 @@ class TunnelPairRequest(BaseModel):
 
 
 @router.post("/tunnel/pair")
-def tunnel_pair(body: TunnelPairRequest, request: Request):
+def tunnel_pair(body: TunnelPairRequest, request: Request,
+                device_id: str = Depends(current_device)):
     """Pair the calling device for off-LAN access and hand back its config.
 
     LAN-only by design — see `tunnel.py`. The refusal is a 403 with the reason
@@ -984,11 +985,30 @@ def tunnel_pair(body: TunnelPairRequest, request: Request):
     from . import tunnel
     client_ip = request.client.host if request.client else ""
     try:
-        return tunnel.pair(body.device, client_ip)
+        issued = tunnel.pair(body.device, client_ip)
     except tunnel.PairingUnsupported as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except tunnel.PairingRefused as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    except tunnel.TunnelError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    # The peer is this credential's: revoking the row takes it off the mesh.
+    devices.bind_peer(device_id, body.device)
+    return issued
+
+
+@router.get("/tunnel/peers")
+def tunnel_peers(request: Request, device_id: str = Depends(current_device)):
+    """Every peer on this hub's mesh against the device roster — which rows
+    carry them, and which peers are on the network with no live credential
+    behind them (`stale`). A HUB MENU BAR view: the mesh roster is the same
+    authority as the device roster, and a remote gets neither."""
+    from . import tunnel
+    managed_access.require_console(request)
+    if not tunnel.can_pair():
+        raise HTTPException(status_code=503, detail="this host does not own a mesh")
+    try:
+        return tunnel.reconcile()
     except tunnel.TunnelError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -1246,6 +1266,15 @@ def forget_host(key: str, request: Request, device_id: str = Depends(current_dev
     Console-only, with one exception: a machine's own credential may forget
     the machine it is bound to — that is `detach` telling this hub goodbye
     from the mesh, where there is no console to speak from.
+
+    Forget is the whole withdrawal, whoever asks: the tile, the delegation
+    grant, the hub's ssh wiring to it, the machine's credential, and with the
+    credential its WireGuard peer. The credential has nothing left to open
+    once the tombstone is down (`managed_access.authorize` ends its reach),
+    but alive it still held the hub's /managed/ routes and, through its peer,
+    a place on the mesh — a machine that was "forgotten" and could still
+    reach port 22 on every peer. Revoking it here is what makes forget mean
+    off, not hidden.
     """
     from . import grants, shell_grants
     from .store import get_store
@@ -1253,19 +1282,18 @@ def forget_host(key: str, request: Request, device_id: str = Depends(current_dev
     itself = own is not None and own["key"] == key
     if not itself:
         managed_access.require_console(request)
+    row = get_store().host_row(key)
+    bound = (row or {}).get("device_id") or ""
     with audit.acting(audit.from_request(request, device_id)):
         if not get_store().forget_host(key):
             raise HTTPException(status_code=404,
                                 detail="unknown or already forgotten host")
-        # The credential goes with the tile when the machine itself is the caller.
-        # It could not revoke itself afterwards: the tombstone already ends its
-        # reach (`managed_access.authorize`), and a machine credential is not a
-        # device that may disconnect (`revoke_device`). Left alive it would still
-        # open every /managed/ route of a hub that has forgotten the machine.
-        revoked = device_id if itself and devices.revoke(device_id) else ""
+        peer = devices.peer_of(bound) if bound else ""
+        revoked = bound if bound and devices.revoke(bound) else ""
         return {"forgotten": key, "grant_dropped": grants.forget(key),
                 "shell_steps": shell_grants.machine_forgotten(key),
-                "credential_revoked": revoked}
+                "credential_revoked": revoked,
+                "peer_removed": peer if revoked else ""}
 
 
 class HostGrantRequest(BaseModel):

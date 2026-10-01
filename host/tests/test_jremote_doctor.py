@@ -37,7 +37,7 @@ def test_every_check_answers_with_a_grade(machine):
                      "profile", "agents", "registry", "timeline", "transcripts",
                      "scheduler", "allowance", "codex hooks", "hook owners",
                      "activation", "git hooks", "repos",
-                     "service", "source", "app", "hub seal", "files", "windows"]
+                     "service", "source", "app", "hub seal", "files", "mesh", "windows"]
     assert all(r["grade"] in (doctor.OK, doctor.WARN, doctor.FAIL) for r in results)
     by = {r["name"]: r for r in results}
     assert by["token"]["grade"] == doctor.FAIL, "no token minted in this state dir"
