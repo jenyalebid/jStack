@@ -10,7 +10,7 @@ A tag answers what a stretch of work was *about*, across seats and dates, and it
 attaches to the **session** — so every entry that session wrote, and every one it
 writes later, reaches the tag through its session id.
 
-**When the user types `/tag`, this skill is not what runs.** `hooks/tag-command.py`
+**When the user types `/jstack:tag`, this skill is not what runs.** `hooks/tag-command.py`
 intercepts it at UserPromptSubmit and answers from the db without starting a turn —
 bookkeeping shouldn't cost a model call. Use this skill for what the hook cannot do:
 tagging a session mid-turn, in light of work you have actually been doing.

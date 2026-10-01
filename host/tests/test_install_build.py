@@ -558,6 +558,14 @@ def test_install_sh_drops_a_dead_link_of_ours_that_no_pass_would_revisit():
     assert 'ours "$(readlink "$target")" || continue' in CODE
 
 
+def test_jstack_ships_no_unnamespaced_command_twin():
+    """A bare `/elevator` beside the plugin's own `/jstack:elevator` put every
+    command in the picker twice, under a name that hid where it came from."""
+    assert not (REPO / "plugins" / "jstack" / "commands-stage").exists()
+    assert 'link_stage "$PLUGIN/commands-stage"' not in CODE
+    assert 'drop_dead "$HOME/.claude/commands"' in CODE
+
+
 def test_install_sh_settles_build_inputs_before_it_takes_a_working_hub_apart():
     """It asked for the interpreter where the build runs, which is after the
     published Hub has been unregistered, deleted and its state moved aside. A

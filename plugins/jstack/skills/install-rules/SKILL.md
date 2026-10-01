@@ -1,15 +1,14 @@
 ---
 name: install-rules
-description: Use when the user asks to install or refresh the jStack rules and bare slash commands in ~/.claude/.
+description: Use when the user asks to install or refresh the jStack rules in ~/.claude/rules/.
 argument-hint: "[--copy] [--force]"
 ---
 
 # /jstack:install-rules — install what the plugin can't ship
 
-Two things load only from fixed user-scope locations, so a plugin cannot deliver them:
-path-matched rules (`~/.claude/rules/`) and unnamespaced slash commands
-(`~/.claude/commands/` — a plugin's own commands are always `/jstack:name`). This skill
-links both out of the plugin's staging directories.
+Path-matched rules load only from user scope (`~/.claude/rules/`), so a plugin cannot
+deliver them. This skill links them out of the plugin's staging directory. Commands are
+not staged: a plugin's commands are `/jstack:name`, and the CLI lists them as such.
 
 ## Arguments
 
@@ -24,13 +23,12 @@ use it directly, don't parse `installed_plugins.json`:
 
 ```
 ${CLAUDE_PLUGIN_ROOT}/rules-stage/*.md      →  ~/.claude/rules/
-${CLAUDE_PLUGIN_ROOT}/commands-stage/*.md   →  ~/.claude/commands/
 ```
 
 Running from a raw clone with the plugin disabled leaves `${CLAUDE_PLUGIN_ROOT}` unset —
-fall back to the staging dirs beside this skill, or ask where the clone lives.
+fall back to the staging dir beside this skill, or ask where the clone lives.
 
-**Confirm.** Enumerate both stages at runtime and show the counts and the destinations,
+**Confirm.** Enumerate the stage at runtime and show the count and the destination,
 then wait for one word (`yes` / `y` / `go`). `--force` skips the ask.
 
 **Install.** Per file: `mkdir -p` the destination, skip if it exists and `--force` wasn't
@@ -46,10 +44,10 @@ then the totals.
 
 ## Uninstall
 
-Remove only the links that still point into a jstack stage, in both destinations:
+Remove only the links that still point into a jstack stage:
 
 ```bash
-for f in ~/.claude/rules/*.md ~/.claude/commands/*.md; do
+for f in ~/.claude/rules/*.md; do
   [ -L "$f" ] && readlink "$f" | grep -q "jstack/.*-stage" && rm "$f"
 done
 ```

@@ -415,11 +415,6 @@ def check_rules() -> dict:
     return _stage_check("rules", "rules-stage", USER_CLAUDE / "rules", "rules")
 
 
-def check_commands() -> dict:
-    return _stage_check("commands", "commands-stage", USER_CLAUDE / "commands",
-                        "bare commands")
-
-
 def check_hooks() -> dict:
     """Every command in hooks.json resolves to a file that exists and can run.
 
@@ -1060,7 +1055,7 @@ def check_versions() -> dict:
 
 
 CHECKS = (check_python, check_claude, check_git, check_dateutil, check_root,
-          check_agents, check_timeline, check_rules, check_commands, check_hooks,
+          check_agents, check_timeline, check_rules, check_hooks,
           check_host,
           check_bin, check_config, check_review, check_injection, check_scheduler,
           check_marketplace_source, check_versions)
