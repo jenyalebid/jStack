@@ -558,17 +558,34 @@ class MacBackend:
         with httpx.Client(timeout=5, trust_env=False) as client:
             base = self.config["local_url"] + "/api/jremote/v1"
             headers = {"Authorization": "Bearer " + token}
-            response = client.get(base + "/host", headers=headers)
-            response.raise_for_status()
+            try:
+                response = client.get(base + "/host", headers=headers)
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                self.unverified = f"the host did not answer /host: {exc or type(exc).__name__}"
+                return False
             identity = response.json()
             source = identity.get("source", {})
-            if (identity["host_id"] != self.config["machine"] or
-                    source.get("release") != job["release"] or source.get("dirty") or
-                    source.get("sha") != job["envelope"]["manifest"]["sources"]["stack"]):
+            if identity["host_id"] != self.config["machine"]:
+                self.unverified = f"the host answering is {identity['host_id']}, not this machine"
                 return False
-            response = client.get(base + "/sessions/active", headers=headers)
-            response.raise_for_status()
-            return isinstance(response.json().get("sessions"), list)
+            if source.get("release") != job["release"]:
+                self.unverified = f"the host is running {source.get('release') or 'no release'}, not {job['release']}"
+                return False
+            if source.get("dirty") or source.get("sha") != job["envelope"]["manifest"]["sources"]["stack"]:
+                self.unverified = (f"the host source is {source.get('sha') or 'unknown'}"
+                                   f"{' (dirty)' if source.get('dirty') else ''}, not the release's")
+                return False
+            try:
+                response = client.get(base + "/sessions/active", headers=headers)
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                self.unverified = f"the host did not answer /sessions/active: {exc or type(exc).__name__}"
+                return False
+            if not isinstance(response.json().get("sessions"), list):
+                self.unverified = "the host's /sessions/active carried no session list"
+                return False
+            return True
 
     def verify(self, job: dict) -> bool:
         self.unverified = ""
@@ -592,12 +609,20 @@ class MacBackend:
             built_here = self._built_here(job)
             for kind, app in job["transaction"]["apps"].items():
                 target = Path(app["target"])
-                self._check_app(target, job["envelope"]["manifest"]["components"][kind], kind,
-                                source_build=built_here)
+                try:
+                    self._check_app(target, job["envelope"]["manifest"]["components"][kind], kind,
+                                    source_build=built_here)
+                except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+                    self.unverified = f"the {kind} bundle did not check: {exc or type(exc).__name__}"
+                    return False
                 if self._running_required(kind, app, job["transaction"]) and not self._app_running(kind, target):
+                    self.unverified = f"the {kind} app is not running"
                     return False
             return True
-        except (OSError, ValueError, httpx.HTTPError, KeyError, subprocess.SubprocessError):
+        except (OSError, ValueError, httpx.HTTPError, KeyError, subprocess.SubprocessError) as exc:
+            # Every leg names itself (#315): a bare False read exactly like a
+            # bundle that failed to land, on a machine that had installed fine.
+            self.unverified = self.unverified or f"verification raised {type(exc).__name__}: {exc}"
             return False
 
     def line(self) -> str:
