@@ -21,8 +21,12 @@ def _done(argv, code=0, out="", err=""):
 
 def _machine(tmp_path, monkeypatch, *, actual=None, account=False,
              guest=False, service=True, acl=False, smb_hash=True,
-             hash_readable=True):
+             hash_readable=True, others=None):
+    """`others` is every other person's account on the machine, name -> whether
+    smbd would answer its password (None = not readable from here)."""
     root = tmp_path / "stack"
+    others = {} if others is None else dict(others)
+    fileshare._reset_cache()
     for name in fileshare.SHARE_NAMES:
         (root / name).mkdir(parents=True)
     monkeypatch.setattr(fileshare, "_stack_root", lambda: root)
@@ -40,6 +44,19 @@ def _machine(tmp_path, monkeypatch, *, actual=None, account=False,
                 text += f" 1: user:hostuser allow {','.join(fileshare.ACL_RIGHTS)}\n"
             return _done(argv, out=text)
         if argv[0] == fileshare.DSCL:
+            if argv[1:3] == [".", "-list"]:
+                rows = [f"root 0\n", f"_smbd 222\n"]
+                if account:
+                    rows.append(f"{fileshare.ACCOUNT} 502\n")
+                rows += [f"{name} {600 + i}\n" for i, name in enumerate(others)]
+                return _done(argv, out="".join(rows))
+            if argv[-1] == "AuthenticationAuthority":
+                user = argv[3].rsplit("/", 1)[1]
+                state = others.get(user, smb_hash if hash_readable else None)
+                if state is None:
+                    return _done(argv, out="No such key: AuthenticationAuthority\n")
+                kinds = "SALTED-SHA512-PBKDF2" + (",SMB-NT" if state else "")
+                return _done(argv, out=f"AuthenticationAuthority: ;ShadowHash;HASHLIST:<{kinds}> ;SecureToken;\n")
             if account:
                 return _done(argv, out=(f"NFSHomeDirectory: {fileshare.ACCOUNT_HOME}\n"
                                         f"UserShell: {fileshare.ACCOUNT_SHELL}\n"
@@ -49,11 +66,13 @@ def _machine(tmp_path, monkeypatch, *, actual=None, account=False,
             # macOS 26's own exit code for a non-member, with its own sentence.
             return _done(argv, code=67, out="no jstackshare is NOT a member of admin")
         if argv[0] == fileshare.PWPOLICY:
-            # Reading hash types is root-only: to anyone else it prints nothing
-            # and still exits 0.
-            if not hash_readable:
+            # Reading another account's hash types is root-only: it prints
+            # nothing and still exits 0.
+            user = argv[2]
+            state = others.get(user, smb_hash if hash_readable else None)
+            if state is None:
                 return _done(argv)
-            return _done(argv, out="SMB-NT\n" if smb_hash else
+            return _done(argv, out="SMB-NT\n" if state else
                          "SALTED-SHA512-PBKDF2\n")
         if argv[0] == fileshare.SYSADMINCTL:
             word = "enabled" if guest else "disabled"
@@ -520,3 +539,149 @@ def test_administrator_script_refuses_a_password_step_with_no_password():
     with pytest.raises(fileshare.FileShareError, match="none was collected"):
         fileshare._administrator_script(
             [[fileshare.DSCL, ".", "-passwd", f"/Users/{fileshare.ACCOUNT}"]], None)
+
+
+# --- the server speaks only to the sharing account -----------------------------
+#
+# Share-point settings gate three folders.  They do not gate who may log in to
+# smbd: any local account with an SMB hash can, and an administrator who does
+# may mount the whole startup disk.  So every other account is observed, and
+# setup switches its SMB credential off.
+
+def _ready_machine(tmp_path, monkeypatch, **kw):
+    root = tmp_path / "stack"
+    _machine(tmp_path, monkeypatch, actual={n: _share(root / n) for n in fileshare.SHARE_NAMES},
+             account=True, acl=True, **kw)
+    return root
+
+
+def test_another_account_smbd_answers_for_is_not_secure(tmp_path, monkeypatch):
+    _ready_machine(tmp_path, monkeypatch, others={"owner": True, "guest2": False})
+
+    observed = fileshare.status()
+
+    assert observed["accounts"] == [
+        {"name": "guest2", "uid": 601, "smb_hash": False},
+        {"name": "owner", "uid": 600, "smb_hash": True},
+    ]
+    assert observed["secure"] is False
+    assert observed["ready"] is False
+    assert {"kind": "account_speaks_smb", "name": "owner"} in observed["security_problems"]
+
+
+def test_setup_switches_every_other_account_off_the_server(tmp_path, monkeypatch):
+    _ready_machine(tmp_path, monkeypatch, others={"owner": True, "quiet": False,
+                                                  "unread": None})
+
+    commands = fileshare.setup_plan()
+
+    off = [c[2] for c in commands if c[:2] == [fileshare.PWPOLICY, "-u"]
+           and c[-2:] == ["SMB-NT", "off"]]
+    # An unreadable account is switched off too: dropping a hash that was
+    # never there costs nothing, and a guess would leave a door open.
+    assert off == ["owner", "unread"]
+    assert fileshare.ACCOUNT not in off
+    assert [fileshare.PWPOLICY, "-u", fileshare.ACCOUNT, "-sethashtypes",
+            "SMB-NT", "on"] not in commands
+
+
+def test_an_unreadable_other_account_is_named_and_does_not_block(tmp_path, monkeypatch):
+    _ready_machine(tmp_path, monkeypatch, others={"unread": None})
+
+    observed = fileshare.status()
+
+    assert observed["accounts"] == [{"name": "unread", "uid": 600, "smb_hash": None}]
+    assert "accounts.unread.smb_hash" in observed["unverified"]
+    assert observed["ready"] is True
+
+
+def test_system_accounts_and_the_sharing_account_are_not_other_accounts(tmp_path, monkeypatch):
+    _ready_machine(tmp_path, monkeypatch)
+    assert fileshare.status()["accounts"] == []
+
+
+def test_hash_types_fall_back_to_the_directory_record(monkeypatch):
+    """`pwpolicy` is silent for anyone but root and the caller; the record's
+    HASHLIST says the same thing, and the real hub reads its own that way."""
+    calls = []
+
+    def run(argv):
+        calls.append(argv[0])
+        if argv[0] == fileshare.PWPOLICY:
+            return _done(argv)
+        return _done(argv, out="AuthenticationAuthority: ;ShadowHash;HASHLIST:"
+                               "<SALTED-SHA512-PBKDF2,SMB-NT> ;SecureToken;\n")
+    monkeypatch.setattr(fileshare, "_run", run)
+
+    assert fileshare._hash_types("someone") == {"SALTED-SHA512-PBKDF2", "SMB-NT"}
+    assert calls == [fileshare.PWPOLICY, fileshare.DSCL]
+
+
+def test_doctor_fails_a_server_another_account_can_log_in_to(monkeypatch):
+    monkeypatch.setattr(fileshare, "status", lambda: {
+        "available": True, "configured": True, "ready": False, "secure": False,
+        "unexpected": [], "service_enabled": True, "shares": [],
+        "security_problems": [{"kind": "account_speaks_smb", "name": "owner"}],
+    })
+    result = doctor.check_file_sharing()
+    assert result["grade"] == doctor.FAIL
+    assert "owner" in result["detail"]
+    assert "files setup --apply" in result["hint"]
+
+
+def test_doctor_only_warns_where_no_server_is_declared(monkeypatch):
+    monkeypatch.setattr(fileshare, "status", lambda: {
+        "available": True, "configured": False, "ready": False, "secure": False,
+        "unexpected": [], "service_enabled": False, "shares": [],
+        "security_problems": [{"kind": "account_speaks_smb", "name": "owner"}],
+    })
+    assert doctor.check_file_sharing()["grade"] == doctor.WARN
+
+
+# --- the capability probe answers from one reading (jStack#325) ---------------
+
+def test_the_probe_answers_several_askers_from_one_scan(tmp_path, monkeypatch):
+    import threading
+    _ready_machine(tmp_path, monkeypatch)
+    scans = []
+    real = fileshare._observe
+
+    def counted():
+        scans.append(1)
+        return real()
+    monkeypatch.setattr(fileshare, "_observe", counted)
+
+    answers = []
+    threads = [threading.Thread(target=lambda: answers.append(fileshare.serves_files()))
+               for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert answers == [True] * 5
+    assert len(scans) == 1
+    assert router._probe("file_sharing") is True
+    assert len(scans) == 1
+
+
+def test_a_fresh_status_renews_what_the_probe_answers_from(tmp_path, monkeypatch):
+    _ready_machine(tmp_path, monkeypatch)
+    assert fileshare.serves_files() is True
+
+    # The share points vanish; the probe still answers from its reading until
+    # someone takes a fresh one, which every default `status()` call is.
+    monkeypatch.setattr(fileshare, "_actual_shares", lambda: {})
+    assert fileshare.serves_files() is True
+    assert fileshare.status()["ready"] is False
+    assert fileshare.serves_files() is False
+
+
+def test_the_probe_reading_expires(tmp_path, monkeypatch):
+    _ready_machine(tmp_path, monkeypatch)
+    now = [1000.0]
+    monkeypatch.setattr(fileshare.time, "monotonic", lambda: now[0])
+    assert fileshare.serves_files() is True
+    monkeypatch.setattr(fileshare, "_actual_shares", lambda: {})
+    now[0] += fileshare.PROBE_TTL + 0.1
+    assert fileshare.serves_files() is False

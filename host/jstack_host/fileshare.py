@@ -9,7 +9,13 @@ else in Directory Services' share-point table is drift.
 This module owns both sides of that contract:
 
 * :func:`status` is unprivileged and is the one observation used by the CLI,
-  API, doctor and audit.
+  API, doctor and audit.  The ``/host`` capability probe reads it through
+  :func:`serves_files`, which answers from a reading at most :data:`PROBE_TTL`
+  old, so a launch that asks five times pays for one scan (jStack#325).
+* The server speaks only to the sharing account.  Every other local account's
+  SMB credential is observed and, under setup, switched off: an administrator
+  with an SMB hash can mount the whole startup disk through the same port the
+  three shares are published on, and no share-point setting prevents that.
 * :func:`setup` is a dry-run unless explicitly applied as root.  It creates a
   non-admin, non-login account, removes every undeclared share point, declares
   the three roots with guest access disabled and SMB3 encryption required, and
@@ -25,6 +31,7 @@ launchctl imitation cannot honestly claim to reproduce.
 from __future__ import annotations
 
 import asyncio
+import copy
 import getpass
 import json
 import os
@@ -35,6 +42,8 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from . import hostenv
@@ -74,6 +83,13 @@ ACL_OBSERVED_FILE_RIGHTS = (
 )
 
 AUDIT_INTERVAL = 300.0
+#: How old a reading the `/host` capability probe may answer from.  The scan
+#: behind :func:`status` costs most of a second; the app probes on every
+#: launch and foreground, several times at once.
+PROBE_TTL = 10.0
+#: The first UID macOS gives a person.  Below it are the system's own
+#: accounts, none of which carries a password an SMB client could present.
+LOCAL_UID_FLOOR = 500
 
 
 class FileShareError(RuntimeError):
@@ -164,6 +180,48 @@ def _parse_membership(text: str) -> bool | None:
     return None
 
 
+def _hash_types(user: str) -> set[str] | None:
+    """The password hashes an account carries, or None when unreadable.
+
+    `pwpolicy -gethashtypes` answers for the caller's own account and, as root,
+    for any; for anyone else it prints nothing and exits 0.  Directory
+    Services keeps the same list in the record's AuthenticationAuthority,
+    which macOS lets a user read for their own record alone.  "SMB-NT" in
+    either is the one fact that decides whether smbd will take the account's
+    password at all.
+    """
+    r = _run([PWPOLICY, "-u", user, "-gethashtypes"])
+    if r.returncode == 0 and r.stdout.strip():
+        return set(r.stdout.split())
+    r = _run([DSCL, ".", "-read", f"/Users/{user}", "AuthenticationAuthority"])
+    if r.returncode == 0:
+        m = re.search(r"HASHLIST:<([^>]*)>", r.stdout)
+        if m:
+            return {h.strip() for h in m.group(1).split(",") if h.strip()}
+    return None
+
+
+def _local_accounts() -> list[dict]:
+    """Every person's account on this machine other than the sharing account,
+    with whether smbd would answer its password.  None = not readable from
+    here, which is every account but the caller's on a host without root."""
+    r = _run([DSCL, ".", "-list", "/Users", "UniqueID"])
+    if r.returncode != 0:
+        return []
+    out = []
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not parts[1].lstrip("-").isdigit():
+            continue
+        name, uid = parts[0], int(parts[1])
+        if uid < LOCAL_UID_FLOOR or name == ACCOUNT:
+            continue
+        hashes = _hash_types(name)
+        out.append({"name": name, "uid": uid,
+                    "smb_hash": None if hashes is None else "SMB-NT" in hashes})
+    return sorted(out, key=lambda row: row["name"])
+
+
 def _account() -> dict:
     r = _run([DSCL, ".", "-read", f"/Users/{ACCOUNT}", "NFSHomeDirectory",
               "UserShell", "UniqueID"])
@@ -176,11 +234,10 @@ def _account() -> dict:
         if sep:
             fields[key.strip()] = value.strip()
     admin = _run([DSEDITGROUP, "-o", "checkmember", "-m", ACCOUNT, "admin"])
-    hashes = _run([PWPOLICY, "-u", ACCOUNT, "-gethashtypes"])
-    # Reading hash *types* is root-only on current macOS. Unknown is kept as
-    # unknown instead of pretending the credential is either armed or broken.
-    smb_hash = (None if hashes.returncode or not hashes.stdout.strip()
-                else "SMB-NT" in hashes.stdout.split())
+    hashes = _hash_types(ACCOUNT)
+    # Another account's hash types are root-only on current macOS. Unknown is
+    # kept as unknown instead of pretending the credential is armed or broken.
+    smb_hash = None if hashes is None else "SMB-NT" in hashes
     is_admin = _parse_membership(f"{admin.stdout} {admin.stderr}")
     return {
         "exists": True,
@@ -269,15 +326,46 @@ def _row(name: str, path: Path, actual: dict | None) -> dict:
     }
 
 
-def status() -> dict:
-    """Declared and observed file-sharing state, without privilege or writes."""
+_cache_lock = threading.Lock()
+_cached: tuple[float, dict] | None = None
+
+
+def status(*, max_age: float = 0.0) -> dict:
+    """Declared and observed file-sharing state, without privilege or writes.
+
+    ``max_age`` > 0 answers from the last reading when it is no older than
+    that, and otherwise takes one reading for every caller waiting on it.  The
+    default is always a fresh scan, and every fresh scan renews what the
+    probe answers from.
+    """
+    global _cached
+    if max_age <= 0:
+        fresh = _observe()
+        with _cache_lock:
+            _cached = (time.monotonic(), fresh)
+        return fresh
+    with _cache_lock:
+        if _cached is not None and time.monotonic() - _cached[0] <= max_age:
+            return copy.deepcopy(_cached[1])
+        fresh = _observe()
+        _cached = (time.monotonic(), fresh)
+        return copy.deepcopy(fresh)
+
+
+def _reset_cache() -> None:
+    global _cached
+    with _cache_lock:
+        _cached = None
+
+
+def _observe() -> dict:
     desired = desired_shares()
     if not _supported():
         return {"available": False, "configured": False, "secure": False,
                 "ready": False,
                 "reason": "macOS SMB sharing is not available", "shares": [],
                 "unexpected": [], "security_problems": [], "service_enabled": None,
-                "guest_enabled": None, "unverified": [],
+                "guest_enabled": None, "unverified": [], "accounts": [],
                 "account": {"exists": False, "name": ACCOUNT, "ok": False,
                             "smb_hash": False}}
 
@@ -296,6 +384,10 @@ def status() -> dict:
                   account["shell"] == ACCOUNT_SHELL)
     guest = _guest_enabled()
     service = _service_enabled()
+    accounts = _local_accounts()
+    # Any other account smbd would answer for is a second door on the same
+    # port -- for an administrator, a door onto the whole disk.
+    speaking = [row["name"] for row in accounts if row["smb_hash"] is True]
     configured = bool(rows) and all(row["present"] for row in rows)
     # Reading the account's hash types is root-only, and the host is sealed
     # against root: demanding a `True` there made `ready` unreachable in the
@@ -303,8 +395,11 @@ def status() -> dict:
     # `unverified`; an observed `False` still blocks.
     unverified = [f"account.{key}" for key in ("admin", "smb_hash")
                   if account.get(key) is None]
+    unverified += [f"accounts.{row['name']}.smb_hash" for row in accounts
+                   if row["smb_hash"] is None]
     secure = (configured and not unexpected and account_ok and
               account.get("smb_hash") is not False and guest is False and
+              not speaking and
               all(all(row[k] for k in ("path_ok", "guest_off", "writable",
                                        "encrypted", "shared", "acl_ok",
                                        "owner_acl_ok", "children_acl_ok",
@@ -324,6 +419,8 @@ def status() -> dict:
         problems.append({"kind": "global_guest_enabled"})
     if configured and account.get("admin"):
         problems.append({"kind": "sharing_account_is_admin", "name": ACCOUNT})
+    for name in speaking:
+        problems.append({"kind": "account_speaks_smb", "name": name})
     return {
         "available": True,
         "configured": configured,
@@ -336,6 +433,7 @@ def status() -> dict:
         "guest_enabled": guest,
         "unverified": unverified,
         "account": {**account, "ok": account_ok},
+        "accounts": accounts,
     }
 
 
@@ -448,6 +546,14 @@ def setup_plan(observed: dict | None = None) -> list[list[str]]:
         commands.append([PWPOLICY, "-u", ACCOUNT, "-sethashtypes",
                          "SMB-NT", "on"])
         commands.append([DSCL, ".", "-passwd", f"/Users/{ACCOUNT}"])
+
+    # Only the sharing account may answer smbd.  Dropping a hash an account
+    # never had is a no-op, so an account this caller could not read is
+    # switched off rather than left to a guess.
+    for row in observed.get("accounts", []):
+        if row.get("smb_hash") is not False:
+            commands.append([PWPOLICY, "-u", row["name"], "-sethashtypes",
+                             "SMB-NT", "off"])
 
     removed = set()
     for row in observed.get("unexpected", []):
@@ -633,7 +739,10 @@ async def audit_loop(interval: float = AUDIT_INTERVAL) -> None:
 
 
 def serves_files() -> bool:
+    """What the `/host` capability probe asks: may the app show the files
+    screen.  Answered from a reading at most :data:`PROBE_TTL` old; the
+    routes behind the screen read the live state themselves."""
     try:
-        return bool(status()["ready"])
+        return bool(status(max_age=PROBE_TTL)["ready"])
     except Exception:
         return False
