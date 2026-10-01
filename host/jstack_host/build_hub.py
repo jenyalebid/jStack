@@ -504,6 +504,7 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
     (packages / "release-identity.json").write_text(json.dumps({
         **identity,
         "package_sha256": fingerprint(packages / "jstack_host")}) + "\n")
+    bar_bytecode(resources)
     # The runtime gate asks who signed the bundle it is about to import from.
     # A Hub built on the Mac that will run it is signed ad-hoc — that Mac holds
     # no Developer ID — so asking for the publisher's team makes every such
@@ -555,6 +556,24 @@ def _build(stack: Path, output: Path, version: str, config: dict | None, *, cata
             raise ValueError(f"escaping runtime symlink: {path.relative_to(contents)}")
     sign(app, config)
     return app
+
+
+def bar_bytecode(root: Path) -> None:
+    """Seal a file named `__pycache__` beside every Python source under `root`.
+
+    The runtime never writes bytecode, but any other interpreter pointed at
+    `packages` does, and one `.pyc` added after signing breaks the seal and
+    every Hub service with it (#285). Python skips the write when it cannot
+    create the `__pycache__` directory, whatever its version, so a sealed file
+    holding that name keeps the bundle intact. Read-only directories would also
+    stop it, but then neither `rm -rf` nor FileManager can delete the bundle
+    without a chmod first.
+    """
+    for directory in sorted({path.parent for path in root.rglob("*.py")}):
+        cache = directory / "__pycache__"
+        if cache.is_dir():
+            raise ValueError(f"bytecode staged into the bundle: {cache.relative_to(root)}")
+        cache.touch()
 
 
 def sign(app: Path, config: dict | None):

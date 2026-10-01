@@ -29,7 +29,7 @@ HUB = "live.jstack.hub"
 pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="macOS code signing")
 
 
-def bundle(root: Path, executable: Path | None = None) -> Path:
+def bundle(root: Path, executable: Path | None = None, *, barred: bool = False) -> Path:
     """An ad-hoc signed Hub-shaped app with one package in it."""
     app = root / "jStack Hub.app"
     contents = app / "Contents"
@@ -46,6 +46,11 @@ def bundle(root: Path, executable: Path | None = None) -> Path:
     package = contents / "Resources/packages/httpx"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("# httpx\n")
+    (package / "_sub").mkdir()
+    (package / "_sub/core.py").write_text("VALUE = 1\n")
+    if barred:
+        from jstack_host.build_hub import bar_bytecode
+        bar_bytecode(contents / "Resources")
     subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", str(app)],
                    check=True, capture_output=True)
     return app
@@ -149,6 +154,28 @@ def test_doctor_sends_an_altered_hub_to_a_reinstall(tmp_path, monkeypatch):
     assert result["grade"] == doctor.FAIL
     assert "modified Contents/Resources/packages/httpx/__init__.py" in result["detail"]
     assert "reinstall" in result["hint"] and "__pycache__" not in result["hint"]
+
+
+def test_a_built_hub_keeps_its_seal_when_another_python_imports_from_it(tmp_path, monkeypatch):
+    app = bundle(tmp_path, barred=True)
+    use(monkeypatch, app)
+
+    imported = subprocess.run([sys.executable, "-c", "import httpx, httpx._sub.core as c; print(c.VALUE)"],
+                              env={**{k: v for k, v in os.environ.items() if k != "PYTHONDONTWRITEBYTECODE"},
+                                   "PYTHONPATH": str(app / "Contents/Resources/packages")},
+                              capture_output=True, text=True, timeout=60)
+
+    assert imported.returncode == 0 and imported.stdout.strip() == "1", imported.stderr
+    assert not list(app.rglob("*.pyc"))
+    assert doctor.check_hub_seal()["grade"] == doctor.OK
+
+
+def test_bytecode_already_in_the_tree_is_refused_not_sealed(tmp_path):
+    from jstack_host.build_hub import bar_bytecode
+    (tmp_path / "pkg/__pycache__").mkdir(parents=True)
+    (tmp_path / "pkg/m.py").write_text("")
+    with pytest.raises(ValueError, match="pkg/__pycache__"):
+        bar_bytecode(tmp_path)
 
 
 def test_doctor_without_a_hub_has_nothing_to_grade(tmp_path, monkeypatch):
