@@ -194,6 +194,23 @@ def test_the_suite_writes_its_state_nowhere_a_host_could_be_serving():
             "on this machine declared it is serving")
 
 
+def test_the_suite_pairs_nothing_onto_a_mesh_a_host_could_be_serving():
+    """The peer table, not just the state dir — the same leak one directory
+    over. `tunnel.HUB_CONF` binds at import off `hostenv.wireguard_dir()`,
+    which on a hub is the live `wg0.conf`; a redeem through the real path then
+    pairs a test name onto the machine's mesh, a key nothing revokes. The
+    suite's answer has to be its own empty directory: no conf, so no host
+    here owns a mesh and nothing is issued."""
+    from jstack_host import hostenv, tunnel
+
+    for path in (hostenv.wireguard_dir(), tunnel.HUB_CONF.parent, tunnel.CLIENTS_DIR.parent):
+        here = path.resolve()
+        assert here.name.startswith("jstack-host-tests-mesh-"), (
+            f"the suite resolved {here} as its mesh dir — see conftest._WG_DIR")
+        assert not (here / "wg0.conf").exists()
+    assert not tunnel.can_pair()
+
+
 def test_state_paths_bound_at_import_follow_the_suites_state_dir():
     """The constants, not just the calls — and the reason conftest sets the
     variable at module level rather than in a fixture.

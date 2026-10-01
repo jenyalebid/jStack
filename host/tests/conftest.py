@@ -52,6 +52,19 @@ import pytest
 _STATE_DIR = Path(tempfile.mkdtemp(prefix="jstack-host-tests-state-"))
 os.environ["JREMOTE_STATE_DIR"] = str(_STATE_DIR)
 
+#: The mesh is the same seam one directory over. `tunnel` binds `HUB_CONF` and
+#: `CLIENTS_DIR` at import off `hostenv.wireguard_dir()`, and on the hub that
+#: is the live peer table. A test that redeems a host code through the real
+#: `enrolment.redeem` then runs the real `wg_peer.py add --leaf` against it:
+#: the hub-prefs tests paired `fresh-leaf` and `other-mac` onto this Mac's
+#: mesh on every pre-push gate, two keys nothing could revoke, found by the
+#: doctor after a purge had already cleared them once. An empty directory of
+#: the session's own: no `wg0.conf` there, so `can_pair()` is False and the
+#: redeem records no peer, while a test that wants a mesh builds one under
+#: its `tmp_path` (`test_jremote_mesh.mesh`). `test_jremote_isolation` pins it.
+_WG_DIR = Path(tempfile.mkdtemp(prefix="jstack-host-tests-mesh-"))
+os.environ["WG_PEER_DIR"] = str(_WG_DIR)
+
 # ── The suite's tmux sockets live in a directory the run takes away ─────────
 #
 # THE SUITE LEFT 15,926 SOCKET FILES IN THE MACHINE'S TMUX DIR (#259). Every
