@@ -149,8 +149,9 @@ _INJECTED = [re.compile(p, re.S) for p in (
     r"<environment_context>.*?</environment_context>",
     r"<permissions instructions>.*?</permissions instructions>",
 )]
-# A turn that is ONLY machine opening is not speech at all.
-_NOT_SPEECH = re.compile(r"^\s*(<command-name>|Caveat: The messages below|\[Request interrupted)")
+# A turn that is ONLY machine opening is not speech at all — nor is one a
+# machine sent in the user's seat, which opens with the shared injected tag.
+_NOT_SPEECH = re.compile(r"^\s*(<command-name>|Caveat: The messages below|\[Request interrupted|\[system prompt\])")
 
 
 def strip_injected(text: str) -> str:

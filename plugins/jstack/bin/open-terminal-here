@@ -55,6 +55,16 @@ done
 
 case "$ENGINE" in claude|codex) ;; *) echo "unknown engine: $ENGINE" >&2; exit 64 ;; esac
 
+# The first prompt is a machine speaking in the user's seat — a person never
+# reaches a session through this adapter — so it carries the shared tag
+# (rules-stage/prompt-sourcing.md). Once: a caller that already tagged it, or
+# the host's spawn doing the same, does not stack a second. A slash command
+# stays bare; the CLI only runs one that opens the line.
+INJECTED_TAG="[system prompt]"
+if [ -n "$FIRST_PROMPT" ] && [[ "$FIRST_PROMPT" != "$INJECTED_TAG"* && "$FIRST_PROMPT" != /* ]]; then
+  FIRST_PROMPT="$INJECTED_TAG $FIRST_PROMPT"
+fi
+
 # A command driven through a managed terminal must stay drivable there. The host owns
 # routing and board ids; the portable adapter only knows its public CLI.
 if [[ -n "${JREMOTE_SID:-}" ]] && command -v jstack-host >/dev/null 2>&1; then

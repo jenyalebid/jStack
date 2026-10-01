@@ -29,7 +29,7 @@ wc -l "$T"; jq -r '.type' "$T" | sort | uniq -c
 jq -r 'select(.type=="user" or (.type=="queue-operation" and .operation=="enqueue"))
        | (.content // (.message.content
            | if type=="string" then . else map(select(.type=="text")|.text)|join(" ") end))
-       | gsub("\\s+";" ")' "$T" | grep -Ev '^[[:space:]]*$|^<' | tail -40
+       | gsub("\\s+";" ")' "$T" | grep -Ev '^[[:space:]]*$|^<|^\[system prompt\]' | tail -40
 
 # what the session claimed it did — the claims you are about to check
 jq -r 'select(.type=="assistant") | .message.content
@@ -48,6 +48,8 @@ as `queue-operation`/`enqueue`, and those interjections are usually the
 corrections, the "no, not like that" that redirected the whole session. Select
 on `user` alone and the transcript reads as though the user never pushed back.
 Blank lines are dropped before `tail`, not after, or the tail is all blanks.
+So is every line opening `[system prompt]`: that tag marks a hook, wake or
+spawn speaking in the user's seat, and none of it is the user.
 
 `session-files --session {sid}` gives the same write list already filtered to
 what git still sees — the stage list, if this ends in a commit.

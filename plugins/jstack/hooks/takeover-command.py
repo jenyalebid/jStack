@@ -52,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(PLUGIN_ROOT))
 from session_runtime import engine, session_title
 from _answer import block, configure    # noqa: E402 — sibling modules, path set above
-from _prompts import load as load_prompt  # noqa: E402
+from _prompts import load as load_prompt, tagged  # noqa: E402
 
 try:
     import root as _root  # noqa: E402
@@ -254,9 +254,9 @@ def main() -> None:
     brief_path = stage(briefing)
 
     title = title_for(agent, session_title(transcript, sid), source_seat)
-    kick = ("Take over the session named in your briefing: read it from the "
-            "transcript, verify what it claims against the tree, then continue"
-            + (f" — focus: {focus}." if focus else "."))
+    kick = tagged("Take over the session named in your briefing: read it from the "
+                  "transcript, verify what it claims against the tree, then continue"
+                  + (f" — focus: {focus}." if focus else "."))
 
     if not shutil.which(TERMINAL):
         block(f"/takeover: no terminal adapter on PATH ({TERMINAL}).\n"
