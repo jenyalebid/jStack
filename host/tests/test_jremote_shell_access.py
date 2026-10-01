@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from jstack_host import hostenv, shell_access
+from jstack_host import fileshare, hostenv, shell_access
 
 
 @pytest.fixture(autouse=True)
@@ -359,6 +359,7 @@ def test_policy_status_reads_the_door_not_the_file(tmp_path):
 
 def test_apply_without_root_goes_through_the_administrator_prompt(tmp_path, monkeypatch):
     monkeypatch.setattr(shell_access.os, "geteuid", lambda: 501)
+    monkeypatch.setattr(fileshare.sys, "stdin", type("NoTty", (), {"isatty": lambda self: False})())
     monkeypatch.setattr(shell_access, "offered_methods",
                         lambda runner=None, port=22: ["publickey", "password"])
     seen = {}
@@ -378,6 +379,31 @@ def test_apply_without_root_goes_through_the_administrator_prompt(tmp_path, monk
     # sshd is asked to parse it, and a rejected policy is lifted by the same script.
     assert f"{shell_access.SSHD} -t" in source
     assert f"{shell_access.RM} -f" in source
+
+
+def test_apply_from_a_terminal_asks_in_that_terminal_so_a_remote_shell_can_answer(tmp_path, monkeypatch):
+    monkeypatch.setattr(shell_access.os, "geteuid", lambda: 501)
+    monkeypatch.setattr(fileshare.sys, "stdin", type("Tty", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr(shell_access, "offered_methods",
+                        lambda runner=None, port=22: ["publickey", "password"])
+    seen = {}
+
+    def sudo(argv, **kw):
+        seen["argv"], seen["stdin"] = argv, kw.get("input", "")
+        return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    result = shell_access.apply_policy(apply=True, runner=sudo, root=tmp_path)
+
+    assert result["applied"] is True
+    argv = seen["argv"]
+    assert argv[0] == fileshare.SUDO and argv[1] == "-p"
+    assert "key-only" in argv[2] and "password for %u" in argv[2]
+    assert argv[3:5] == [fileshare.SH, "-c"]
+    script = argv[5]
+    assert "do shell script" not in script and seen["stdin"] == ""
+    assert shell_access.INSTALL in script and "-o root -g wheel" in script
+    assert str(tmp_path / shell_access.SSHD_POLICY_PATH) in script
+    assert f"{shell_access.SSHD} -t" in script and f"{shell_access.RM} -f" in script
 
 
 def test_a_refused_prompt_is_a_failed_step_not_an_exception(tmp_path, monkeypatch):

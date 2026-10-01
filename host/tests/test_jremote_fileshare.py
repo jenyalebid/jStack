@@ -449,7 +449,18 @@ def _apply_rig(monkeypatch, commands, *, secure=True):
     return calls, runner
 
 
+class _NoTty:
+    def isatty(self):
+        return False
+
+
+class _Tty:
+    def isatty(self):
+        return True
+
+
 def test_apply_without_root_goes_through_the_administrator_prompt(monkeypatch, tmp_path):
+    monkeypatch.setattr(fileshare.sys, "stdin", _NoTty())
     commands = [
         [fileshare.SYSADMINCTL, "-addUser", fileshare.ACCOUNT, "-fullName",
          "jStack File Sharing", "-shell", fileshare.ACCOUNT_SHELL, "-home",
@@ -489,7 +500,36 @@ def test_apply_without_root_goes_through_the_administrator_prompt(monkeypatch, t
     assert written and not written[0].exists() and not written[0].parent.exists()
 
 
+def test_apply_from_a_terminal_asks_for_the_password_there_not_in_a_dialog(monkeypatch, tmp_path):
+    """A remote shell has no view of this machine's screen: on a terminal the
+    approval is sudo's own prompt in that terminal, never an osascript dialog
+    waiting on a display nobody is watching."""
+    monkeypatch.setattr(fileshare.sys, "stdin", _Tty())
+    commands = [
+        [fileshare.DSCL, ".", "-passwd", f"/Users/{fileshare.ACCOUNT}"],
+        [fileshare.SHARING, "-a", str(tmp_path / "Agents"), "-n", "Agents", "-g", "000", "-E", "1"],
+    ]
+    calls, runner = _apply_rig(monkeypatch, commands)
+    monkeypatch.setattr(fileshare, "_collect_password", lambda: "s3cret pass")
+
+    result = fileshare.setup(apply=True, runner=runner)
+
+    assert result["applied"] is True
+    [(argv, stdin)] = calls
+    assert argv[0] == fileshare.SUDO
+    assert fileshare.OSASCRIPT not in argv and stdin == ""
+    assert argv[1] == "-p" and "password for %u" in argv[2]
+    assert argv[3:5] == [fileshare.SH, "-c"]
+    script = argv[5]
+    assert script.startswith("set -eu")
+    assert f'pw=$({fileshare.CAT} ' in script
+    assert f'-passwd /Users/{fileshare.ACCOUNT} "$pw"' in script
+    # the password still travels by file, never on sudo's argv
+    assert "s3cret" not in " ".join(argv)
+
+
 def test_apply_without_root_and_without_a_password_step_asks_for_none(monkeypatch, tmp_path):
+    monkeypatch.setattr(fileshare.sys, "stdin", _NoTty())
     commands = [[fileshare.SHARING, "-a", str(tmp_path / "Agents"), "-n", "Agents"]]
     calls, runner = _apply_rig(monkeypatch, commands)
     monkeypatch.setattr(fileshare, "_collect_password",

@@ -432,12 +432,14 @@ def policy_status(*, runner=None, root: Path | None = None) -> dict:
 
 def apply_policy(*, apply: bool = False, runner=None, root: Path | None = None) -> dict:
     """Print the policy, or lay it. As root, directly; as the logged-in user,
-    through the OS administrator prompt the way `files setup --apply` goes,
+    approved with the user's own password where they sit — in the terminal,
+    or the OS administrator dialog when there is none — the way `files setup
+    --apply` goes,
     with `sshd -t` and the lift-on-rejection inside the same approved script."""
     before = policy_status(runner=None, root=root)
     if not apply:
         return {"applied": False, "policy": SSHD_POLICY, "status": before,
-                "note": "dry run; re-run with --apply (an administrator prompt opens)"}
+                "note": "dry run; re-run with --apply (it asks for your password)"}
     if os.geteuid() == 0:
         step = lay_policy(runner=runner, sudo=False, root=root)
     else:

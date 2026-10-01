@@ -57,6 +57,8 @@ CHMOD = "/bin/chmod"
 LS = "/bin/ls"
 LAUNCHCTL = "/bin/launchctl"
 OSASCRIPT = "/usr/bin/osascript"
+SUDO = "/usr/bin/sudo"
+SH = "/bin/sh"
 CAT = "/bin/cat"
 
 ACCOUNT = "jstackshare"
@@ -448,11 +450,12 @@ def _needs_password(argv: list[str]) -> bool:
 
 
 def _administrator_script(commands: list[list[str]], password_file: Path | None) -> str:
-    """The plan as one `set -eu` shell script of fixed system tools, for the
-    OS administrator prompt.  The password steps read the account password
-    from `password_file` (user-owned, 0600) instead of a terminal: under the
-    prompt there is no tty for `sysadminctl -password -` or `dscl -passwd` to
-    ask on.  The script itself never contains the password."""
+    """The plan as one `set -eu` shell script of fixed system tools, to run as
+    root.  The password steps read the account password from `password_file`
+    (user-owned, 0600) instead of a terminal: under the administrator dialog
+    there is no tty for `sysadminctl -password -` or `dscl -passwd` to ask on,
+    and under sudo the terminal is already spoken for.  The script itself
+    never contains the password."""
     lines = ["set -eu", "umask 077", "export LC_ALL=C"]
     if password_file is not None:
         lines.append("pw=$(" + CAT + " " + shlex.quote(str(password_file)) + ")")
@@ -472,16 +475,23 @@ def _administrator_script(commands: list[list[str]], password_file: Path | None)
 
 
 def _run_as_administrator(script: str, prompt: str, runner=subprocess.run) -> None:
-    """Execute a reviewed script of fixed system tools through the OS
-    administrator prompt, as the logged-in user.  The sealed runtime refuses
+    """Execute a reviewed script of fixed system tools as root, approved by
+    the logged-in user where they are.  On a terminal that is `sudo`, asking
+    for the password in that terminal — a remote shell has no view of this
+    machine's screen, and a dialog raised there would wait on nobody.  Without
+    a terminal it is the OS administrator dialog.  The sealed runtime refuses
     to start as root, and the identity rule behind that — root never runs
-    user-writable Python — holds here too: what root runs is the plan's own
-    `sharing`, `sysadminctl`, `dscl`, `pwpolicy` and `chmod` lines, nothing
-    from the package."""
-    literal = '"' + script.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
-    source = ("do shell script " + literal + " with administrator privileges "
-              "with prompt " + json.dumps(prompt))
-    result = runner([OSASCRIPT, "-"], input=source, capture_output=True, text=True, timeout=600)
+    user-writable Python — holds on both roads: what root runs is the plan's
+    own `sharing`, `sysadminctl`, `dscl`, `pwpolicy`, `chmod`, `install` and
+    `sshd -t` lines, nothing from the package."""
+    if sys.stdin.isatty():
+        argv = [SUDO, "-p", f"{prompt} — password for %u: ", SH, "-c", script]
+        result = runner(argv, capture_output=True, text=True, timeout=600)
+    else:
+        literal = '"' + script.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+        source = ("do shell script " + literal + " with administrator privileges "
+                  "with prompt " + json.dumps(prompt))
+        result = runner([OSASCRIPT, "-"], input=source, capture_output=True, text=True, timeout=600)
     if result.returncode:
         raise FileShareError("administrator approval or setup command failed: "
                              + (result.stderr or result.stdout)[-1000:].strip())
@@ -632,10 +642,11 @@ def _apply_tree(commands: list[list[str]], runner=subprocess.run) -> list[dict]:
 
 
 def setup(*, apply: bool = False, runner=subprocess.run) -> dict:
-    """Print the plan, or apply it.  Applying as the logged-in user goes
-    through the OS administrator prompt (the sealed `jstack-host` cannot be
-    started under sudo); applying as root, on an unsealed install, runs the
-    plan directly."""
+    """Print the plan, or apply it.  Applying as the logged-in user runs the
+    plan as root under the user's own password — asked in the terminal, or
+    through the OS administrator dialog when there is none (the sealed
+    `jstack-host` cannot be started under sudo); applying as root, on an
+    unsealed install, runs the plan directly."""
     before = status()
     commands = setup_plan(before)
     tree = tree_plan(before)
@@ -643,8 +654,8 @@ def setup(*, apply: bool = False, runner=subprocess.run) -> dict:
         return {"applied": False, "commands": [_display(c) for c in commands],
                 "tree_commands": [_display(c) for c in tree],
                 "status": before,
-                "note": "dry run; re-run with --apply (an administrator prompt "
-                        "opens), then enable File Sharing in System Settings"}
+                "note": "dry run; re-run with --apply (it asks for your password), "
+                        "then enable File Sharing in System Settings"}
     if os.geteuid() != 0:
         password_file = None
         if any(_needs_password(c) for c in commands):
