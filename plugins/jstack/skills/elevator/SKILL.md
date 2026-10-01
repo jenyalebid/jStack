@@ -1,6 +1,6 @@
 ---
 name: elevator
-description: Use when the user asks for the short version of a result — "/elevator", "give me the pitch", "short version", "where are we".
+description: Use when the user asks for the short version of a result — "/jstack:elevator", "give me the pitch", "short version", "where are we".
 argument-hint: "[topic / focus]"
 ---
 
@@ -34,7 +34,7 @@ Say it the way it would be said standing next to the user. No preamble, no closi
 
 ## 4. Focus
 
-Everything after the command points the paragraph: `/elevator the sweep — is it actually running`. A focus narrows: answer that aspect and drop the rest, including the parts worth being proud of. No focus → this session's unit of work. A focus on something the session never touched → say so in one line rather than composing an answer out of inference.
+Everything after the command points the paragraph: `/jstack:elevator the sweep — is it actually running`. A focus narrows: answer that aspect and drop the rest, including the parts worth being proud of. No focus → this session's unit of work. A focus on something the session never touched → say so in one line rather than composing an answer out of inference.
 
 ## 5. Read it back
 

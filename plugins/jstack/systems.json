@@ -78,11 +78,10 @@
       "name": "Install Rules",
       "slug": null,
       "status": "live",
-      "description": "Symlinks (or copies, with --copy) both user-scope stages a plugin cannot ship itself: rules-stage/ into ~/.claude/rules/ so bodies auto-load by glob match, and commands-stage/ into ~/.claude/commands/ so bare slash commands exist unnamespaced.",
+      "description": "Symlinks (or copies, with --copy) the user-scope stage a plugin cannot ship itself: rules-stage/ into ~/.claude/rules/ so bodies auto-load by glob match.",
       "code": [
         "skills/install-rules/SKILL.md",
-        "rules-stage/",
-        "commands-stage/"
+        "rules-stage/"
       ],
       "config": [],
       "test": {
@@ -176,7 +175,6 @@
       "description": "Files a session under a timeline subject. Typed by the user, `/tag` never reaches the model: hooks/tag-command.py answers it at UserPromptSubmit and blocks the prompt, so listing, attaching, minting and detaching all cost zero turns. The SKILL.md remains for the model tagging a session mid-turn in light of the work it has been doing.",
       "code": [
         "hooks/tag-command.py",
-        "commands-stage/tag.md",
         "skills/tag/SKILL.md",
         "bin/log_event"
       ],
@@ -187,7 +185,7 @@
         "description": "Pipes fixture UserPromptSubmit payloads through the real hook against a temp JSTACK_TIMELINE_DIR; asserts every branch's text AND its exit code, since an answer on exit 0 has spent the turn the hook exists to save."
       },
       "subsystems": [],
-      "notes": "Grammar is one tag per call: bare lists the vocabulary with a marker on what the session carries; a carried name toggles off; a known name attaches; an unknown name needs trailing words to mint with, and is refused without them. Recognized as /tag, /jstack:tag, and the JSTACK_TAG_CMD sentinel the installed stub expands to, so it works whichever way the harness routes a command. The gates live in the CLI, not the caller."
+      "notes": "Grammar is one tag per call: bare lists the vocabulary with a marker on what the session carries; a carried name toggles off; a known name attaches; an unknown name needs trailing words to mint with, and is refused without them. Recognized as /tag, /jstack:tag, and the JSTACK_TAG_CMD sentinel Codex's composer translates to, so it works whichever way the harness routes a command. The gates live in the CLI, not the caller."
     },
     {
       "id": "pict",
@@ -197,7 +195,6 @@
       "description": "Renders everything a session spawned from a directory is injected with, in wire order, and puts it on screen. Typed by the user, `/pict` never reaches the model: hooks/pict-command.py answers it at UserPromptSubmit and blocks the prompt. Render, place, open — three fixed steps, none of them a judgement, and a session asked to describe its own context describes what it believes is there, which is the guess the tool exists to replace.",
       "code": [
         "hooks/pict-command.py",
-        "commands-stage/pict.md",
         "skills/pict/SKILL.md",
         "bin/pict",
         "bin/open-artifact"
@@ -237,7 +234,6 @@
       "description": "Dubs the current session into a new terminal via bin/dub-session — a verbatim copy of the conversation under a fresh id, opened in its own window and diverging forward. Typed by the user, `/splitoff` never reaches the model: hooks/splitoff-command.py answers it at UserPromptSubmit and blocks the prompt. Where handoff distills to a brief, this keeps the whole transcript.",
       "code": [
         "hooks/splitoff-command.py",
-        "commands-stage/splitoff.md",
         "skills/splitoff/SKILL.md",
         "bin/dub-session",
         "bin/open-terminal-here"
@@ -259,7 +255,6 @@
       "description": "Spawns a fresh session — here or in another agent's workspace — pointed at THIS session's transcript and told to take it over. It is handed no summary: it reads the JSONL from source, checks the claims against the tree, and continues. Typed by the user, `/takeover` never reaches the model: hooks/takeover-command.py answers it at UserPromptSubmit and blocks the prompt. Where handoff distills the session to a brief it wrote itself and splitoff dubs it whole, this one hands over a pointer and a mandate to verify.",
       "code": [
         "hooks/takeover-command.py",
-        "commands-stage/takeover.md",
         "skills/takeover/SKILL.md",
         "bin/open-terminal-here"
       ],
@@ -280,7 +275,6 @@
       "description": "Prints the absolute path of the session's local JSONL transcript file — the answer to \"where is this conversation stored on disk\". Typed by the user, `/print` never reaches the model: hooks/print-command.py answers it at UserPromptSubmit from the payload's own transcript_path and blocks the prompt.",
       "code": [
         "hooks/print-command.py",
-        "commands-stage/print.md",
         "skills/print/SKILL.md"
       ],
       "config": [],
@@ -290,7 +284,7 @@
         "description": "Pipes fixture UserPromptSubmit payloads through the real hook against a fixture CLAUDE_CONFIG_DIR; asserts the payload path is the answer verbatim, that the id glob never degrades to the newest file in a shared project dir, and every branch's exit code — an answer on exit 0 has spent the turn the hook exists to save."
       },
       "subsystems": [],
-      "notes": "No args; trailing words are ignored rather than refused. The harness hands every hook the file it is writing to, so the answer needs no glob and no path-encoding guess — the session-id glob remains only as the fallback for a payload without transcript_path, and never degrades to the newest .jsonl in the project dir, which is another session's conversation. Recognized as /print, /jstack:print, and the JSTACK_PRINT_CMD sentinel the installed stub expands to. The SKILL.md is the by-hand fallback for a harness that does not fire UserPromptSubmit on commands."
+      "notes": "No args; trailing words are ignored rather than refused. The harness hands every hook the file it is writing to, so the answer needs no glob and no path-encoding guess — the session-id glob remains only as the fallback for a payload without transcript_path, and never degrades to the newest .jsonl in the project dir, which is another session's conversation. Recognized as /print, /jstack:print, and the JSTACK_PRINT_CMD sentinel Codex's composer translates to. The SKILL.md is the by-hand fallback for a harness that does not fire UserPromptSubmit on commands."
     },
     {
       "id": "timeline-log",
@@ -434,8 +428,7 @@
       "status": "live",
       "description": "Delivers a finished unit of work spoken aloud in three or four short blocks - where it stands, what it took, what is next - with no paths, symbol names, shas, issue numbers or counts in it. Carries report's settling obligation: unsettled work is fixed-or-filed and pushed before it is spoken.",
       "code": [
-        "skills/elevator/SKILL.md",
-        "commands-stage/elevator.md"
+        "skills/elevator/SKILL.md"
       ],
       "config": [],
       "test": {
@@ -444,7 +437,7 @@
         "description": "Validates SKILL.md exists, frontmatter is well-formed, and name matches directory."
       },
       "subsystems": [],
-      "notes": "Report's obligations, a person's mouth. Same gate as /jstack:report (settle every finding, then /jstack:push) with a different delivery: four to six sentences broken across a block per beat, blank line between, no headers or bullets, nothing a listener would have to open. A single unbroken wall is the failure the form exists to end, however short. Blocked/unverified work takes its own block rather than being folded away - compression buys no silence. Optional arg is a focus that narrows which aspect the paragraph answers; a focus on untouched work is declined in one line rather than inferred. Reachable unnamespaced as /elevator via commands-stage, installed by /jstack:install-rules. /jstack:elevator."
+      "notes": "Report's obligations, a person's mouth. Same gate as /jstack:report (settle every finding, then /jstack:push) with a different delivery: four to six sentences broken across a block per beat, blank line between, no headers or bullets, nothing a listener would have to open. A single unbroken wall is the failure the form exists to end, however short. Blocked/unverified work takes its own block rather than being folded away - compression buys no silence. Optional arg is a focus that narrows which aspect the paragraph answers; a focus on untouched work is declined in one line rather than inferred. /jstack:elevator."
     },
     {
       "id": "issue",

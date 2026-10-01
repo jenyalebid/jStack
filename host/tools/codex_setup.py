@@ -34,8 +34,6 @@ def link_skills(source, target):
 
 def link_commands(source, target):
     for command in sorted(source.glob("*.md")):
-        if "commands-stage" in command.resolve().parts:
-            continue  # already supplied by the native jStack plugin
         dest = target / command.stem / "SKILL.md"
         if dest.exists():
             continue

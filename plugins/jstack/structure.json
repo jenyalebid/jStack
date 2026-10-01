@@ -40,7 +40,6 @@
     ".claude-plugin": "Claude Code plugin manifest — the version lives here",
     ".codex-plugin": "codex plugin manifest — same version, bumped together (manifest.sh enforces parity)",
     "bin": "the shipped adapters — log_event, msg, seat, session-files and the rest",
-    "commands-stage": "bare slash commands staged for a host's ~/.claude/commands",
     "githooks": "versioned git hooks for this checkout — .git/hooks symlinks resolve here",
     "hooks": "the Claude Code hook scripts — SessionStart, Stop, UserPromptSubmit, PreToolUse",
     "prompts": "model-bound text the hooks inject — file-sourced per the prompt-sourcing rule, loaded by hooks/_prompts.py",

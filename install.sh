@@ -1000,14 +1000,15 @@ EOF
     write_seat "$seat" "$AGENT_NAME"
 fi
 
-# ── 5. rules and bare commands ──────────────────────────────────────────────
+# ── 5. rules ────────────────────────────────────────────────────────────────
 #
-# Claude Code loads both from user scope only, so a plugin cannot deliver them.
+# Claude Code loads path-matched rules from user scope only, so a plugin cannot
+# deliver them.
 # Symlinked, not copied, and pointed at the CHECKOUT — a link into a versioned
 # plugin cache works until that version is reaped, then silently points at
 # nothing. `jstack-doctor` grades exactly that case as a failure.
 
-step "Rules and bare commands"
+step "Rules"
 
 # A link this installer made is ours to correct; anything else in these
 # directories is the user's and is never touched. The test is where the link
@@ -1022,6 +1023,20 @@ ours() {
         "$CHECKOUT"/*|*/rules-stage/*|*/commands-stage/*) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# A name this checkout no longer ships leaves a link behind that no pass ever
+# visits, because the loop walks what exists now. It points at nothing and it
+# is ours, so it goes — a dead link holds no bytes and carries its own
+# provenance in its target.
+drop_dead() {
+    local target
+    for target in "$1"/*.md; do
+        [ -L "$target" ] || continue
+        [ -e "$target" ] && continue
+        ours "$(readlink "$target")" || continue
+        run rm -f "$target" && dropped=$((dropped+1))
+    done
 }
 
 link_stage() {
@@ -1043,16 +1058,7 @@ link_stage() {
         if [ -e "$target" ] || [ -L "$target" ]; then kept=$((kept+1)); continue; fi
         run ln -s "$f" "$target" && made=$((made+1))
     done
-    # A name this checkout no longer ships leaves a link behind that no pass
-    # above ever visits, because the loop walks what exists now. It points at
-    # nothing and it is ours, so it goes — a dead link holds no bytes and
-    # carries its own provenance in its target.
-    for target in "$dst"/*.md; do
-        [ -L "$target" ] || continue
-        [ -e "$target" ] && continue
-        ours "$(readlink "$target")" || continue
-        run rm -f "$target" && dropped=$((dropped+1))
-    done
+    drop_dead "$dst"
     # Counted, not decorated: `${n:+...}` treats a zero count as something to
     # report, which is how a clean run learns to say "0 re-pointed".
     SUMMARY="$made $label linked into $dst"
@@ -1063,7 +1069,11 @@ link_stage() {
 }
 
 link_stage "$PLUGIN/rules-stage"    "$HOME/.claude/rules"    "rules"
-link_stage "$PLUGIN/commands-stage" "$HOME/.claude/commands" "bare commands"
+# jStack ships no unnamespaced commands — a plugin command is /jstack:name, and
+# a bare twin only puts every command in the picker twice.
+dropped=0
+drop_dead "$HOME/.claude/commands"
+[ "$dropped" -gt 0 ] && ok "$dropped dead command link(s) dropped from $HOME/.claude/commands"
 
 # Claude Code reads statusLine from user scope only, so the allowance sampler
 # cannot ride the plugin the way everything else does. Unwired, the Usage bars
