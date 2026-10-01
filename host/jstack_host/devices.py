@@ -506,11 +506,51 @@ def is_revoked(device_id: str) -> bool:
 
 
 def revoke(device_id: str) -> bool:
-    """Stamp the row and cut its live connections. False = nothing to do."""
+    """Stamp the row, cut its live connections, and take its peer off the mesh.
+    False = nothing to do.
+
+    The peer goes in the same act because the roster is the one place a person
+    revokes anything: a row stamped revoked whose WireGuard peer still
+    handshakes is a device that was told it is gone and is still on the
+    network, one password away from every port on the hub. The release never
+    blocks the revocation — the row is stamped first and a failed removal is
+    alarmed, so the worst case is a loud orphan the mesh audit names, never a
+    credential that stayed live because the tunnel tool hiccuped.
+    """
     if not _store().revoke_device(device_id):
         return False
     notify_revoked(device_id)
+    release_peer(device_id)
     return True
+
+
+def bind_peer(device_id: str, peer: str) -> bool:
+    """Record which mesh peer this credential rides on."""
+    return _store().set_device_peer(device_id, peer)
+
+
+def peer_of(device_id: str) -> str:
+    row = _store().device(device_id)
+    return (row or {}).get("peer") or ""
+
+
+def release_peer(device_id: str) -> str:
+    """Remove the row's peer from the mesh, if it has one and this host owns a
+    mesh. Returns the peer name removed, '' when there was nothing to remove.
+    A failure is alarmed and swallowed — see `revoke`."""
+    from . import hostenv, tunnel
+    peer = peer_of(device_id)
+    if not peer or not tunnel.can_pair():
+        return ""
+    try:
+        tunnel.remove_peer(peer)
+    except tunnel.TunnelError as exc:
+        hostenv.security_alert(
+            f"device {device_id} was revoked but its mesh peer {peer!r} could not "
+            f"be removed: {exc} — it is still on the WireGuard mesh until "
+            f"`jstack-host mesh purge --yes` succeeds")
+        return ""
+    return peer
 
 
 def delete(device_id: str) -> bool:

@@ -188,6 +188,139 @@ def live_peers() -> set[str]:
             if m}
 
 
+def peer_table() -> dict[str, str]:
+    """Every peer wg0.conf carries, name → mesh address — `live_peers()` with
+    the address kept, for the readers that have to match a peer to a host row
+    by the one fact both sides hold."""
+    listed = subprocess.run(
+        [sys.executable, str(PEER_SCRIPT), "list"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if listed.returncode != 0:
+        raise TunnelError(f"could not list peers: {listed.stderr.strip()}")
+    return {m.group(1): m.group(2) for m in
+            (PEER_LINE_RE.match(line) for line in listed.stdout.splitlines())
+            if m}
+
+
+def remove_peer(name: str) -> bool:
+    """Take `name` off the mesh — the peer entry, its keys, its client files.
+
+    True when a peer was removed, False when wg0.conf already carried no peer
+    by that name: a revoke that finds the peer already gone has nothing left to
+    do and must not read as a failure. Anything else the tool refuses is a
+    TunnelError, because a peer that stayed on the mesh after its device was
+    revoked is the one outcome this function exists to prevent.
+
+    Always `--yes`. The tool's leaf confirmation guards a *person* at a shell
+    from stranding a machine by accident; the callers here — a revocation, a
+    forget, the mesh purge — are the explicit act the confirmation asks for.
+    """
+    if not NAME_RE.match(name or ""):
+        raise TunnelError(f"bad peer name {name!r}")
+    result = subprocess.run(
+        [sys.executable, str(PEER_SCRIPT), "remove", name, "--yes"],
+        capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode == 0:
+        return True
+    err = (result.stderr.strip() or result.stdout.strip())
+    if f"no device {name!r}" in err:
+        return False
+    raise TunnelError(f"removing peer {name} failed: {err}")
+
+
+#: How a peer on the mesh relates to the device roster — the three answers
+#: `reconcile()` gives, and the two of them that mean the peer should not be
+#: on the mesh at all.
+BOUND = "bound"          # a live device row carries it
+REVOKED = "revoked"      # its device row is revoked: the peer outlived its credential
+UNBOUND = "unbound"      # no device row claims it: a peer nothing can revoke
+STALE = (REVOKED, UNBOUND)
+
+
+def _slug(name: str) -> str:
+    import re as _re
+    slug = _re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")[:31].rstrip("-")
+    return slug if NAME_RE.match(slug) else ""
+
+
+def reconcile() -> dict:
+    """Every peer on the mesh, matched to the device credential it belongs to.
+
+    The device table is the one roster a person revokes from; wg0.conf is the
+    list of keys the interface honours. They were written by different tools
+    at different times, so this is the diff that says whether "revoked" meant
+    "off the network". Three ways a peer finds its row, in order of how much
+    the match is worth: the row that *recorded* it (`devices.peer`, written at
+    pairing from now on); a host row whose mesh address is the peer's (a leaf
+    adopted before the column existed — its address is the one fact both sides
+    hold); and, last, a live device row whose name slugs to the peer's name,
+    the way enrolment derives peer names. The third is an inference and is
+    reported as one (`inferred`), so `bind_inferred()` can write it down and
+    the next reconcile has a recorded match instead.
+
+    Returns the per-peer rows and the names in each class. A peer in `stale`
+    is on the mesh with no live credential behind it — the thing to purge.
+    """
+    from . import devices
+    from .store import get_store
+    store = get_store()
+    peers = peer_table()
+    rows = {r["id"]: r for r in devices.list_all()}
+    by_peer = {r["peer"]: r for r in rows.values() if r.get("peer")}
+    hosts = [h for h in store.list_hosts(include_forgotten=True) if h.get("device_id")]
+    by_addr = {h["address"]: h for h in hosts if h.get("address")}
+    by_slug = {}
+    for r in rows.values():
+        if not r["revoked"] and not r.get("peer"):
+            by_slug.setdefault(_slug(r["name"]), r)
+    out = []
+    for name, addr in peers.items():
+        row, how = by_peer.get(name), "recorded"
+        if row is None and addr in by_addr:
+            row, how = rows.get(by_addr[addr]["device_id"]), "host address"
+        if row is None and name in by_slug:
+            row, how = by_slug[name], "name"
+        if row is None:
+            state, how = UNBOUND, ""
+        else:
+            state = REVOKED if row["revoked"] else BOUND
+        out.append({"peer": name, "address": addr, "state": state,
+                    "device_id": row["id"] if row else "",
+                    "device": row["name"] if row else "", "matched_by": how,
+                    "inferred": bool(row) and how != "recorded"})
+    return {"peers": out,
+            "bound": [p["peer"] for p in out if p["state"] == BOUND],
+            "stale": [p["peer"] for p in out if p["state"] in STALE],
+            "inferred": [p["peer"] for p in out if p["inferred"]]}
+
+
+def bind_inferred(report: dict | None = None) -> list[str]:
+    """Write the inferred matches onto their rows, so the binding is recorded
+    rather than re-derived. Returns the peers bound."""
+    from . import devices
+    report = report or reconcile()
+    bound = []
+    for p in report["peers"]:
+        if p["inferred"] and p["device_id"] and devices.bind_peer(p["device_id"], p["peer"]):
+            bound.append(p["peer"])
+    return bound
+
+
+def purge(report: dict | None = None) -> dict:
+    """Remove every stale peer. Returns what went and what refused to."""
+    report = report or reconcile()
+    removed, failed = [], {}
+    for name in report["stale"]:
+        try:
+            remove_peer(name)
+            removed.append(name)
+        except TunnelError as exc:
+            failed[name] = str(exc)
+    return {"removed": removed, "failed": failed}
+
+
 def peer_is_live(device: str) -> bool:
     """Whether wg0.conf still carries a peer entry for this name.
 

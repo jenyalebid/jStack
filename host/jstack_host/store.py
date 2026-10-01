@@ -272,7 +272,13 @@ CREATE TABLE IF NOT EXISTS devices (
   -- instead of another TestFlight build cut to find out.
   client_build TEXT,
   authority_grant TEXT NOT NULL DEFAULT '',
-  authority_device TEXT NOT NULL DEFAULT ''
+  authority_device TEXT NOT NULL DEFAULT '',
+  -- The WireGuard peer this credential rides on (`# device: <peer>` in the
+  -- hub's wg0.conf), bound at pairing or enrolment, '' for a device with no
+  -- peer of its own (a LAN-only device, the host's own row, a leaf's rows).
+  -- The reason the column exists: revoking the row removes the peer, so a
+  -- device that is off the roster is off the mesh in the same act.
+  peer TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS retired_device_tokens (
   device_id TEXT NOT NULL,
@@ -1347,6 +1353,24 @@ class SessionStore:
                              (name, device_id))
             return cur.rowcount > 0
 
+    def set_device_peer(self, device_id: str, peer: str) -> bool:
+        """Bind a row to its mesh peer; a peer re-issued to another row moves
+        with it, because one peer entry can only be one device's credential."""
+        with self._write_lock, self._conn() as db:
+            if peer:
+                db.execute("UPDATE devices SET peer='' WHERE peer=? AND id<>?",
+                           (peer, device_id))
+            cur = db.execute("UPDATE devices SET peer=? WHERE id=?",
+                             (peer, device_id))
+            return cur.rowcount > 0
+
+    def device_for_peer(self, peer: str) -> dict | None:
+        if not peer:
+            return None
+        with self._conn() as db:
+            row = db.execute("SELECT * FROM devices WHERE peer=?", (peer,)).fetchone()
+        return dict(row) if row else None
+
     def revoke_device(self, device_id: str) -> bool:
         """Stamp revoked_at on a live row. False = unknown or already revoked
         (idempotent — a second tap on Revoke is not an error)."""
@@ -1698,6 +1722,16 @@ class SessionStore:
                  for t, name in targets])
         except Exception:  # noqa: BLE001
             pass
+
+    def record_access(self, action: str, target_kind: str, target: str,
+                      target_name: str = "") -> None:
+        """One audit row for an act of access that is not a revocation and
+        would otherwise leave no record anywhere — the hub shell opening and
+        closing. Same table, same actor context, so `access history` names
+        it beside the revocations."""
+        with self._conn() as db:
+            self._audit(db, int(time.time()), action, target_kind,
+                        [(target, target_name)])
 
     @staticmethod
     def _host_name(db, key: str) -> str:

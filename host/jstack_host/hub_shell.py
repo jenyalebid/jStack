@@ -9,6 +9,12 @@ One named tmux process, single per hub, started on demand. Any client may
 join it; any client may close it, and closing ends it for everyone — that
 is the intent, not a hazard to guard against.
 
+It has no board row, so it is inside the record another way: every open,
+leave and close writes an `access_audit` row naming the device, where it came
+from and the build it ran — the same table the revocations go to, read with
+`jstack-host access history <device>`. A remote shell on the hub with the
+same reach as a turn is never a shell nobody can account for.
+
 Named outside `jr-` on purpose: `managed.reconcile()` reaps every
 `jr-`-prefixed session whose pane isn't live in the agent scan (its own
 docstring names "a bare shell" as precisely that debris). A login shell
@@ -39,10 +45,10 @@ import struct
 import subprocess
 import termios
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from starlette.websockets import WebSocket
 
-from . import hostenv, managed
+from . import audit, hostenv, managed
 from .auth import authenticate_ws, require_token
 
 NAME = "hub-shell"
@@ -52,6 +58,25 @@ http_router = APIRouter(prefix="/api/jremote/v1/hub/shell",
 ws_router = APIRouter()
 
 _READ_CHUNK = 65536
+
+
+def _store():
+    from .store import get_store
+    return get_store()
+
+
+def _record(action: str, device_id: str, request, **detail) -> None:
+    """One audit row, attributed to the device on the socket. Never raises:
+    a shell the record could block is a shell the user needed."""
+    try:
+        actor = audit.from_request(request, device_id)
+        actor["via"] = f"ws {getattr(getattr(request, 'url', None), 'path', '')}"
+        actor["detail"] = {**actor.get("detail", {}), **detail}
+        with audit.acting(actor):
+            _store().record_access(action, "device", device_id,
+                                   actor.get("actor_name", ""))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def is_open() -> bool:
@@ -94,8 +119,12 @@ def status():
 
 
 @http_router.post("/close")
-def close_route():
+def close_route(request: Request):
+    was_open = is_open()
     close()
+    if was_open:
+        _record("hub_shell.close", getattr(request.state, "authorized_device", ""),
+                request, everyone=True, via_route=True)
     return {"open": is_open()}
 
 
@@ -181,7 +210,9 @@ async def hub_shell_ws(ws: WebSocket, cols: int = 80, rows: int = 24):
         await ws.close(code=4401, reason="invalid or missing bearer token")
         return
 
+    started = not is_open()
     ensure()
+    _record("hub_shell.open", device_id, ws, started=started, cols=cols, rows=rows)
     pid, master = _spawn_attach(cols, rows)
     loop = asyncio.get_running_loop()
     out_q: asyncio.Queue = asyncio.Queue()
@@ -253,5 +284,7 @@ async def hub_shell_ws(ws: WebSocket, cols: int = 80, rows: int = 24):
         await _reap(pid)
         if closing_everyone:
             close()
+        _record("hub_shell.close" if closing_everyone else "hub_shell.leave",
+                device_id, ws, everyone=closing_everyone)
         code, reason = (4411, "closed") if closing_everyone else (1000, "detached")
         await _end(ws, code, reason)

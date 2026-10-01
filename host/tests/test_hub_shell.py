@@ -19,6 +19,7 @@ import time
 import pytest
 
 from jstack_host import hub_shell, managed
+from jstack_host.store import SessionStore
 
 pytestmark = pytest.mark.skipif(not shutil.which(managed._TMUX),
                                 reason="tmux not installed")
@@ -108,3 +109,62 @@ def test_a_typed_line_runs_through_the_attach_client(sock, monkeypatch):
         os.close(master)
         os.kill(pid, 15)
         os.waitpid(pid, 0)
+
+
+# ── inside the record ────────────────────────────────────────────────────────
+#
+# No board row, so the audit table is where a hub shell is accounted for:
+# who opened it, from where, and when it was left or closed for everyone.
+
+class _Socket:
+    """What `audit.from_request` reads off a WebSocket or a Request."""
+
+    def __init__(self, path="/api/jremote/v1/hub/shell", host="10.66.0.12", build="130"):
+        self.url = type("U", (), {"path": path})()
+        self.client = type("C", (), {"host": host})()
+        self.headers = {"user-agent": "jRemote/1", "x-jremote-build": build}
+        self.state = type("S", (), {"authorized_device": "dev-1"})()
+
+
+@pytest.fixture
+def audit_store(tmp_path, monkeypatch):
+    s = SessionStore(db_path=tmp_path / "hub.sqlite")
+    monkeypatch.setattr(hub_shell, "_store", lambda: s)
+    monkeypatch.setattr("jstack_host.devices.row",
+                        lambda device_id: {"id": device_id, "name": "Owner Phone"})
+    return s
+
+
+def test_open_leave_and_close_each_leave_a_row_naming_the_device(audit_store):
+    hub_shell._record("hub_shell.open", "dev-1", _Socket(), started=True, cols=100, rows=30)
+    hub_shell._record("hub_shell.leave", "dev-1", _Socket(), everyone=False)
+    hub_shell._record("hub_shell.close", "dev-1", _Socket(), everyone=True)
+
+    rows = audit_store.access_history(["dev-1"])
+    assert [r["action"] for r in rows] == ["hub_shell.close", "hub_shell.leave", "hub_shell.open"]
+    opened = rows[-1]
+    assert opened["target_kind"] == "device"
+    assert opened["actor_name"] == "Owner Phone"
+    assert opened["origin"] == "10.66.0.12"
+    assert opened["via"] == "ws /api/jremote/v1/hub/shell"
+    assert opened["detail"] == {"build": "130", "started": True, "cols": 100, "rows": 30}
+    assert rows[0]["detail"]["everyone"] is True
+
+
+def test_the_close_route_records_who_ended_it_for_everyone(sock, audit_store):
+    hub_shell.ensure()
+    assert hub_shell.close_route(_Socket(path="/api/jremote/v1/hub/shell/close")) == {"open": False}
+    rows = audit_store.access_history(["dev-1"])
+    assert [r["action"] for r in rows] == ["hub_shell.close"]
+    assert rows[0]["detail"]["via_route"] is True
+
+    # Closing what is not open is not an event.
+    hub_shell.close_route(_Socket())
+    assert len(audit_store.access_history(["dev-1"])) == 1
+
+
+def test_a_failed_record_never_costs_the_shell(monkeypatch):
+    def boom():
+        raise RuntimeError("store is away")
+    monkeypatch.setattr(hub_shell, "_store", boom)
+    hub_shell._record("hub_shell.open", "dev-1", _Socket())
