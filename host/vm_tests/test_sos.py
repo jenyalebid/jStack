@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 
@@ -281,6 +282,7 @@ def test_process_stop_preserves_an_unrelated_name_and_verifies_exit(tmp_path):
             shutil.copyfile("/bin/sleep", executable)
             executable.chmod(0o700)
             processes.append(subprocess.Popen([str(executable), "60"]))
+            threading.Thread(target=processes[-1].wait, daemon=True).start()
         for process in processes:
             assert process.poll() is None
         deadline = time.monotonic() + 5
@@ -301,6 +303,60 @@ def test_process_stop_preserves_an_unrelated_name_and_verifies_exit(tmp_path):
             if process.poll() is None:
                 process.kill()
             process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("machine_wide", [False, True])
+def test_process_stop_obeys_account_scope(tmp_path, machine_wide):
+    executable = tmp_path / ("sos" + uuid.uuid4().hex[:10])
+    shutil.copyfile("/bin/sleep", executable)
+    executable.chmod(0o700)
+    root_pid_file = tmp_path / "root-pid"
+    user_process = subprocess.Popen([str(executable), "60"])
+    root_process = subprocess.Popen(["sudo", "-n", "/bin/sh", "-c",
+                                     'echo "$$" > "$1"; shift; exec "$@"', "sos-root-process",
+                                     str(root_pid_file), str(executable), "60"], start_new_session=True)
+    for process in (user_process, root_process):
+        threading.Thread(target=process.wait, daemon=True).start()
+    root_pid = None
+    try:
+        deadline = time.monotonic() + 5
+        while True:
+            assert user_process.poll() is None and root_process.poll() is None
+            if root_pid_file.exists() and root_pid_file.read_text().strip().isdigit():
+                root_pid = int(root_pid_file.read_text().strip())
+                observed = subprocess.run(["/usr/bin/pgrep", "-u", "0", "-x", executable.name],
+                                          capture_output=True, text=True)
+                if observed.returncode == 0 and observed.stdout.split() == [str(root_pid)]:
+                    break
+            assert time.monotonic() < deadline, "root fixture process was not visible"
+            time.sleep(.05)
+        script = "\n".join(['set -u', 'failed=0', 'fail() { echo "$*"; failed=1; }',
+                             *sos.process_commands((executable.name,),
+                                                   uid=None if machine_wide else os.getuid(), stop=True),
+                             'exit "$failed"'])
+        result = subprocess.run(["sudo", "-n", "/bin/bash", "-c", script],
+                                capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result
+        assert user_process.wait(timeout=5) == -9
+        if machine_wide:
+            root_process.wait(timeout=5)
+        observed = subprocess.run(["/bin/ps", "-p", str(root_pid), "-o", "uid=", "-o", "comm="],
+                                  capture_output=True, text=True)
+        if machine_wide:
+            assert observed.returncode == 1 and not observed.stdout.strip(), observed
+        else:
+            assert root_process.poll() is None
+            assert observed.returncode == 0, observed
+            owner, path = observed.stdout.strip().split(None, 1)
+            assert owner == "0" and Path(path).name == executable.name
+    finally:
+        if user_process.poll() is None:
+            user_process.kill()
+        user_process.wait(timeout=5)
+        if root_process.poll() is None:
+            target = str(root_pid) if root_pid is not None else "-" + str(root_process.pid)
+            subprocess.run(["sudo", "-n", "/bin/kill", "-KILL", "--", target], check=True)
+        root_process.wait(timeout=5)
 
 
 @pytest.mark.parametrize("name,phase", [("codex", "quiesce"), ("JumpConnect", "apps")])
