@@ -1380,31 +1380,6 @@ def set_leaf_usage_reporting(key: str, body: LeafUsageRequest, request: Request)
             "steps": [usage_reporting.poke(key)]}
 
 
-class UsageReportingRequest(BaseModel):
-    #: "client" | "hidden" | "available" — `usage_reporting.STATES`.
-    state: str
-
-
-@router.post("/usage/reporting")
-def set_own_usage_reporting(body: UsageReportingRequest, request: Request):
-    """This machine's own word about its own client — the hub's menu bar.
-
-    A leaf is refused here rather than allowed to write a value its next pull
-    would overwrite: on a managed Mac this policy belongs to the hub, and a
-    control that stores something and then loses it is worse than one that
-    says no.
-    """
-    from . import usage_reporting
-    if managed_access.is_leaf():
-        raise HTTPException(409, "a managed machine's Usage policy belongs to its hub")
-    managed_access.require_console(request)
-    try:
-        state = usage_reporting.normalise(body.state)
-    except usage_reporting.UnknownState as exc:
-        raise HTTPException(400, str(exc))
-    return {"usage_reporting": usage_reporting.set_own(state)}
-
-
 @router.post("/usage/refresh")
 def usage_refresh(device_id: str = Depends(current_device)):
     """A poke, not a payload: the leaf pulls its own policy from its parent.

@@ -50,7 +50,7 @@ assert(!current.building && current.summary == "Build failed: the checkout is go
 // A finished build outranks a check that predates it: the machine is not
 // "behind" once the commit is built and waiting to be installed.
 current.build = HubBuildPhase(state: "built", release: "2026-09-23-99999999")
-assert(current.summary == "Built 2026-09-23-99999999. Install it under Software Updates.")
+assert(current.summary == "Built 2026-09-23-99999999. Ready to install.")
 current.build = HubBuildPhase(state: "built", release: "2026-09-22-abcdef12")
 assert(current.summary == "dev has moved ahead. Rebuild to take it.")
 
@@ -103,10 +103,10 @@ var picked: [String] = []
 var rebuilds = 0
 let window = HostInfoWindow()
 window.render(HostInfoForm(machine: "Lab Mac", status: "Running", version: "26.09.01",
-    source: "abcdef", release: "2026-09-22-abcdef12", hubSource: current, sourceBusy: false,
+    release: "2026-09-22-abcdef12", hubSource: current, sourceBusy: false,
     follow: { picked.append($0) }, rebuild: { rebuilds += 1 },
-    app: InfoAppSnapshot(), updateStatus: "No update published", error: nil,
-    localCommand: nil, machines: [], commands: [:], allCommand: nil,
+    app: InfoAppSnapshot(), updateStatus: nil, error: nil,
+    localCommand: nil, machines: [], commands: [:],
     open: {}, download: {}))
 let hosting = window.contentView as! NSHostingView<HostInfoForm>
 assert(hosting.rootView.hubSource?.ref == "dev")
@@ -128,9 +128,14 @@ print("source row renders")
     assert "source row renders" in result.stdout
 
 
-def test_the_info_window_says_nothing_installs_unless_queued_and_the_menu_offers_no_update():
+def test_the_settings_window_queues_per_machine_and_the_menu_offers_no_update():
     source = (Path(__file__).resolve().parents[1] / "menubar" / "JStackHostBar.swift").read_text()
-    assert 'Text("Nothing installs until it is queued here.")' in source
+    # Every install is one machine's own press; the fleet-wide one is the
+    # release procedure's deploy, never a button.
+    assert "Update All Macs" not in source and 'representedObject = "all"' not in source
+    # The source's state line is the section's footer, not a row inside it.
+    section = source.split("struct InfoSourceSection: View {", 1)[1].split("\nstruct ", 1)[0]
+    assert section.index("} footer: {") < section.index("Text(source.summary)")
     assert "Update Available" not in source and "localUpdate" not in source
     assert 'LabeledContent("Line", value: HubSource.label(line))' in source
     assert 'LabeledContent("Release", value: release)' in source

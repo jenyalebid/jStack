@@ -2,17 +2,18 @@
 
 Three states, and the third one is the point. `client` leaves the choice to
 each client's own setting — the switch in the app, one device one answer.
-`hidden` and `available` take that choice away for the client running ON this
-Mac. Nothing here governs a phone: `/host` answers this field to a **loopback**
+`hidden` and `available` take that choice away for the client running ON a
+managed Mac. Nothing here governs a phone: `/host` answers this field to a **loopback**
 caller only, because a policy a remote device is not subject to is a policy it
 must not be handed as if it were its own.
 
 Who owns the answer depends on what the machine is, and that split is the same
 one the whole leaf contract is built on:
 
-- A **hub** owns its own. It is the console at its own menu bar, there is no
-  row above it, and the state lives in this machine's state dir.
-- A **leaf** does not. Its hub holds the row (`hosts.usage_reporting`), beside
+- A **hub** forces nothing on its own client. The person at the hub is the
+  person at that client, and the client's own switch is their answer; a second
+  switch on the menu bar for the same screen would be two doors to one room.
+- A **leaf**'s answer is its hub's word. The hub holds the row (`hosts.usage_reporting`), beside
   `sees_home` and `sees_leaves`, flipped from the same menu, for the reason the
   app already says out loud on a managed Mac: "Access and visibility are
   controlled from the hub's menu bar." A leaf that could flip its own would be
@@ -90,18 +91,6 @@ def _store(**fields) -> None:
         _STATE.write_text(json.dumps(d, indent=2, sort_keys=True))
 
 
-def own() -> str:
-    """This machine's own word about its own client. A hub's answer."""
-    state = _load().get("own")
-    return state if state in STATES else CLIENT
-
-
-def set_own(state: str) -> str:
-    """Store this machine's own choice. The console route's write."""
-    _store(own=normalise(state))
-    return state
-
-
 def cached_parent() -> str:
     """What this leaf's hub last said about it."""
     state = _load().get("parent")
@@ -129,7 +118,7 @@ def note_parent(state) -> str:
 def effective() -> str:
     """The state this machine's local client is subject to, right now."""
     from . import managed_access
-    return cached_parent() if managed_access.is_leaf() else own()
+    return cached_parent() if managed_access.is_leaf() else CLIENT
 
 
 def poke(host_key: str, *, poster=None) -> dict:

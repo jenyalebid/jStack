@@ -117,9 +117,9 @@ update.setAccessibilityIdentifier("updates_tap_lab")
 details.addItem(update)
 let window = HostInfoWindow()
 let form = HostInfoForm(machine: "Lab Mac", status: "Running", version: "0.70.0",
-    source: "abc123", hubSource: nil, sourceBusy: false, follow: { _ in }, rebuild: {},
+    hubSource: nil, sourceBusy: false, follow: { _ in }, rebuild: {},
     app: InfoAppSnapshot(), updateStatus: "Update available",
-    error: nil, localCommand: update, machines: [], commands: [:], allCommand: nil,
+    error: nil, localCommand: update, machines: [], commands: [:],
     open: {}, download: {})
 window.render(form)
 let hosting = window.contentView as! NSHostingView<HostInfoForm>
@@ -133,9 +133,9 @@ assert(window.isVisible)
 window.close()
 assert(!window.isVisible)
 window.makeKeyAndOrderFront(nil)
-assert(window.isVisible, "a closed Info window must reopen")
+assert(window.isVisible, "a closed Settings window must reopen")
 window.close()
-print("info window contract passed")
+print("settings window contract passed")
 
 // Poll a loopback fixture through the real HostProbe, inspect the built native
 // menu, and invoke its actions. This covers wiring, not merely policy helpers.
@@ -148,44 +148,55 @@ func waitUntil(_ condition: () -> Bool) {
     }
     assert(condition(), "menu did not reach expected state")
 }
-// Ready is the fixture's whole state drawn, not the first item: "Info" is on
-// the menu before the first poll lands, and the devices after it.
+// Ready is the fixture's whole state drawn, not the first item: the machine
+// row is on the menu before the first poll lands, and the devices after it.
 let openFixture = ProcessInfo.processInfo.environment["FIXTURE_MODE"] == "open"
 waitUntil {
     guard let items = statusItem.menu?.items,
           statusItem.button?.accessibilityLabel() == "jStack · Needs attention",
-          items.contains(where: { $0.title == "Info" }) else { return false }
+          items.first?.submenu?.items.contains(where: { $0.title == "Settings…" }) == true
+    else { return false }
     return !openFixture || (items.contains { $0.title == "1 Device" }
                             && items.contains { $0.title == "1 Managed Mac" })
 }
 let menu = statusItem.menu!
-// No update item on the menu: an update is queued from Info, per machine.
+// No update item on the menu: an update is queued from Settings, per machine.
 assert(!menu.items.contains { $0.title == "Update Available" || $0.title.hasPrefix("Update") })
 if ProcessInfo.processInfo.environment["FIXTURE_MODE"] == "open" {
     let devices = menu.items.first { $0.title == "1 Device" }!
     let machines = menu.items.first { $0.title == "1 Managed Mac" }!
     assert(devices.attributedTitle == nil && machines.attributedTitle == nil)
+    // Each verb heads the list it adds to, where the host tool is installed.
+    if HostControl.hostBinary != nil {
+        assert(devices.submenu!.items.first!.title == "Pair a Device…")
+        assert(machines.submenu!.items.first!.title == "Adopt a Mac…")
+    }
 } else {
     assert(!menu.items.contains { $0.title == "1 Device" || $0.title == "1 Managed Mac" })
 }
-assert(!menu.items.contains { $0.title == "Software Updates" })
+assert(!menu.items.contains { $0.title == "Software Updates" || $0.title == "Info" })
+// The machine's own submenu: its lifecycle, Settings, its logs — nothing else.
+let controls = menu.items.first!.submenu!.items.filter { !$0.isSeparatorItem }.map(\.title)
+assert(controls.allSatisfy { ["Restart Hub", "Shut Down Hub", "Settings…", "Open Log Folder"].contains($0) },
+       "the machine submenu carries \(controls)")
 assert(statusItem.button!.attributedTitle.string == " ●")
 assert(statusItem.button!.accessibilityLabel() == "jStack · Needs attention")
-let info = menu.items.first { $0.title == "Info" }!
+let info = menu.items.first!.submenu!.items.first { $0.title == "Settings…" }!
 assert(info.submenu == nil && info.action != nil)
 NSApp.sendAction(info.action!, to: info.target, from: info)
-waitUntil { app.windows.contains { $0.title == "jStack Info" && $0.isVisible } }
-let firstInfo = app.windows.first { $0.title == "jStack Info" && $0.isVisible }!
+waitUntil { app.windows.contains { $0.title == "Hub Settings" && $0.isVisible } }
+let firstInfo = app.windows.first { $0.title == "Hub Settings" && $0.isVisible }!
 NSApp.sendAction(info.action!, to: info.target, from: info)
-assert(app.windows.filter { $0.title == "jStack Info" && $0.isVisible }.count == 1)
+assert(app.windows.filter { $0.title == "Hub Settings" && $0.isVisible }.count == 1)
 firstInfo.close()
-controller.showUpdates() // The jstack://updates entry uses this exact method.
+controller.showSettings() // The jstack://updates entry uses this exact method.
 assert(firstInfo.isVisible)
-// The one place this Mac's update is queued: its own row's command in Info.
+// The one place this Mac's update is queued: the Source section's Install.
 let infoForm = firstInfo.contentView as! NSHostingView<HostInfoForm>
 waitUntil { infoForm.rootView.localCommand != nil }
 let own = infoForm.rootView.localCommand!
 assert(own.accessibilityIdentifier() == "updates_tap_lab")
+assert(own.title == "Install Update")
 NSApp.sendAction(own.action!, to: own.target, from: own)
 assert(firstInfo.isVisible, "a queued update keeps its progress window")
 waitUntil { infoForm.rootView.localCommand == nil }
@@ -258,7 +269,7 @@ print("live menu actions passed")
         thread.join(timeout=2)
     assert result.returncode == 0, result.stderr
     assert "device menu contract passed" in result.stdout
-    assert "info window contract passed" in result.stdout
+    assert "settings window contract passed" in result.stdout
     assert "live menu actions passed" in result.stdout
     assert len(queued) == 1
     assert queued[0]["target"] == "lab"
