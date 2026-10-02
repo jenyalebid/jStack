@@ -571,12 +571,18 @@ def turn_moved(path, offset, engine):
     climbing (jStack#334). The child keeps watching through it and compacts once the pane is
     idle again.
 
+    The event can land before `offset` too: the settle step moves the baseline to the file's
+    size up to SETTLE_SECS after Stop, so an event written in that gap sits behind it and only
+    its reply lands after. A codex agent line answers the prompt that opened its turn, so the
+    reply is read against the last prompt on file before `offset` — counted alone it read as
+    somebody new and superseded the seam again on the build that carried the fix (jStack#334).
+
     Unreadable answers True — the one direction that never types.
     """
     blob = tail_from(path, offset)
     if blob is None:
         return True
-    notice = False
+    notice = engine == "codex" and opened_by_job_notice(path, offset)
     for entry in rows(blob):
         role, _ = turn_of(entry, engine)
         if role == "user":
@@ -598,6 +604,28 @@ def is_job_notice(entry):
     said = "\n".join(block.get("text") or "" for block in payload.get("content") or []
                      if isinstance(block, dict) and block.get("type") == "input_text")
     return codex_transcript.strip_attachments(said).startswith(JOB_NOTICE)
+
+
+#: How far back from `offset` to look for the prompt that opened the open turn. A turn's
+#: own tool output can run long; past this the answer is "a person", the side that never
+#: compacts over somebody.
+LOOKBACK_BYTES = 4 << 20
+
+
+def opened_by_job_notice(path, offset):
+    """True when the last prompt written before `offset` is a job_monitor event."""
+    start = max(0, offset - LOOKBACK_BYTES)
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            blob = fh.read(offset - start).decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    last = None
+    for entry in rows(blob):
+        if turn_of(entry, "codex")[0] == "user":
+            last = entry
+    return last is not None and is_job_notice(last)
 
 
 def _declares(text):
