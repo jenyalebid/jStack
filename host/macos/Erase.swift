@@ -222,7 +222,9 @@ func preferences(verifyOnly: Bool) throws {
         ? try FileManager.default.contentsOfDirectory(atPath: byHost) : []
     for domain in domains {
         let paths = [base + "/" + domain + ".plist"] + names.filter {
-            $0.hasPrefix(domain + ".") && $0.hasSuffix(".plist")
+            guard $0.hasPrefix(domain + "."), $0.hasSuffix(".plist") else { return false }
+            let suffix = String($0.dropFirst(domain.count + 1).dropLast(".plist".count))
+            return UUID(uuidString: suffix) != nil
         }.map { byHost + "/" + $0 }
         for path in paths {
             var metadata = stat()

@@ -380,6 +380,19 @@ def erase(eraser, target):
     return subprocess.run(["sudo", "-n", str(eraser), str(target)], capture_output=True, text=True)
 
 
+def test_preference_inventory_does_not_select_a_domain_with_the_same_prefix(tmp_path):
+    domain = "com.example.sos"
+    directory = tmp_path / "Library/Preferences/ByHost"
+    directory.mkdir(parents=True)
+    selected = directory / (domain + "." + str(uuid.uuid4()) + ".plist")
+    neighbour = directory / (domain + ".unrelated." + str(uuid.uuid4()) + ".plist")
+    for path in (selected, neighbour):
+        path.write_bytes(plistlib.dumps({"preserve": True}))
+    paths = sos.preference_files(tmp_path, [domain])
+    assert selected in paths
+    assert neighbour not in paths
+
+
 @pytest.mark.parametrize("condition", ["normal", "symlink", "immutable", "unreadable", "wrong-user"])
 def test_native_preferences_from_launchd_preserve_other_domains_and_root(
         eraser, authorization, tmp_path, condition):

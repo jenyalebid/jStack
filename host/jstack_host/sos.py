@@ -35,6 +35,18 @@ PREFERENCE_DOMAINS = ("com.anthropic.claudefordesktop", "com.openai.codex",
                       "com.p5sys.jump.connect", "com.p5sys.jump.mac.viewer.web")
 
 
+def preference_files(home: Path, domains: list[str]) -> list[Path]:
+    base = home / "Library/Preferences"
+    paths = []
+    for domain in domains:
+        paths.append(base / (domain + ".plist"))
+        for path in (base / "ByHost").glob(domain + ".*.plist"):
+            suffix = path.name[len(domain) + 1:-len(".plist")]
+            if re.fullmatch(r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}", suffix):
+                paths.append(path)
+    return paths
+
+
 def volume_uuid(path: Path) -> str:
     filesystem = subprocess.run(["/bin/df", "-P", str(path)],
                                 capture_output=True, text=True, check=True).stdout.splitlines()
@@ -216,10 +228,8 @@ def inventory() -> dict:
         add("data", home / relative)
     for name in ("jStack", "jRemote-Code"):
         add("data", root / name)
-    for domain in result["preferences"]:
-        add("data", home / "Library/Preferences" / (domain + ".plist"))
-        for path in (home / "Library/Preferences/ByHost").glob(domain + ".*.plist"):
-            add("data", path)
+    for path in preference_files(home, result["preferences"]):
+        add("data", path)
     for relative in ("Library/Caches/com.p5sys.jump.mac.viewer.web", "Library/Caches/Jump Desktop",
                      "Library/Caches/com.p5sys.jump.connect", "Library/Containers/com.p5sys.jump.mac.viewer",
                      "Library/Application Support/com.p5sys.jump.connect"):
