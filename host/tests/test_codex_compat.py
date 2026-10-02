@@ -590,3 +590,21 @@ def test_a_hook_only_the_copy_carries_is_never_trimmed(tmp_path):
     managed.write_text(module.managed_hooks(_manifest(("PreToolUse", "Bash", "guard.py")), PLUGIN)[0])
     copy = _manifest(("PreToolUse", "Edit", "guard.py"), ("PostToolUse", "Bash", "guard.py"))
     assert module.trim_manifest(copy, module.managed_registrations(managed)) == copy
+
+
+def test_setup_makes_job_monitor_a_direct_call_and_keeps_the_rest():
+    """A code-cell wait yields every few seconds and each yield is a full-context model
+    call; live 2026-10-02 run 2 spent 6 calls on one job, the direct run spent none."""
+    import tomllib
+    direct = _codex_setup().direct_only_config
+    ours = '["mcp__job_monitor"]'
+    out = direct('[mcp_servers.job_monitor]\ncommand = "x"\n', "mcp__job_monitor")
+    assert tomllib.loads(out)["features"]["code_mode"]["direct_only_tool_namespaces"] == \
+        ["mcp__job_monitor"] and ours in out
+    kept = direct('[features.code_mode]\ndirect_only_tool_namespaces = ["a"]\nenabled = true\n',
+                  "mcp__job_monitor")
+    assert tomllib.loads(kept)["features"]["code_mode"] == {
+        "direct_only_tool_namespaces": ["a", "mcp__job_monitor"], "enabled": True}
+    assert direct(kept, "mcp__job_monitor") == kept
+    assert direct("[features]\ncode_mode = true\n", "mcp__job_monitor") == \
+        "[features]\ncode_mode = true\n"

@@ -383,3 +383,9 @@ def test_a_blocked_wait_does_not_hold_other_calls_on_the_wire(runtime):
 def test_the_handover_points_at_wait_not_at_a_wake(runtime):
     out = wrapped(runtime, "sleep 3; exit 0", threshold=1)
     assert "`wait` tool" in out.stdout and only_job() in out.stdout
+
+
+def test_the_model_is_given_no_wait_bound_to_guess_short():
+    """Live 2026-10-02: given a bound, the model waited 60 s on a 75 s job, twice."""
+    wait = next(t for t in monitor.tool_specs() if t["name"] == "wait")
+    assert set(wait["inputSchema"]["properties"]) == {"job_id"}

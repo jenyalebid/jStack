@@ -498,15 +498,14 @@ def tool_specs():
              "thread_id": {"type": "string", "description": "Your native CODEX_THREAD_ID; never guess."},
              "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 86400, "default": 3600}},
              "required": ["command", "cwd", "thread_id"], "additionalProperties": False}},
+        # No bound in the schema: a model given one picks a short guess, and every guess
+        # under the job's length is one more model call that pays the whole context.
         {"name": "wait", "description": "Block until a job ends and return its result, "
          "notification receipt and bounded log tail. The way to take a job's result: costs "
-         "nothing while it waits and sends no completion event. Returns the running row "
-         f"after timeout_seconds (max {WAIT_MAX}); call it again if it is still running.",
-         "inputSchema": {"type": "object", "properties": {
-             "job_id": {"type": "string"},
-             "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": WAIT_MAX,
-                                 "default": WAIT_MAX}},
-             "required": ["job_id"], "additionalProperties": False}},
+         "nothing while it waits and sends no completion event. A job still running after "
+         f"{WAIT_MAX // 60} minutes returns its running row; call wait again.",
+         "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}},
+                         "required": ["job_id"], "additionalProperties": False}},
         {"name": "status", "description": "Read a job result, notification receipt and bounded log tail "
          "without waiting. For an explicit status request; do not poll — use wait.",
          "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}},

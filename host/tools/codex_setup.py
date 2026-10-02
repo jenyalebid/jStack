@@ -155,6 +155,43 @@ def tool_timeout_config(text, server, seconds):
     return text[:start] + body + text[end:]
 
 
+def direct_only_config(text, namespace):
+    """Add `namespace` to `[features.code_mode] direct_only_tool_namespaces`.
+
+    Codex 0.160 runs MCP tools inside a code cell that yields every few seconds,
+    and each yield is a model call that pays the whole context to ask whether
+    the cell is done. A `wait` on a job is the one call that should cost
+    nothing while it blocks, so its namespace is called directly. A config
+    whose `features.code_mode` is not a table, or that this edit would make
+    unparseable, is left alone.
+    """
+    import tomllib
+    try:
+        mode = tomllib.loads(text).get("features", {}).get("code_mode", {})
+    except tomllib.TOMLDecodeError:
+        return text
+    if not isinstance(mode, dict):
+        return text
+    names = list(mode.get("direct_only_tool_namespaces") or [])
+    if namespace in names:
+        return text
+    line = f"direct_only_tool_namespaces = {json.dumps(names + [namespace])}\n"
+    header = "[features.code_mode]"
+    if header in text:
+        start = text.index(header) + len(header)
+        match = re.search(r"^\[", text[start:], flags=re.M)
+        end = start + match.start() if match else len(text)
+        body = re.sub(r"^direct_only_tool_namespaces\s*=.*\n?", "", text[start:end], flags=re.M)
+        out = text[:start] + "\n" + line + body.lstrip("\n") + text[end:]
+    else:
+        out = (text.rstrip("\n") + "\n\n" if text.strip() else "") + f"{header}\n{line}"
+    try:
+        tomllib.loads(out)
+    except tomllib.TOMLDecodeError:
+        return text
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path)
@@ -225,8 +262,8 @@ def main():
                             str(checkout / "host/tools/job_monitor.py"), "mcp"], check=True)
         sys.path.insert(0, str(checkout / "host/tools"))
         from job_monitor import WAIT_TOOL_TIMEOUT
-        config.write_text(tool_timeout_config(config.read_text(), "job_monitor",
-                                              WAIT_TOOL_TIMEOUT))
+        text = tool_timeout_config(config.read_text(), "job_monitor", WAIT_TOOL_TIMEOUT)
+        config.write_text(direct_only_config(text, "mcp__job_monitor"))
     if any(name.startswith("swift-lsp@") and enabled
            for name, enabled in claude_settings.get("enabledPlugins", {}).items()):
         exists = subprocess.run(["codex", "mcp", "get", "swift-lsp", "--json"],

@@ -658,6 +658,43 @@ def nudge_streak(path, engine):
     return streak
 
 
+#: How far above the fresh session's first call a compaction may leave a codex thread before
+#: the hook stops continuing it. Codex carries every user message through a compaction, so a
+#: thread that grows across them is paying its whole carried history on every call — the
+#: 2026-10-01 run went 28,510 fresh to 67,568 after its 18th. Continuing that buys nothing.
+HEAVY_AFTER = 2
+
+
+def after_compaction(path, engine):
+    """The first real reading after the newest codex compaction, or 0 when there is none.
+
+    Codex writes a reading of 0 straight after a `compacted` line; that zero is the counter
+    resetting, not the session's weight, and `codex_readings` already drops it. The weight
+    is the first figure the next model call reports.
+    """
+    if engine != "codex":
+        return 0
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return 0
+    post, armed = 0, False
+    for line in (tail_from(path, max(0, size - LOOKBACK_BYTES)) or "").splitlines():
+        if '"compacted"' in line:
+            try:
+                compacted = is_boundary(json.loads(line), engine)
+            except ValueError:
+                compacted = False
+            if compacted:
+                post, armed = 0, True
+                continue
+        if armed:
+            got = context_ceiling.codex_readings(line)
+            if got:
+                post, armed = got[0], False
+    return post
+
+
 def _declares(text):
     """True when `CONTINUE_MARK` is the closing line of `text`, alone on it.
 
@@ -1599,6 +1636,10 @@ def decide(path, sid, engine, agent, wants_resume):
     if streak >= CONTINUE_CAP:
         return None, (f"{streak} nudges since a person last spoke — the cap is "
                       f"{CONTINUE_CAP}; an unattended codex loop stops here")
+    post, fresh = after_compaction(path, engine), floor_of(path, engine)
+    if post and fresh and post > HEAVY_AFTER * fresh:
+        return None, (f"compaction-heavy: {post:,} after the last compaction against "
+                      f"{fresh:,} fresh — compacting no longer lightens this thread")
 
     # Below here the session is one this hook acts on. The only question left is whether a
     # boundary helps it — and when the answer is no, a parked session is still parked.
