@@ -79,8 +79,16 @@ def _agent_engine(name: str | None, cmdline: list) -> str | None:
     if n in ("claude", "claude.exe") or arg0 == "claude" or arg0.endswith("/claude"):
         return "claude"
     if n in ("codex", "codex.exe") or arg0 == "codex" or arg0.endswith("/codex"):
+        if _subcommand(cmdline) in _CODEX_SERVERS:
+            return None
         return "codex"
     return None
+
+
+#: Codex subcommands that run a server, never a session. The app-server daemon
+#: outlives whatever started it — one lingered for a day as two permanent
+#: Headless cards, with Kill on them wired to Codex's own server (#344).
+_CODEX_SERVERS = frozenset({"app-server", "mcp-server"})
 
 
 #: A Codex thread id, as it appears bare in argv — `codex exec resume <id>`
