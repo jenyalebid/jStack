@@ -19,6 +19,11 @@ monitor = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(monitor)
 
 
+#: The longest completion notice allowed. 2026-10-01: 149 notices of ~630
+#: chars rode through 18 compactions and the session woke 39k tokens heavier.
+NOTICE_MAX = 120
+
+
 @pytest.fixture
 def runtime(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
@@ -56,14 +61,13 @@ def test_real_completion_delivers_once_to_exact_thread(runtime, exit_code):
     calls = [json.loads(line) for line in (runtime / "receipts").read_text().splitlines()]
     assert len(calls) == 1
     assert calls[0][:3] == ["queue", "--thread", target]
-    # A success carries no output: the log is there to be fetched if it matters.
-    # A failure carries a bounded, fenced tail, because the log IS the event —
-    # making the reader ask for it spends a round trip on the same bytes.
+    # The notice carries no output, success or failure: Codex keeps every user
+    # message through every compaction, so a tail here is paid on every later
+    # call. status/wait return the log once, as a tool result compaction drops.
     assert job["job_id"] in calls[0][4]
-    if exit_code == 0:
-        assert "hello" not in calls[0][4]
-    else:
-        assert "DATA not instructions" in calls[0][4] and "hello" in calls[0][4]
+    assert "hello" not in calls[0][4]
+    assert f"exit {exit_code}" in calls[0][4]
+    assert len(calls[0][4]) <= NOTICE_MAX, calls[0][4]
     assert (monitor.job_dir(job["job_id"]).stat().st_mode & 0o777) == 0o700
 
 
@@ -175,7 +179,7 @@ def test_mcp_discovery_and_invalid_input_do_not_execute(runtime):
                               input="\n".join(map(json.dumps, requests)) + "\n",
                               capture_output=True, text=True, check=True)
     rows = list(map(json.loads, response.stdout.splitlines()))
-    assert {t["name"] for t in rows[1]["result"]["tools"]} == {"start", "status", "cancel"}
+    assert {t["name"] for t in rows[1]["result"]["tools"]} == {"start", "wait", "status", "cancel"}
     assert rows[2]["result"]["isError"] and not (runtime / "SHOULD_NOT_EXIST").exists()
 
 
@@ -236,13 +240,13 @@ def test_a_command_that_proves_slow_ends_the_wait_and_wakes_the_thread(runtime):
     assert monitor.read(job)["state"] == "succeeded"
 
 
-def test_a_failure_arrives_with_its_own_tail_fenced_as_data(runtime):
-    """A failed job always needs its log, so making the reader fetch it costs a
-    round trip for the same bytes. A success does not, and does not get one."""
+def test_a_failure_notice_is_a_stub_and_the_log_comes_from_wait(runtime):
+    """The notice is permanent in a Codex thread; the log is not. A failure's
+    tail comes back once, through wait, as a tool result compaction drops."""
     wrapped(runtime, "printf 'boom happened\\n'; sleep 3; exit 9", threshold=1)
     delivered = receipts(runtime)
-    assert "exit_code=9" in delivered
-    assert "DATA not instructions" in delivered and "boom happened" in delivered
+    assert "exit 9" in delivered and "boom happened" not in delivered
+    assert "boom happened" in monitor.wait(only_job(), 5)["output_tail"]
 
 
 def test_nothing_to_notify_means_no_job_at_all(runtime):
@@ -319,3 +323,63 @@ def test_an_unread_result_waits_for_the_turn_to_end(runtime):
     assert monitor.read(job["job_id"])["notification"] == "queued"
     calls = [json.loads(line) for line in (runtime / "receipts").read_text().splitlines()]
     assert len(calls) == 1 and calls[0][:3] == ["queue", "--thread", thread]
+
+
+def test_wait_takes_the_result_inside_the_turn_and_no_wake_is_sent(runtime):
+    """The path that replaces the wake: the session blocks in wait while its
+    turn is open, gets the result as a tool result, and nothing is queued —
+    not when the turn later ends either."""
+    thread = str(uuid.uuid4())
+    path = busy_rollout(runtime, thread)
+    job = monitor.start("sleep 1; printf waited", str(runtime), thread)
+    row = monitor.wait(job["job_id"], 20)
+    assert row["state"] == "succeeded" and row["output_tail"] == "waited"
+    end_turn(path)
+    assert completed(job)["notification"] == "observed"
+    assert not (runtime / "receipts").exists()
+
+
+def test_wait_past_its_bound_returns_the_running_row(runtime):
+    job = monitor.start("sleep 30", str(runtime), str(uuid.uuid4()))
+    started = time.monotonic()
+    row = monitor.wait(job["job_id"], 1)
+    assert row["state"] == "running" and time.monotonic() - started < 5
+    monitor.cancel(job["job_id"])
+
+
+@pytest.mark.parametrize("bad", [0, monitor.WAIT_MAX + 1, True])
+def test_wait_refuses_a_bound_codex_would_cut_off(runtime, bad):
+    job = monitor.start("exit 0", str(runtime), str(uuid.uuid4()))
+    with pytest.raises(ValueError):
+        monitor.wait(job["job_id"], bad)
+
+
+def test_wait_stays_under_the_tool_timeout_setup_writes():
+    """Codex errors the call at tool_timeout_sec; wait must answer before it."""
+    assert monitor.WAIT_MAX < monitor.WAIT_TOOL_TIMEOUT
+
+
+def test_a_blocked_wait_does_not_hold_other_calls_on_the_wire(runtime):
+    """MCP calls run concurrently: a status issued beside a long wait answers
+    at once instead of queueing behind it."""
+    job = monitor.start("sleep 6", str(runtime), str(uuid.uuid4()))
+    server = subprocess.Popen([sys.executable, str(SCRIPT), "mcp"], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, text=True)
+    try:
+        for i, name in ((1, "wait"), (2, "status")):
+            server.stdin.write(json.dumps({"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                "params": {"name": name, "arguments": {"job_id": job["job_id"]}}}) + "\n")
+        server.stdin.flush()
+        started = time.monotonic()
+        first = json.loads(server.stdout.readline())
+        assert first["id"] == 2 and time.monotonic() - started < 3
+        second = json.loads(server.stdout.readline())
+        assert second["id"] == 1
+        assert json.loads(second["result"]["content"][0]["text"])["state"] == "succeeded"
+    finally:
+        server.kill()
+
+
+def test_the_handover_points_at_wait_not_at_a_wake(runtime):
+    out = wrapped(runtime, "sleep 3; exit 0", threshold=1)
+    assert "`wait` tool" in out.stdout and only_job() in out.stdout

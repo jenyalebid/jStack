@@ -628,6 +628,36 @@ def opened_by_job_notice(path, offset):
     return last is not None and is_job_notice(last)
 
 
+#: How the hook's own nudges open — the prefix every prompt in compact-delivery.md shares.
+HOOK_NUDGE = "[system prompt] Compact-on-delivery hook"
+
+#: The most nudges a codex session gets back to back with no person speaking between them.
+#: Codex keeps every user message through every compaction, and the nudge IS one, so an
+#: unattended park/continue loop both grows the thread's floor and spends a full-context
+#: turn per lap. 2026-10-01: 36 nudges in one run, 24 of them opening a turn. A person's
+#: message resets the count; a job notice neither counts nor resets.
+CONTINUE_CAP = 8
+
+
+def nudge_streak(path, engine):
+    """How many hook nudges the codex rollout holds since the last person spoke."""
+    if engine != "codex":
+        return 0
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return 0
+    streak = 0
+    for entry in rows(tail_from(path, max(0, size - LOOKBACK_BYTES)) or ""):
+        if turn_of(entry, "codex")[0] != "user" or is_job_notice(entry):
+            continue
+        payload = entry.get("payload") or {}
+        said = "\n".join(block.get("text") or "" for block in payload.get("content") or []
+                         if isinstance(block, dict) and block.get("type") == "input_text")
+        streak = streak + 1 if codex_transcript.strip_attachments(said).startswith(HOOK_NUDGE) else 0
+    return streak
+
+
 def _declares(text):
     """True when `CONTINUE_MARK` is the closing line of `text`, alone on it.
 
@@ -1565,6 +1595,10 @@ def decide(path, sid, engine, agent, wants_resume):
     name = managed._name(sid)
     if pane(name) is None:
         return None, "not a managed tmux session"
+    streak = nudge_streak(path, engine)
+    if streak >= CONTINUE_CAP:
+        return None, (f"{streak} nudges since a person last spoke — the cap is "
+                      f"{CONTINUE_CAP}; an unattended codex loop stops here")
 
     # Below here the session is one this hook acts on. The only question left is whether a
     # boundary helps it — and when the answer is no, a parked session is still parked.

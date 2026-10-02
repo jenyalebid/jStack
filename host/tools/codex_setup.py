@@ -135,6 +135,26 @@ def shell_config(text, plugin, path):
     return text + "\n" + block + values + "# END jstack shell\n"
 
 
+def tool_timeout_config(text, server, seconds):
+    """Give one MCP server's table a `tool_timeout_sec`, replacing ours if present.
+
+    Codex cuts every MCP call off at this timeout, and its default is far
+    shorter than a job: job_monitor's `wait` blocks for as long as a job runs,
+    so without this line the session gets a tool error instead of a result and
+    falls back to ending the turn to be woken — the expensive path `wait`
+    exists to remove. A server table that is not there is left alone.
+    """
+    header = f"[mcp_servers.{server}]"
+    if header not in text:
+        return text
+    start = text.index(header) + len(header)
+    match = re.search(r"^\[", text[start:], flags=re.M)
+    end = start + match.start() if match else len(text)
+    body = re.sub(r"^tool_timeout_sec\s*=.*\n?", "", text[start:end], flags=re.M)
+    body = "\n" + f"tool_timeout_sec = {seconds}\n" + body.lstrip("\n")
+    return text[:start] + body + text[end:]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path)
@@ -203,6 +223,10 @@ def main():
         if not exists:
             subprocess.run(["codex", "mcp", "add", "job_monitor", "--", sys.executable,
                             str(checkout / "host/tools/job_monitor.py"), "mcp"], check=True)
+        sys.path.insert(0, str(checkout / "host/tools"))
+        from job_monitor import WAIT_TOOL_TIMEOUT
+        config.write_text(tool_timeout_config(config.read_text(), "job_monitor",
+                                              WAIT_TOOL_TIMEOUT))
     if any(name.startswith("swift-lsp@") and enabled
            for name, enabled in claude_settings.get("enabledPlugins", {}).items()):
         exists = subprocess.run(["codex", "mcp", "get", "swift-lsp", "--json"],
