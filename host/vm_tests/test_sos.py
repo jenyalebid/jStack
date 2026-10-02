@@ -161,6 +161,59 @@ def test_noninteractive_confirmation_refused(monkeypatch):
         sos.confirm("wipe")
 
 
+@pytest.fixture
+def unregistered_service_bundle(tmp_path):
+    import uuid
+    app = tmp_path.resolve() / "Service Fixture.app"
+    contents = app / "Contents"
+    for directory in ("MacOS", "Resources", "Library/LaunchAgents"):
+        (contents / directory).mkdir(parents=True, exist_ok=True)
+    label = "live.jstack.sos-fixture." + uuid.uuid4().hex
+    (contents / "Info.plist").write_bytes(plistlib.dumps({
+        "CFBundleIdentifier": label, "CFBundleExecutable": "JStackHub",
+        "CFBundlePackageType": "APPL", "CFBundleVersion": "1"}))
+    (contents / "Resources/services.json").write_text(json.dumps({
+        "absent": label + ".absent.plist", "unused": label + ".unused.plist"}))
+    (contents / "Library/LaunchAgents" / (label + ".unused.plist")).write_bytes(plistlib.dumps({
+        "Label": label + ".unused", "BundleProgram": "Contents/MacOS/JStackHub",
+        "ProgramArguments": ["JStackHub", "status"], "RunAtLoad": False}))
+    executable = contents / "MacOS/JStackHub"
+    source = Path(__file__).resolve().parents[1] / "macos/ServiceControl.swift"
+    subprocess.run(["xcrun", "swiftc", str(source), "-o", str(executable)], check=True)
+    subprocess.run(["codesign", "--force", "--sign", "-", str(app)], check=True)
+    return executable, label
+
+
+@pytest.mark.parametrize("role,status", [("absent", "not_found"), ("unused", "not_registered")])
+def test_native_unregister_of_absent_service_is_repeatable(unregistered_service_bundle, role, status):
+    executable, _ = unregistered_service_bundle
+    before = json.loads(subprocess.check_output([str(executable), "status"], text=True))
+    assert before[role] == status, before
+    for _ in range(3):
+        result = subprocess.run([str(executable), "unregister", role], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"service": role, "status": status}
+        assert json.loads(subprocess.check_output([str(executable), "status"], text=True)) == before
+
+
+def test_native_unregister_does_not_hide_loaded_job(unregistered_service_bundle, tmp_path):
+    executable, label = unregistered_service_bundle
+    label += ".absent"
+    definition = tmp_path / "live.plist"
+    definition.write_bytes(plistlib.dumps({"Label": label, "ProgramArguments": ["/bin/sleep", "60"],
+                                          "RunAtLoad": True}))
+    domain = "gui/" + str(os.getuid())
+    target = domain + "/" + label
+    subprocess.run(["launchctl", "bootstrap", domain, str(definition)], check=True)
+    try:
+        result = subprocess.run([str(executable), "unregister", "absent"], capture_output=True, text=True)
+        assert result.returncode != 0
+        assert "still loaded" in result.stderr
+        subprocess.run(["launchctl", "print", target], check=True, capture_output=True)
+    finally:
+        subprocess.run(["launchctl", "bootout", target], check=True)
+
+
 @pytest.fixture(scope="module")
 def eraser(tmp_path_factory):
     destination = tmp_path_factory.mktemp("native").resolve() / "Erase"

@@ -141,7 +141,18 @@ func main() throws {
             }
         }
     } else {
-        try service.unregister()
+        let recorded = service.status
+        if recorded == .notRegistered || recorded == .notFound {
+            // An optional absent definition cannot be unregistered: macOS
+            // returns EPERM. Retrying a completed removal must also succeed.
+            // Do not hide a live job behind an absent registration record.
+            guard !launchdLoaded(labelOf(plist)) else {
+                throw NSError(domain: "jStack", code: 77, userInfo: [NSLocalizedDescriptionKey:
+                    "Service is still loaded despite an absent registration"])
+            }
+        } else {
+            try service.unregister()
+        }
     }
     try emit(["service": args[1], "status": statusName(service.status)])
 }
