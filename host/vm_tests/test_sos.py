@@ -187,7 +187,20 @@ def unregistered_service_bundle(tmp_path, request):
 
 @pytest.mark.parametrize("role,status", [("absent", "not_found"), ("unused", "not_registered")])
 def test_native_unregister_of_absent_service_is_repeatable(unregistered_service_bundle, role, status):
-    executable, _ = unregistered_service_bundle
+    executable, label = unregistered_service_bundle
+    if role == "unused":
+        # A never-registered bundled plist reports not_found on macOS. Reach
+        # not_registered through a real register/remove cycle, not a mock.
+        subprocess.run([str(executable), "register", role], check=True, capture_output=True)
+        try:
+            registered = json.loads(subprocess.check_output([str(executable), "status"], text=True))
+            assert registered[role] == "enabled", registered
+            subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}.{role}"],
+                           check=True, capture_output=True)
+        finally:
+            subprocess.run([str(executable), "unregister", role], check=True, capture_output=True)
+        assert subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}.{role}"],
+                              capture_output=True).returncode != 0
     before = json.loads(subprocess.check_output([str(executable), "status"], text=True))
     assert before[role] == status, before
     for _ in range(3):
