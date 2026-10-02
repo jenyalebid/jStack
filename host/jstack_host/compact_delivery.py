@@ -565,12 +565,39 @@ def turn_moved(path, offset, engine):
     NEXT Stop instead: somebody mid-conversation, watching a compaction land on a question
     asked three minutes ago.
 
+    A codex job_monitor completion event is not a turn either, and nor is the reply it gets.
+    It arrives as a user message the moment the parked turn ends, and counting it killed every
+    compaction one heavy thread asked for: fifteen events, fifteen `superseded`, 217k and
+    climbing (jStack#334). The child keeps watching through it and compacts once the pane is
+    idle again.
+
     Unreadable answers True — the one direction that never types.
     """
     blob = tail_from(path, offset)
     if blob is None:
         return True
-    return any(turn_of(entry, engine)[0] for entry in rows(blob))
+    notice = False
+    for entry in rows(blob):
+        role, _ = turn_of(entry, engine)
+        if role == "user":
+            notice = engine == "codex" and is_job_notice(entry)
+            if not notice:
+                return True
+        elif role and not notice:
+            return True
+    return False
+
+
+#: How job_monitor opens every completion event it queues into a codex thread.
+JOB_NOTICE = "[job-monitor:"
+
+
+def is_job_notice(entry):
+    """True for a codex user line that is a job_monitor completion event."""
+    payload = entry.get("payload") or {}
+    said = "\n".join(block.get("text") or "" for block in payload.get("content") or []
+                     if isinstance(block, dict) and block.get("type") == "input_text")
+    return codex_transcript.strip_attachments(said).startswith(JOB_NOTICE)
 
 
 def _declares(text):
