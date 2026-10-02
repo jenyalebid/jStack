@@ -124,6 +124,10 @@ func main() throws {
     }
     let service = appService(plist)
     if action == "register" {
+        guard !FileManager.default.fileExists(atPath: "/private/var/db/live.jstack.sos") else {
+            throw NSError(domain: "jStack", code: 77,
+                userInfo: [NSLocalizedDescriptionKey: "jStack wipe is in progress"])
+        }
         guard !emergencyStopped() else { throw NSError(domain: "jStack", code: 77,
             userInfo: [NSLocalizedDescriptionKey: "jStack emergency stop is active"]) }
         // Approval revocation is not a registration failure to repair away.

@@ -17,12 +17,14 @@ import shlex
 import socket
 import subprocess
 import sys
+import uuid
 
-from . import app_services, hostenv, service_settings
+from . import app_services, fileshare, hostenv, network_admin, service_settings
 
 WORK = Path("/private/var/db/live.jstack.sos")
 LABEL = "live.jstack.sos"
 PLIST = Path("/Library/LaunchDaemons/live.jstack.sos.plist")
+NETWORK_APP = Path("/Library/PrivilegedHelperTools/jStack Network.app")
 PROVIDERS = {"claude": (".claude", "CLAUDE_CONFIG_DIR"),
              "codex": (".codex", "CODEX_HOME")}
 TREE_DIRS = ("Agents", "Projects", "Systems", "Config", "State", "Logs", "Credentials")
@@ -38,7 +40,7 @@ def safe_target(path: Path, home: Path) -> Path:
                  home / ".config", Path("/opt"), Path("/opt/homebrew"), Path("/usr/local")}
     if path in forbidden or path in home.parents or path == WORK or WORK in path.parents:
         raise ValueError(f"refusing enclosing directory: {path}")
-    if str(path).startswith("/Users/") and not path.is_relative_to(home):
+    if str(path).startswith("/Users/") and not path.is_relative_to(home) and path != Path(fileshare.ACCOUNT_HOME):
         raise ValueError(f"refusing another account: {path}")
     if path.is_relative_to("/System") or path.is_relative_to("/bin") or path.is_relative_to("/sbin"):
         raise ValueError(f"refusing operating system path: {path}")
@@ -58,6 +60,9 @@ def inventory() -> dict:
     result = {"schema": 1, "user": pwd.getpwuid(os.getuid()).pw_name,
               "uid": os.getuid(), "home": str(home), "hostname": socket.gethostname(),
               "root": str(root), "history": [], "data": [], "apps": [], "services": [],
+              "registrations": [], "network_transaction": config.get("network_transaction"),
+              "tmux_socket": environment.get("JREMOTE_TMUX_SOCK", "jremote"),
+              "shares": {},
               "app": config.get("app", "/Applications/jStack Hub.app")}
 
     def add(phase, path):
@@ -80,7 +85,7 @@ def inventory() -> dict:
         if environment.get(variable):
             add("history", environment[variable])
     for name in TREE_DIRS:
-        add("data", root / name)
+        add("history" if name in {"Logs", "State"} else "data", root / name)
     add("data", hostenv.instance_root())
     for relative in (".claude.json", ".claude.json.backup", ".config/jstack", ".agents",
                      ".local/share/claude", ".local/bin/claude", ".local/bin/codex",
@@ -90,6 +95,11 @@ def inventory() -> dict:
                      "Library/Application Support/Jump Desktop", "Library/Application Support/Jump Desktop Connect",
                      "Library/Caches/com.anthropic.claudefordesktop", "Library/Caches/com.openai.codex"):
         add("data", home / relative)
+    for relative in (".config/claude", ".config/codex", ".config/jremote", ".local/share/jstack",
+                     "Library/Logs/Claude", "Library/Logs/Codex", "Library/Logs/jRemote",
+                     "Library/Logs/jStack", "Library/Saved Application State/com.anthropic.claudefordesktop.savedState",
+                     "Library/Saved Application State/com.openai.codex.savedState"):
+        add("history", home / relative)
     for name in ("jStack Hub.app", "jRemote.app", "Claude.app", "Codex.app",
                  "Jump Desktop.app", "Jump Desktop Connect.app"):
         for base in (Path("/Applications"), home / "Applications"):
@@ -124,10 +134,32 @@ def inventory() -> dict:
     app = Path(config.get("app", "/Applications/jStack Hub.app"))
     definitions = app / "Contents/Library/LaunchAgents"
     if definitions.is_dir():
+        catalog = json.loads((app / "Contents/Resources/services.json").read_text())
+        for role in catalog:
+            if not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", role):
+                raise ValueError("invalid sealed service role")
+            result["registrations"].append(role)
         for path in definitions.glob("live.jstack.*.plist"):
             label = plistlib.loads(path.read_bytes()).get("Label")
             if isinstance(label, str) and re.fullmatch(r"live\.jstack\.[A-Za-z0-9_.-]+", label):
                 result["services"].append({"domain": f"gui/{os.getuid()}", "label": label})
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", result["tmux_socket"]):
+        raise ValueError("invalid managed tmux socket")
+    if NETWORK_APP.exists():
+        if not re.fullmatch(r"[a-f0-9]{32}", str(result["network_transaction"])):
+            raise ValueError("installed Network service has no reviewed uninstall transaction")
+        result["network_invocation"] = uuid.uuid4().hex
+    actual = fileshare._actual_shares()
+    desired = fileshare.desired_shares()
+    for name, path in desired.items():
+        if name in actual and Path(actual[name]["path"]) == path:
+            result["shares"][name] = str(path)
+    account = fileshare._account()
+    if account["exists"]:
+        if account["home"] != fileshare.ACCOUNT_HOME or account["shell"] != fileshare.ACCOUNT_SHELL or account["admin"] is not False:
+            raise ValueError("sharing account ownership cannot be established")
+        result["share_account"] = True
+        add("apps", fileshare.ACCOUNT_HOME)
     return result
 
 
@@ -159,6 +191,9 @@ def worker(plan: dict) -> str:
              'phase() { printf "%s\\n" "$1" > phase; printf "PHASE %s\\n" "$1"; }',
              'phase quiesce']
     for service in plan["services"]:
+        # Network and remote-desktop access are retained until history is gone.
+        if service["label"] == "live.jstack.network" or service["label"].startswith("com.p5sys.jump"):
+            continue
         target = service["domain"] + "/" + service["label"]
         lines += [f"/bin/launchctl disable {q(target)} || fail {q('disable: ' + target)}",
                   f"if /bin/launchctl print {q(target)} >/dev/null 2>&1; then /bin/launchctl bootout {q(target)} || fail {q('stop: ' + target)}; fi"]
@@ -166,25 +201,61 @@ def worker(plan: dict) -> str:
     for name in ("claude", "codex", "Claude", "Codex", "jRemote"):
         lines += [f"/usr/bin/pkill -KILL -u {uid} -x {q(name)} 2>/dev/null || :",
                   f"if /usr/bin/pgrep -u {uid} -x {q(name)} >/dev/null; then fail {q('writer: ' + name)}; fi"]
+    app = Path(plan.get("app", "/Applications/jStack Hub.app"))
+    user = ["/usr/bin/sudo", "-n", "-H", "-u", "#" + str(uid)]
+    tmux = app / "Contents/MacOS/tmux"
+    lines += [f"if test -x {q(str(tmux))}; then",
+              shlex.join(user + [str(tmux), "-L", plan.get("tmux_socket", "jremote"), "kill-server"]) + " 2>/dev/null || :",
+              "fi"]
     for target in plan["history"]:
         lines += [f"if test -d {q(target)} && test ! -L {q(target)}; then",
                   f"  /usr/sbin/lsof -a -u {uid} -t +D {q(target)} > writers 2> scan-errors; scan=$?",
                   '  if test -s scan-errors || test "$scan" -gt 1; then fail "cannot observe history writers"; fi',
-                  '  while read -r writer; do case "$writer" in ""|*[!0-9]*) fail "invalid writer PID";; '
-                  '*) /bin/kill -KILL "$writer" 2>/dev/null || :;; esac; done < writers',
+                  # Unknown writers are not permission to kill an unrelated app.
+                  '  if test -s writers; then fail "history still has open writers"; fi',
                   "fi"]
     lines.append('[ "$failed" = 0 ] || exit 1')
     for phase in ("history", "data", "apps"):
         lines.append("phase " + phase)
         if phase == "data":
+            for name, path in plan.get("shares", {}).items():
+                node = "/SharePoints/" + name
+                lines += [f"if /usr/bin/dscl . -read {q(node)} >/dev/null 2>&1; then",
+                          f'test "$(/usr/bin/dscl . -read {q(node)} directory_path)" = {q("directory_path: " + path)} || exit 1',
+                          f"/usr/sbin/sharing -r {q(name)} || exit 1", "fi"]
+            if plan.get("share_account"):
+                node = "/Users/" + fileshare.ACCOUNT
+                lines += [f"if /usr/bin/dscl . -read {q(node)} >/dev/null 2>&1; then",
+                          f'test "$(/usr/bin/dscl . -read {q(node)} NFSHomeDirectory)" = {q("NFSHomeDirectory: " + fileshare.ACCOUNT_HOME)} || exit 1',
+                          f'test "$(/usr/bin/dscl . -read {q(node)} UserShell)" = {q("UserShell: " + fileshare.ACCOUNT_SHELL)} || exit 1',
+                          f"/usr/bin/dscl . -delete {q(node)} || exit 1", "fi"]
+            lines += ['if test ! -f user-cleanup-done; then',
+                      shlex.join(user + [str(app / "Contents/MacOS/JStackCLI"), "_wipe-user-cleanup"]) + " || exit 1",
+                      'touch user-cleanup-done', 'fi']
             for service in ("Claude Code-credentials", "Claude", "Codex Auth", "jRemote"):
                 delete = shlex.join(["/usr/bin/sudo", "-n", "-H", "-u", "#" + str(uid),
                                      "/usr/bin/security", "delete-generic-password", "-s", service])
                 lines += [f"while :; do {delete} >/dev/null 2> keychain-error; result=$?;",
                           'case "$result" in 0) ;; 44) break;; *) fail "keychain deletion denied"; break;; esac; done']
         if phase == "apps":
+            lines += ['if test ! -f registrations-done; then']
+            for role in plan.get("registrations", []):
+                lines += [shlex.join(user + [str(app / "Contents/MacOS/JStackHub"), "unregister", role])
+                          + " || fail 'user service unregister' "]
+            lines += ['[ "$failed" = 0 ] || exit 1', 'touch registrations-done', 'fi']
+            if plan.get("network_invocation"):
+                invocation = network_admin.ROOT / "invocations" / plan["network_invocation"]
+                lines += ['if test ! -f network-done; then',
+                          shlex.join([str(invocation / "Installer"), str(invocation / "request.json")]) + " || exit 1",
+                          'touch network-done', 'fi']
+            for service in plan["services"]:
+                target = service["domain"] + "/" + service["label"]
+                if service["label"].startswith("com.p5sys.jump"):
+                    lines += [f"/bin/launchctl disable {q(target)} || fail 'disable Jump'",
+                              f"if /bin/launchctl print {q(target)} >/dev/null 2>&1; then /bin/launchctl bootout {q(target)} || fail 'stop Jump'; fi"]
             for name in ("JumpConnect", "Jump Desktop Connect", "Jump Desktop", "JumpDesktop"):
                 lines.append(f"/usr/bin/pkill -KILL -x {q(name)} 2>/dev/null || :")
+            lines.append('[ "$failed" = 0 ] || exit 1')
         lines += ["remove " + q(path) for path in plan[phase]]
         lines.append('[ "$failed" = 0 ] || exit 1')
     # An install root is a container, never a recursive deletion target.
@@ -204,11 +275,32 @@ def bootstrap(plan: dict) -> str:
                   "RunAtLoad": True, "KeepAlive": {"SuccessfulExit": False}, "ThrottleInterval": 30}
     executable = Path(plan["app"]) / "Contents/MacOS/JStackErase"
     expected = hashlib.sha256(executable.read_bytes()).hexdigest()
-    lines = ["set -eu", "umask 077", f"test ! -e {q(str(WORK))} && test ! -L {q(str(WORK))}",
+    network_admin.protected_ancestry(WORK.parent)
+    network_admin.protected_ancestry(PLIST.parent)
+    lines = ["set -eu", "umask 077", "export PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C",
+             "check_parent() { test ! -L \"$1\"; test \"$(/usr/bin/stat -f %u \"$1\")\" = 0; "
+             "test $(( 0$(/usr/bin/stat -f %Lp \"$1\") & 022 )) = 0; "
+             "/bin/ls -lde \"$1\" | /usr/bin/awk 'NR > 1 && / allow / { exit 1 }'; }",
+             *["check_parent " + q(str(path)) for path in sorted(set((*WORK.parent.parents, WORK.parent,
+                                                                 *PLIST.parent.parents, PLIST.parent)))],
+             f"test ! -e {q(str(WORK))} && test ! -L {q(str(WORK))}",
              f"test ! -e {q(str(PLIST))} && test ! -L {q(str(PLIST))}",
              f"/bin/mkdir -m 700 {q(str(WORK))}",
              f"/usr/bin/install -o root -g wheel -m 700 {q(str(executable))} {q(str(WORK / 'Erase'))}",
              f'test "$(/usr/bin/shasum -a 256 {q(str(WORK / "Erase"))} | /usr/bin/cut -d " " -f 1)" = {q(expected)}']
+    if plan.get("network_invocation"):
+        network_admin.protected_ancestry(network_admin.ROOT)
+        app_services.verify(NETWORK_APP, "live.jstack.network")
+        source = NETWORK_APP / "Contents/MacOS/JStackNetworkInstaller"
+        invocation = network_admin.ROOT / "invocations" / plan["network_invocation"]
+        request = {"schema": 1, "action": "uninstall", "transaction": plan["network_transaction"]}
+        for directory in (network_admin.ROOT, network_admin.ROOT / "invocations"):
+            lines += [f"if test ! -e {q(str(directory))}; then /bin/mkdir -m 700 {q(str(directory))}; fi",
+                      "check_parent " + q(str(directory))]
+        lines += [f"/bin/mkdir -m 700 {q(str(invocation))}",
+                  f"/usr/bin/install -o root -g wheel -m 700 {q(str(source))} {q(str(invocation / 'Installer'))}",
+                  f'test "$(/usr/bin/shasum -a 256 {q(str(invocation / "Installer"))} | /usr/bin/cut -d " " -f 1)" = {q(hashlib.sha256(source.read_bytes()).hexdigest())}',
+                  f"printf %s {q(base64.b64encode(json.dumps(request).encode()).decode())} | /usr/bin/base64 -D > {q(str(invocation / 'request.json'))}"]
     for path, data in ((WORK / "worker.sh", worker(plan).encode()),
                        (WORK / "manifest.json", json.dumps(plan).encode()),
                        (PLIST, plistlib.dumps(definition))):
@@ -241,8 +333,9 @@ def run(action: str, *, dry_run=False, out=sys.stdout) -> int:
         library = ctypes.CDLL("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login")
         function = library.SACLockScreenImmediate
         function.argtypes = []
-        function.restype = ctypes.c_int
-        return int(function())
+        function.restype = None
+        function()
+        return 0
     subprocess.run(["/usr/bin/sudo", "-v"], check=True)
     print(f"Accepted {action} on {socket.gethostname()}; the connection may close.", file=out, flush=True)
     if action == "wipe":

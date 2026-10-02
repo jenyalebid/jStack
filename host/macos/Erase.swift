@@ -50,7 +50,11 @@ do {
     guard CommandLine.arguments.count == 2 else { throw POSIXError(.EINVAL) }
     let path = CommandLine.arguments[1]
     let components = path.split(separator: "/").map(String.init)
-    guard path.hasPrefix("/"), components.count >= 3,
+    guard path.hasPrefix("/"), components.count >= 2,
+          !(components[0] == "Users" && components.count == 2),
+          !["/private/var", "/private/etc", "/usr/local", "/opt/homebrew",
+            "/Library/LaunchDaemons", "/Library/LaunchAgents",
+            "/Library/PrivilegedHelperTools", "/Library/Application Support"].contains(path),
           !components.contains(".."), !components.contains(".") else { throw POSIXError(.EINVAL) }
     var parent = open("/", O_RDONLY | O_DIRECTORY)
     guard parent >= 0 else { throw POSIXError(.EIO) }

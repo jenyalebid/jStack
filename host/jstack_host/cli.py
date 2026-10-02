@@ -163,8 +163,14 @@ def _cmd_emergency_stop(args) -> int:
 
 
 def _cmd_sos(args) -> int:
+    _adopt(args)
     from . import sos
     return sos.run(args.cmd, dry_run=getattr(args, "dry_run", False))
+
+
+def _cmd_sos_user_cleanup(args) -> int:
+    from . import sos_user_cleanup
+    return sos_user_cleanup.run()
 
 
 def _cmd_pair(args) -> int:
@@ -1740,6 +1746,9 @@ def build_parser() -> argparse.ArgumentParser:
         if action == "wipe":
             p.add_argument("--dry-run", action="store_true", help="print the removal inventory without changing anything")
         p.set_defaults(fn=_cmd_sos)
+
+    p = sub.add_parser("_wipe-user-cleanup", help=argparse.SUPPRESS)
+    p.set_defaults(fn=_cmd_sos_user_cleanup)
 
     def _serving_args(p, *, bind_default, bind_help):
         p.add_argument("--port", type=int, default=install_host.DEFAULT_PORT)
