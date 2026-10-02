@@ -52,6 +52,28 @@ def test_root_is_never_a_recursive_target(monkeypatch, tmp_path):
     assert str(Path.home() / "Agents") in plan["data"]
 
 
+def test_inventory_retains_service_and_shell_history_locations(monkeypatch):
+    base = Path.home() / "sos-inventory-fixture"
+    monkeypatch.setattr(sos.service_settings, "read", lambda: {
+        "environment": {"CODEX_HOME": str(base / "installed-codex"),
+                        "JREMOTE_STATE_DIR": str(base / "installed-state"),
+                        "JREMOTE_CREDENTIALS_DIR": str(base / "credentials")},
+        "scheduler": {"environment": {"JSTACK_LOGS_DIR": str(base / "scheduler-logs"),
+                                       "SCHEDULER_STATE_DIR": str(base / "scheduler-state")}},
+        "migration_dir": str(base / "migration"),
+    })
+    monkeypatch.setenv("CODEX_HOME", str(base / "shell-codex"))
+    monkeypatch.setenv("JREMOTE_STATE_DIR", str(base / "shell-state"))
+    monkeypatch.setenv("JSTACK_TIMELINE_DIR", str(base / "timeline"))
+    plan = sos.inventory()
+    for name in ("installed-codex", "shell-codex", "installed-state", "shell-state",
+                 "scheduler-logs", "scheduler-state", "timeline", "migration"):
+        assert str(base / name) in plan["history"]
+    assert str(base / "credentials") in plan["data"]
+    assert str(Path.home() / "jRemote-Code") in plan["data"]
+    assert str(Path.home() / ".scheduler") in plan["history"]
+
+
 def test_worker_prioritizes_history_and_removes_itself_last():
     plan = {"home": "/Users/admin", "uid": 501, "root": "/Users/admin/Stack",
             "services": [], "history": ["/Users/admin/.codex"],

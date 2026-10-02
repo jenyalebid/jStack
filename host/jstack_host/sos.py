@@ -56,6 +56,8 @@ def inventory() -> dict:
     home = Path.home()
     config = service_settings.read()
     environment = {**config.get("environment", {}), **os.environ}
+    locations = (config.get("environment", {}),
+                 config.get("scheduler", {}).get("environment", {}), os.environ)
     root = hostenv.stack_root()
     result = {"schema": 1, "user": pwd.getpwuid(os.getuid()).pw_name,
               "uid": os.getuid(), "home": str(home), "hostname": socket.gethostname(),
@@ -77,25 +79,43 @@ def inventory() -> dict:
 
     for directory, variable in PROVIDERS.values():
         add("history", home / directory)
-        if environment.get(variable):
-            add("history", environment[variable])
+        for declared in locations:
+            if declared.get(variable):
+                add("history", declared[variable])
     for relative in (".cache/jremote", ".local/state/jremote", ".local/share/jremote",
                      "Library/Containers/dev.jenya.jRemote",
                      "Library/Application Support/Claude", "Library/Application Support/Codex"):
         add("history", home / relative)
-    for variable in ("JREMOTE_STATE_DIR", "JREMOTE_CACHE_DIR"):
-        if environment.get(variable):
-            add("history", environment[variable])
+    # The installed services and the invoking shell can name different
+    # locations; neither declaration makes the other one's history disappear.
+    for declared in locations:
+        for variable in ("JREMOTE_STATE_DIR", "JREMOTE_CACHE_DIR", "JREMOTE_ATTENTION_DIR",
+                         "JREMOTE_TURN_DIR", "JSTACK_LOGS_DIR", "JSTACK_TIMELINE_DIR",
+                         "JSTACK_STATE_DIR", "SCHEDULER_HOME", "SCHEDULER_STATE_DIR"):
+            if declared.get(variable):
+                add("history", declared[variable])
+        for variable in ("JREMOTE_CREDENTIALS_DIR", "JREMOTE_RELEASES_DIR", "JREMOTE_TOKEN_PATH",
+                         "JSTACK_CONFIG_DIR", "JSTACK_CREDENTIALS_DIR", "JSTACK_SYSTEMS_DIR",
+                         "JSTACK_AGENTS_DIR", "JREMOTE_INSTANCE_ROOT", "SCHEDULER_CONFIG_DIR",
+                         "WG_PEER_DIR"):
+            if declared.get(variable):
+                add("data", declared[variable])
+    for key in ("migration_dir", "automation_settings"):
+        if config.get(key):
+            add("history" if key == "migration_dir" else "data", config[key])
+    add("history", home / ".scheduler")
     for name in TREE_DIRS:
         add("history" if name in {"Logs", "State"} else "data", root / name)
     add("data", hostenv.instance_root())
     for relative in (".claude.json", ".claude.json.backup", ".config/jstack", ".agents",
                      ".local/share/claude", ".local/bin/claude", ".local/bin/codex",
-                     ".local/bin/jstack-host", "jStack",
+                     ".local/bin/jstack-host", "jStack", "jRemote-Code",
                      "Library/Containers/dev.jenya.jRemote.Share",
                      "Library/Containers/dev.jenya.jRemote.tunnel",
                      "Library/Application Support/Jump Desktop", "Library/Application Support/Jump Desktop Connect"):
         add("data", home / relative)
+    for name in ("jStack", "jRemote-Code"):
+        add("data", root / name)
     for relative in (".config/claude", ".config/codex", ".config/jremote", ".local/share/jstack",
                      ".cache/claude", ".cache/codex",
                      "Library/Caches/com.anthropic.claudefordesktop", "Library/Caches/com.openai.codex",
