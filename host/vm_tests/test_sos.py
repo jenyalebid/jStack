@@ -394,6 +394,46 @@ def test_native_removal_preserves_symlink_destination(eraser, authorization, tmp
     assert erase(eraser, target).returncode == 0
 
 
+@pytest.mark.parametrize("copies_only", [False, True])
+@pytest.mark.parametrize("mount_is_target", [False, True])
+def test_native_refuses_mounted_filesystem_and_recovers_after_detach(
+        eraser, authorization, tmp_path, copies_only, mount_is_target):
+    base = tmp_path.resolve()
+    selected = base / "selected"
+    mount = selected / "mounted"
+    mount.mkdir(parents=True)
+    outside = base / "unrelated.jsonl"
+    outside.write_bytes(b"unrelated history survives")
+    image = base / "fixture.dmg"
+    subprocess.run(["/usr/bin/hdiutil", "create", "-size", "32m", "-fs", "HFS+",
+                    "-volname", "SOS Mount Fixture", str(image)], check=True, capture_output=True, timeout=30)
+    attached = False
+    target = mount if mount_is_target else selected
+    command = ["sudo", "-n", str(eraser), *(["--history-copies"] if copies_only else []), str(target)]
+    try:
+        result = subprocess.run(["/usr/bin/hdiutil", "attach", "-nobrowse", "-mountpoint", str(mount),
+                                 "-plist", str(image)], check=True, capture_output=True, timeout=30)
+        attached = True
+        entities = plistlib.loads(result.stdout)["system-entities"]
+        assert any(item.get("mount-point") == str(mount) for item in entities)
+        assert mount.stat().st_dev != selected.stat().st_dev
+        mounted_history = mount / "preserved.jsonl"
+        mounted_history.write_bytes(b"mounted history survives")
+        authorization(target)
+        refused = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        assert refused.returncode != 0, refused.stderr
+        assert mounted_history.read_bytes() == b"mounted history survives"
+        assert outside.read_bytes() == b"unrelated history survives"
+    finally:
+        if attached:
+            subprocess.run(["/usr/bin/hdiutil", "detach", str(mount)], check=True,
+                           capture_output=True, timeout=30)
+    assert mount.stat().st_dev == selected.stat().st_dev
+    retry = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    assert retry.returncode == 0, retry.stderr
+    assert outside.read_bytes() == b"unrelated history survives"
+
+
 def test_native_history_sweep_across_mixed_trees_preserves_general_data(eraser, authorization, tmp_path):
     import gzip
     import sqlite3
