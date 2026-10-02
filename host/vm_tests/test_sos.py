@@ -135,10 +135,11 @@ def test_launchd_deletes_explicit_keychains_and_preserves_unrelated(condition):
 
 
 @pytest.mark.parametrize("path", ["/", "/Users", "/Applications", "/Library", "/opt/homebrew",
-                                   "/Users/admin", "/Users/admin/Library", "/Users/other/.codex"])
+                                   Path.home(), Path.home() / "Library",
+                                   Path.home().with_name("sos-other-account") / ".codex"])
 def test_enclosing_and_other_account_paths_refused(path):
     with pytest.raises(ValueError):
-        sos.safe_target(Path(path), Path("/Users/admin"))
+        sos.safe_target(Path(path), Path.home())
 
 
 def test_symlink_target_is_removed_without_following_but_ancestor_refused(tmp_path):
@@ -215,10 +216,11 @@ def test_inventory_refuses_to_delete_execution_dependency_early(monkeypatch):
 
 
 def test_worker_prioritizes_history_and_removes_itself_last():
-    plan = {"home": "/Users/admin", "uid": 501, "root": "/Users/admin/Stack",
+    home = Path.home()
+    plan = {"home": str(home), "uid": os.getuid(), "root": str(home / "Stack"),
             "keychains": sos.keychain_inventory(Path.home(), os.getuid()),
-            "services": [], "history": ["/Users/admin/.codex"],
-            "data": ["/Users/admin/Stack/Agents"], "apps": ["/Applications/Codex.app"]}
+            "services": [], "history": [str(home / ".codex")],
+            "data": [str(home / "Stack/Agents")], "apps": ["/Applications/Codex.app"]}
     script = sos.worker(plan)
     assert script.index("phase history") < script.index("phase data") < script.index("phase apps")
     assert script.index("phase verify") < script.index("phase complete") < script.index("-replace SOSComplete")
@@ -227,7 +229,7 @@ def test_worker_prioritizes_history_and_removes_itself_last():
     assert supervisor.index('test "$complete" = true') < supervisor.index("/bin/rm -rf")
     assert supervisor.index("/bin/rm -rf") < supervisor.index("/bin/rm -f")
     assert supervisor.rstrip().endswith("/bin/launchctl bootout system/live.jstack.sos")
-    assert "rm -rf /Users/admin/Stack\n" not in script
+    assert "rm -rf " + shlex.quote(str(home / "Stack")) + "\n" not in script
     assert "[ \"$failed\" = 0 ] || exit 1" in script
 
 
@@ -515,7 +517,7 @@ def test_native_refuses_symlink_ancestor(eraser, authorization, tmp_path):
     assert sentinel.read_text() == "must survive"
 
 
-@pytest.mark.parametrize("path", ["/", "/Users/admin", "/Library/LaunchDaemons", "/opt/homebrew",
+@pytest.mark.parametrize("path", ["/", Path.home(), "/Library/LaunchDaemons", "/opt/homebrew",
                                    "/Library/Keychains", "/Library/Preferences", "/private/tmp",
                                    "/Volumes/Backup", "/opt/unlisted"])
 def test_native_refuses_unlisted_paths(eraser, authorization, tmp_path, path):
