@@ -261,3 +261,61 @@ def test_refuses_unsafe_storage_and_traversal(runtime):
         monitor.start("true", str(runtime), str(uuid.uuid4()))
     with pytest.raises(ValueError):
         monitor.job_dir("../../elsewhere")
+
+
+def busy_rollout(runtime, thread):
+    """A Codex rollout for `thread` whose newest turn event says it is mid-turn."""
+    path = runtime / f"codex-home/sessions/2026/10/01/rollout-2026-10-01T00-00-00-{thread}.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}) + "\n")
+    return path
+
+
+def end_turn(path):
+    with path.open("a") as stream:
+        stream.write(json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}}) + "\n")
+
+
+def finished(job):
+    deadline = time.monotonic() + 10
+    while monitor.read(job["job_id"])["state"] not in monitor.TERMINAL:
+        if time.monotonic() > deadline:
+            pytest.fail("job did not finish")
+        time.sleep(0.02)
+
+
+def test_a_result_read_mid_turn_is_never_announced_again(runtime):
+    """jStack#334: the session read the result itself, so the event would only repeat it.
+
+    On 2026-10-01 a Codex thread got fifteen such events nine to twelve minutes
+    late, one whole turn each, every one superseding the compaction its park had
+    asked for.
+    """
+    thread = str(uuid.uuid4())
+    path = busy_rollout(runtime, thread)
+    job = monitor.start("exit 0", str(runtime), thread)
+    finished(job)
+    assert monitor.status(job["job_id"])["state"] == "succeeded"
+    end_turn(path)
+    row = completed(job)
+    assert row["notification"] == "observed"
+    assert not (runtime / "receipts").exists()
+
+
+def test_an_unread_result_waits_for_the_turn_to_end(runtime):
+    thread = str(uuid.uuid4())
+    path = busy_rollout(runtime, thread)
+    job = monitor.start("exit 0", str(runtime), thread)
+    finished(job)
+    time.sleep(3 * monitor.IDLE_POLL)
+    assert monitor.read(job["job_id"])["notification"] == "pending"
+    assert not (runtime / "receipts").exists()
+    end_turn(path)
+    deadline = time.monotonic() + 10
+    while monitor.read(job["job_id"])["notification"] == "pending":
+        if time.monotonic() > deadline:
+            pytest.fail("event never left after the turn ended")
+        time.sleep(0.05)
+    assert monitor.read(job["job_id"])["notification"] == "queued"
+    calls = [json.loads(line) for line in (runtime / "receipts").read_text().splitlines()]
+    assert len(calls) == 1 and calls[0][:3] == ["queue", "--thread", thread]

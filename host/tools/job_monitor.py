@@ -46,6 +46,10 @@ THRESHOLD_SECONDS = 20
 # Extra time the supervisor allows the foreground caller to claim or release
 # the report after the threshold; covers writing a large log out to stdout.
 PROMOTE_GRACE = 30
+# How often the supervisor reads the thread's rollout while it holds a finished
+# job's event for the turn to end, and the longest it holds one. See idle().
+IDLE_POLL = 2
+IDLE_CAP = 24 * 3600
 
 
 def private_dir(path):
@@ -93,6 +97,12 @@ def log_tail(folder, limit=2000):
 
 def status(job_id):
     row = read(job_id)
+    # A terminal result read here has reached the session that asked, so the
+    # completion event the supervisor still holds would only repeat it. Its own
+    # file, not a status.json field: the supervisor saves its in-memory row and
+    # would erase a field written from this side. See worker().
+    if row["state"] in TERMINAL:
+        (job_dir(job_id) / "observed").touch()
     # Never present a stale saved running state as observed process liveness.
     if row["state"] not in TERMINAL:
         try:
@@ -109,6 +119,40 @@ def status(job_id):
     if tail is not None:
         row["output_tail"] = tail
     return row
+
+
+def rollout(thread_id):
+    """The native rollout file for a Codex thread, or None when there is none."""
+    sessions = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "sessions"
+    found = sorted(sessions.glob(f"*/*/*/rollout-*-{thread_id}.jsonl"))
+    return found[-1] if found else None
+
+
+def idle(path, window=262144):
+    """True unless the rollout's newest turn event says a turn is running.
+
+    Codex writes `task_started` when a turn begins and `task_complete` or
+    `turn_aborted` when it ends. A file that cannot be read says nothing, so it
+    answers idle: holding an event on a missing signal would be the silence
+    this tool exists to end.
+    """
+    try:
+        with open(path, "rb") as stream:
+            stream.seek(max(0, os.path.getsize(path) - window))
+            lines = stream.read().splitlines()
+    except OSError:
+        return True
+    for line in reversed(lines):
+        try:
+            payload = json.loads(line).get("payload") or {}
+        except ValueError:
+            continue
+        kind = payload.get("type")
+        if kind == "task_started":
+            return False
+        if kind in ("task_complete", "task_completed", "turn_aborted"):
+            return True
+    return True
 
 
 def start(command, cwd, thread_id, timeout_seconds=3600, promoter_deadline=None):
@@ -364,6 +408,25 @@ async def worker(job_id):
             row["notification"] = "reported_inline"
             save(folder, row)
             return
+
+    # Hold the event while the thread is mid-turn. Codex queues a message for a
+    # busy thread and hands it over only after the turn ends, one per turn, and
+    # by then the session has usually read the result through status already:
+    # on 2026-10-01 one thread received fifteen such events nine to twelve
+    # minutes late, each one a whole turn spent confirming a result it already
+    # had, and each one landing on the boundary compact-on-delivery was about to
+    # use (jStack#334). Waiting here instead lets status() cancel the event.
+    path = rollout(row["thread_id"])
+    if path is not None:
+        deadline = time.time() + IDLE_CAP
+        while not idle(path) and time.time() < deadline:
+            if (folder / "observed").exists():
+                break
+            await asyncio.sleep(IDLE_POLL)
+    if (folder / "observed").exists():
+        row["notification"] = "observed"
+        save(folder, row)
+        return
 
     # Successful output is deliberately NOT injected as instructions: retrieve
     # only the relevant log after this small event, using status or the path.

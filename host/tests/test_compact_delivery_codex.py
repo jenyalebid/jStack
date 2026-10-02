@@ -425,3 +425,46 @@ def test_the_deliverys_own_codex_sends_wait_for_the_paste_before_enter(monkeypat
     assert cd.submit("jr-x", cd.COMPACT_CMD, "codex")
     assert cd.submit("jr-x", "go on", "claude")
     assert seen == [cd.CODEX_ENTER_DELAY, 0.0]
+
+
+# --- a job_monitor completion event is not somebody new speaking (jStack#334) -------------
+
+def _after_park(tmp_path, *entries):
+    path = rollout(tmp_path, meta(), assistant("Parked.\n" + CONT, ordinal=9))
+    offset = os.path.getsize(path)
+    with open(path, "a") as fh:
+        for entry in entries:
+            fh.write(json.dumps(entry) + "\n")
+    return path, offset
+
+
+def test_a_job_event_and_its_reply_do_not_supersede_the_seam(tmp_path):
+    """On 2026-10-01 one thread asked for its seam fifteen times and lost every one to a
+    queued job event landing first; it sat at 217k and climbing."""
+    path, offset = _after_park(
+        tmp_path, task_started(10),
+        user("[job-monitor:8117285eb6ce4729ae18870d469edc37] Background job succeeded; "
+             "exit_code=0.", ordinal=11),
+        assistant("Verified. No rerun.\n" + CONT, ordinal=12), task_complete(13))
+    assert cod.turn_moved(path, offset, "codex") is False
+
+
+def test_a_person_speaking_after_a_job_event_still_supersedes(tmp_path):
+    path, offset = _after_park(
+        tmp_path, user("[job-monitor:8117285eb6ce4729ae18870d469edc37] Background job "
+                       "succeeded; exit_code=0.", ordinal=11),
+        assistant("Verified.", ordinal=12), user("now do the next thing", ordinal=13))
+    assert cod.turn_moved(path, offset, "codex") is True
+
+
+def test_a_person_speaking_still_supersedes(tmp_path):
+    path, offset = _after_park(tmp_path, user("stop, wrong VM", ordinal=11))
+    assert cod.turn_moved(path, offset, "codex") is True
+
+
+def test_the_job_event_prefix_is_the_one_job_monitor_writes():
+    """The prefix lives in two files; a one-sided edit would bring #334 back silently."""
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / "tools/job_monitor.py").read_text()
+    assert 'f"[job-monitor:{job_id}] ' in source
+    assert cod.JOB_NOTICE == "[job-monitor:"
