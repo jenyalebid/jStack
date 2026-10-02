@@ -172,6 +172,32 @@ def parse_session(session_id: str) -> dict:
             return {"messages": [], "pending": True}
         return {"messages": [], "error": "Session file not found"}
 
+    try:
+        st = path.stat()
+        key = (str(path), st.st_size, st.st_mtime_ns)
+    except OSError:
+        key = None
+    hit = _parsed.get(session_id)
+    if key is not None and hit is not None and hit[0] == key:
+        return hit[1]
+    result = _parse_file(path)
+    if key is not None and "error" not in result:
+        _parsed.pop(session_id, None)
+        _parsed[session_id] = (key, result)
+        while len(_parsed) > _PARSED_MAX:
+            _parsed.pop(next(iter(_parsed)))
+    return result
+
+
+# Parsed transcripts by sid, keyed on the file's (path, size, mtime). The board
+# tick, the events view and the session view all ask for the same Codex threads
+# every second or so; a 12k-line rollout is ~370ms of GIL-held parsing, which
+# stalled every terminal riding this process's loop. Callers only read.
+_parsed: "dict[str, tuple[tuple, dict]]" = {}
+_PARSED_MAX = 32
+
+
+def _parse_file(path: Path) -> dict:
     if path.name.startswith("rollout-"):
         from .codex_transcript import message_entries
         return {"messages": message_entries(path)}

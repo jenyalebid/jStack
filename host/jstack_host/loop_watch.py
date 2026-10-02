@@ -31,6 +31,11 @@ STALL = 0.25
 RESAMPLE = 1.0
 # The log is capped and rotated once; it is a diagnostic, not a history.
 MAX_BYTES = 4 * 1024 * 1024
+# The GIL handoff interval. At CPython's 5ms default, an I/O-bound loop thread
+# waits up to 5ms per syscall whenever any worker computes (board scan,
+# transcript parse) — measured p50 28ms / max 151ms echo latency under two busy
+# threads; 0.5ms gave p50 3ms / max 10ms.
+SWITCH = 0.0005
 WINDOW = 600.0
 
 _beat = 0.0
@@ -118,6 +123,7 @@ def start() -> None:
     _started = True
     _gen += 1
     _loop_thread = threading.get_ident()
+    sys.setswitchinterval(SWITCH)
     _beat = time.monotonic()
     asyncio.get_running_loop().create_task(_heartbeat())
     threading.Thread(target=_watch, args=(_gen,), name="loop-watch", daemon=True).start()

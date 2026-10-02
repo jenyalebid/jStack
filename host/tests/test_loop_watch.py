@@ -47,3 +47,16 @@ def test_an_unblocked_loop_logs_nothing(tmp_path, monkeypatch):
     asyncio.run(run())
     assert not log.exists()
     assert loop_watch.stats()["stalls"] == 0
+
+
+def test_start_shortens_the_gil_handoff(monkeypatch):
+    import sys
+    monkeypatch.setattr(loop_watch, "_started", False)
+    before = sys.getswitchinterval()
+    try:
+        async def run():
+            loop_watch.start()
+        asyncio.run(run())
+        assert sys.getswitchinterval() == loop_watch.SWITCH
+    finally:
+        sys.setswitchinterval(before)
