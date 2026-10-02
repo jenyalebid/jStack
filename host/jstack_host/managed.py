@@ -1482,8 +1482,8 @@ def close_managed(sid: str, review: bool = True) -> bool:
     # Give claude a moment to exit + fire its hook, then kill the lingering shell
     # pane and close the window it was in — detached so the endpoint returns
     # immediately, one script so the window never closes ahead of the exit.
-    steps = [f"sleep 2", f"{shlex.quote(_TMUX)} -L {shlex.quote(_SOCK)} "
-             f"kill-session -t {shlex.quote(name)} 2>/dev/null"]
+    steps = [f"sleep 2",
+             shlex.join(_t("kill-session", "-t", name)) + " 2>/dev/null"]
     if review_cmd:
         # The engine's atomic claim deduplicates this fallback with a native
         # hook that did run. Dispatch only after the source process is gone.

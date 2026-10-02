@@ -16,12 +16,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from jstack_host.managed import _READY, _type_argv  # noqa: E402
+from jstack_host.managed import _READY, _t, _type_argv  # noqa: E402
 
 
 def keys(text, name="s"):
     """Just the tmux arguments, with the socket boilerplate dropped."""
-    return [a[3:] for a in _type_argv(name, text)]
+    return [a[len(_t()):] for a in _type_argv(name, text)]
 
 
 def test_single_line_is_one_literal_send():
