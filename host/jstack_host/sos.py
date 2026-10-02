@@ -71,6 +71,8 @@ def inventory() -> dict:
                                     (Path(value).is_relative_to("/Volumes") and len(Path(value).parts) >= 4)):
             raise ValueError(f"data location is outside the account or a configured volume: {value}")
         if value not in result[phase]:
+            if phase == "history" and Path(value).is_symlink():
+                raise ValueError(f"history root is a symlink; its contents cannot be accounted for: {value}")
             result[phase].append(value)
 
     for directory, variable in PROVIDERS.values():
@@ -89,13 +91,14 @@ def inventory() -> dict:
     add("data", hostenv.instance_root())
     for relative in (".claude.json", ".claude.json.backup", ".config/jstack", ".agents",
                      ".local/share/claude", ".local/bin/claude", ".local/bin/codex",
-                     ".local/bin/jstack-host", "jStack", ".cache/claude", ".cache/codex",
+                     ".local/bin/jstack-host", "jStack",
                      "Library/Containers/dev.jenya.jRemote.Share",
                      "Library/Containers/dev.jenya.jRemote.tunnel",
-                     "Library/Application Support/Jump Desktop", "Library/Application Support/Jump Desktop Connect",
-                     "Library/Caches/com.anthropic.claudefordesktop", "Library/Caches/com.openai.codex"):
+                     "Library/Application Support/Jump Desktop", "Library/Application Support/Jump Desktop Connect"):
         add("data", home / relative)
     for relative in (".config/claude", ".config/codex", ".config/jremote", ".local/share/jstack",
+                     ".cache/claude", ".cache/codex",
+                     "Library/Caches/com.anthropic.claudefordesktop", "Library/Caches/com.openai.codex",
                      "Library/Logs/Claude", "Library/Logs/Codex", "Library/Logs/jRemote",
                      "Library/Logs/jStack", "Library/Saved Application State/com.anthropic.claudefordesktop.savedState",
                      "Library/Saved Application State/com.openai.codex.savedState"):
@@ -192,7 +195,7 @@ def worker(plan: dict) -> str:
              'phase quiesce']
     for service in plan["services"]:
         # Network and remote-desktop access are retained until history is gone.
-        if service["label"] == "live.jstack.network" or service["label"].startswith("com.p5sys.jump"):
+        if late_service(service["label"]):
             continue
         target = service["domain"] + "/" + service["label"]
         lines += [f"/bin/launchctl disable {q(target)} || fail {q('disable: ' + target)}",
@@ -208,7 +211,8 @@ def worker(plan: dict) -> str:
               shlex.join(user + [str(tmux), "-L", plan.get("tmux_socket", "jremote"), "kill-server"]) + " 2>/dev/null || :",
               "fi"]
     for target in plan["history"]:
-        lines += [f"if test -d {q(target)} && test ! -L {q(target)}; then",
+        lines += [f"if test -L {q(target)}; then fail 'history root became a symlink'; fi",
+                  f"if test -d {q(target)} && test ! -L {q(target)}; then",
                   f"  /usr/sbin/lsof -a -u {uid} -t +D {q(target)} > writers 2> scan-errors; scan=$?",
                   '  if test -s scan-errors || test "$scan" -gt 1; then fail "cannot observe history writers"; fi',
                   # Unknown writers are not permission to kill an unrelated app.
@@ -250,9 +254,9 @@ def worker(plan: dict) -> str:
                           'touch network-done', 'fi']
             for service in plan["services"]:
                 target = service["domain"] + "/" + service["label"]
-                if service["label"].startswith("com.p5sys.jump"):
-                    lines += [f"/bin/launchctl disable {q(target)} || fail 'disable Jump'",
-                              f"if /bin/launchctl print {q(target)} >/dev/null 2>&1; then /bin/launchctl bootout {q(target)} || fail 'stop Jump'; fi"]
+                if late_service(service["label"]):
+                    lines += [f"/bin/launchctl disable {q(target)} || fail {q('disable: ' + target)}",
+                              f"if /bin/launchctl print {q(target)} >/dev/null 2>&1; then /bin/launchctl bootout {q(target)} || fail {q('stop: ' + target)}; fi"]
             for name in ("JumpConnect", "Jump Desktop Connect", "Jump Desktop", "JumpDesktop"):
                 lines.append(f"/usr/bin/pkill -KILL -x {q(name)} 2>/dev/null || :")
             lines.append('[ "$failed" = 0 ] || exit 1')
@@ -263,16 +267,42 @@ def worker(plan: dict) -> str:
               'phase verify', *[f'test ! -e {q(path)} && test ! -L {q(path)} || fail {q("remains: " + path)}'
                                 for phase in ("history", "data", "apps") for path in plan[phase]],
               '[ "$failed" = 0 ] || exit 1', 'phase complete',
-              f"/bin/rm -f {q(str(PLIST))} || exit 1", "cd /",
-              f"{q(str(WORK / 'Erase'))} {q(str(WORK))} || exit 1",
-              f"/bin/launchctl bootout system/{LABEL}"]
+              f"/usr/bin/plutil -replace SOSComplete -bool YES {q(str(PLIST))} || exit 1"]
     return "\n".join(lines) + "\n"
+
+
+def late_service(label: str) -> bool:
+    return label in {"live.jstack.network", "com.jremote.hub", "com.jremote.hub-sync",
+                     "com.jremote.leaf", "com.jremote.leaf-watch"} or label.startswith("com.p5sys.jump")
+
+
+def supervisor() -> str:
+    q = shlex.quote
+    # launchd retains this script in memory, and reloads it from its plist on
+    # reboot. Completion lives outside WORK so interrupted self-removal cannot
+    # destroy the only code or evidence needed to finish cleaning up.
+    return "\n".join([
+        "set -eu", "export PATH=/usr/bin:/bin:/usr/sbin:/sbin", "cd /",
+        f"if test ! -e {q(str(PLIST))} && test ! -e {q(str(WORK))}; then",
+        f"  /bin/launchctl bootout system/{LABEL}; exit 0", "fi",
+        f"complete=$(/usr/bin/plutil -extract SOSComplete raw {q(str(PLIST))})",
+        'if test "$complete" != true; then',
+        f"  /bin/bash {q(str(WORK / 'worker.sh'))}",
+        f"  complete=$(/usr/bin/plutil -extract SOSComplete raw {q(str(PLIST))})", "fi",
+        'test "$complete" = true',
+        # Only the fixed, root-owned executor directory is removed here. All
+        # user data goes through the separately approved native inventory.
+        f"/bin/rm -rf {q(str(WORK))}",
+        f"/bin/rm -f {q(str(PLIST))}",
+        f"/bin/launchctl bootout system/{LABEL}",
+    ]) + "\n"
 
 
 def bootstrap(plan: dict) -> str:
     q = shlex.quote
-    definition = {"Label": LABEL, "ProgramArguments": ["/bin/bash", str(WORK / "worker.sh")],
-                  "RunAtLoad": True, "KeepAlive": {"SuccessfulExit": False}, "ThrottleInterval": 30}
+    definition = {"Label": LABEL, "ProgramArguments": ["/bin/sh", "-c", supervisor()],
+                  "SOSComplete": False, "RunAtLoad": True,
+                  "KeepAlive": {"SuccessfulExit": False}, "ThrottleInterval": 30}
     executable = Path(plan["app"]) / "Contents/MacOS/JStackErase"
     expected = hashlib.sha256(executable.read_bytes()).hexdigest()
     network_admin.protected_ancestry(WORK.parent)
@@ -286,6 +316,15 @@ def bootstrap(plan: dict) -> str:
              f"test ! -e {q(str(WORK))} && test ! -L {q(str(WORK))}",
              f"test ! -e {q(str(PLIST))} && test ! -L {q(str(PLIST))}",
              f"/bin/mkdir -m 700 {q(str(WORK))}",
+             "launched=0; plist_created=0; invocation_created=0",
+             "rollback() { result=$?; trap - EXIT; "
+             f"if test \"$launched\" = 0 && ! /bin/launchctl print system/{LABEL} >/dev/null 2>&1; then "
+             f"if test \"$plist_created\" = 1; then /bin/rm -f {q(str(PLIST))}; fi; "
+             f"/bin/rm -rf {q(str(WORK))}; "
+             + (f"if test \"$invocation_created\" = 1; then /bin/rm -rf {q(str(network_admin.ROOT / 'invocations' / plan['network_invocation']))}; fi; "
+                if plan.get("network_invocation") else "")
+             + "fi; exit \"$result\"; }",
+             "trap rollback EXIT", "trap 'exit 1' HUP INT TERM",
              f"/usr/bin/install -o root -g wheel -m 700 {q(str(executable))} {q(str(WORK / 'Erase'))}",
              f'test "$(/usr/bin/shasum -a 256 {q(str(WORK / "Erase"))} | /usr/bin/cut -d " " -f 1)" = {q(expected)}']
     if plan.get("network_invocation"):
@@ -298,17 +337,20 @@ def bootstrap(plan: dict) -> str:
             lines += [f"if test ! -e {q(str(directory))}; then /bin/mkdir -m 700 {q(str(directory))}; fi",
                       "check_parent " + q(str(directory))]
         lines += [f"/bin/mkdir -m 700 {q(str(invocation))}",
+                  "invocation_created=1",
                   f"/usr/bin/install -o root -g wheel -m 700 {q(str(source))} {q(str(invocation / 'Installer'))}",
                   f'test "$(/usr/bin/shasum -a 256 {q(str(invocation / "Installer"))} | /usr/bin/cut -d " " -f 1)" = {q(hashlib.sha256(source.read_bytes()).hexdigest())}',
                   f"printf %s {q(base64.b64encode(json.dumps(request).encode()).decode())} | /usr/bin/base64 -D > {q(str(invocation / 'request.json'))}"]
     for path, data in ((WORK / "worker.sh", worker(plan).encode()),
                        (WORK / "manifest.json", json.dumps(plan).encode()),
-                       (PLIST, plistlib.dumps(definition))):
+                       (WORK / "launchd.plist", plistlib.dumps(definition))):
         encoded = base64.b64encode(data).decode()
         lines += [f"printf %s {q(encoded)} | /usr/bin/base64 -D > {q(str(path))}",
                   f"/bin/chmod 600 {q(str(path))}"]
-    lines += [f"/bin/chmod 644 {q(str(PLIST))}",
-              f"/bin/launchctl bootstrap system {q(str(PLIST))}"]
+    lines += ["plist_created=1",
+              f"/usr/bin/install -o root -g wheel -m 644 {q(str(WORK / 'launchd.plist'))} {q(str(PLIST))}",
+              f"/bin/launchctl bootstrap system {q(str(PLIST))}",
+              "launched=1", "trap - EXIT HUP INT TERM"]
     return "\n".join(lines)
 
 

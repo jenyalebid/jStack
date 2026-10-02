@@ -1,6 +1,77 @@
 import Foundation
 import Darwin
 
+let workspace = "/private/var/db/live.jstack.sos"
+
+func canonical(_ path: String) -> Bool {
+    let parts = path.split(separator: "/").map(String.init)
+    return path == "/" + parts.joined(separator: "/") &&
+        !parts.contains(".") && !parts.contains("..") &&
+        !path.contains("\0") && !path.contains("\n") && !path.contains("\r")
+}
+
+func requireRootProtection(_ fd: Int32) throws {
+    var metadata = stat()
+    guard fstat(fd, &metadata) == 0, metadata.st_uid == 0,
+          metadata.st_mode & 0o022 == 0 else { throw POSIXError(.EPERM) }
+    guard let acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED) else {
+        if errno == ENOENT { return }
+        throw POSIXError(.EIO)
+    }
+    defer { acl_free(UnsafeMutableRawPointer(acl)) }
+    guard acl_valid(acl) == 0 else { throw POSIXError(.EIO) }
+    var entry: acl_entry_t?
+    // Darwin signals the end of a valid ACL with EINVAL, not Linux's zero.
+    let result = acl_get_entry(acl, ACL_FIRST_ENTRY.rawValue, &entry)
+    guard result == -1, errno == EINVAL else { throw POSIXError(.EPERM) }
+}
+
+// The helper has no arbitrary-path mode. Each invocation must match the exact
+// inventory approved by the user and then staged in a root-only directory.
+// Open the authorization through pinned descriptors, just like deletion.
+func protectedFile(_ name: String) throws -> Data {
+    var fd = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    guard fd >= 0 else { throw POSIXError(.EIO) }
+    defer { close(fd) }
+    for component in ["private", "var", "db", "live.jstack.sos", name] {
+        try requireRootProtection(fd)
+        let flags = component == name ? O_RDONLY | O_NOFOLLOW : O_RDONLY | O_DIRECTORY | O_NOFOLLOW
+        let next = openat(fd, component, flags)
+        guard next >= 0 else { throw POSIXError(.EPERM) }
+        close(fd)
+        fd = next
+    }
+    try requireRootProtection(fd)
+    var metadata = stat()
+    guard fstat(fd, &metadata) == 0, metadata.st_uid == 0,
+          metadata.st_mode & S_IFMT == S_IFREG, metadata.st_mode & 0o077 == 0,
+          metadata.st_size > 0, metadata.st_size <= 8 * 1024 * 1024 else { throw POSIXError(.EPERM) }
+    let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+    guard let data = try handle.readToEnd() else { throw POSIXError(.EIO) }
+    return data
+}
+
+func authorize(_ path: String) throws {
+    guard geteuid() == 0, canonical(path),
+          let manifest = try JSONSerialization.jsonObject(with: protectedFile("manifest.json")) as? [String: Any],
+          manifest["schema"] as? Int == 1,
+          let home = manifest["home"] as? String, canonical(home),
+          let history = manifest["history"] as? [String],
+          let data = manifest["data"] as? [String],
+          let apps = manifest["apps"] as? [String] else { throw POSIXError(.EPERM) }
+    // Exact equality, never prefix containment. An approved child does not
+    // authorize its parent or a sibling, including a whole external volume.
+    let approved = history + data + apps
+    guard approved.allSatisfy({ canonical($0) && $0 != home && !home.hasPrefix($0 + "/") }) else {
+        throw POSIXError(.EPERM)
+    }
+    if path == workspace {
+        guard try protectedFile("phase") == Data("complete\n".utf8) else { throw POSIXError(.EPERM) }
+    } else {
+        guard approved.contains(path), !path.hasPrefix(workspace + "/") else { throw POSIXError(.EPERM) }
+    }
+}
+
 // Pin every ancestor by descriptor. A user swapping a directory for a symlink
 // during a root wipe must not redirect a later unlink into another tree.
 func erase(_ parent: Int32, _ name: String, _ device: dev_t) throws {
@@ -49,6 +120,7 @@ func erase(_ parent: Int32, _ name: String, _ device: dev_t) throws {
 do {
     guard CommandLine.arguments.count == 2 else { throw POSIXError(.EINVAL) }
     let path = CommandLine.arguments[1]
+    try authorize(path)
     let components = path.split(separator: "/").map(String.init)
     guard path.hasPrefix("/"), components.count >= 2,
           !(components[0] == "Users" && components.count == 2),
