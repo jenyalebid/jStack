@@ -118,7 +118,7 @@ def test_launchd_deletes_explicit_keychains_and_preserves_unrelated(condition):
                 *sos.keychain_commands(plan, user, delete=True),
                 *sos.keychain_commands(plan, user, delete=False)])
             output, error = launch_keychain_script(script, directory)
-            assert f'SOS-KEYCHAIN-EXIT={0 if condition == "normal" else 1}' in output, (output, error)
+            assert f'SOS-KEYCHAIN-EXIT={1 if condition == "changed-directory" else 0}' in output, (output, error)
             for path in paths:
                 if condition == "locked":
                     subprocess.run([security, "unlock-keychain", "-p", "sos-fixture", str(path)], check=True)
@@ -126,7 +126,7 @@ def test_launchd_deletes_explicit_keychains_and_preserves_unrelated(condition):
                     for account in ("first", "second"):
                         result = subprocess.run([security, "find-generic-password", "-s", service,
                                                  "-a", account, str(path)], capture_output=True)
-                        expected = 0 if condition != "normal" or service == "unrelated-sos-sentinel" else 44
+                        expected = 0 if condition == "changed-directory" or service == "unrelated-sos-sentinel" else 44
                         assert result.returncode == expected, (service, account, result.returncode)
         finally:
             for path in created:
