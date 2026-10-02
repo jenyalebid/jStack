@@ -131,7 +131,12 @@ class TakeoverFailed(RuntimeError):
 
 
 def _t(*args) -> list[str]:
-    return [_TMUX, "-L", _SOCK, *args]
+    # `-u`: every format this module reads splits on a tab, and a tmux that
+    # finds no UTF-8 in LC_ALL/LC_CTYPE/LANG escapes the tab to `_`. A host
+    # launched with no locale at all then read every pane as nameless — the
+    # pane map came back empty, each Codex process lost the only identity it
+    # has, and the board carried a `pid-` window card beside the real one.
+    return [_TMUX, "-u", "-L", _SOCK, *args]
 
 
 # ── The pane keeps its identity and loses its reach (#257) ──────────────────
