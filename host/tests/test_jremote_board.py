@@ -2121,3 +2121,18 @@ def test_a_codex_exec_run_reads_as_a_pipe_not_a_terminal():
         "a fresh exec resumes nothing"
     assert procscan._codex_native_id(["codex", "resume", native]) == "", \
         "an interactive resume is a pane, named by its tty"
+
+
+def test_codex_servers_are_not_sessions():
+    """#344: the app-server daemon and its child, argv as observed on this Mac,
+    sat on the board as two permanent Headless cards."""
+    base = "/Users/x/.codex/packages/app-server-daemon/releases/0.160.0/bin/codex"
+    assert procscan._agent_engine(
+        "codex", [base, "app-server", "daemon", "pid-update-loop"]) is None
+    assert procscan._agent_engine(
+        "codex", [base, "app-server", "--listen", "unix://",
+                  "--managed-daemon"]) is None
+    assert procscan._agent_engine("codex", ["codex", "mcp-server"]) is None
+    assert procscan._agent_engine(
+        "codex", ["codex", "--dangerously-bypass-hook-trust", "-m", "m"]) == "codex"
+    assert procscan._agent_engine("codex", ["codex", "exec", "resume", "x"]) == "codex"
