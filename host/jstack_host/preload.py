@@ -57,6 +57,7 @@ MODULES = (
     "jstack_host.shell_access",
     "jstack_host.auth",
     "jstack_host.board_watch",
+    "jstack_host.loop_watch",
     "jstack_host.desk",
     "jstack_host.fileshare",
     "jstack_host.windows",
