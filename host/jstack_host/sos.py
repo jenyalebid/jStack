@@ -15,6 +15,7 @@ import pwd
 import re
 import shlex
 import socket
+import stat
 import subprocess
 import sys
 import uuid
@@ -28,6 +29,65 @@ NETWORK_APP = Path("/Library/PrivilegedHelperTools/jStack Network.app")
 PROVIDERS = {"claude": (".claude", "CLAUDE_CONFIG_DIR"),
              "codex": (".codex", "CODEX_HOME")}
 TREE_DIRS = ("Agents", "Projects", "Systems", "Config", "State", "Logs", "Credentials")
+KEYCHAIN_SERVICES = ("Claude Code-credentials", "Claude", "Codex Auth", "jRemote")
+
+
+def keychain_inventory(home: Path, uid: int) -> list[dict]:
+    """Pin the invoking account's explicit file keychains before elevation."""
+    result = subprocess.run(["/usr/bin/security", "list-keychains", "-d", "user"],
+                            capture_output=True, text=True, check=True)
+    paths = shlex.split(result.stdout)
+    login = home / "Library/Keychains/login.keychain-db"
+    if login.exists() or login.is_symlink():
+        paths.append(str(login))
+    if not paths:
+        raise ValueError("cannot establish the account's keychain inventory")
+    records = []
+    for value in dict.fromkeys(paths):
+        path = Path(value)
+        if (not path.is_absolute() or not path.is_relative_to(home) or
+                ".." in path.parts or any(c in value for c in "\n\r\x00")):
+            raise ValueError(f"keychain is outside the invoking account: {path}")
+        if any(p.is_symlink() for p in (path, *path.parents)):
+            raise ValueError(f"keychain path is a symlink: {path}")
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
+            raise ValueError(f"keychain ownership cannot be established: {path}")
+        records.append({"path": str(path), "device": info.st_dev,
+                        "inode": info.st_ino, "uid": info.st_uid})
+    return records
+
+
+def keychain_commands(plan: dict, user: list[str], *, delete: bool) -> list[str]:
+    """Use explicit paths: launchd's implicit search can lie with errSecItemNotFound."""
+    if not plan.get("keychains"):
+        raise ValueError("wipe requires an explicit keychain inventory")
+    lines = []
+    for record in plan["keychains"]:
+        path = Path(record["path"])
+        checks = [f"test ! -L {shlex.quote(str(p))}" for p in (path, *path.parents)]
+        checks += [f"test -f {shlex.quote(str(path))}",
+                   f'test "$(/usr/bin/stat -f %d:%i:%u {shlex.quote(str(path))})" = '
+                   + shlex.quote(f'{record["device"]}:{record["inode"]}:{record["uid"]}')]
+        guard = " && ".join(checks) + ' || { fail "keychain identity changed"; exit 1; }'
+        for service in KEYCHAIN_SERVICES:
+            query = shlex.join(user + ["/usr/bin/security", "find-generic-password",
+                                      "-s", service, str(path)])
+            lines.append(guard)
+            if delete:
+                remove = shlex.join(user + ["/usr/bin/security", "delete-generic-password",
+                                           "-s", service, str(path)])
+                lines += ['keychain_count=0', 'while :; do', guard,
+                          query + ' >/dev/null 2> keychain-error; result=$?',
+                          'case "$result" in 44) break;; 0) ;; *) fail "cannot inspect keychain"; exit 1;; esac',
+                          'keychain_count=$((keychain_count + 1))',
+                          'test "$keychain_count" -le 4096 || { fail "keychain deletion did not converge"; exit 1; }',
+                          remove + ' >/dev/null 2> keychain-error || { fail "keychain deletion denied"; exit 1; }',
+                          'done']
+            else:
+                lines += [query + ' >/dev/null 2> keychain-error; result=$?',
+                          'test "$result" = 44 || { fail "credential remains or cannot be inspected"; exit 1; }']
+    return lines
 
 
 def safe_target(path: Path, home: Path) -> Path:
@@ -201,6 +261,11 @@ def inventory() -> dict:
             raise ValueError("sharing account ownership cannot be established")
         result["share_account"] = True
         add("apps", fileshare.ACCOUNT_HOME)
+    result["keychains"] = keychain_inventory(home, os.getuid())
+    for record in result["keychains"]:
+        if any(Path(record["path"]).is_relative_to(target)
+               for phase in ("history", "data", "apps") for target in result[phase]):
+            raise ValueError("removal target contains a required keychain")
     return result
 
 
@@ -281,10 +346,7 @@ def worker(plan: dict) -> str:
                       shlex.join(user + [str(app / "Contents/MacOS/JStackCLI"), "_wipe-user-cleanup"])
                       + ' || { fail "user cleanup"; exit 1; }',
                       'touch user-cleanup-done', 'fi']
-            for service in ("Claude Code-credentials", "Claude", "Codex Auth", "jRemote"):
-                delete = shlex.join(user + ["/usr/bin/security", "delete-generic-password", "-s", service])
-                lines += [f"while :; do {delete} >/dev/null 2> keychain-error; result=$?;",
-                          'case "$result" in 0) ;; 44) break;; *) fail "keychain deletion denied"; break;; esac; done']
+            lines += keychain_commands(plan, user, delete=True)
         if phase == "apps":
             lines += ['if test ! -f registrations-done; then']
             for role in plan.get("registrations", []):
@@ -310,6 +372,7 @@ def worker(plan: dict) -> str:
     lines += [f"/bin/rmdir {q(plan['root'])} 2>/dev/null || :",
               'phase verify', *[f'test ! -e {q(path)} && test ! -L {q(path)} || fail {q("remains: " + path)}'
                                 for phase in ("history", "data", "apps") for path in plan[phase]],
+              *keychain_commands(plan, user, delete=False),
               '[ "$failed" = 0 ] || exit 1', 'phase complete',
               f"/usr/bin/plutil -replace SOSComplete -bool YES {q(str(PLIST))} || exit 1"]
     return "\n".join(lines) + "\n"

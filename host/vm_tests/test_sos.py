@@ -8,6 +8,8 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 
 import pytest
 
@@ -25,6 +27,104 @@ def guest_only():
 
 def test_every_provider_has_removal_coverage():
     assert set(sos.PROVIDERS) == set(engines.engine_ids())
+
+
+@pytest.mark.parametrize("kind", ["outside", "symlink", "directory", "empty", "malformed"])
+def test_keychain_inventory_refuses_unaccounted_locations(monkeypatch, tmp_path, kind):
+    home = tmp_path.resolve() / "home"
+    home.mkdir()
+    target = home / "test.keychain-db"
+    target.write_text("fixture")
+    if kind == "outside":
+        target = tmp_path / "outside"
+        target.write_text("fixture")
+    elif kind == "symlink":
+        alias = home / "alias"
+        alias.symlink_to(target)
+        target = alias
+    elif kind == "directory":
+        target = home
+    output = "" if kind == "empty" else '"unterminated' if kind == "malformed" else shlex.quote(str(target))
+    monkeypatch.setattr(sos.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, output, ""))
+    with pytest.raises(ValueError):
+        sos.keychain_inventory(home, os.getuid())
+
+
+def test_keychain_cleanup_requires_inventory():
+    with pytest.raises(ValueError, match="explicit keychain"):
+        sos.keychain_commands({}, [], delete=True)
+
+
+def launch_keychain_script(script, directory):
+    identifier = "com.example.sos-keychain-test-" + uuid.uuid4().hex
+    source = directory / "job.plist"
+    destination = Path("/Library/LaunchDaemons") / (identifier + ".plist")
+    output, error = directory / "output", directory / "error"
+    source.write_bytes(plistlib.dumps({
+        "Label": identifier, "RunAtLoad": True,
+        "ProgramArguments": ["/bin/bash", "-c", script],
+        "StandardOutPath": str(output), "StandardErrorPath": str(error)}))
+    loaded = False
+    try:
+        subprocess.run(["sudo", "-n", "install", "-o", "root", "-g", "wheel", "-m", "644",
+                        str(source), str(destination)], check=True)
+        subprocess.run(["sudo", "-n", "launchctl", "bootstrap", "system", str(destination)], check=True)
+        loaded = True
+        deadline = time.monotonic() + 45
+        while not output.exists() or "SOS-KEYCHAIN-EXIT=" not in output.read_text():
+            if time.monotonic() > deadline:
+                pytest.fail("launchd keychain cleanup did not finish")
+            time.sleep(.2)
+        return output.read_text(), error.read_text()
+    finally:
+        if loaded:
+            subprocess.run(["sudo", "-n", "launchctl", "bootout", "system/" + identifier], check=True)
+        subprocess.run(["sudo", "-n", "unlink", str(destination)], check=True)
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_launchd_deletes_explicit_keychains_and_preserves_unrelated(changed):
+    security = "/usr/bin/security"
+    original = shlex.split(subprocess.check_output([security, "list-keychains", "-d", "user"], text=True))
+    with tempfile.TemporaryDirectory(prefix="sos-keychain-test-", dir=Path.home()) as name:
+        directory = Path(name)
+        paths = [directory / "first.keychain-db", directory / "second space.keychain-db"]
+        created = []
+        try:
+            for path in paths:
+                subprocess.run([security, "create-keychain", "-p", "sos-fixture", str(path)], check=True)
+                created.append(path)
+                subprocess.run([security, "unlock-keychain", "-p", "sos-fixture", str(path)], check=True)
+                for service in (*sos.KEYCHAIN_SERVICES, "unrelated-sos-sentinel"):
+                    for account in ("first", "second"):
+                        subprocess.run([security, "add-generic-password", "-s", service, "-a", account,
+                                        "-w", "synthetic-sos-value", "-T", security, str(path)], check=True)
+            records = [{"path": str(p), "device": p.stat().st_dev,
+                        "inode": p.stat().st_ino, "uid": os.getuid()} for p in paths]
+            if changed:
+                records[0]["inode"] += 1
+            user = ["/usr/bin/sudo", "-n", "-H", "-u", "#" + str(os.getuid()),
+                    "/bin/sh", "-c", 'cd / && exec "$@"', "sos-user"]
+            plan = {"keychains": records}
+            script = "\n".join([
+                "set -u", "umask 077", "cd " + shlex.quote(name),
+                'trap \'printf "SOS-KEYCHAIN-EXIT=%s\\n" "$?"\' EXIT',
+                'fail() { echo "INCOMPLETE: $*"; }',
+                *sos.keychain_commands(plan, user, delete=True),
+                *sos.keychain_commands(plan, user, delete=False)])
+            output, error = launch_keychain_script(script, directory)
+            assert f"SOS-KEYCHAIN-EXIT={1 if changed else 0}" in output, (output, error)
+            for path in paths:
+                for service in (*sos.KEYCHAIN_SERVICES, "unrelated-sos-sentinel"):
+                    for account in ("first", "second"):
+                        result = subprocess.run([security, "find-generic-password", "-s", service,
+                                                 "-a", account, str(path)], capture_output=True)
+                        expected = 0 if changed or service == "unrelated-sos-sentinel" else 44
+                        assert result.returncode == expected, (service, account, result.returncode)
+        finally:
+            for path in created:
+                subprocess.run([security, "delete-keychain", str(path)], check=True)
+            subprocess.run([security, "list-keychains", "-d", "user", "-s", *original], check=True)
 
 
 @pytest.mark.parametrize("path", ["/", "/Users", "/Applications", "/Library", "/opt/homebrew",
@@ -109,6 +209,7 @@ def test_inventory_refuses_to_delete_execution_dependency_early(monkeypatch):
 
 def test_worker_prioritizes_history_and_removes_itself_last():
     plan = {"home": "/Users/admin", "uid": 501, "root": "/Users/admin/Stack",
+            "keychains": sos.keychain_inventory(Path.home(), os.getuid()),
             "services": [], "history": ["/Users/admin/.codex"],
             "data": ["/Users/admin/Stack/Agents"], "apps": ["/Applications/Codex.app"]}
     script = sos.worker(plan)
@@ -129,6 +230,7 @@ def test_user_cleanup_can_read_cwd_after_leaving_root_only_worker(tmp_path):
     subprocess.run(["sudo", "-n", "chown", "root:wheel", str(protected)], check=True)
     try:
         plan = {"home": str(Path.home()), "uid": os.getuid(), "root": str(tmp_path),
+                "keychains": sos.keychain_inventory(Path.home(), os.getuid()),
                 "services": [], "history": [], "data": [], "apps": []}
         command = next(line for line in sos.worker(plan).splitlines() if "_wipe-user-cleanup" in line)
         argv = shlex.split(command.split(" || ", 1)[0])
@@ -437,6 +539,7 @@ def test_failed_staging_rolls_back_without_disabling_runtime(guest_only, tmp_pat
     helper.parent.mkdir(parents=True)
     helper.write_bytes(b"disappearing build input")
     plan = {"app": str(app), "home": str(Path.home()), "uid": os.getuid(),
+            "keychains": sos.keychain_inventory(Path.home(), os.getuid()),
             "root": str(tmp_path), "history": [], "data": [], "apps": [], "services": []}
     script = sos.bootstrap(plan)
     helper.unlink()
@@ -454,6 +557,7 @@ def test_existing_operation_is_never_replaced(eraser, authorization, tmp_path):
     helper.parent.mkdir(parents=True)
     helper.write_bytes(eraser.read_bytes())
     plan = {"app": str(app), "home": str(Path.home()), "uid": os.getuid(),
+            "keychains": sos.keychain_inventory(Path.home(), os.getuid()),
             "root": str(tmp_path), "history": [], "data": [], "apps": [], "services": []}
     result = subprocess.run(["sudo", "-n", "/bin/sh", "-c", sos.bootstrap(plan)], capture_output=True, text=True)
     assert result.returncode != 0
