@@ -466,3 +466,25 @@ def test_an_accepted_add_asks_nothing_more(home, monkeypatch):
     monkeypatch.setattr(update_plugins, "run", _codex_runner(asked, repo, refuse=False))
     update_plugins.install(update_plugins.discover(), _shipped(home))
     assert not any(a[1:4] == ["plugin", "marketplace", "list"] for a in asked)
+
+
+def test_a_stale_index_over_a_clean_tree_is_not_uncommitted_work(tmp_path, monkeypatch):
+    """Sessions that commit and pull through private indexes leave the
+    checkout's own index on an older HEAD, staging every newer file as its own
+    revert while the tree is exactly HEAD. Read through that index, every
+    update on this Mac refused a clean checkout (2026-10-01..02)."""
+    import os
+    import subprocess
+    # The updater runs as no session; a session's own git would hide the index.
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    clone, first, second = _origin_and_clone(tmp_path)
+    private = tmp_path / "private.index"
+    env = {**os.environ, "GIT_INDEX_FILE": str(private)}
+    for argv in (["read-tree", "HEAD"], ["fetch", "--quiet", "origin"],
+                 ["merge", "--quiet", "--ff-only", second]):
+        subprocess.run(["git", *argv], cwd=clone, env=env, check=True, capture_output=True)
+    assert _git("diff", "--cached", "--name-only", "HEAD", cwd=clone)
+    monkeypatch.setattr(update_plugins, "run", lambda argv: "[]")
+    update_plugins.install([_provider(clone)], tmp_path / "stack", second)
+    assert _git("rev-parse", "HEAD", cwd=clone) == second
+    assert _git("diff", "--cached", "--name-only", "HEAD", cwd=clone) == ""

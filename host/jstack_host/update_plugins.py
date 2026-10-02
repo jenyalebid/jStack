@@ -101,6 +101,24 @@ def replace_references(path: Path, old: str, new: str):
         atomic_bytes(path, changed.encode())
 
 
+def _worktree_changes(root: str) -> list[str]:
+    """`status --porcelain` of the working tree against HEAD, not the index.
+
+    The index is not work. Where sessions commit through private indexes
+    (`GIT_INDEX_FILE`), the checkout's own `.git/index` keeps the files each
+    merge since replaced, staged as if reverted, while the tree matches HEAD.
+    Read through it, every update on this Mac refused a clean checkout
+    (2026-10-01..02: five in a row, each landing only on a re-queue).
+    """
+    import tempfile
+    from .update_macos import command
+    with tempfile.TemporaryDirectory() as scratch:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "index")}
+        command(["git", "-C", root, "read-tree", "HEAD"], env=env)
+        return command(["git", "-C", root, "status", "--porcelain", "--untracked-files=no"],
+                       env=env).split("\n")
+
+
 def advance(root: str, sha: str) -> None:
     """Bring a checkout onto the commit this update installs.
 
@@ -118,14 +136,15 @@ def advance(root: str, sha: str) -> None:
     """
     from .update_macos import command
     git = ["git", "-C", root]
-    dirty = command([*git, "status", "--porcelain", "--untracked-files=no"]).split("\n")
-    dirty = [line[3:] for line in dirty if line.strip()]
+    dirty = [line[3:] for line in _worktree_changes(root) if line.strip()]
     if dirty:
         # Named, because the refusal outlives the edit: by the time anyone
         # reads the log the tree is clean again and nothing says who wrote.
         raise ReleaseError(f"the jStack checkout at {root} has uncommitted changes "
                            f"({', '.join(dirty[:5])}{' …' if len(dirty) > 5 else ''}); it was "
                            f"not moved to {sha[:8]} and the plugin stays where it is")
+    # The tree is HEAD's, so whatever the index still stages is nobody's work.
+    command([*git, "reset", "--quiet"])
     if command([*git, "rev-parse", "HEAD"]).strip() == sha:
         return
     if subprocess.run([*git, "cat-file", "-e", sha + "^{commit}"], capture_output=True).returncode:
