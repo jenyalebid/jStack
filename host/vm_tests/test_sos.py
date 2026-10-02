@@ -273,11 +273,14 @@ def test_process_observation_errors_never_mean_absence(tmp_path, status, stop, a
         assert signalled.read_text().strip() == "-KILL " + scope + "-x sos-fixture"
 
 
-def test_process_stop_preserves_an_unrelated_name_and_verifies_exit(tmp_path):
-    name = "sos" + uuid.uuid4().hex[:10]
+@pytest.mark.parametrize("fixture_name", [None, "Jump Desktop Connect"])
+def test_process_stop_preserves_an_unrelated_name_and_verifies_exit(tmp_path, fixture_name):
+    name = fixture_name or "sos" + uuid.uuid4().hex[:10]
     processes = []
     try:
         for suffix in ("", "next"):
+            assert subprocess.run(["/usr/bin/pgrep", "-u", str(os.getuid()), "-x", name + suffix],
+                                  capture_output=True).returncode == 1, "fixture name is already active"
             executable = tmp_path / (name + suffix)
             shutil.copyfile("/bin/sleep", executable)
             executable.chmod(0o700)
@@ -306,8 +309,11 @@ def test_process_stop_preserves_an_unrelated_name_and_verifies_exit(tmp_path):
 
 
 @pytest.mark.parametrize("machine_wide", [False, True])
-def test_process_stop_obeys_account_scope(tmp_path, machine_wide):
-    executable = tmp_path / ("sos" + uuid.uuid4().hex[:10])
+@pytest.mark.parametrize("fixture_name", [None, "Jump Desktop Connect"])
+def test_process_stop_obeys_account_scope(tmp_path, machine_wide, fixture_name):
+    executable = tmp_path / (fixture_name or "sos" + uuid.uuid4().hex[:10])
+    assert subprocess.run(["/usr/bin/pgrep", "-x", executable.name], capture_output=True).returncode == 1, \
+        "fixture name is already active"
     shutil.copyfile("/bin/sleep", executable)
     executable.chmod(0o700)
     root_pid_file = tmp_path / "root-pid"
