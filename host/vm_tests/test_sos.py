@@ -162,7 +162,7 @@ def test_noninteractive_confirmation_refused(monkeypatch):
 
 
 @pytest.fixture
-def unregistered_service_bundle(tmp_path):
+def unregistered_service_bundle(tmp_path, request):
     import uuid
     app = tmp_path.resolve() / "Service Fixture.app"
     contents = app / "Contents"
@@ -170,7 +170,8 @@ def unregistered_service_bundle(tmp_path):
         (contents / directory).mkdir(parents=True, exist_ok=True)
     label = "live.jstack.sos-fixture." + uuid.uuid4().hex
     (contents / "Info.plist").write_bytes(plistlib.dumps({
-        "CFBundleIdentifier": label, "CFBundleExecutable": "JStackHub",
+        "CFBundleIdentifier": "live.jstack.network" if getattr(request, "param", False) else label,
+        "CFBundleExecutable": "JStackHub",
         "CFBundlePackageType": "APPL", "CFBundleVersion": "1"}))
     (contents / "Resources/services.json").write_text(json.dumps({
         "absent": label + ".absent.plist", "unused": label + ".unused.plist"}))
@@ -196,22 +197,28 @@ def test_native_unregister_of_absent_service_is_repeatable(unregistered_service_
         assert json.loads(subprocess.check_output([str(executable), "status"], text=True)) == before
 
 
+@pytest.mark.parametrize("unregistered_service_bundle", [False, True], indirect=True)
 def test_native_unregister_does_not_hide_loaded_job(unregistered_service_bundle, tmp_path):
     executable, label = unregistered_service_bundle
     label += ".absent"
     definition = tmp_path / "live.plist"
     definition.write_bytes(plistlib.dumps({"Label": label, "ProgramArguments": ["/bin/sleep", "60"],
                                           "RunAtLoad": True}))
-    domain = "gui/" + str(os.getuid())
+    info = plistlib.loads((executable.parents[1] / "Info.plist").read_bytes())
+    privileged = info["CFBundleIdentifier"] == "live.jstack.network"
+    domain = "system" if privileged else "gui/" + str(os.getuid())
+    prefix = ["sudo", "-n"] if privileged else []
+    if privileged:
+        subprocess.run(["sudo", "-n", "chown", "root:wheel", str(definition)], check=True)
     target = domain + "/" + label
-    subprocess.run(["launchctl", "bootstrap", domain, str(definition)], check=True)
+    subprocess.run([*prefix, "launchctl", "bootstrap", domain, str(definition)], check=True)
     try:
         result = subprocess.run([str(executable), "unregister", "absent"], capture_output=True, text=True)
         assert result.returncode != 0
         assert "still loaded" in result.stderr
         subprocess.run(["launchctl", "print", target], check=True, capture_output=True)
     finally:
-        subprocess.run(["launchctl", "bootout", target], check=True)
+        subprocess.run([*prefix, "launchctl", "bootout", target], check=True)
 
 
 @pytest.fixture(scope="module")

@@ -54,7 +54,8 @@ func labelOf(_ plist: String) -> String { String(plist.dropLast(".plist".count))
 func launchdLoaded(_ label: String) -> Bool {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-    process.arguments = ["print", "gui/\(getuid())/\(label)"]
+    let domain = privileged ? "system" : "gui/\(getuid())"
+    process.arguments = ["print", "\(domain)/\(label)"]
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice
     guard (try? process.run()) != nil else { return false }
