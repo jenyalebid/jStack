@@ -311,7 +311,7 @@ async def pty_ws(ws: WebSocket, sid: str, cols: int = 80, rows: int = 24,
         await _end(ws, 4404, "invalid session id")
         return
     try:
-        _ensure_managed(sid)
+        await asyncio.to_thread(_ensure_managed, sid)
     except SessionEnded:
         await _end(ws, 4411, "session ended")
         return
@@ -354,7 +354,13 @@ async def pty_ws(ws: WebSocket, sid: str, cols: int = 80, rows: int = 24,
 
     loop.add_reader(master, _on_readable)
 
+    # The engine is the session's for life; asked once, off the loop. Asked
+    # per keystroke on it, a `tmux list-sessions` fork froze every attached
+    # terminal for up to 1.1s whenever the Mac was busy (loop_stalls.jsonl).
+    engine = None
+
     async def pump_input():
+        nonlocal engine
         while True:
             msg = await ws.receive()
             if msg["type"] == "websocket.disconnect":
@@ -364,7 +370,10 @@ async def pty_ws(ws: WebSocket, sid: str, cols: int = 80, rows: int = 24,
                 # Keystrokes are the driving fact — a handoff typed here
                 # must open its window on this instance.
                 attach.note_input(att)
-                if (managed.open_registry().get(sid) or {}).get("engine") == "codex":
+                if engine is None:
+                    entry = (await asyncio.to_thread(managed.open_registry)).get(sid) or {}
+                    engine = entry.get("engine") or ""
+                if engine == "codex":
                     from .codex_commands import pending_command, translate_paste, workspace
                     if data == b"\r":
                         command = await asyncio.to_thread(pending_command, sid)
@@ -409,7 +418,7 @@ async def pty_ws(ws: WebSocket, sid: str, cols: int = 80, rows: int = 24,
                 ordered = None
             # An ordered close (4412) carries its own disposition; EOF asks
             # tmux whether this was a detach or the session ending.
-            code, reason = ordered if ordered else _eof_disposition(sid)
+            code, reason = ordered if ordered else await asyncio.to_thread(_eof_disposition, sid)
     finally:
         attach.unregister(att)
         notify.unmark_attached(sid)
