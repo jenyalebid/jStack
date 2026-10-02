@@ -934,9 +934,9 @@
     {
       "id": "compact-delivery",
       "name": "Compact Delivery",
-      "slug": null,
+      "slug": "Agents/compact-delivery",
       "status": "live",
-      "description": "The environment's built-in `compact-on-delivery` trigger (Stop, both engines, input action): it types `/compact` into a session that parked at the seam, waits for the boundary to land, and hands the session back its own work. It is the PRIMARY delivery path and the only one that serves a busy session: the outside sweep only ever looks at a session that has already gone QUIET, so a session that parks at a seam and keeps working is invisible to it and this hook is all it has. The engine is resolved by address, not by name — PATH first because an install outranks a guess, then the locations install.sh writes — because the name resolves through one symlink that `install.sh --uninstall` removes and nothing re-creates, and a hook that could only see the name exited 0 on every Stop for hours while the host sat installed and working. `--which` reports the resolved engine without delivering, so a health probe grades the real thing rather than re-deriving the search.",
+      "description": "A session compacts at the seam it declared and resumes on its own, on every vendor the stack runs.",
       "code": [
         "hooks/stop-compact-delivery.sh",
         "../../host/jstack_host/compact_delivery.py"
