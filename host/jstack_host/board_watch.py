@@ -110,6 +110,10 @@ async def ensure_running() -> None:
     if not (_subscribers or _consumers):
         return
     _loop = asyncio.get_running_loop()
+    # Both hub entry points arm this watcher at startup, on the loop the
+    # terminals ride — the one place the loop watch can start from either.
+    from . import loop_watch
+    loop_watch.start()
     if _wake is None:
         _wake = asyncio.Event()
     if _watcher is None or _watcher.done():
