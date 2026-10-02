@@ -72,9 +72,47 @@ func authorize(_ path: String) throws {
     }
 }
 
+// Mixed agent/project trees contain both ordinary files and exported history.
+// Treat logs, databases and opaque archives conservatively as possible history;
+// recognize renamed native transcripts by their record tags. Never follow links
+// or read special files, and never emit file contents into the wipe log.
+func historyFile(_ parent: Int32, _ name: String, _ metadata: stat) throws -> Bool {
+    let lower = name.lowercased()
+    let suffixes = [".jsonl", ".ndjson", ".log", ".sqlite", ".sqlite3", ".db",
+                    "-wal", "-shm", "-journal", ".zip", ".tar", ".gz", ".tgz",
+                    ".bz2", ".xz", ".7z", ".zst", ".lz4"]
+    if suffixes.contains(where: { lower.hasSuffix($0) }) { return true }
+    guard metadata.st_mode & S_IFMT == S_IFREG else { return false }
+    let descriptor = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+    guard descriptor >= 0 else { throw POSIXError(.EIO) }
+    defer { close(descriptor) }
+    var opened = stat()
+    guard fstat(descriptor, &opened) == 0, opened.st_ino == metadata.st_ino,
+          opened.st_dev == metadata.st_dev, opened.st_mode & S_IFMT == S_IFREG else {
+        throw POSIXError(.ESTALE)
+    }
+    var bytes = [UInt8](repeating: 0, count: 65536)
+    let count = read(descriptor, &bytes, bytes.count)
+    guard count >= 0 else { throw POSIXError(.EIO) }
+    let data = Data(bytes.prefix(count))
+    let magic: [[UInt8]] = [[0x50, 0x4b, 0x03, 0x04], [0x1f, 0x8b],
+                            [0x42, 0x5a, 0x68], [0xfd, 0x37, 0x7a, 0x58, 0x5a],
+                            [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c], [0x28, 0xb5, 0x2f, 0xfd]]
+    if magic.contains(where: { data.starts(with: $0) }) || data.starts(with: Data("SQLite format 3".utf8)) {
+        return true
+    }
+    if count > 262 && data.subdata(in: 257..<262) == Data("ustar".utf8) { return true }
+    let text = String(decoding: data, as: UTF8.self)
+    return text.range(of: #""type"\s*:\s*"(session_meta|response_item|event_msg|user|assistant|file-history-snapshot|queue-operation)""#,
+                      options: .regularExpression) != nil
+}
+
+let historyDirectories: Set<String> = [".claude", ".codex", ".git", "sessions", "archived_sessions",
+                                       "transcripts", "session-exports", "subagents", "file-history"]
+
 // Pin every ancestor by descriptor. A user swapping a directory for a symlink
 // during a root wipe must not redirect a later unlink into another tree.
-func erase(_ parent: Int32, _ name: String, _ device: dev_t) throws {
+func erase(_ parent: Int32, _ name: String, _ device: dev_t, copiesOnly: Bool = false) throws {
     var metadata = stat()
     guard fstatat(parent, name, &metadata, AT_SYMLINK_NOFOLLOW) == 0 else {
         if errno == ENOENT { return }
@@ -94,6 +132,7 @@ func erase(_ parent: Int32, _ name: String, _ device: dev_t) throws {
               opened.st_dev == metadata.st_dev, opened.st_ino == metadata.st_ino else {
             throw POSIXError(.ESTALE)
         }
+        let filterChildren = copiesOnly && !historyDirectories.contains(name.lowercased())
         while true {
             errno = 0
             guard let entry = readdir(directory) else {
@@ -105,21 +144,23 @@ func erase(_ parent: Int32, _ name: String, _ device: dev_t) throws {
                     String(cString: $0)
                 }
             }
-            if child != "." && child != ".." { try erase(descriptor, child, device) }
+            if child != "." && child != ".." { try erase(descriptor, child, device, copiesOnly: filterChildren) }
         }
+        if filterChildren { return }
         guard unlinkat(parent, name, AT_REMOVEDIR) == 0 || errno == ENOENT else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     } else {
+        if copiesOnly {
+            if try !historyFile(parent, name, metadata) { return }
+        }
         guard unlinkat(parent, name, 0) == 0 || errno == ENOENT else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }
 }
 
-do {
-    guard CommandLine.arguments.count == 2 else { throw POSIXError(.EINVAL) }
-    let path = CommandLine.arguments[1]
+func removeTarget(_ path: String, copiesOnly: Bool) throws {
     try authorize(path)
     let components = path.split(separator: "/").map(String.init)
     guard path.hasPrefix("/"), components.count >= 2,
@@ -133,14 +174,27 @@ do {
     defer { close(parent) }
     for component in components.dropLast() {
         let next = openat(parent, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-        if next < 0 && errno == ENOENT { exit(0) }
+        if next < 0 && errno == ENOENT { return }
         guard next >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         close(parent)
         parent = next
     }
     var metadata = stat()
     guard fstat(parent, &metadata) == 0 else { throw POSIXError(.EIO) }
-    try erase(parent, components.last!, metadata.st_dev)
+    try erase(parent, components.last!, metadata.st_dev, copiesOnly: copiesOnly)
+}
+
+do {
+    let arguments = Array(CommandLine.arguments.dropFirst())
+    if arguments.first == "--history-copies" {
+        guard arguments.count >= 2 else { throw POSIXError(.EINVAL) }
+        // Validate every exact target before changing the first one.
+        for path in arguments.dropFirst() { try authorize(path) }
+        for path in arguments.dropFirst() { try removeTarget(path, copiesOnly: true) }
+    } else {
+        guard arguments.count == 1 else { throw POSIXError(.EINVAL) }
+        try removeTarget(arguments[0], copiesOnly: false)
+    }
 } catch {
     fputs("SOS removal incomplete: \(error)\n", stderr)
     exit(1)

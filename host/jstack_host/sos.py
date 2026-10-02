@@ -62,7 +62,7 @@ def inventory() -> dict:
     result = {"schema": 1, "user": pwd.getpwuid(os.getuid()).pw_name,
               "uid": os.getuid(), "home": str(home), "hostname": socket.gethostname(),
               "root": str(root), "history": [], "data": [], "apps": [], "services": [],
-              "registrations": [], "network_transaction": config.get("network_transaction"),
+              "registrations": [], "history_sources": [], "network_transaction": config.get("network_transaction"),
               "tmux_socket": environment.get("JREMOTE_TMUX_SOCK", "jremote"),
               "shares": {},
               "app": config.get("app", "/Applications/jStack Hub.app")}
@@ -91,8 +91,7 @@ def inventory() -> dict:
     for declared in locations:
         for variable in ("JREMOTE_STATE_DIR", "JREMOTE_CACHE_DIR", "JREMOTE_ATTENTION_DIR",
                          "JREMOTE_TURN_DIR", "JSTACK_LOGS_DIR", "JSTACK_TIMELINE_DIR",
-                         "JSTACK_STATE_DIR", "SCHEDULER_HOME", "SCHEDULER_STATE_DIR",
-                         "JSTACK_AGENTS_DIR", "JREMOTE_INSTANCE_ROOT"):
+                         "JSTACK_STATE_DIR", "SCHEDULER_HOME", "SCHEDULER_STATE_DIR"):
             if declared.get(variable):
                 add("history", declared[variable])
         for variable in ("JREMOTE_CREDENTIALS_DIR", "JREMOTE_RELEASES_DIR", "JREMOTE_TOKEN_PATH",
@@ -100,16 +99,29 @@ def inventory() -> dict:
                          "SCHEDULER_CONFIG_DIR", "WG_PEER_DIR"):
             if declared.get(variable):
                 add("data", declared[variable])
+    def mixed_history(path):
+        add("data", path)
+        value = str(safe_target(Path(path), home))
+        if value not in result["history_sources"]:
+            result["history_sources"].append(value)
+
+    for declared in locations:
+        for variable in ("JSTACK_AGENTS_DIR", "JREMOTE_INSTANCE_ROOT"):
+            if declared.get(variable):
+                mixed_history(declared[variable])
     for key in ("migration_dir", "automation_settings"):
         if config.get(key):
             add("history" if key == "migration_dir" else "data", config[key])
     add("history", home / ".scheduler")
-    # Agent and project trees can hold transcript exports under arbitrary names.
-    # They are already selected for removal; searching filenames cannot prove
-    # that all those copies disappeared before the data phase.
+    # Mixed trees retain ordinary data until copies across ALL selected trees
+    # have been swept. The native helper scans after quiescing, not at prompt
+    # time, and uses the same descriptor-pinned traversal as final deletion.
     for name in TREE_DIRS:
-        add("history" if name in {"Agents", "Projects", "Logs", "State"} else "data", root / name)
-    add("history", hostenv.instance_root())
+        if name in {"Agents", "Projects"}:
+            mixed_history(root / name)
+        else:
+            add("history" if name in {"Logs", "State"} else "data", root / name)
+    mixed_history(hostenv.instance_root())
     for relative in (".claude.json", ".claude.json.backup", ".config/jstack", ".agents",
                      ".local/share/claude", ".local/bin/claude", ".local/bin/codex",
                      ".local/bin/jstack-host", "jStack", "jRemote-Code",
@@ -239,7 +251,7 @@ def worker(plan: dict) -> str:
     lines += [f"if test -x {q(str(tmux))}; then",
               shlex.join(user + [str(tmux), "-L", plan.get("tmux_socket", "jremote"), "kill-server"]) + " 2>/dev/null || :",
               "fi"]
-    for target in plan["history"]:
+    for target in dict.fromkeys(plan["history"] + plan.get("history_sources", [])):
         lines += [f"if test -L {q(target)}; then fail 'history root became a symlink'; fi",
                   f"if test -d {q(target)} && test ! -L {q(target)}; then",
                   f"  /usr/sbin/lsof -a -u {uid} -t +D {q(target)} > writers 2> scan-errors; scan=$?",
@@ -250,6 +262,9 @@ def worker(plan: dict) -> str:
     lines.append('[ "$failed" = 0 ] || exit 1')
     for phase in ("history", "data", "apps"):
         lines.append("phase " + phase)
+        if phase == "history" and plan.get("history_sources"):
+            lines.append(shlex.join([str(WORK / "Erase"), "--history-copies",
+                                     *plan["history_sources"]]) + ' || { fail "history copies"; exit 1; }')
         if phase == "data":
             for name, path in plan.get("shares", {}).items():
                 node = "/SharePoints/" + name

@@ -51,8 +51,8 @@ def test_root_is_never_a_recursive_target(monkeypatch, tmp_path):
     monkeypatch.setattr(sos.hostenv, "instance_root", lambda: Path.home() / "Agents")
     plan = sos.inventory()
     assert str(Path.home()) not in sum((plan[p] for p in ("history", "data", "apps")), [])
-    assert str(Path.home() / "Agents") in plan["history"]
-    assert str(Path.home() / "Projects") in plan["history"]
+    assert str(Path.home() / "Agents") in plan["history_sources"]
+    assert str(Path.home() / "Projects") in plan["history_sources"]
 
 
 def test_inventory_retains_service_and_shell_history_locations(monkeypatch):
@@ -87,10 +87,12 @@ def test_agent_and_project_copies_precede_configuration_removal(monkeypatch):
     monkeypatch.setenv("JREMOTE_INSTANCE_ROOT", str(root / "other-instances"))
     plan = sos.inventory()
     for path in (root / "Agents", root / "Projects", custom, root / "other-instances"):
-        assert str(path) in plan["history"]
-        assert str(path) not in plan["data"]
+        assert str(path) in plan["history_sources"]
+        assert str(path) in plan["data"]
+        assert str(path) not in plan["history"]
     script = sos.worker(plan)
-    assert script.index("phase history") < script.index("phase data")
+    assert script.index("phase history") < script.index("--history-copies") < script.index("phase data")
+    assert script.index("phase data") < script.index("remove " + shlex.quote(str(custom)))
     assert str(root / "Config") in plan["data"]
     assert str(root / "Credentials") in plan["data"]
 
@@ -208,6 +210,73 @@ def test_native_removal_preserves_symlink_destination(eraser, authorization, tmp
     assert not target.exists()
     assert sentinel.read_bytes() == b"must survive"
     assert erase(eraser, target).returncode == 0
+
+
+def test_native_history_sweep_across_mixed_trees_preserves_general_data(eraser, authorization, tmp_path):
+    import gzip
+    import sqlite3
+    import zipfile
+
+    roots = [tmp_path.resolve() / name for name in ("Agents", "Projects")]
+    outside = tmp_path.resolve() / "outside"
+    outside.mkdir()
+    (outside / "keep.jsonl").write_text("outside history must survive")
+    histories, ordinary = [], []
+    for root in roots:
+        root.mkdir()
+        for name, content in {
+            "copy.jsonl": '{"message":"session copy"}\n',
+            "renamed-claude": '{"type":"assistant","message":{"content":"private"}}\n',
+            "renamed-codex": '{"type":"session_meta","payload":{"id":"private"}}\n',
+            "activity.log": "private prompt",
+            "state.sqlite-wal": "private WAL",
+        }.items():
+            path = root / name
+            path.write_text(content)
+            histories.append(path)
+        database = root / "renamed-database"
+        with sqlite3.connect(database) as db:
+            db.execute("create table history(body text)")
+            db.execute("insert into history values ('private prompt')")
+        histories.append(database)
+        archive = root / "renamed-archive"
+        with zipfile.ZipFile(archive, "w") as zipped:
+            zipped.writestr("conversation.jsonl", '{"private":"history"}')
+        histories.append(archive)
+        compressed = root / "renamed-compressed"
+        compressed.write_bytes(gzip.compress(b"private conversation"))
+        histories.append(compressed)
+        (root / "nested").mkdir()
+        marker = root / "nested/general-data.txt"
+        marker.write_text("general data must survive the history sweep")
+        ordinary.append(marker)
+        (root / "outside-link").symlink_to(outside, target_is_directory=True)
+        os.mkfifo(root / "pipe")
+    authorization(*roots)
+    result = subprocess.run(["sudo", "-n", str(eraser), "--history-copies", *map(str, roots)],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert not any(path.exists() for path in histories)
+    assert all(path.read_text() == "general data must survive the history sweep" for path in ordinary)
+    assert (outside / "keep.jsonl").read_text() == "outside history must survive"
+    assert all((root / "pipe").exists() for root in roots)
+    # Only now does general deletion proceed, after both roots' histories are gone.
+    for root in roots:
+        assert erase(eraser, root).returncode == 0
+    assert (outside / "keep.jsonl").exists()
+
+
+def test_native_copy_sweep_checks_all_authorizations_before_deleting(eraser, authorization, tmp_path):
+    selected = tmp_path.resolve() / "selected"
+    selected.mkdir()
+    history = selected / "copy.jsonl"
+    history.write_text("private transcript")
+    unapproved = tmp_path.resolve() / "not-approved"
+    authorization(selected)
+    result = subprocess.run(["sudo", "-n", str(eraser), "--history-copies", str(selected), str(unapproved)],
+                            capture_output=True, text=True)
+    assert result.returncode != 0
+    assert history.read_text() == "private transcript"
 
 
 def test_native_refuses_symlink_ancestor(eraser, authorization, tmp_path):
