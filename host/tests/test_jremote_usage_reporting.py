@@ -92,16 +92,18 @@ def test_a_machine_that_never_chose_leaves_the_choice_to_the_client():
     `hidden` on upgrade would take a section away from everyone at once, with
     no act by anybody that asked for it.
     """
-    assert usage_reporting.own() == usage_reporting.CLIENT
     assert usage_reporting.cached_parent() == usage_reporting.CLIENT
     assert usage_reporting.effective() == usage_reporting.CLIENT
 
 
-def test_its_own_word_survives_being_set():
-    assert usage_reporting.set_own("hidden") == "hidden"
-    assert usage_reporting.own() == "hidden"
-    assert usage_reporting.set_own("client") == "client"
-    assert usage_reporting.own() == "client"
+def test_a_hub_forces_nothing_on_its_own_client():
+    """The client's switch is the hub owner's answer; nothing overrides it.
+
+    A word an older build stored for itself is ignored rather than migrated —
+    there is no longer any control that could take it back.
+    """
+    usage_reporting._store(own="hidden")
+    assert usage_reporting.effective() == usage_reporting.CLIENT
 
 
 def test_a_state_this_build_never_heard_of_reads_as_client():
@@ -111,14 +113,13 @@ def test_a_state_this_build_never_heard_of_reads_as_client():
     word it cannot interpret — and the unsafe reading of an uninterpretable
     word is any reading that hides something.
     """
-    usage_reporting._store(own="obscured", parent="obscured")
-    assert usage_reporting.own() == usage_reporting.CLIENT
+    usage_reporting._store(parent="obscured")
     assert usage_reporting.cached_parent() == usage_reporting.CLIENT
 
 
-def test_a_hubs_answer_is_its_own_and_a_leafs_is_its_hubs(monkeypatch):
-    usage_reporting._store(own="available", parent="hidden")
-    assert usage_reporting.effective() == "available"
+def test_a_leafs_answer_is_its_hubs(monkeypatch):
+    usage_reporting._store(parent="hidden")
+    assert usage_reporting.effective() == usage_reporting.CLIENT
     monkeypatch.setattr(managed_access, "is_leaf", lambda: True)
     assert usage_reporting.effective() == "hidden"
 
@@ -178,14 +179,14 @@ def test_a_store_that_predates_the_column_gains_it_and_defaults_to_client(tmp_pa
 
 # ── /host: the one route that answers before any screen ──────────────────────
 
-def test_the_policy_is_answered_to_loopback_and_to_nobody_else(client, monkeypatch):
+def test_the_policy_is_answered_to_loopback_and_to_nobody_else(client, monkeypatch, as_leaf):
     """A phone must never be handed a flag about somebody else's Mac.
 
     Withheld at the server and not by client courtesy: the field governs the
     client running on that machine, and a remote device that received it would
     be a remote device deciding it applied to itself.
     """
-    usage_reporting.set_own("hidden")
+    usage_reporting._store(parent="hidden")
     monkeypatch.setattr(router, "_is_loopback", lambda ip: False)
     assert "usage_reporting" not in client.get(f"{API}/host").json()
     monkeypatch.setattr(router, "_is_loopback", lambda ip: True)
@@ -238,28 +239,12 @@ def test_the_policy_stays_off_the_device_wire_and_rides_the_console_one(store):
     assert router._serve_host(dict(row), policy=True)["usage_reporting"] == "hidden"
 
 
-# ── a machine's word about itself ────────────────────────────────────────────
+# ── a hub's own client is its own ────────────────────────────────────────────
 
-def test_a_hub_sets_its_own_word_from_its_own_console(client, on_console):
+def test_a_hub_has_no_route_to_force_its_own_client(client, on_console):
+    """The menu bar no longer carries the switch, so neither does the API."""
     assert client.post(f"{API}/usage/reporting",
-                       json={"state": "available"}).status_code == 200
-    assert usage_reporting.own() == "available"
-    assert client.post(f"{API}/usage/reporting",
-                       json={"state": "sideways"}).status_code == 400
-
-
-def test_its_own_word_is_console_only(client):
-    assert client.post(f"{API}/usage/reporting",
-                       json={"state": "hidden"}).status_code == 403
-    assert usage_reporting.own() == usage_reporting.CLIENT
-
-
-def test_a_leaf_is_refused_its_own_word_rather_than_told_it_took(
-        client, on_console, as_leaf):
-    """A control that stores a value the next pull discards is worse than a no."""
-    assert client.post(f"{API}/usage/reporting",
-                       json={"state": "hidden"}).status_code == 409
-    assert usage_reporting.own() == usage_reporting.CLIENT
+                       json={"state": "hidden"}).status_code in (404, 405)
 
 
 # ── the poke's landing, and the answer it pulls ──────────────────────────────

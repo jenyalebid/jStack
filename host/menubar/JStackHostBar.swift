@@ -533,12 +533,6 @@ struct HostIdentity: Decodable {
     var features: [String: Bool]?
     var source: UpdateSource?
 
-    /// This Mac's own word on Usage reporting, which `/host` answers to
-    /// loopback and to nothing else — the policy governs the client app on
-    /// this machine and is no other device's business. Nil on a host too old
-    /// to carry it, read as `client`.
-    var usageReporting: String?
-
     /// local / open / managed — the host's own verdict on how a device off
     /// this network reaches it, computed by `jstack_host.mode`. Nil where an
     /// older host predates the field; the headline falls back to the coarser
@@ -774,7 +768,7 @@ struct HubSource: Decodable {
             return "Build failed" + (detail.isEmpty ? "." : ": \(detail)")
         case "built":
             if let release = build?.release, release != running?.release {
-                return "Built \(release). Install it under Software Updates."
+                return "Built \(release). Ready to install."
             }
         default: break
         }
@@ -1085,7 +1079,7 @@ final class HostProbe {
         session.dataTask(with: request) { data, response, error in
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? error?.localizedDescription ?? "No response"
-            // Update All may be partially accepted. Do not hide refused rows
+            // A queue for several machines may be partially accepted. Do not hide refused rows
             // behind the HTTP 200 returned for the successfully queued ones.
             let body = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             let partial = !(body?["errors"] as? [Any] ?? []).isEmpty
@@ -1164,13 +1158,6 @@ final class HostProbe {
     func leafUsage(hostKey: String, state: UsagePolicy, token: String,
                    _ done: @escaping (Bool, String) -> Void) {
         post("/hosts/\(escaped(hostKey))/usage", token: token, timeout: 10,
-             payload: try? JSONEncoder().encode(["state": state.rawValue]), done)
-    }
-
-    /// This machine's own word, for the client running on this machine.
-    func ownUsage(state: UsagePolicy, token: String,
-                  _ done: @escaping (Bool, String) -> Void) {
-        post("/usage/reporting", token: token, timeout: 10,
              payload: try? JSONEncoder().encode(["state": state.rawValue]), done)
     }
 
@@ -1612,51 +1599,6 @@ final class FieldWatcher: NSObject, NSTextFieldDelegate {
     }
 }
 
-/// What `jstack-host detach --json` answers: every step by name, whether this
-/// machine is actually out, and the mode it landed in.
-///
-/// Steps rather than a verdict, because they fail independently and mean
-/// different things — the grants are the authority, the calls to the parent are
-/// courtesy over a mesh that is coming down, and the tunnel is the transport.
-/// The mode is read as well as `detached`: the steps can all pass on a machine
-/// that still dials out from a second leaf install somewhere, and the mode is
-/// the only thing that would say so.
-struct DetachOutcome {
-    let steps: [(ok: Bool, note: String)]
-    let detached: Bool
-    let mode: String
-    let note: String
-
-    var isManaged: Bool { mode == "managed" }
-
-    init?(json: String) {
-        // The whole output first, then its last line — a stray warning ahead of
-        // the payload must not turn a detach that reported itself fully into
-        // "did not report an outcome".
-        let whole = json.data(using: .utf8)
-        let tail = json.split(separator: "\n").last.flatMap { $0.data(using: .utf8) }
-        let parsed = [whole, tail].compactMap { $0 }
-            .compactMap { try? JSONSerialization.jsonObject(with: $0) }
-            .compactMap { $0 as? [String: Any] }
-        guard let top = parsed.first else { return nil }
-        let rows = top["steps"] as? [[String: Any]] ?? []
-        steps = rows.map { (ok: $0["ok"] as? Bool ?? false,
-                            note: $0["note"] as? String ?? "") }
-        detached = top["detached"] as? Bool ?? false
-        let landed = top["mode"] as? [String: Any] ?? [:]
-        mode = landed["mode"] as? String ?? ""
-        note = landed["note"] as? String ?? ""
-    }
-
-    /// The steps the way the command prints them in a terminal, and the mode
-    /// underneath — the same report, in the place the person actually ran it.
-    var report: String {
-        var lines = steps.map { "\($0.ok ? "✓" : "✗")  \($0.note)" }
-        if !mode.isEmpty { lines.append("\nmode  \(mode) — \(note)") }
-        return lines.joined(separator: "\n")
-    }
-}
-
 enum HostControl {
     /// `gui/<uid>`: the per-user domain, which is where a LaunchAgent lives and
     /// the reason none of this needs a password.
@@ -1755,104 +1697,6 @@ enum HostControl {
     }()
 }
 
-/// Signed startup is registration state, not a writable RunAtLoad flag.
-/// Changes belong in macOS Login Items: unregistering here would immediately
-/// stop the host (or this menu), not merely change its next-login behavior.
-enum SignedLogin {
-    static func status(_ role: String) -> SMAppService.Status? {
-        let url = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/services.json")
-        guard let data = try? Data(contentsOf: url),
-              let catalog = try? JSONDecoder().decode([String: String].self, from: data),
-              let plist = catalog[role], plist.hasPrefix("live.jstack."),
-              plist.hasSuffix(".plist"), !plist.contains("/") else { return nil }
-        return SMAppService.agent(plistName: plist).status
-    }
-
-    static func description(_ status: SMAppService.Status?) -> String {
-        guard let status else { return "Unknown" }
-        switch status {
-        case .enabled: return "Enabled"
-        case .notRegistered: return "Not registered"
-        case .requiresApproval: return "Approval required"
-        case .notFound: return "Service not found"
-        @unknown default: return "Unknown"
-        }
-    }
-}
-
-/// Legacy LaunchAgents only: whether one brings itself up at login.
-///
-/// There is no permission to grant here and no API to ask. A *user* LaunchAgent
-/// in `~/Library/LaunchAgents` is loaded at login by launchd with no prompt and
-/// no sudo — it shows up afterwards in Login Items & Extensions as a switch you
-/// may turn off, not as one you had to turn on. So the setting is a property of
-/// the plist, and this reads and writes exactly that.
-enum LoginAgent {
-    static func plistURL(_ label: String) -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/LaunchAgents/\(label).plist")
-    }
-
-    static func exists(_ label: String) -> Bool {
-        FileManager.default.fileExists(atPath: plistURL(label).path)
-    }
-
-    private static func job(_ label: String) -> [String: Any]? {
-        guard let data = try? Data(contentsOf: plistURL(label)),
-              let plist = try? PropertyListSerialization.propertyList(
-                  from: data, options: [], format: nil) as? [String: Any]
-        else { return nil }
-        return plist
-    }
-
-    /// Does it come up at login?
-    ///
-    /// `RunAtLoad` is the obvious half. The other half is `KeepAlive` as a bare
-    /// `true`, which means "keep this running" with no condition attached — so
-    /// launchd starts it the moment the job is loaded, whatever `RunAtLoad`
-    /// says or fails to say. A *dictionary* `KeepAlive` is conditional
-    /// (`SuccessfulExit` and friends) and starts nothing on its own.
-    ///
-    /// Getting this wrong is how a checkbox ends up unticked next to a hub that
-    /// has come up at every login for months.
-    static func startsAtLogin(_ label: String) -> Bool {
-        guard let job = job(label) else { return false }
-        if job["KeepAlive"] as? Bool == true { return true }
-        return job["RunAtLoad"] as? Bool == true
-    }
-
-    /// True where `KeepAlive` alone guarantees the start. Then `RunAtLoad` is
-    /// not the knob, and a switch offering to flip it is a switch that lies —
-    /// so the row is shown ticked and locked, with the reason on the tooltip,
-    /// rather than offered as a choice that would not take.
-    static func pinnedOn(_ label: String) -> Bool {
-        job(label)?["KeepAlive"] as? Bool == true
-    }
-
-    /// Write the flag. Nothing is unloaded and nothing is restarted: launchd
-    /// reads these files fresh at the next login, which is the only moment this
-    /// setting means anything — and booting the job out to make a next-login
-    /// setting "take" would stop the very thing being configured.
-    @discardableResult
-    static func setStartsAtLogin(_ label: String, _ on: Bool) -> Bool {
-        guard var job = job(label) else { return false }
-        job["RunAtLoad"] = on
-        guard let data = try? PropertyListSerialization.data(
-                  fromPropertyList: job, format: .xml, options: 0),
-              (try? data.write(to: plistURL(label), options: .atomic)) != nil
-        else { return false }
-        return true
-    }
-}
-
-/// This app's own LaunchAgent label — its bundle identifier, which is what
-/// `install.sh` writes into both the bundle and the plist. Read rather than
-/// repeated, so the two cannot drift apart.
-enum MenuBarAgent {
-    static let label = HostAgent.appOwned ? "live.jstack.hub.menu"
-        : (Bundle.main.bundleIdentifier ?? "com.jremote.menubar")
-}
-
 // MARK: - The menu bar
 
 /// A reusable, nonmodal status window. Update actions retain their menu command
@@ -1889,32 +1733,24 @@ struct InfoCommand: View {
     }
 }
 
-struct InfoHubSection: View {
+struct InfoAboutSection: View {
     let name: String
     let status: String
     let version: String
-    let source: String?
     /// The build id. Both lines can carry one short version at once, so the
     /// line and this are what tell two builds of it apart.
     var release: String? = nil
     var body: some View {
         Section {
-            LabeledContent("Mac", value: name)
+            LabeledContent("Machine", value: name)
             LabeledContent("Status", value: status)
             LabeledContent("Version", value: version)
             if let release, !release.isEmpty {
                 LabeledContent("Release", value: release)
                     .textSelection(.enabled)
             }
-            if let source {
-                DisclosureGroup("Technical details") {
-                    LabeledContent("Source", value: source)
-                        .textSelection(.enabled)
-                }
-                .accessibilityIdentifier("info_hub_details")
-            }
         } header: {
-            Label("jStack Hub", systemImage: "server.rack")
+            Label("About", systemImage: "info.circle")
                 .font(.headline)
         }
     }
@@ -1963,7 +1799,7 @@ struct InfoMachineSection: View {
                 LabeledContent("Line", value: HubSource.label(line))
             }
             if let version = machine.observed?.hostSource?.version {
-                LabeledContent("jStack", value: version)
+                LabeledContent("jStack", value: UpdateSource.short(version) ?? version)
             }
             if let client = machine.observed?.components?["client"], let build = client.installed {
                 LabeledContent("jRemote", value: client.version.map { "\($0) (\(build))" } ?? "Build \(build)")
@@ -1985,52 +1821,80 @@ struct InfoMachineSection: View {
     }
 }
 
-/// Where the hub's software comes from, and the two presses that move it: the
-/// ref it follows, and a rebuild. They are separate on purpose — picking a ref
-/// writes a name and does nothing else, so nothing on this machine downloads
-/// or builds until somebody asks for it in as many words.
+/// Where the hub's software comes from, what it runs, and the presses that
+/// move it: the ref it follows, a rebuild, and installing what is offered.
+/// They are separate on purpose — picking a ref writes a name and does nothing
+/// else, so nothing on this machine downloads, builds or installs until
+/// somebody asks for it in as many words.
+///
+/// `source` is nil on a machine whose updater is not configured; the section
+/// then carries only the install half, which is how that updater gets set up.
 struct InfoSourceSection: View {
-    let source: HubSource
+    let source: HubSource?
     let busy: Bool
     let follow: (String) -> Void
     let rebuild: () -> Void
+    /// This Mac's own update, when there is anything to say about it — never
+    /// "Up to date", which the footer already says for the line.
+    let update: String?
+    let detail: String?
+    let install: NSMenuItem?
 
     var body: some View {
         Section {
-            LabeledContent("Build", value: source.running?.displayVersion ?? "Not reported")
-            if let sha = source.running?.sha, !sha.isEmpty {
-                LabeledContent("Commit", value: String(sha.prefix(12))
-                               + (source.running?.dirty == true ? " (modified)" : ""))
-                    .textSelection(.enabled)
-            }
-            if source.switchable {
-                Picker("Follows", selection: Binding(get: { HubSource.label(source.ref) },
-                                                     set: follow)) {
-                    ForEach(HubSource.offered, id: \.self) { ref in
-                        Text(HubSource.label(ref)).tag(ref)
-                    }
+            if let source {
+                if let sha = source.running?.sha, !sha.isEmpty {
+                    LabeledContent("Commit", value: String(sha.prefix(12))
+                                   + (source.running?.dirty == true ? " (modified)" : ""))
+                        .textSelection(.enabled)
                 }
-                .pickerStyle(.segmented)
-                .disabled(busy)
-                .accessibilityIdentifier("info_source_ref")
-            } else {
-                LabeledContent("Follows", value: HubSource.label(source.ref))
+                if source.switchable {
+                    Picker("Follows", selection: Binding(get: { HubSource.label(source.ref) },
+                                                         set: follow)) {
+                        ForEach(HubSource.offered, id: \.self) { ref in
+                            Text(HubSource.label(ref)).tag(ref)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(busy)
+                    .accessibilityIdentifier("info_source_ref")
+                } else {
+                    LabeledContent("Follows", value: HubSource.label(source.ref))
+                }
             }
-            Text(source.summary).font(.callout).foregroundStyle(.secondary)
-                .textSelection(.enabled)
-            if source.canBuild {
-                Button("Rebuild now", action: rebuild)
-                    .disabled(busy || source.building)
-                    .accessibilityIdentifier("info_source_rebuild")
-            } else if let blocked = source.blocked, !blocked.isEmpty {
-                // Why there is no button, rather than a button that answers
-                // with an error dialog.
-                Text(blocked).font(.callout).foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+            if let update {
+                LabeledContent("Update", value: update)
+            }
+            if let detail, !detail.isEmpty {
+                Text(detail).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            if source?.canBuild == true || install != nil {
+                HStack {
+                    if let source, source.canBuild {
+                        Button("Rebuild now", action: rebuild)
+                            .disabled(busy || source.building)
+                            .accessibilityIdentifier("info_source_rebuild")
+                    }
+                    if let install { InfoCommand(command: install) }
+                }
             }
         } header: {
             Label("Source", systemImage: "arrow.triangle.branch")
                 .font(.headline)
+        } footer: {
+            if let source {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(source.summary)
+                    // Why there is no Rebuild button, rather than a button that
+                    // answers with an error dialog.
+                    if !source.canBuild, let blocked = source.blocked, !blocked.isEmpty {
+                        Text(blocked)
+                    }
+                }
+                .font(.callout).foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 }
@@ -2039,48 +1903,45 @@ struct HostInfoForm: View {
     let machine: String
     let status: String
     let version: String
-    let source: String?
     var release: String? = nil
     let hubSource: HubSource?
     let sourceBusy: Bool
     let follow: (String) -> Void
     let rebuild: () -> Void
     let app: InfoAppSnapshot
-    let updateStatus: String
+    let updateStatus: String?
     let error: String?
     let localCommand: NSMenuItem?
     let machines: [UpdateMachine]
     let commands: [String: NSMenuItem]
-    let allCommand: NSMenuItem?
     let open: () -> Void
     let download: () -> Void
 
+    private var source: HubSource? { hubSource?.enabled == true ? hubSource : nil }
+
     var body: some View {
         Form {
-            InfoHubSection(name: machine, status: status, version: version, source: source,
-                           release: release)
+            InfoAboutSection(name: machine, status: status, version: version, release: release)
             InfoClientSection(app: app, open: open, download: download)
-            Section("Software Updates") {
-                LabeledContent("Status", value: updateStatus)
-                // Nothing on any machine installs by itself: a build is an
-                // offer, and only a press here turns an offer into a job.
-                Text("Nothing installs until it is queued here.")
-                    .font(.callout).foregroundStyle(.secondary)
-                if let error {
-                    Text(error).foregroundStyle(.secondary).textSelection(.enabled)
-                }
-                if let localCommand { InfoCommand(command: localCommand) }
-                if let allCommand { InfoCommand(command: allCommand) }
-            }
-            if let hubSource, hubSource.enabled {
-                InfoSourceSection(source: hubSource, busy: sourceBusy,
-                                  follow: follow, rebuild: rebuild)
+            // Nothing on any machine installs by itself: a build is an offer,
+            // and only a press here or on a machine's own row turns an offer
+            // into a job. Every machine is its own press — there is no
+            // fleet-wide one; the release procedure's deploy is that.
+            if source != nil || localCommand != nil || updateStatus != nil
+                || !(error ?? "").isEmpty {
+                InfoSourceSection(source: source, busy: sourceBusy,
+                                  follow: follow, rebuild: rebuild,
+                                  update: updateStatus, detail: error,
+                                  install: localCommand)
             }
             ForEach(machines, id: \.machine) { machine in
                 InfoMachineSection(machine: machine, command: commands[machine.machine])
             }
         }
         .formStyle(.grouped)
+        // A form of label/value rows: past this width the values drift away
+        // from their labels, and under it the labels wrap.
+        .frame(minWidth: 460, idealWidth: 520, maxWidth: 640, minHeight: 400)
         .accessibilityIdentifier("host_info_form")
     }
 }
@@ -2092,9 +1953,9 @@ final class HostInfoWindow: NSWindow {
         super.init(contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
                    styleMask: [.titled, .closable, .resizable, .miniaturizable],
                    backing: .buffered, defer: false)
-        title = "jStack Info"
+        // The form's frame bounds the window, through the hosting view.
+        title = "Hub Settings"
         isReleasedWhenClosed = false
-        minSize = NSSize(width: 460, height: 400)
         setAccessibilityIdentifier("host_info_window")
         center()
     }
@@ -2245,12 +2106,9 @@ final class StatusController: NSObject {
         // about this hub that shows its devices but not its machines is a menu
         // that stops just short of what the hub actually is.
         if let machines = machinesItem() { menu.addItem(machines) }
-        // No update item here. An update is queued from Info, per machine, on
-        // purpose — a top-level button one click from installing was the one
-        // way a machine took a build nobody chose for it.
-        let info = Self.action("Info", #selector(doInfo), self, symbol: "info.circle")
-        info.setAccessibilityIdentifier("host_info")
-        menu.addItem(info)
+        // No update item here. An update is queued from Settings, per machine,
+        // on purpose — a top-level button one click from installing was the
+        // one way a machine took a build nobody chose for it.
 
         // ── The app ─────────────────────────────────────────────────────────
         menu.addItem(.separator())
@@ -2258,10 +2116,6 @@ final class StatusController: NSObject {
             let remote = Self.action("jRemote", #selector(doOpenApp), self)
             remote.image = JRemoteGlyph.image(size: 13)
             menu.addItem(remote)
-        }
-        if FileManager.default.fileExists(atPath: HostAgent.logDirectory().path) {
-            menu.addItem(Self.action("Open Log Folder", #selector(doLogs), self,
-                                     symbol: "folder"))
         }
         // No Refresh. `menuWillOpen` re-polls, so everything below the pointer
         // was fetched on the way to it — a button that re-fetches data a
@@ -2331,23 +2185,17 @@ final class StatusController: NSObject {
             if let detail = machine.job?.detail, !detail.isEmpty {
                 submenu.addItem(Self.caption(detail))
             }
-            let canRecoverHere = machine.machine == localID && machine.needsBootstrap
+            let isLocal = machine.machine == localID
+            let canRecoverHere = isLocal && machine.needsBootstrap
             if machine.canUpdate || canRecoverHere {
-                let title = canRecoverHere ? "Enable Updates and Continue" : "Update \(machine.name)"
+                let title = canRecoverHere ? "Enable Updates and Continue"
+                    : isLocal ? "Install Update" : "Update \(machine.name)"
                 let update = Self.action(title, #selector(doUpdate), self)
                 update.setAccessibilityIdentifier("updates_tap_" + machine.machine)
                 update.representedObject = machine.machine
                 update.isEnabled = !updateRequestInFlight
                 submenu.addItem(update)
             }
-        }
-        if inventory.machines.count > 1 && inventory.release != nil {
-            submenu.addItem(.separator())
-            let all = Self.action("Update All Macs", #selector(doUpdate), self)
-            all.setAccessibilityIdentifier("updates_tap_all")
-            all.representedObject = "all"
-            all.isEnabled = !updateRequestInFlight
-            submenu.addItem(all)
         }
         return submenu
     }
@@ -2359,7 +2207,7 @@ final class StatusController: NSObject {
         let local = updateInventory?.machines.first { $0.machine == localID }
         if (target == "self" || target == localID), local?.needsBootstrap == true {
             updateActionStatus = "Enabling managed updates…"
-            showUpdates()
+            showSettings()
             guard let binary = HostControl.hostBinary else {
                 finishUpdate(false, "The installed jStack host command could not be found.")
                 return
@@ -2381,7 +2229,7 @@ final class StatusController: NSObject {
             }
             return
         }
-        showUpdates()
+        showSettings()
         queueUpdate(target)
     }
 
@@ -2404,7 +2252,7 @@ final class StatusController: NSObject {
         refresh()
     }
 
-    func showUpdates() {
+    func showSettings() {
         if infoWindow == nil { infoWindow = HostInfoWindow() }
         refreshInfoWindow()
         NSApp.activate(ignoringOtherApps: true)
@@ -2412,7 +2260,7 @@ final class StatusController: NSObject {
         refresh()
     }
 
-    @objc private func doInfo() { showUpdates() }
+    @objc private func doSettings() { showSettings() }
 
     private func refreshInfoWindow() {
         guard let infoWindow else { return }
@@ -2428,7 +2276,6 @@ final class StatusController: NSObject {
             machine: Machine.name,
             status: state.isUp ? (state.identity?.mode?.isManaged == true ? "Running · Managed Mac" : "Running") : "Not running",
             version: source?.displayVersion ?? "Version not reported",
-            source: source?.sha,
             release: source?.release,
             hubSource: hubSource,
             sourceBusy: sourceBusy,
@@ -2436,11 +2283,11 @@ final class StatusController: NSObject {
             rebuild: { [weak self] in self?.rebuildSource() },
             app: InfoAppSnapshot.read(),
             updateStatus: updateActionStatus ?? (updateError != nil ? "Could not check for updates"
-                : local?.summary ?? (updateInventory == nil ? "Checking…" : "No update published")),
+                : local.flatMap { ["current", "not_published", "unknown"].contains($0.state) ? nil : $0.summary }),
             error: updateError ?? local?.job?.detail,
             localCommand: commands[localID],
             machines: updateInventory?.machines.filter { $0.machine != localID } ?? [],
-            commands: commands, allCommand: commands["all"],
+            commands: commands,
             open: { [weak self] in self?.doOpenApp() },
             download: { [weak self] in self?.downloadClient() }))
     }
@@ -2516,26 +2363,26 @@ final class StatusController: NSObject {
         }
     }
 
-    /// The Active section. Rows are informational — a menu bar is where you
-    /// look to find out, and the thing you would do about it is a terminal
-    /// command or the app, neither of which belongs behind a status item.
-    /// What opens off the machine's row: the things you can do to the hub.
+    /// What opens off the machine's row: the hub's own lifecycle, and the
+    /// two doors behind it — its settings and its logs.
     ///
     /// Start / Stop only when there is an agent to operate. A hub running in a
     /// terminal is stopped by the terminal it is running in, and a Shut Down
     /// that boots out a job which does not exist is a button that lies.
+    ///
+    /// Nothing else lives here. Pairing and adopting open the lists they add
+    /// to; login items are System Settings' (it is what owns a signed
+    /// service); and Home's Usage section on this Mac is the client's own
+    /// switch — only a leaf's is the hub's word, on that leaf's row.
     private func controlsMenu() -> NSMenu {
         let sub = NSMenu()
         sub.autoenablesItems = false
         if state.installed {
-            // `unauthorized` counts as running, and it is the same rule as the
-            // one above read the other way round: a refusal is an *answer*, and
+            // `unauthorized` counts as running: a refusal is an *answer*, and
             // only something serving the port can produce one. Offering Start
-            // for a hub that is already up is the lying button, and it is the
-            // worse direction of the two — Shut Down at least fails loudly,
-            // while Start quietly does nothing to a job launchd already has
-            // loaded, leaving the stale credential that caused the refusal
-            // untouched and unmentioned.
+            // for a hub that is already up is the lying button — it quietly
+            // does nothing to a job launchd already has loaded, leaving the
+            // stale credential that caused the refusal untouched.
             if state.isUp || state.unauthorized {
                 sub.addItem(Self.action("Restart Hub", #selector(doRestart), self,
                                         symbol: "arrow.clockwise"))
@@ -2545,123 +2392,17 @@ final class StatusController: NSObject {
                 sub.addItem(Self.action("Start Hub", #selector(doStart), self,
                                         symbol: "power"))
             }
-        }
-        if state.isUp, state.identity?.canManageDevices == true, HostControl.hostBinary != nil {
-            sub.addItem(Self.action("Pair a Device…", #selector(doPair), self,
-                                    symbol: "plus.circle"))
-            // Adopt and Detach are the two directions of the same relationship,
-            // and a machine is only ever in one of them: a managed Mac rides
-            // another hub's mesh and has no peers of its own to hand out, so
-            // offering it Adopt is offering a button whose only outcome is the
-            // refusal underneath it.
-            //
-            // The gate is the mode and NOT `features.tunnel_pairing`. That flag
-            // is `can_pair()`, which answers whether *this process* can find the
-            // peer table — false on a hub whose mesh predates the package, which
-            // is exactly the machine that most needs this item (#42). A mode of
-            // `local` or `open` is a hub either way; where the peer table is
-            // genuinely unreachable the CLI says so in its own words, which are
-            // better than anything this menu could guess.
-            if state.identity?.mode?.isManaged == true {
-                let parent = state.identity?.mode?.parentHost
-                let detach = Self.action(
-                    parent.map { "Detach from \($0)…" } ?? "Detach from Parent Hub…",
-                    #selector(doDetach), self, symbol: "eject")
-                detach.toolTip = "Stop being administered from "
-                    + "\(state.identity?.mode?.parent ?? "the parent hub")"
-                    + " and leave its mesh."
-                sub.addItem(detach)
-            } else {
-                let adopt = Self.action("Adopt a Mac…", #selector(doAdopt), self,
-                                        symbol: "plus.rectangle.on.rectangle")
-                adopt.toolTip = "Join another Mac to this hub's mesh. Every "
-                    + "device already paired here gets into it without a "
-                    + "second code."
-                sub.addItem(adopt)
-            }
-        }
-        if sub.items.isEmpty {
-            sub.addItem(Self.caption("No agent to operate this hub."))
-        }
-
-        // ── Login ───────────────────────────────────────────────────────────
-        //
-        // Here and not behind a Settings row of its own. Whether the hub comes
-        // up at login is a fact about this machine's hub, which is what this
-        // submenu already is — a Settings item next to it would be a second
-        // door onto the same room.
-        sub.addItem(.separator())
-        if HostAgent.appOwned {
-            sub.addItem(Self.caption("Hub at Login: " + SignedLogin.description(SignedLogin.status(HostAgent.serviceRole))))
-            sub.addItem(Self.caption("Menu Bar at Login: " + SignedLogin.description(SignedLogin.status("menu"))))
-            let settings = Self.action("Login Items Settings…", #selector(doOpenLoginSettings), self,
-                                       symbol: "gearshape")
-            settings.setAccessibilityIdentifier("hub_open_login_settings")
-            settings.toolTip = "macOS manages signed background services. Disabling them can stop running services immediately."
-            sub.addItem(settings)
-        } else if HostAgent.isInstalled {
-            let hub = Self.check("Start Hub at Login",
-                                 on: LoginAgent.startsAtLogin(HostAgent.label),
-                                 #selector(doToggleHubLogin), self)
-            if LoginAgent.pinnedOn(HostAgent.label) {
-                hub.action = nil
-                hub.isEnabled = false
-                hub.toolTip = "Always on: this agent is set to be kept running, "
-                    + "so launchd starts it at login whatever this says. "
-                    + "Change it where the agent is installed from."
-            } else {
-                hub.toolTip = "Nothing to grant — a user LaunchAgent loads at "
-                    + "login on its own. Takes effect at the next login."
-            }
-            sub.addItem(hub)
-        }
-        if !HostAgent.appOwned && LoginAgent.exists(MenuBarAgent.label) {
-            let bar = Self.check("Start Menu Bar at Login",
-                                 on: LoginAgent.startsAtLogin(MenuBarAgent.label),
-                                 #selector(doToggleBarLogin), self)
-            bar.toolTip = "Off means the icon is gone until you launch the app "
-                + "again. The hub is unaffected either way."
-            sub.addItem(bar)
-        }
-
-        // ── Usage on Home ───────────────────────────────────────────────────
-        //
-        // This Mac's word on the client running on this Mac, and on nothing
-        // else: a phone is never handed the flag, and an adopted machine's
-        // answer belongs to its hub — which is why the leaves carry theirs on
-        // their own rows and this group speaks only for the machine the menu
-        // is running on.
-        if state.isUp, state.identity?.canManageDevices == true {
             sub.addItem(.separator())
-            let usage = Self.caption("Usage on Home (This Mac)")
-            usage.toolTip = "Whether the client on this Mac shows Home's Usage "
-                + "section — the headroom meters and the day's spend. "
-                + "Controlled by Client leaves it to that app's own setting."
-            sub.addItem(usage)
-            let policy = UsagePolicy.read(state.identity?.usageReporting)
-            for (index, option) in UsagePolicy.allCases.enumerated() {
-                let pick = Self.check(option.title, on: option == policy,
-                                      #selector(doSetOwnUsage), self)
-                pick.tag = index
-                pick.indentationLevel = 1
-                pick.setAccessibilityIdentifier("hub_usage_\(option.rawValue)")
-                sub.addItem(pick)
-            }
         }
-
-        // No agent label, state dir or token path on the menu. They are the
-        // answer to "why is this menu wrong", which is a question asked while
-        // something is broken and never while it works — and a permanent row
-        // that cannot be clicked reads as a control that died, not as a fact.
-        // Copy Diagnostics carries all three, untruncated, to the place they
-        // are actually usable.
-        sub.addItem(.separator())
-        let copy = Self.action("Copy Diagnostics", #selector(doCopyDiagnostics), self,
-                               symbol: "doc.on.clipboard")
-        copy.toolTip = "Everything on this submenu, plus what the host answered, "
-            + "as text. No token value is copied."
-        sub.addItem(copy)
-
+        let settings = Self.action("Settings…", #selector(doSettings), self,
+                                   symbol: "gearshape")
+        settings.setAccessibilityIdentifier("hub_settings")
+        sub.addItem(settings)
+        // One log per Hub service — host, updater, scheduler — and nothing else.
+        if FileManager.default.fileExists(atPath: HostAgent.logDirectory().path) {
+            sub.addItem(Self.action("Open Log Folder", #selector(doLogs), self,
+                                    symbol: "folder"))
+        }
         return sub
     }
 
@@ -2794,19 +2535,22 @@ final class StatusController: NSObject {
     }
 
     /// The paired-devices row: a count read at the top level, the roster opened
-    /// off it. Only where the host answered a token, since the list lives behind
-    /// it — and only when something is actually paired, because a row that can
-    /// only ever say "nobody" is furniture, and pairing a first one already
-    /// lives on the machine's controls.
+    /// off it, with pairing the next one as its first item — the verb sits on
+    /// the list it adds to. Only where the host answered a token, since the
+    /// list lives behind it, and only on a hub: a leaf owns no devices.
     private func devicesItem() -> NSMenuItem? {
         guard state.isUp, state.isProvisioned, !state.unauthorized,
               state.identity?.canManageDevices == true else { return nil }
         let active = DeviceMenu.active(state.devices, removed: removedDevices)
         let revoked = DeviceMenu.revoked(allDevices, deleted: deletedDevices)
-        guard !active.isEmpty || !revoked.isEmpty else { return nil }
 
         let sub = NSMenu()
         sub.autoenablesItems = false
+        if HostControl.hostBinary != nil {
+            sub.addItem(Self.action("Pair a Device…", #selector(doPair), self,
+                                    symbol: "plus.circle"))
+            if !active.isEmpty || !revoked.isEmpty { sub.addItem(.separator()) }
+        }
 
         for device in active {
             let row = NSMenuItem(title: device.name, action: nil, keyEquivalent: "")
@@ -2852,6 +2596,7 @@ final class StatusController: NSObject {
             }
         }
 
+        guard !sub.items.isEmpty else { return nil }
         let title = "\(active.count) " + (active.count == 1 ? "Device" : "Devices")
         let item = Self.opener(title, symbol: "laptopcomputer.and.iphone", submenu: sub)
         return item
@@ -2860,10 +2605,8 @@ final class StatusController: NSObject {
     /// The adopted-machines row: the Macs this hub joined to its own mesh, and
     /// whether a device paired here actually gets into each one.
     ///
-    /// Hidden entirely on a hub that adopted nobody, which is most of them —
-    /// the same rule the roster follows, and for the same reason: a permanent
-    /// row that can only ever say "none" is furniture, and adopting a first one
-    /// lives on the machine's controls with the other verbs.
+    /// Adopting the next one is its first item, the way pairing heads the
+    /// device roster.
     ///
     /// The second line is the access, not the address, because the access is
     /// the thing that is ever wrong. A machine adopted by a build that predates
@@ -2874,10 +2617,18 @@ final class StatusController: NSObject {
         guard state.isUp, state.isProvisioned, !state.unauthorized,
               state.identity?.canManageDevices == true else { return nil }
         let machines = state.leaves.sorted { $0.title < $1.title }
-        guard !machines.isEmpty else { return nil }
 
         let sub = NSMenu()
         sub.autoenablesItems = false
+        if HostControl.hostBinary != nil {
+            let adopt = Self.action("Adopt a Mac…", #selector(doAdopt), self,
+                                    symbol: "plus.rectangle.on.rectangle")
+            adopt.toolTip = "Join another Mac to this hub's mesh. Every "
+                + "device already paired here gets into it without a "
+                + "second code."
+            sub.addItem(adopt)
+            if !machines.isEmpty { sub.addItem(.separator()) }
+        }
 
         for machine in machines {
             let row = NSMenuItem(title: machine.title, action: nil, keyEquivalent: "")
@@ -2934,6 +2685,7 @@ final class StatusController: NSObject {
             sub.addItem(row)
         }
 
+        guard !sub.items.isEmpty else { return nil }
         let title = "\(machines.count) "
             + (machines.count == 1 ? "Managed Mac" : "Managed Macs")
         let item = Self.opener(title, symbol: "point.3.connected.trianglepath.dotted", submenu: sub)
@@ -3301,22 +3053,6 @@ final class StatusController: NSObject {
               sender.tag >= 0, sender.tag < UsagePolicy.allCases.count else { return }
         probe.leafUsage(hostKey: machine.key, state: UsagePolicy.allCases[sender.tag],
                         token: token) { [weak self] ok, detail in
-            if !ok {
-                let alert = NSAlert()
-                alert.messageText = "Could Not Set Usage Reporting"
-                alert.informativeText = detail
-                alert.runModal()
-            }
-            self?.refresh()
-        }
-    }
-
-    @objc private func doSetOwnUsage(_ sender: NSMenuItem) {
-        guard state.identity?.canManageDevices == true,
-              let token = HostAgent.token(),
-              sender.tag >= 0, sender.tag < UsagePolicy.allCases.count else { return }
-        probe.ownUsage(state: UsagePolicy.allCases[sender.tag], token: token) {
-            [weak self] ok, detail in
             if !ok {
                 let alert = NSAlert()
                 alert.messageText = "Could Not Set Usage Reporting"
@@ -3747,92 +3483,6 @@ final class StatusController: NSObject {
         refresh()
     }
 
-    /// Leave the parent hub. Confirmed first, then run off the main thread.
-    ///
-    /// Off it because the steps talk to the parent, and the parent is
-    /// occasionally the thing that went away — two calls that each wait out a
-    /// timeout would freeze the menu bar for half a minute, which is this app
-    /// looking like the casualty of its own button.
-    @objc private func doDetach() {
-        guard let binary = HostControl.hostBinary else { return }
-        let mode = state.identity?.mode
-        let named = mode?.parentHost ?? "the parent hub"
-        let url = mode?.parent ?? ""
-        NSApp.activate(ignoringOtherApps: true)
-
-        let ask = NSAlert()
-        ask.alertStyle = .critical
-        ask.messageText = "Detach from \(named)?"
-        ask.informativeText = "This Mac stops being administered from "
-            + "\(url.isEmpty ? named : url). The grants it issued are revoked, "
-            + "so nothing there can mint credentials here; that hub is asked to "
-            + "drop this machine from its grid; and the leaf tunnel comes down, "
-            + "so this Mac leaves the mesh.\n\nDevices paired directly to this "
-            + "Mac keep working. Rejoining needs a fresh code from that hub."
-        ask.addButton(withTitle: "Detach")
-        ask.addButton(withTitle: "Cancel")
-        guard ask.runModal() == .alertFirstButtonReturn else { return }
-
-        let panel = Self.workingPanel("Detaching from \(named)…")
-        DispatchQueue.global(qos: .userInitiated).async {
-            let result = HostControl.run(binary, ["detach", "--json"])
-            DispatchQueue.main.async { [weak self] in
-                panel.close()
-                self?.showDetachOutcome(result)
-                self?.refresh()
-            }
-        }
-    }
-
-    /// Every step detach reported, in its own words, and what to do about the
-    /// half this app cannot perform.
-    ///
-    /// The tunnel lives under `root` — two LaunchDaemons and a `/etc/wireguard`
-    /// conf — and this app runs as the user, with no terminal to put a password
-    /// into. So that half can fail while everything else succeeded, and the
-    /// result is a machine that revoked its grants and is still on the mesh.
-    /// Saying "detached" there would be the menu lying about the one state that
-    /// matters; instead it says which half did not happen and hands over the
-    /// command that finishes it.
-    private func showDetachOutcome(_ result: (out: String, code: Int32)) {
-        let alert = NSAlert()
-        guard let outcome = DetachOutcome(json: result.out) else {
-            alert.alertStyle = .warning
-            alert.messageText = "Detach did not report an outcome"
-            alert.informativeText = result.out
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            NSApp.activate(ignoringOtherApps: true)
-            alert.runModal()
-            return
-        }
-
-        let finished = outcome.detached && !outcome.isManaged
-        alert.alertStyle = finished ? .informational : .warning
-        alert.messageText = finished ? "Detached" : "Partly detached"
-        var body = outcome.report
-        if !finished {
-            body += "\n\nThe tunnel is installed under root and this app runs "
-                + "as you, with nowhere to put a password. Finish in a "
-                + "terminal:"
-        }
-        alert.informativeText = body
-        if !finished {
-            alert.accessoryView = Self.commandAccessory("sudo jstack-host detach")
-            alert.addButton(withTitle: "Copy Command")
-            alert.addButton(withTitle: "Done")
-            NSApp.activate(ignoringOtherApps: true)
-            if alert.runModal() == .alertFirstButtonReturn {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString("sudo jstack-host detach",
-                                               forType: .string)
-            }
-            return
-        }
-        alert.addButton(withTitle: "Done")
-        NSApp.activate(ignoringOtherApps: true)
-        alert.runModal()
-    }
-
     /// Drop an adopted machine from the grid, after asking.
     ///
     /// The confirmation draws the line the route itself draws: forgetting takes
@@ -3885,134 +3535,6 @@ final class StatusController: NSObject {
         return field
     }
 
-    /// A window that says something is happening and offers nothing to answer.
-    ///
-    /// Not an NSAlert: `runModal()` blocks the main thread, and the whole point
-    /// here is that the work is on another one — a modal loop would be a
-    /// spinner turning over an application that has stopped. Not cancellable
-    /// either, because a Cancel that cannot recall a `launchctl bootout`
-    /// already in flight is the one control in this menu that would lie.
-    private static func workingPanel(_ text: String) -> NSWindow {
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 340, height: 92),
-                            styleMask: [.titled], backing: .buffered, defer: false)
-        panel.title = "jStack"
-        let spinner = NSProgressIndicator(
-            frame: NSRect(x: 22, y: 36, width: 20, height: 20))
-        spinner.style = .spinning
-        spinner.startAnimation(nil)
-        let label = NSTextField(labelWithString: text)
-        label.frame = NSRect(x: 54, y: 34, width: 264, height: 24)
-        panel.contentView?.addSubview(spinner)
-        panel.contentView?.addSubview(label)
-        panel.center()
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
-        return panel
-    }
-
-    // MARK: Settings
-
-    @objc private func doOpenLoginSettings() {
-        SMAppService.openSystemSettingsLoginItems()
-    }
-
-    @objc private func doToggleHubLogin(_ sender: NSMenuItem) {
-        setLogin(HostAgent.label, sender, what: "the hub")
-    }
-
-    @objc private func doToggleBarLogin(_ sender: NSMenuItem) {
-        setLogin(MenuBarAgent.label, sender, what: "the menu bar app")
-    }
-
-    /// Flip the flag, and say so if the file would not take it.
-    ///
-    /// Silence on failure is the thing to avoid here: the row would redraw from
-    /// the plist on the next open and simply appear not to have been clicked,
-    /// which is indistinguishable from a menu that ignores you.
-    private func setLogin(_ label: String, _ sender: NSMenuItem, what: String) {
-        guard !HostAgent.appOwned else {
-            doOpenLoginSettings()
-            return
-        }
-        let wanted = sender.state != .on
-        guard LoginAgent.setStartsAtLogin(label, wanted) else {
-            let failed = NSAlert()
-            failed.alertStyle = .warning
-            failed.messageText = "Could not change the login setting"
-            failed.informativeText = "\(LoginAgent.plistURL(label).path) could "
-                + "not be written."
-            NSApp.activate(ignoringOtherApps: true)
-            failed.runModal()
-            return
-        }
-        sender.state = wanted ? .on : .off
-        // Said out loud once, because a checkbox that ticks instantly reads as
-        // something that happened instantly — and this one has not happened yet.
-        if !wanted {
-            let note = NSAlert()
-            note.messageText = "\(what.prefix(1).uppercased())\(what.dropFirst()) "
-                + "will not start at the next login"
-            note.informativeText = "Whatever is running now keeps running. "
-                + "Turn it back on here."
-            NSApp.activate(ignoringOtherApps: true)
-            note.runModal()
-        }
-    }
-
-    /// The state of everything, as text, for pasting into a message when
-    /// something is wrong. The token's *path* and whether it reads — never its
-    /// value: this goes to a clipboard, and a clipboard goes anywhere.
-    @objc private func doCopyDiagnostics() {
-        var lines = [
-            "jStack host — \(Machine.name)",
-            "hub        \(state.headline)",
-            "agent      \(HostAgent.label)"
-                + (HostAgent.isInstalled ? "" : " (no plist)"),
-            HostAgent.appOwned
-                ? "login      hub \(SignedLogin.description(SignedLogin.status(HostAgent.serviceRole))), menu bar \(SignedLogin.description(SignedLogin.status("menu")))"
-                : "login      hub \(HostAgent.isInstalled && LoginAgent.startsAtLogin(HostAgent.label) ? "yes" : "no"), menu bar \(LoginAgent.startsAtLogin(MenuBarAgent.label) ? "yes" : "no")",
-            "bind       \(HostAgent.bind() ?? "not recorded")",
-            "state      \(HostAgent.stateDir().path)",
-            "token      \(HostAgent.tokenPath().path)"
-                + (HostAgent.token() == nil ? " — missing" : " — present"),
-        ]
-        if let identity = state.identity {
-            lines.append("host_id    \(identity.hostId ?? "?")")
-            lines.append("profile    \(identity.profile ?? "?")")
-        }
-        if let mode = state.identity?.mode {
-            // The parent's URL in full here, where the menu row shows only the
-            // host: this is the paste that goes to whoever is working out why
-            // the two machines cannot see each other, and the port is half of
-            // that answer. It is the address, never the credential — the token
-            // beside it in `parent.json` is not on this route at all.
-            lines.append("mode       \(mode.mode ?? "?")"
-                         + (mode.live == false ? " (tunnel down)" : "")
-                         + (mode.parent.map { $0.isEmpty ? "" : " ← \($0)" } ?? ""))
-        }
-        lines.append("usage      "
-                     + "\(UsagePolicy.read(state.identity?.usageReporting).rawValue)"
-                     + " (Home's Usage section, this Mac's client)")
-        lines.append("sessions   \(state.sessions.count) "
-                     + "(\(state.liveCount) working)")
-        if !state.leaves.isEmpty {
-            let delegated = state.leaves.filter { $0.delegated == true }.count
-            lines.append("machines   \(state.leaves.count) adopted "
-                         + "(\(delegated) delegated)")
-            for machine in state.leaves.sorted(by: { $0.title < $1.title }) {
-                let access = machine.delegated.map { $0 ? "delegated" : "pair-by-hand" }
-                    ?? "access not reported"
-                lines.append("           \(machine.title) — "
-                             + "\(machine.route.isEmpty ? "no address" : machine.route)"
-                             + " — \(access)"
-                             + " — usage \(UsagePolicy.read(machine.usageReporting).rawValue)")
-            }
-        }
-        if state.unauthorized { lines.append("auth       token refused by the hub") }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
-    }
-
     private func after(_ seconds: TimeInterval, _ block: @escaping () -> Void) {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: block)
     }
@@ -4048,7 +3570,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         if urls.contains(where: { $0.scheme == "jstack" && $0.host == "updates" }) {
-            controller?.showUpdates()
+            controller?.showSettings()
         }
     }
 }
