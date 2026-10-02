@@ -5,6 +5,7 @@ import os
 import plistlib
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -234,6 +235,72 @@ def test_worker_prioritizes_history_and_removes_itself_last():
     assert supervisor.rstrip().endswith("/bin/launchctl bootout system/live.jstack.sos")
     assert "rm -rf " + shlex.quote(str(home / "Stack")) + "\n" not in script
     assert "[ \"$failed\" = 0 ] || exit 1" in script
+
+
+@pytest.mark.parametrize("status", [0, 1, 2, 3, 127])
+@pytest.mark.parametrize("stop", [False, True])
+@pytest.mark.parametrize("account_only", [False, True])
+def test_process_observation_errors_never_mean_absence(tmp_path, status, stop, account_only):
+    probe = tmp_path / "probe"
+    signal = tmp_path / "signal"
+    observed = tmp_path / "observed"
+    signalled = tmp_path / "signalled"
+    probe.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shlex.quote(str(observed))
+                     + f"\nexit {status}\n")
+    signal.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shlex.quote(str(signalled))
+                      + "\nexit 3\n")
+    probe.chmod(0o700)
+    signal.chmod(0o700)
+    uid = os.getuid() if account_only else None
+    commands = "\n".join(sos.process_commands(("sos-fixture",), uid=uid, stop=stop))
+    commands = commands.replace("/usr/bin/pgrep", shlex.quote(str(probe)))
+    commands = commands.replace("/usr/bin/pkill", shlex.quote(str(signal)))
+    commands = commands.replace("/bin/sleep 0.1", "/usr/bin/true")
+    script = 'set -u\nfailed=0\nfail() { echo "$*"; failed=1; }\n' + commands + '\nexit "$failed"\n'
+    result = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=5)
+    assert result.returncode == (0 if status == 1 else 1), result
+    if status == 0:
+        assert "process remains: sos-fixture" in result.stdout
+    elif status != 1:
+        assert "cannot observe process: sos-fixture" in result.stdout
+    scope = f"-u {uid} " if account_only else ""
+    probes = observed.read_text().splitlines()
+    assert set(probes) == {scope + "-x sos-fixture"}
+    assert len(probes) == (50 if status == 0 and stop else 1)
+    assert signalled.exists() == stop
+    if stop:
+        assert signalled.read_text().strip() == "-KILL " + scope + "-x sos-fixture"
+
+
+def test_process_stop_preserves_an_unrelated_name_and_verifies_exit(tmp_path):
+    name = "sos" + uuid.uuid4().hex[:10]
+    processes = []
+    try:
+        for suffix in ("", "next"):
+            executable = tmp_path / (name + suffix)
+            shutil.copyfile("/bin/sleep", executable)
+            executable.chmod(0o700)
+            processes.append(subprocess.Popen([str(executable), "60"]))
+        for process in processes:
+            assert process.poll() is None
+        deadline = time.monotonic() + 5
+        while subprocess.run(["/usr/bin/pgrep", "-u", str(os.getuid()), "-x", name],
+                             capture_output=True).returncode != 0:
+            assert time.monotonic() < deadline, "fixture process was not visible"
+            time.sleep(.05)
+        script = "\n".join(['set -u', 'failed=0', 'fail() { echo "$*"; failed=1; }',
+                             *sos.process_commands((name,), uid=os.getuid(), stop=True),
+                             *sos.process_commands((name,), uid=os.getuid(), stop=False),
+                             'exit "$failed"'])
+        result = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result
+        assert processes[0].wait(timeout=5) == -9
+        assert processes[1].poll() is None
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
 
 
 def test_user_cleanup_can_read_cwd_after_leaving_root_only_worker(tmp_path):

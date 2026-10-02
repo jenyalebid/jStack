@@ -331,6 +331,26 @@ def confirm(action: str, *, out=sys.stdout) -> bool:
     return answer == phrase
 
 
+def process_commands(names: tuple[str, ...], *, uid: int | None, stop: bool) -> list[str]:
+    scope = [] if uid is None else ["-u", str(uid)]
+    lines = []
+    for name in names:
+        if stop:
+            lines.append(shlex.join(["/usr/bin/pkill", "-KILL", *scope, "-x", name])
+                         + " 2>/dev/null || :")
+        lines += ["process_attempt=0", "while :; do",
+                  "  " + shlex.join(["/usr/bin/pgrep", *scope, "-x", name]) + " >/dev/null; process_status=$?",
+                  '  case "$process_status" in',
+                  "    1) break ;;",
+                  "    0) " + ("process_attempt=$((process_attempt + 1)); "
+                              'if test "$process_attempt" -lt 50; then /bin/sleep 0.1; continue; fi; '
+                              if stop else "")
+                  + "fail " + shlex.quote("process remains: " + name) + "; break ;;",
+                  "    *) fail " + shlex.quote("cannot observe process: " + name) + "; break ;;",
+                  "  esac", "done"]
+    return lines
+
+
 def worker(plan: dict) -> str:
     q = shlex.quote
     home, uid = plan["home"], plan["uid"]
@@ -354,9 +374,9 @@ def worker(plan: dict) -> str:
         lines += [f"/bin/launchctl disable {q(target)} || fail {q('disable: ' + target)}",
                   f"if /bin/launchctl print {q(target)} >/dev/null 2>&1; then /bin/launchctl bootout {q(target)} || fail {q('stop: ' + target)}; fi"]
     # Exact process names, never a match against prompt/command text.
-    for name in ("claude", "codex", "Claude", "Codex", "jRemote"):
-        lines += [f"/usr/bin/pkill -KILL -u {uid} -x {q(name)} 2>/dev/null || :",
-                  f"if /usr/bin/pgrep -u {uid} -x {q(name)} >/dev/null; then fail {q('writer: ' + name)}; fi"]
+    providers = ("claude", "codex", "Claude", "Codex", "jRemote")
+    remote_desktop = ("JumpConnect", "Jump Desktop Connect", "Jump Desktop", "JumpDesktop")
+    lines += process_commands(providers, uid=uid, stop=True)
     app = Path(plan.get("app", "/Applications/jStack Hub.app"))
     # sudo -H changes HOME, not cwd. The worker's 0700 directory is unreadable
     # to this user; CLI audit metadata calls getcwd before cleanup can begin.
@@ -416,8 +436,7 @@ def worker(plan: dict) -> str:
                 if late_service(service["label"]):
                     lines += [f"/bin/launchctl disable {q(target)} || fail {q('disable: ' + target)}",
                               f"if /bin/launchctl print {q(target)} >/dev/null 2>&1; then /bin/launchctl bootout {q(target)} || fail {q('stop: ' + target)}; fi"]
-            for name in ("JumpConnect", "Jump Desktop Connect", "Jump Desktop", "JumpDesktop"):
-                lines.append(f"/usr/bin/pkill -KILL -x {q(name)} 2>/dev/null || :")
+            lines += process_commands(remote_desktop, uid=None, stop=True)
             lines.append('[ "$failed" = 0 ] || exit 1')
         lines += ["remove " + q(path) for path in plan[phase]]
         lines.append('[ "$failed" = 0 ] || exit 1')
@@ -425,6 +444,8 @@ def worker(plan: dict) -> str:
     lines += [f"/bin/rmdir {q(plan['root'])} 2>/dev/null || :",
               'phase verify', *[f'test ! -e {q(path)} && test ! -L {q(path)} || fail {q("remains: " + path)}'
                                 for phase in ("history", "data", "apps") for path in plan[phase]],
+              *process_commands(providers, uid=uid, stop=False),
+              *process_commands(remote_desktop, uid=None, stop=False),
               *keychain_commands(plan, user, delete=False),
               *([shlex.join([str(WORK / "Erase"), "--verify-preferences"])
                  + ' || { fail "preferences remain or cannot be inspected"; exit 1; }']
