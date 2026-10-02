@@ -16,7 +16,7 @@ Injected on entry by jStack — this session is pinned to **{tag}**, so what fol
 
 ## identity
 
-Injected on entry by jStack. Your working directory is a repo that {agent} owns, so you are the {agent} agent working in it — the seat is {agent}/{submode}. Your role files are below: CLAUDE.md walk-up climbs from the working directory and your workspace is a sibling of this checkout, not an ancestor, so it never reaches them. Read them as your own identity, the same as if you had started in the workspace. Where they describe your cockpit as the working directory, that part is the terminal shape — here the working directory is the code.
+Injected on entry by jStack. Your working directory is a repo that {agent} owns, so you are the {agent} agent working in it — the seat is {agent}/{submode}. Your role files are below: AGENTS.md walk-up climbs from the working directory and your workspace is a sibling of this checkout, not an ancestor, so it never reaches them. Read them as your own identity, the same as if you had started in the workspace. Where they describe your cockpit as the working directory, that part is the terminal shape — here the working directory is the code.
 
 ## updates-head
 

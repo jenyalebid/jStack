@@ -8,7 +8,7 @@ argument-hint: "<session-id>"
 
 Session ID is in `$ARGUMENTS`. The timeline entry is the deliverable; thread extraction and doc accuracy are hygiene and never substitute for it.
 
-Output contract, parsed by the engine: `${CLAUDE_PLUGIN_ROOT}/skills/post-session-review/output.md`. One pass, no sub-spawns; read the JSONL once at Phase A and reuse it. The agent's walk-up CLAUDE.md carries glue applying after this procedure — read it.
+Output contract, parsed by the engine: `${CLAUDE_PLUGIN_ROOT}/skills/post-session-review/output.md`. One pass, no sub-spawns; read the JSONL once at Phase A and reuse it. The agent's walk-up AGENTS.md carries glue applying after this procedure — read it.
 
 ## Setup
 

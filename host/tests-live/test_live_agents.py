@@ -42,7 +42,7 @@ def test_the_roster_names_agents_this_host_can_open(api, agent_id):
 
 def test_an_agents_tree_opens_at_its_root(api, agent_id):
     """The shortcut picker's walk. `is_seat` is the only thing that makes a
-    row pickable — a card minted on a directory with no CLAUDE.md spawns a
+    row pickable — a card minted on a directory with no AGENTS.md spawns a
     session with no identity, rules or timeline — so the flag must be
     present, not merely the names."""
     tree = api.ok("GET", "/agents/{agent_id}/tree", fmt={"agent_id": agent_id})

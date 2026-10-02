@@ -115,7 +115,7 @@ def test_the_users_own_status_line_is_never_taken(tmp_path):
     mine = {"statusLine": {"type": "command", "command": "~/bin/my-prompt"}}
     path.write_text(json.dumps(mine))
     note = claude_settings.install(path=path, checkout=Path("/opt/jstack"), state_dir="")
-    assert json.loads(path.read_text()) == mine
+    assert json.loads(path.read_text())["statusLine"] == mine["statusLine"]
     assert "left your own status line alone" in note
     assert claude_settings.statusline_state(path)[0] is False
 
@@ -126,7 +126,8 @@ def test_an_already_wired_machine_is_not_rewritten(tmp_path):
     before = path.stat().st_mtime_ns
     note = claude_settings.install(path=path, checkout=Path("/opt/jstack"), state_dir="")
     assert path.stat().st_mtime_ns == before
-    assert note == "status line already samples the allowance"
+    assert note == ("status line already samples the allowance; "
+                    "AGENTS.md loads beside CLAUDE.md")
 
 
 def test_our_own_entry_is_repointed_when_the_install_moves(tmp_path):
@@ -161,6 +162,25 @@ def test_the_default_state_dir_is_not_carried(monkeypatch):
     monkeypatch.setenv("JREMOTE_STATE_DIR", str(hostenv.profile().state_dir()))
     assert claude_settings.statusline_command(Path("/opt/jstack")) == \
         f"/opt/jstack/{claude_settings.SAMPLER}"
+
+
+def test_agents_md_loads_beside_claude_md(tmp_path):
+    """A seat is an AGENTS.md walk-up; the loader's default drops all of it
+    the moment any CLAUDE.md sits in the chain."""
+    path = tmp_path / "settings.json"
+    claude_settings.install(path=path, checkout=Path("/opt/jstack"), state_dir="")
+    got = json.loads(path.read_text())["pluginConfigs"]["agents-md@builtin"]
+    assert got == {"options": {"instructionFiles": "claude-md-and-agents-md"}}
+
+
+def test_the_users_own_instruction_mode_is_never_taken(tmp_path):
+    path = tmp_path / "settings.json"
+    mine = {"pluginConfigs": {"agents-md@builtin": {
+        "options": {"instructionFiles": "claude-md"}}, "other@x": {"options": {"a": 1}}}}
+    path.write_text(json.dumps(mine))
+    note = claude_settings.install(path=path, checkout=Path("/opt/jstack"), state_dir="")
+    assert json.loads(path.read_text())["pluginConfigs"] == mine["pluginConfigs"]
+    assert "left your instructionFiles='claude-md' alone" in note
 
 
 def test_check_writes_nothing(tmp_path):

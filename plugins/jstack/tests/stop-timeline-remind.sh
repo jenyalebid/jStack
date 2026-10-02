@@ -32,8 +32,8 @@ HOOK, TMP = sys.argv[1], Path(sys.argv[2])
 agents = TMP / "Agents"
 seat = agents / "Gamma/social"
 seat.mkdir(parents=True)
-(agents / "Gamma/CLAUDE.md").write_text("# Gamma")
-(seat / "CLAUDE.md").write_text("# Social")
+(agents / "Gamma/AGENTS.md").write_text("# Gamma")
+(seat / "AGENTS.md").write_text("# Social")
 cfg = TMP / "review.json"
 cfg.write_text(json.dumps({"agent_root": str(agents)}))
 os.environ["JSTACK_REVIEW_CONFIG"] = str(cfg)

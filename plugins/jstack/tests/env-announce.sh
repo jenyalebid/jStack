@@ -56,7 +56,7 @@ export JSTACK_CACHE_ROOT="$CACHE"
 # seat without asking the machine what agents it has.
 AGENTS="$TMP/agents"
 mkdir -p "$AGENTS/probeagent/chat"
-: > "$AGENTS/probeagent/CLAUDE.md"
+: > "$AGENTS/probeagent/AGENTS.md"
 printf '{"agent_root": "%s"}' "$AGENTS" > "$TMP/review.json"
 export JSTACK_REVIEW_CONFIG="$TMP/review.json"
 # Far above anything this test writes: re-injection on transcript growth is the

@@ -12,7 +12,7 @@ Arguments, all optional. `--stage`, first if given, opens the session with the d
 
 ## 1. Write the doc
 
-Actionable state, not history. Specific: file paths, function names, line numbers, branch names, exact state. Skip what the next session derives from CLAUDE.md or the code. Under 200 lines — it rides in system-prompt space.
+Actionable state, not history. Specific: file paths, function names, line numbers, branch names, exact state. Skip what the next session derives from AGENTS.md or the code. Under 200 lines — it rides in system-prompt space.
 
 Sections: **Current Work** (the immediate task) · **In Progress** (partial implementations, uncommitted changes, pending decisions) · **Still To Do** · **Key Decisions** the next session must respect · **Context** — blockers and gotchas.
 

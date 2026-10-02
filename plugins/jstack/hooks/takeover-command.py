@@ -116,7 +116,7 @@ def source_home(cwd: str) -> Path:
     opened a fresh session in `<seat>/pad` — a directory that is
     deliberately not a seat anywhere in this module (`_RESERVED_DIRS`), so the
     new session had no seat to be addressed by: the host answered "unknown
-    session" to every pad-addressed route on it, and it read whatever CLAUDE.md
+    session" to every pad-addressed route on it, and it read whatever AGENTS.md
     the checkout in that pad happened to carry instead of the seat's own.
 
     `enclosing_seat` is the walk-up that already exists for this, and the

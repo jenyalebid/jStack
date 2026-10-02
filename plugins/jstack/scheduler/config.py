@@ -196,7 +196,7 @@ BUILTIN_INSTALL = {
     "agent_root": None,
     "agent_registry": None,
     # Sub-seat redirection: an agent id ending in `suffix` runs in the named
-    # subdir when that subdir has its own CLAUDE.md.
+    # subdir when that subdir has its own AGENTS.md.
     "seat_rules": [],
 }
 

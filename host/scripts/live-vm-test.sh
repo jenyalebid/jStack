@@ -176,14 +176,14 @@ ln -sf ~/jStack/host/.venv/bin/jstack-host ~/.local/bin/jstack-host
 # subject, so the suite would skip the largest half of the surface and call it
 # covered.
 #
-# So the guest gets what a real install gets: a seat directory with a CLAUDE.md
+# So the guest gets what a real install gets: a seat directory with a AGENTS.md
 # in it. Made here rather than in a fixture because it is machine setup, not
 # behaviour under test — and the suite asserts the host *finds* it, which is
 # the part that can break.
 say "seeding an agent tree in the guest"
 vssh 'mkdir -p ~/Agents/testbench/chat/pad ~/Agents/testbench/pad
-printf "# Testbench\n\nA seat that exists so the live suite has a subject.\n" > ~/Agents/testbench/CLAUDE.md
-printf "# Testbench · chat\n\nThe seat the live suite opens sessions in.\n" > ~/Agents/testbench/chat/CLAUDE.md
+printf "# Testbench\n\nA seat that exists so the live suite has a subject.\n" > ~/Agents/testbench/AGENTS.md
+printf "# Testbench · chat\n\nThe seat the live suite opens sessions in.\n" > ~/Agents/testbench/chat/AGENTS.md
 printf "seeded by live-vm-test.sh\n" > ~/Agents/testbench/pad/seed.txt' \
     || die "could not seed an agent tree in the guest"
 

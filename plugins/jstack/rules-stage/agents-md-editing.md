@@ -1,25 +1,25 @@
 ---
 paths:
-  - "**/CLAUDE.md"
+  - "**/AGENTS.md"
   - "**/rules/*.md"
   - "**/commands/*.md"
   - "**/SKILL.md"
 ---
 
-# Editing CLAUDE.md and instruction docs
+# Editing AGENTS.md and instruction docs
 
-CLAUDE.md files load on every walk-up. Every line you add is paid for in context on every session that touches the cwd. Before adding content, find where it already lives.
+AGENTS.md files load on every walk-up. Every line you add is paid for in context on every session that touches the cwd. Before adding content, find where it already lives.
 
 Tag the session — `log_event tag set md` — so instruction-doc work reads back as one thread across every seat that touched it.
 
 ## One canonical home per procedure
 
-Process lives in exactly one place. CLAUDE.md sites point to it; they do not restate it. Concretely:
+Process lives in exactly one place. AGENTS.md sites point to it; they do not restate it. Concretely:
 
-- Agent autonomous procedure (cron-fired, has a defined contract) → agent-scoped skill at `~/Agents/{agent}/.claude/commands/{skill}.md` (single file: description + Inputs / Outputs / Failure modes / Steps / Edge cases). Cron payload = direct `/skill_name` slash command. Sub-mode CLAUDE.md = identity + on-entry + cron schedule + hard rules only.
-- Path-scoped technical pattern → `~/.claude/rules/*.md` with `paths:`. CLAUDE.md does not duplicate.
+- Agent autonomous procedure (cron-fired, has a defined contract) → agent-scoped skill at `~/Agents/{agent}/.claude/commands/{skill}.md` (single file: description + Inputs / Outputs / Failure modes / Steps / Edge cases). Cron payload = direct `/skill_name` slash command. Sub-mode AGENTS.md = identity + on-entry + cron schedule + hard rules only.
+- Path-scoped technical pattern → `~/.claude/rules/*.md` with `paths:`. AGENTS.md does not duplicate.
 - Repeatable workflow invoked from anywhere → global slash command at `~/.claude/commands/{name}.md`.
-- Project architecture → that project's own CLAUDE.md. Agent CLAUDE.md does not restate.
+- Project architecture → that project's own AGENTS.md. Agent AGENTS.md does not restate.
 - Owner preference that governs how work is done → the layer of the walk-up that owns it, stated once as law.
 - A platform truth or failure mode that cost real time → an on-demand reference file, reached by name when the symptom appears.
 
@@ -77,7 +77,7 @@ Reread the final file top to bottom before moving on: does any line carry proven
 
 ## Bloat ceiling
 
-Anthropic spec — each CLAUDE.md ≤ 200 lines; walk-up total (org root + agent root + sub-mode) ≤ 400. A skill's SKILL.md stays under 1,000 tokens (~4,000 chars) and aims well below it; the file is read whole on every invocation, so it carries the gate and the exact command, and anything a reader needs only sometimes goes in a sibling reference file the skill names. Going over isn't "needs trimming later" — it's a failed edit. Trim now or pick a different destination.
+Anthropic spec — each AGENTS.md ≤ 200 lines; walk-up total (org root + agent root + sub-mode) ≤ 400. A skill's SKILL.md stays under 1,000 tokens (~4,000 chars) and aims well below it; the file is read whole on every invocation, so it carries the gate and the exact command, and anything a reader needs only sometimes goes in a sibling reference file the skill names. Going over isn't "needs trimming later" — it's a failed edit. Trim now or pick a different destination.
 
 What makes an instruction doc long is almost never the law; it is the same law stated three times at three strengths — the rule, then a table restating it, then a DO-NOT list restating it again. Say it once, at full force, in the place the reader hits first. A prohibition that only echoes a rule already stated above earns nothing and costs the reader's attention.
 

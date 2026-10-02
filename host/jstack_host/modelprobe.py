@@ -53,7 +53,7 @@ def _run(argv, timeout, cwd=None, runner=subprocess.run):
 def claude_latest(runner=subprocess.run, timeout=180) -> dict:
     """`{alias: model id}` for each family, from a real turn on that alias.
 
-    Run from an empty directory: a probe that inherits a project's CLAUDE.md
+    Run from an empty directory: a probe that inherits a project's AGENTS.md
     walk-up pays for context it does not read and fires that tree's hooks.
     """
     out = {}

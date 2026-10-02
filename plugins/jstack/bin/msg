@@ -96,14 +96,14 @@ except ImportError:
 
 
 def _is_seat(path: Path) -> bool:
-    """A seat is a directory holding a CLAUDE.md — the same evidence the
+    """A seat is a directory holding a AGENTS.md — the same evidence the
     injector and review engine use to recognize one.
 
     This is the gate, not a blocklist of storage dir names: `Alice/ideas`
     is a real seat and `Bob/pad` is not, and only the file on disk knows
     which is which. Addressing a dir no session ever boots in would file a
     message that could never be read — so it must fail at send time."""
-    return (path / "CLAUDE.md").is_file()
+    return any((path / _n).is_file() for _n in ("AGENTS.md", "CLAUDE.md"))
 
 
 def _seats_under(root: Path) -> list:
@@ -237,7 +237,7 @@ def _fail(msg: str, code: int = 2) -> "None":
 def _agent_dirs() -> dict:
     """lowercase agent name -> its workspace dir. root.agents() is the one
     definition of what an agent is — a dir under the agent root carrying a
-    CLAUDE.md itself or in a seat subdir; six places used to each hold their
+    AGENTS.md itself or in a seat subdir; six places used to each hold their
     own version of that rule and drift apart."""
     if _root is not None:
         cfg = _config()
@@ -247,7 +247,7 @@ def _agent_dirs() -> dict:
     out = {}
     try:
         for child in sorted(agent_root().iterdir()):
-            if child.is_dir() and (child / "CLAUDE.md").is_file():
+            if child.is_dir() and any((child / _n).is_file() for _n in ("AGENTS.md", "CLAUDE.md")):
                 out[child.name.lower()] = child
     except OSError:
         pass
@@ -350,7 +350,7 @@ def resolve_seat(spec: str, sender: "str|None" = None) -> tuple:
         if _is_seat(root / "chat"):
             submode = "chat"
         elif _is_seat(root):
-            # A bare agent — CLAUDE.md at the top, no chat/ dir — keeps its
+            # A bare agent — AGENTS.md at the top, no chat/ dir — keeps its
             # cockpit at the agent root itself. The injector already files a
             # session booted there as {agent}/chat, so that is the seat this
             # message addresses; {root}/chat would name a directory no
@@ -365,7 +365,7 @@ def resolve_seat(spec: str, sender: "str|None" = None) -> tuple:
         _fail(f"{spec!r}: {root} has no chat/ seat to address")
     seat_dir = root / submode
     if not _is_seat(seat_dir):
-        _fail(f"{spec!r}: {seat_dir} is not a seat (no CLAUDE.md) — no session "
+        _fail(f"{spec!r}: {seat_dir} is not a seat (no AGENTS.md) — no session "
               f"boots there, so a message would never be read. "
               f"Seats: {', '.join(_seats_under(root)) or '(none)'}")
     return base, submode, seat_dir
@@ -384,7 +384,7 @@ def _seat_of(path: "Path|None") -> "str|None":
         rel = path.resolve().relative_to(root.resolve())
     except (ValueError, OSError):
         return None
-    if not rel.parts or not (root / rel.parts[0] / "CLAUDE.md").is_file():
+    if not rel.parts or not any((root / rel.parts[0] / _n).is_file() for _n in ("AGENTS.md", "CLAUDE.md")):
         return None
     submode = "/".join(p.lower() for p in rel.parts[1:]) or "chat"
     return f"{rel.parts[0].lower()}/{submode}"

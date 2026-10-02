@@ -16,9 +16,9 @@ CLAUDE="$FIX/.claude"
 mkdir -p "$FIX/Agents/Alpha/chat" "$CLAUDE/rules" "$CLAUDE/jstack"
 
 # --- fixture walk-up chain -------------------------------------------------
-echo "# Org root law" > "$FIX/CLAUDE.md"
-echo "# Alpha identity" > "$FIX/Agents/Alpha/CLAUDE.md"
-echo "# Alpha chat seat" > "$FIX/Agents/Alpha/chat/CLAUDE.md"
+echo "# Org root law" > "$FIX/AGENTS.md"
+echo "# Alpha identity" > "$FIX/Agents/Alpha/AGENTS.md"
+echo "# Alpha chat seat" > "$FIX/Agents/Alpha/chat/AGENTS.md"
 
 # --- fixture rules: one unconditional, one anchored, one elsewhere ---------
 printf '# Always-on gates\nGate body.\n' > "$CLAUDE/rules/gates.md"
@@ -141,7 +141,7 @@ printf '# Reply procedure\nCommand body law. Arg=$1 Tail=$2 All=$ARGUMENTS\n' \
   > "$FIX/Agents/Alpha/.claude/commands/do-thing.md"
 # an HTML comment in a walk-up md — the harness strips these in flight
 printf '# Alpha chat seat\n\n<!-- template: something -->\nSeat law.\n' \
-  > "$FIX/Agents/Alpha/chat/CLAUDE.md"
+  > "$FIX/Agents/Alpha/chat/AGENTS.md"
 # an --append payload (what a spawner passes via --append-system-prompt)
 printf 'Append body law.\n' > "$TMP/append-law.md"
 # a captured tool-served blob
@@ -370,7 +370,7 @@ NR_HITS=$(echo "$OUT6" | grep -c "not renderable" || true)
 # with no identity rather than a preview with a hole in it.
 mkdir -p "$FIX/repos/Widget"
 git -C "$FIX/repos/Widget" init -q 2>/dev/null
-echo "# Widget repo docs" > "$FIX/repos/Widget/CLAUDE.md"
+echo "# Widget repo docs" > "$FIX/repos/Widget/AGENTS.md"
 cat > "$FIX/Agents/agents.json" <<EOF
 {"alpha": {"workspace": "$FIX/Agents/Alpha/chat", "repos": ["Widget"]}}
 EOF

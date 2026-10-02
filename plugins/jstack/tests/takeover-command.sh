@@ -44,7 +44,7 @@ trap 'rm -rf "$TMP"' EXIT
 AGENTS="$TMP/agents"
 mkdir -p "$AGENTS/Alpha/chat" "$AGENTS/Alpha/meta" "$AGENTS/Bravo"
 for d in "$AGENTS/Alpha" "$AGENTS/Alpha/chat" "$AGENTS/Alpha/meta" "$AGENTS/Bravo"; do
-  echo "# agent" > "$d/CLAUDE.md"
+  echo "# agent" > "$d/AGENTS.md"
 done
 export JSTACK_AGENTS_DIR="$AGENTS"
 
@@ -151,11 +151,11 @@ grep -q 'sort | uniq -c' "$BRIEF" \
 #     A session's cwd moves — `cd` into the seat's pad, into a checkout parked
 #     there, into a build tree — and the harness reports the new one from then
 #     on. Opening the takeover there is what 95e01508 was: a fresh session in
-#     the seat's own pad, reading the CLAUDE.md of whatever repo was sitting in
+#     the seat's own pad, reading the AGENTS.md of whatever repo was sitting in
 #     that pad, and invisible to every seat-addressed route on the host, which
 #     answered "unknown session" to its own live terminal.
 mkdir -p "$SEAT/pad/a-checkout"
-echo "# some checkout" > "$SEAT/pad/a-checkout/CLAUDE.md"
+echo "# some checkout" > "$SEAT/pad/a-checkout/AGENTS.md"
 run "/takeover" "$SRC" "$SEAT/pad/a-checkout"
 [[ $CODE == 2 && "$(opened_cwd)" == "$SEAT" ]] \
   && pass "a wandered cwd opens on its seat, not where the shell stood" \

@@ -7,7 +7,7 @@ argument-hint: "[dir] [--full] [pict flags]"
 # /jstack:pict — what a seat actually loads
 
 `bin/pict` renders everything a session spawned from a directory is injected with —
-globals, the CLAUDE.md walk-up, auto-memory, timeline injection, anchored path rules,
+globals, the AGENTS.md walk-up, auto-memory, timeline injection, anchored path rules,
 hook injectors — as one ordered document.
 
 The Codex hook selects `--engine codex`: native AGENTS instruction discovery,

@@ -706,9 +706,30 @@ fi
 # This one is only ever allowed to SKIP the question — if it is wrong and finds
 # nothing, step 4 finds the agents anyway and the answer goes unused. It can
 # never cause a workspace to be created.
+# A seat's instruction file is AGENTS.md — the one name both Claude Code and
+# Codex load natively. Installs from before that carry CLAUDE.md, which every
+# seat check below no longer counts, so a machine that updated without this
+# would find no agents at all. Renamed in place, only where no AGENTS.md sits
+# beside it; pads and git/ hold checkouts whose files are not ours.
+migrate_instruction_files() {
+    [ -d "$AGENT_ROOT" ] || return 0
+    local f d moved=0
+    while IFS= read -r f; do
+        d="$(dirname "$f")"
+        [ -e "$d/AGENTS.md" ] && continue
+        if [ "$DRY_RUN" = "1" ]; then would "rename $f to AGENTS.md"; continue; fi
+        mv "$f" "$d/AGENTS.md" && moved=$((moved+1))
+    done < <(find "$AGENT_ROOT" -mindepth 1 -maxdepth 4 \
+        \( -name pad -o -name git -o -name node_modules -o -name '.*' \) -prune \
+        -o -name CLAUDE.md -type f -print 2>/dev/null)
+    [ "$moved" -gt 0 ] && ok "$moved seat CLAUDE.md file(s) renamed to AGENTS.md"
+    return 0
+}
+migrate_instruction_files
+
 have_agents=0
 if [ -d "$AGENT_ROOT" ]; then
-    for candidate in "$AGENT_ROOT"/*/CLAUDE.md "$AGENT_ROOT"/*/*/CLAUDE.md; do
+    for candidate in "$AGENT_ROOT"/*/AGENTS.md "$AGENT_ROOT"/*/*/AGENTS.md; do
         [ -f "$candidate" ] && { have_agents=1; break; }
     done
 fi
@@ -716,7 +737,7 @@ fi
 if [ "$have_agents" = "1" ]; then
     ok "agents — $AGENT_ROOT already holds some, nothing to name"
 else
-    # Same read-back as the root: the name becomes a directory, a CLAUDE.md
+    # Same read-back as the root: the name becomes a directory, a AGENTS.md
     # and the seat every later session opens into, and none of that is easy to
     # rename afterwards.
     while [ -z "$AGENT_NAME" ]; do
@@ -902,7 +923,7 @@ fi
 # does not exist and the session-end engine reviews nothing — no errors anywhere.
 #
 # An agent is two things on disk, and this step makes both: the agent itself
-# (`<Name>/CLAUDE.md` — who it is) and a SEAT under it (`<Name>/chat/CLAUDE.md`
+# (`<Name>/AGENTS.md` — who it is) and a SEAT under it (`<Name>/chat/AGENTS.md`
 # — where a session actually opens). Shipping only the first is what this step
 # used to do, and a bare agent is a shape the rest of the stack can only
 # approximate: `board._chat_scoped_id` finds no `chat` sub-mode and falls back
@@ -918,16 +939,16 @@ step "Agent workspace"
 # here too (Claude Code walks up), this one is the room the work happens in.
 write_seat() {
     seat_dir="$1/$SEAT_NAME"; seat_agent="$2"
-    [ -f "$seat_dir/CLAUDE.md" ] && return 0
+    { [ -f "$seat_dir/AGENTS.md" ] || [ -f "$seat_dir/CLAUDE.md" ]; } && return 0
     run mkdir -p "$seat_dir"
     if [ "$DRY_RUN" = "1" ]; then
-        would "write $seat_dir/CLAUDE.md"
+        would "write $seat_dir/AGENTS.md"
         return 0
     fi
-    cat > "$seat_dir/CLAUDE.md" <<EOF
+    cat > "$seat_dir/AGENTS.md" <<EOF
 # $seat_agent · $SEAT_NAME
 
-The seat: where a session opens. The agent's own CLAUDE.md is one level up and
+The seat: where a session opens. The agent's own AGENTS.md is one level up and
 is read here too — that file says who $seat_agent is, this one says how the
 work runs in this seat.
 
@@ -939,11 +960,11 @@ Replace everything below.
 
 - (conventions a session in this seat follows)
 EOF
-    ok "created $seat_dir/CLAUDE.md"
+    ok "created $seat_dir/AGENTS.md"
 }
 
 # Asked of root.py rather than re-derived here: an agent is a directory with a
-# CLAUDE.md, or with one immediate subdirectory that has one, and a second
+# AGENTS.md, or with one immediate subdirectory that has one, and a second
 # opinion of that rule is how an installer ends up creating a workspace beside
 # three the tools can already see.
 existing=""
@@ -970,14 +991,14 @@ else
     # an empty name: "$AGENT_ROOT/" would take mkdir and the heredoc with it.
     AGENT_NAME="${AGENT_NAME:-Jarvis}"
     seat="$AGENT_ROOT/$AGENT_NAME"
-    if [ -f "$seat/CLAUDE.md" ]; then
-        ok "$seat/CLAUDE.md already exists"
+    if [ -f "$seat/AGENTS.md" ]; then
+        ok "$seat/AGENTS.md already exists"
     else
         run mkdir -p "$seat"
         if [ "$DRY_RUN" = "1" ]; then
-            would "write $seat/CLAUDE.md"
+            would "write $seat/AGENTS.md"
         else
-            cat > "$seat/CLAUDE.md" <<EOF
+            cat > "$seat/AGENTS.md" <<EOF
 # $AGENT_NAME
 
 Who this agent is, and what it owns. jStack reads this file's EXISTENCE to
@@ -994,7 +1015,7 @@ Replace everything below.
 
 - (conventions a session here should follow)
 EOF
-            ok "created $seat/CLAUDE.md"
+            ok "created $seat/AGENTS.md"
         fi
     fi
     write_seat "$seat" "$AGENT_NAME"

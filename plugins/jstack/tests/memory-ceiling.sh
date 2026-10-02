@@ -73,7 +73,7 @@ check("the reason states the ceiling and the actual count",
       f"{CEILING} lines" in reason and str(CEILING + 5) in reason)
 # A ceiling that only says no makes the next session try the same write again.
 check("the reason names where a rule belongs instead",
-      "CLAUDE.md" in reason and "~/.claude/rules/" in reason)
+      "AGENTS.md" in reason and "~/.claude/rules/" in reason)
 check("the reason names where a platform truth belongs", "~/Research/" in reason)
 check("the reason says why it is a tax", "every agent session" in reason)
 

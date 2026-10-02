@@ -50,7 +50,7 @@ def check(name, cond):
 agents = TMP / "Agents"
 for rel in ("Alpha", "Alpha/social", "Alpha/social/threads", "Gamma"):
     (agents / rel).mkdir(parents=True, exist_ok=True)
-    (agents / rel / "CLAUDE.md").write_text(f"# {rel}\n")
+    (agents / rel / "AGENTS.md").write_text(f"# {rel}\n")
 
 BASE = os.environ.copy()
 BASE.pop("JSTACK_SCRATCHPAD", None)
@@ -153,11 +153,11 @@ code, _, _ = run(agents / "Alpha/social/threads", scratchpad=sp)
 check("the deepest seat wins",
       sp.resolve() == (agents / "Alpha/social/threads/pad").resolve())
 
-# A throwaway checkout parked in a pad carries its own CLAUDE.md. The seat a
+# A throwaway checkout parked in a pad carries its own AGENTS.md. The seat a
 # session standing in one belongs to is the seat above the pad, not the checkout.
 parked = seat / "pad/some-checkout"
 parked.mkdir(parents=True, exist_ok=True)
-(parked / "CLAUDE.md").write_text("# a checkout\n")
+(parked / "AGENTS.md").write_text("# a checkout\n")
 sp = TMP / "harness/eight/scratchpad"
 code, _, _ = run(parked, scratchpad=sp)
 check("a checkout parked in a pad belongs to the seat above it",

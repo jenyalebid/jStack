@@ -68,7 +68,7 @@ export JSTACK_TASK_REPO="Acme/home" JSTACK_TASK_ASSIGNEE="acme-agent"
 SID="aaaa1111-2222-3333-4444-555566667777"
 SEAT_DIR="$HOME/Agents/Testa/chat"
 mkdir -p "$SEAT_DIR" "$HOME/.claude/projects/x"
-touch "$HOME/Agents/Testa/CLAUDE.md" "$SEAT_DIR/CLAUDE.md"
+touch "$HOME/Agents/Testa/AGENTS.md" "$SEAT_DIR/AGENTS.md"
 printf '{"cwd": "%s"}\n' "$SEAT_DIR" > "$HOME/.claude/projects/x/$SID.jsonl"
 
 reset() { rm -f "$FI_CALLS" "${FI_CALLS%.log}.body" "$GH_CALLS"; }

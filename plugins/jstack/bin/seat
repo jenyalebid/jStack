@@ -52,11 +52,12 @@ def main(argv: "list[str]") -> int:
         out = []
         for name in _root.agents():
             agent_dir = base / name
-            for p in sorted(agent_dir.rglob("CLAUDE.md")):
-                seat = _root.seat_at(p.parent)
+            marked = {f.parent for n in ("AGENTS.md", "CLAUDE.md") for f in agent_dir.rglob(n)}
+            for d in sorted(marked):
+                seat = _root.seat_at(d)
                 # rglob reaches into pads, scratch dirs and checkouts; only a
                 # directory the resolver itself calls a seat is listed.
-                if seat is not None and _root.enclosing_seat(p.parent) == seat:
+                if seat is not None and _root.enclosing_seat(d) == seat:
                     out.append(seat.id)
         print("\n".join(sorted(set(out))))
         return 0

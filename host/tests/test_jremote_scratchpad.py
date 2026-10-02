@@ -135,7 +135,7 @@ def test_a_session_working_below_its_seat_still_reaches_the_pad(pad):
     `cd` into the seat's pad — or into a checkout parked there, or a worktree
     — and the harness carries that directory for the rest of the session: it
     names the project dir, and it is what the live pane reports. None of them
-    is a seat, deliberately (a checkout in a pad carries its own CLAUDE.md and
+    is a seat, deliberately (a checkout in a pad carries its own AGENTS.md and
     must never be addressable as one), so an equality test placed the session
     nowhere at all and every pad route on it answered "unknown session" while
     its terminal sat there live. 95e01508 spent a morning like that: its
@@ -150,7 +150,7 @@ def test_a_session_working_below_its_seat_still_reaches_the_pad(pad):
 def test_the_deepest_containing_seat_wins(monkeypatch, tmp_path):
     """Seats nest, so containment alone is not an answer — `Ada/social` holds
     every session under `Ada/social/threads` too. The session belongs to the
-    seat whose CLAUDE.md it is actually running under, which is the deeper."""
+    seat whose AGENTS.md it is actually running under, which is the deeper."""
     outer = tmp_path / "Agents" / "Ada" / "social"
     inner = outer / "threads"
     (inner / scratchpad.PAD).mkdir(parents=True)

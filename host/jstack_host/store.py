@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS settings (
   seq INTEGER NOT NULL DEFAULT 0
 );
 -- Which seats the Agents tab shows, and what the user calls them. NOT the roster:
--- `config/agents.json` says what an agent IS and a CLAUDE.md says where a seat
+-- `config/agents.json` says what an agent IS and a AGENTS.md says where a seat
 -- is, both on disk, both untouched by anything here. This table only records
 -- the ones the user chose to keep in front of them, so deleting a row takes the card
 -- and leaves the directory — the un-pin-without-delete case it exists for.

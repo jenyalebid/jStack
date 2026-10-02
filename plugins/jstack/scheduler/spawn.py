@@ -111,7 +111,7 @@ def _from_registry(agent_id: str) -> "Path|None":
 
 def _apply_seat_rules(agent_id: str, workspace: Path) -> Path:
     """An agent id ending in a rule's suffix runs in that rule's subdir — but
-    only when the subdir is a real seat (has its own CLAUDE.md). Without that
+    only when the subdir is a real seat (has its own AGENTS.md). Without that
     check a matching id would cd into a directory with no context and the run
     would start blind."""
     for rule in config.install().get("seat_rules") or []:
@@ -119,7 +119,7 @@ def _apply_seat_rules(agent_id: str, workspace: Path) -> Path:
         if not suffix or not seat or not agent_id.endswith(suffix):
             continue
         candidate = workspace / seat
-        if (candidate / "CLAUDE.md").exists():
+        if any((candidate / _n).exists() for _n in ("AGENTS.md", "CLAUDE.md")):
             return candidate
     return workspace
 
@@ -128,7 +128,7 @@ def _from_agents_dir(agent_id: str) -> Path:
     """The built-in fallback: a real directory under agents_dir().
 
     Two bars, and they are not the same bar. `root.resolve_agent` answers
-    "which agent is this", so it requires a CLAUDE.md — but a spawn only needs
+    "which agent is this", so it requires a AGENTS.md — but a spawn only needs
     somewhere real to run, and a directory that exists is a legitimate
     workspace before anything has declared it a seat. So: resolve the agent
     when there is one (that is what buys the case and -/_ tolerance), else

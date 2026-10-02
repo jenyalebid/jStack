@@ -28,7 +28,7 @@ trap 'rm -rf "$TMP"' EXIT
 # silently found the machine's own agent tree proves nothing.
 BARE="$TMP/root"
 mkdir -p "$BARE/Agents/alice/chat/notes" "$TMP/sched/config" "$TMP/home"
-touch "$BARE/Agents/alice/chat/CLAUDE.md"
+touch "$BARE/Agents/alice/chat/AGENTS.md"
 
 # A configured timezone the machine is (almost certainly) not in: the tz that
 # rides into the booked job must be READ from this file, not defaulted from

@@ -334,18 +334,18 @@ def timeline_dir(cfg: "dict|None" = None) -> Path:
 #
 # Six places in three repos used to disagree about what an agent is. This is
 # the one definition: an agent is a directory directly under agents_dir() that
-# either carries a CLAUDE.md itself, or has at least one immediate subdirectory
-# that does — the second case being a seat, Agents/<id>/<seat>/CLAUDE.md.
+# either carries a AGENTS.md itself, or has at least one immediate subdirectory
+# that does — the second case being a seat, Agents/<id>/<seat>/AGENTS.md.
 # A directory with neither is not an agent; it is some other folder that
 # happens to live there.
 
 
 def _has_claude_md(d: Path) -> bool:
-    return (d / "CLAUDE.md").is_file()
+    return any((d / _n).is_file() for _n in ("AGENTS.md", "CLAUDE.md"))
 
 
 def is_agent(d: Path) -> bool:
-    """CLAUDE.md at the top, or at least one non-dot seat subdir carrying one.
+    """AGENTS.md at the top, or at least one non-dot seat subdir carrying one.
 
     Public because a caller that has already resolved its own agents dir needs
     to ask the question about a directory it names itself, without handing over
@@ -423,9 +423,9 @@ def seat_of(path, cfg: "dict|None" = None, base=None) -> "tuple[str|None, str|No
     "chat" at the agent root itself.
 
     The gate is `agents()`'s definition of an agent, and that is the point.
-    Three callers each carried their own copy of it, all gating on a CLAUDE.md
+    Three callers each carried their own copy of it, all gating on a AGENTS.md
     at the agent's top level. On a machine whose agents each keep one that is
-    invisible; on a machine laid out as Agents/<id>/<seat>/CLAUDE.md with
+    invisible; on a machine laid out as Agents/<id>/<seat>/AGENTS.md with
     nothing at the top, every one of them refused to name the seat the session
     was sitting in — mail could not say who sent it, and the tools read as
     simply not working there. One definition, asked once, cannot drift apart
@@ -442,7 +442,7 @@ def seat_of(path, cfg: "dict|None" = None, base=None) -> "tuple[str|None, str|No
 
 def seats(agent_id: str, cfg: "dict|None" = None) -> "list[str]":
     """Sorted seat names for an agent that resolves — its immediate non-dot
-    subdirectories carrying their own CLAUDE.md — else [].
+    subdirectories carrying their own AGENTS.md — else [].
 
     Immediate children only. A nested seat (`social/threads`) is not in this
     list; ask `resolve_seat` for those, which walks to any depth.
@@ -510,7 +510,7 @@ class Seat(NamedTuple):
     @property
     def id(self) -> str:
         """The canonical address — `alice-social-chat`. Round-trips through
-        `resolve_seat`. A bare cockpit (CLAUDE.md at the agent root, no chat/
+        `resolve_seat`. A bare cockpit (AGENTS.md at the agent root, no chat/
         dir) is just the agent: there is no seat dir to name."""
         if self.path == self.agent_dir:
             return self.agent
@@ -540,7 +540,7 @@ def _seats_under(d: Path) -> "list[str]":
 #: Directories that are never a seat and are never walked through to find one.
 #: A pad is the seat's shared working room — `bin/msg` stashes attachments in
 #: it and `/pict` writes into it — and what lands there is checkouts, which
-#: carry CLAUDE.md files of their own. A CLAUDE.md is the evidence for a seat
+#: carry AGENTS.md files of their own. A AGENTS.md is the evidence for a seat
 #: everywhere else in this module, so without this the repo a session parked
 #: in its pad this morning reads as a seat: addressable by mail that nobody
 #: will ever read, and offered as a wake target that boots into a checkout.
@@ -632,7 +632,7 @@ def resolve_seat(spec: str, sender: "str|None" = None,
         if _has_claude_md(agent_dir / "chat"):
             submode = "chat"
         elif _has_claude_md(agent_dir):
-            # A bare agent — CLAUDE.md at the top, no chat/ dir — keeps its
+            # A bare agent — AGENTS.md at the top, no chat/ dir — keeps its
             # cockpit at the agent root itself. A session booted there files
             # as {agent}/chat, so that is the seat this address names;
             # {root}/chat would be a directory no session ever boots in.
@@ -647,7 +647,7 @@ def resolve_seat(spec: str, sender: "str|None" = None,
     path = agent_dir / submode
     if not _has_claude_md(path):
         raise AddressError(
-            f"{spec!r}: {path} is not a seat (no CLAUDE.md) — no session "
+            f"{spec!r}: {path} is not a seat (no AGENTS.md) — no session "
             f"boots there. Seats: "
             f"{', '.join(_seats_under(agent_dir)) or '(none)'}")
     return Seat(base, submode, path, agent_dir)
@@ -688,10 +688,10 @@ def enclosing_seat(path, cfg: "dict|None" = None) -> "Seat|None":
 
     A session's cwd is not always a seat: it may be standing in a scratch dir
     or a checkout below one. This walks up to the deepest directory that is a
-    seat, which is the seat whose CLAUDE.md and path rules that session is
+    seat, which is the seat whose AGENTS.md and path rules that session is
     actually running under.
 
-    Deepest, not first: `alice/social/threads` carries its own CLAUDE.md, so a
+    Deepest, not first: `alice/social/threads` carries its own AGENTS.md, so a
     session there belongs to the threads seat and not to `social` above it.
     Stopping at the first path component below the agent was how a wake booked
     from the threads seat came back up in `social/` — a different seat, with
@@ -702,7 +702,7 @@ def enclosing_seat(path, cfg: "dict|None" = None) -> "Seat|None":
         return None
     parts = [] if seat.path == seat.agent_dir else seat.submode.split("/")
     for depth in range(len(parts), 0, -1):
-        # A checkout parked in a pad carries its own CLAUDE.md; the seat a
+        # A checkout parked in a pad carries its own AGENTS.md; the seat a
         # session standing in one belongs to is the seat above the pad.
         if any(p in _RESERVED_DIRS for p in parts[:depth]):
             continue

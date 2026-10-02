@@ -6,7 +6,7 @@
 # Verifies the CLI contract:
 #   - addressing: @agent -> agent/chat; hyphens walk down; a seat holding a
 #     chat/ dir descends into it (@alice-social -> alice/social/chat)
-#   - a directory that is not a seat (no CLAUDE.md) is refused at send time
+#   - a directory that is not a seat (no AGENTS.md) is refused at send time
 #   - @boss is refused; an unknown agent is refused
 #   - send -> inbox -> read -> reply roundtrip, reply joins the thread
 #   - attachments are copied into the RECEIVER's pad
@@ -80,7 +80,7 @@ pass() { echo "ok: $1"; }
 AR="$TMP/agents"
 for seat in Alice Alice/chat Alice/social Alice/social/chat Alice/pm \
             Bob Bob/chat Bob/service-call; do
-  mkdir -p "$AR/$seat"; echo "# $seat" > "$AR/$seat/CLAUDE.md"
+  mkdir -p "$AR/$seat"; echo "# $seat" > "$AR/$seat/AGENTS.md"
 done
 mkdir -p "$AR/Alice/pad" "$AR/Alice/scratch"     # storage, NOT seats
 
@@ -113,7 +113,7 @@ addr() { "$MSG" send "$1" "probe $1" 2>&1 | head -1; }
 [[ "$(addr @bob-service-call)" == *"→ bob/service-call"*      ]] && pass "hyphenated seat dir resolves"         || fail "hyphenated seat dir resolves"
 [[ "$(addr @self)"             == *"→ alice/chat"*            ]] && pass "@self is the sending seat"            || fail "@self is the sending seat"
 
-# a dir with no CLAUDE.md is not a seat — a message there could never be read
+# a dir with no AGENTS.md is not a seat — a message there could never be read
 out=$("$MSG" send @alice-pad "x" 2>&1); rc=$?
 [[ $rc -ne 0 && "$out" == *"no seat"* ]] && pass "non-seat dir refused" || fail "non-seat dir refused (rc=$rc: $out)"
 
@@ -499,15 +499,15 @@ EOF4
 
 # ---------------------------------- 7. the root declaration (JSTACK_ROOT)
 # A machine nobody hand-configured: a root holding nothing but two agents'
-# CLAUDE.md files, no agent_root key, no mail block at all. Addressing must
+# AGENTS.md files, no agent_root key, no mail block at all. Addressing must
 # resolve through $JSTACK_ROOT/Agents, and a --wake must land in the registry
 # the scheduler itself derives — "exited 0" alone is exactly the silent no-op
 # this check exists to catch. The real scheduler.cli runs here, unstubbed,
 # booking into the tmp root.
 BROOT="$TMP/bare-root"; BARE_TL="$TMP/bare-timeline"
 mkdir -p "$BROOT/Agents/Ann" "$BROOT/Agents/Ben"
-printf '# Ann\n' > "$BROOT/Agents/Ann/CLAUDE.md"
-printf '# Ben\n' > "$BROOT/Agents/Ben/CLAUDE.md"
+printf '# Ann\n' > "$BROOT/Agents/Ann/AGENTS.md"
+printf '# Ben\n' > "$BROOT/Agents/Ben/AGENTS.md"
 BARE_CFG="$TMP/bare-review.json"; printf '{}' > "$BARE_CFG"
 bare_msg() { (cd "$BROOT/Agents/Ann" && \
   env -u SCHEDULER_HOME JSTACK_ROOT="$BROOT" JSTACK_REVIEW_CONFIG="$BARE_CFG" \

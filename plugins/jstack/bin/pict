@@ -82,8 +82,8 @@ Stages, in wire order (verified against captured request bodies):
                              renderable by emulation) with any --append
                              content inside it.
   2. First user message,   — <claude_dir>/CLAUDE.md, unconditional rules
-     project context         (no `paths:` frontmatter), the CLAUDE.md /
-                             CLAUDE.local.md walk-up (parent-most first,
+     project context         (no `paths:` frontmatter), the AGENTS.md /
+                             CLAUDE.md / CLAUDE.local.md walk-up (parent-most first,
                              HTML comments stripped in flight), the
                              auto-memory index (unless --no-memory) —
                              all inside a <system-reminder> in the first
@@ -170,6 +170,12 @@ PLUGIN_BIN = Path(__file__).resolve().parent
 
 def claude_dir() -> Path:
     return Path(os.environ.get("PICT_CLAUDE_DIR", str(Path.home() / ".claude"))).expanduser()
+
+
+#: The per-directory instruction files Claude Code loads on a jStack machine:
+#: AGENTS.md is a seat's own name, and install pins the built-in loader to
+#: claude-md-and-agents-md so a CLAUDE.md beside or above it loads too.
+WALKUP_NAMES = ("AGENTS.md", "CLAUDE.md", "CLAUDE.local.md")
 
 
 def rules_dir() -> Path:
@@ -402,13 +408,13 @@ def gather_walkup(directory: Path, sources: list[Source]) -> None:
     chain = [directory] + list(directory.parents)
     chain = [p for p in chain if str(p).startswith(str(stop))]
     for level in reversed(chain):
-        for name in ("CLAUDE.md", "CLAUDE.local.md"):
+        for name in WALKUP_NAMES:
             f = level / name
             body = read_or_none(f)
             if body is not None:
                 body, removed = strip_html_comments(body)
                 add(sources, "context", display(f),
-                    "CLAUDE.md walk-up — rides the first-message "
+                    "instruction-file walk-up — rides the first-message "
                     "<system-reminder>", body,
                     f"harness strips HTML comments (−{removed} chars)"
                     if removed else "")
@@ -621,7 +627,7 @@ def resolve_seat(directory: Path, root: Path,
         rel = None
     if rel is not None and rel.parts:
         agent_dir = root / rel.parts[0]
-        if (agent_dir / "CLAUDE.md").is_file():
+        if any((agent_dir / n).is_file() for n in ("AGENTS.md", "CLAUDE.md")):
             submode = "/".join(x.lower() for x in rel.parts[1:]) or "chat"
             return agent_dir.name.lower(), submode
     cfg = review_config() if cfg is None else cfg
@@ -637,7 +643,8 @@ def seat_via_repo(directory: Path, root: Path) -> bool:
         rel = directory.resolve().relative_to(root.resolve())
     except (ValueError, OSError):
         return True
-    return not (rel.parts and (root / rel.parts[0] / "CLAUDE.md").is_file())
+    return not (rel.parts and any((root / rel.parts[0] / n).is_file()
+                                  for n in ("AGENTS.md", "CLAUDE.md")))
 
 
 def timeline_count(cfg: dict, agent: str, submode: str) -> tuple[int, str]:
@@ -686,7 +693,7 @@ def session_capture(path: Path) -> dict:
     env, and a shell that was never the session's shell guesses wrong; this
     reads the bytes the session actually got.
 
-    What the transcript does NOT hold: the CLAUDE.md walk-up, the memory
+    What the transcript does NOT hold: the AGENTS.md walk-up, the memory
     index, the base prompt, the tool schemas. Those are composed per request
     and never written down, so they stay emulated from the session's own cwd
     (which the transcript does record). `--request` remains the only mode
@@ -1158,7 +1165,7 @@ _POOL_FILE_CAP = 400     # max files one --sources dir contributes
 
 
 def _pool_paths(directory: Path, extra: list[Path]) -> list[Path]:
-    """Candidate files for content attribution: the CLAUDE.md walk-up chain,
+    """Candidate files for content attribution: the AGENTS.md walk-up chain,
     the global CLAUDE.md, rules, and auto-memory for `directory`, plus
     --sources files/dirs, $PICT_SOURCES (colon-separated), and
     <claude_dir>/pict-sources.txt (one path or glob per line, ~ allowed,
@@ -1168,7 +1175,7 @@ def _pool_paths(directory: Path, extra: list[Path]) -> list[Path]:
     d = directory
     root = walk_root()
     while True:
-        for name in ("CLAUDE.md", "CLAUDE.local.md"):
+        for name in WALKUP_NAMES:
             paths.append(d / name)
         if d == root or d == d.parent:
             break
@@ -1443,7 +1450,7 @@ def render_request(path: Path, directory: Path | None = None,
                             if isinstance(part, dict) and ptype == "text" else "")
                     walkup = "# claudeMd" in body and "Contents of" in body
                     if walkup:
-                        src = "CLAUDE.md walk-up + always-on rules — split per file below"
+                        src = "AGENTS.md walk-up + always-on rules — split per file below"
                     elif "<command-name>" in body and len(body) < 1000:
                         w = re.search(r"<command-name>/?([^<]+)</command-name>", body)
                         cmd_name = w.group(1) if w else None
