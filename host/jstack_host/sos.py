@@ -231,7 +231,10 @@ def worker(plan: dict) -> str:
         lines += [f"/usr/bin/pkill -KILL -u {uid} -x {q(name)} 2>/dev/null || :",
                   f"if /usr/bin/pgrep -u {uid} -x {q(name)} >/dev/null; then fail {q('writer: ' + name)}; fi"]
     app = Path(plan.get("app", "/Applications/jStack Hub.app"))
-    user = ["/usr/bin/sudo", "-n", "-H", "-u", "#" + str(uid)]
+    # sudo -H changes HOME, not cwd. The worker's 0700 directory is unreadable
+    # to this user; CLI audit metadata calls getcwd before cleanup can begin.
+    user = ["/usr/bin/sudo", "-n", "-H", "-u", "#" + str(uid),
+            "/bin/sh", "-c", 'cd / && exec "$@"', "sos-user"]
     tmux = app / "Contents/MacOS/tmux"
     lines += [f"if test -x {q(str(tmux))}; then",
               shlex.join(user + [str(tmux), "-L", plan.get("tmux_socket", "jremote"), "kill-server"]) + " 2>/dev/null || :",
@@ -260,11 +263,11 @@ def worker(plan: dict) -> str:
                           f'test "$(/usr/bin/dscl . -read {q(node)} UserShell)" = {q("UserShell: " + fileshare.ACCOUNT_SHELL)} || exit 1',
                           f"/usr/bin/dscl . -delete {q(node)} || exit 1", "fi"]
             lines += ['if test ! -f user-cleanup-done; then',
-                      shlex.join(user + [str(app / "Contents/MacOS/JStackCLI"), "_wipe-user-cleanup"]) + " || exit 1",
+                      shlex.join(user + [str(app / "Contents/MacOS/JStackCLI"), "_wipe-user-cleanup"])
+                      + ' || { fail "user cleanup"; exit 1; }',
                       'touch user-cleanup-done', 'fi']
             for service in ("Claude Code-credentials", "Claude", "Codex Auth", "jRemote"):
-                delete = shlex.join(["/usr/bin/sudo", "-n", "-H", "-u", "#" + str(uid),
-                                     "/usr/bin/security", "delete-generic-password", "-s", service])
+                delete = shlex.join(user + ["/usr/bin/security", "delete-generic-password", "-s", service])
                 lines += [f"while :; do {delete} >/dev/null 2> keychain-error; result=$?;",
                           'case "$result" in 0) ;; 44) break;; *) fail "keychain deletion denied"; break;; esac; done']
         if phase == "apps":

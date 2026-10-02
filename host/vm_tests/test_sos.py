@@ -4,7 +4,9 @@ import json
 import os
 import plistlib
 from pathlib import Path
+import shlex
 import subprocess
+import sys
 import tempfile
 
 import pytest
@@ -117,6 +119,28 @@ def test_worker_prioritizes_history_and_removes_itself_last():
     assert supervisor.rstrip().endswith("/bin/launchctl bootout system/live.jstack.sos")
     assert "rm -rf /Users/admin/Stack\n" not in script
     assert "[ \"$failed\" = 0 ] || exit 1" in script
+
+
+def test_user_cleanup_can_read_cwd_after_leaving_root_only_worker(tmp_path):
+    protected = tmp_path / "root-only"
+    protected.mkdir(mode=0o700)
+    subprocess.run(["sudo", "-n", "chown", "root:wheel", str(protected)], check=True)
+    try:
+        plan = {"home": str(Path.home()), "uid": os.getuid(), "root": str(tmp_path),
+                "services": [], "history": [], "data": [], "apps": []}
+        command = next(line for line in sos.worker(plan).splitlines() if "_wipe-user-cleanup" in line)
+        argv = shlex.split(command.split(" || ", 1)[0])
+        probe = [sys.executable, "-c", "import os; print(os.getcwd())"]
+        root_launcher = ["sudo", "-n", "/bin/sh", "-c", 'cd "$1" && shift && exec "$@"',
+                         "cwd-regression", str(protected)]
+        old = subprocess.run(root_launcher + ["sudo", "-n", "-H", "-u", "#" + str(os.getuid())] + probe,
+                             capture_output=True, text=True)
+        assert old.returncode != 0 and "PermissionError" in old.stderr
+        result = subprocess.run(root_launcher + argv[:-2] + probe, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "/"
+    finally:
+        subprocess.run(["sudo", "-n", "rmdir", str(protected)], check=True)
 
 
 @pytest.mark.parametrize("action", ["reboot", "shutdown", "lock", "wipe"])
