@@ -426,22 +426,6 @@ def test_user_cleanup_can_read_cwd_after_leaving_root_only_worker(tmp_path):
         subprocess.run(["sudo", "-n", "rmdir", str(protected)], check=True)
 
 
-@pytest.mark.parametrize("action", ["reboot", "shutdown", "lock", "wipe"])
-def test_confirmation_names_target_and_rejects_wrong_phrase(monkeypatch, action):
-    monkeypatch.setattr(sos.sys, "stdin", type("TTY", (), {"isatty": lambda self: True})())
-    monkeypatch.setattr(sos.socket, "gethostname", lambda: "sos-guest")
-    monkeypatch.setattr("builtins.input", lambda prompt: "yes")
-    assert not sos.confirm(action, out=io.StringIO())
-    monkeypatch.setattr("builtins.input", lambda prompt: action.upper() + " sos-guest")
-    assert sos.confirm(action, out=io.StringIO())
-
-
-def test_noninteractive_confirmation_refused(monkeypatch):
-    monkeypatch.setattr(sos.sys, "stdin", io.StringIO("WIPE sos-guest\n"))
-    with pytest.raises(ValueError, match="interactive"):
-        sos.confirm("wipe")
-
-
 @pytest.fixture
 def unregistered_service_bundle(tmp_path, request):
     import uuid
@@ -1017,13 +1001,3 @@ def test_shell_alias_destination_swapped_to_symlink_is_not_followed(monkeypatch,
     with pytest.raises(OSError):
         sos_user_cleanup.clean_shell_settings(home)
     assert outside.read_text() == "must survive"
-
-
-@pytest.mark.parametrize("action", ["reboot", "shutdown", "lock", "wipe"])
-@pytest.mark.parametrize("interrupt", [EOFError, KeyboardInterrupt])
-def test_confirmation_interrupted(monkeypatch, action, interrupt):
-    monkeypatch.setattr(sos.sys, "stdin", type("TTY", (), {"isatty": lambda self: True})())
-    def stop(prompt):
-        raise interrupt
-    monkeypatch.setattr("builtins.input", stop)
-    assert not sos.confirm(action, out=io.StringIO())

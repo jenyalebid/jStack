@@ -344,18 +344,6 @@ def inventory() -> dict:
     return result
 
 
-def confirm(action: str, *, out=sys.stdout) -> bool:
-    if not sys.stdin.isatty():
-        raise ValueError("SOS commands require an interactive terminal")
-    phrase = f"{action.upper()} {socket.gethostname()}"
-    print(f"Target: {socket.gethostname()} · {pwd.getpwuid(os.getuid()).pw_name}", file=out)
-    try:
-        answer = input(f"Type {phrase} to confirm: ")
-    except (EOFError, KeyboardInterrupt):
-        return False
-    return answer == phrase
-
-
 def process_commands(names: tuple[str, ...], *, uid: int | None, stop: bool) -> list[str]:
     scope = [] if uid is None else ["-u", str(uid)]
     lines = []
@@ -576,9 +564,6 @@ def run(action: str, *, dry_run=False, out=sys.stdout) -> int:
         app_services.verify(Path(plan["app"]))
         if not (Path(plan["app"]) / "Contents/MacOS/JStackErase").is_file():
             raise ValueError("installed Hub does not contain the SOS executor")
-    if not confirm(action, out=out):
-        print("Cancelled; no action taken.", file=out)
-        return 1
     if action == "lock":
         import ctypes
         library = ctypes.CDLL("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login")
@@ -587,7 +572,12 @@ def run(action: str, *, dry_run=False, out=sys.stdout) -> int:
         function.restype = None
         function()
         return 0
-    subprocess.run(["/usr/bin/sudo", "-v"], check=True)
+    # Submitting the command is the decision; the password is the only gate,
+    # so a cached sudo timestamp must not skip it.
+    subprocess.run(["/usr/bin/sudo", "-k"], check=False)
+    if subprocess.run(["/usr/bin/sudo", "-v"]).returncode != 0:
+        print("Cancelled; no action taken.", file=out)
+        return 1
     print(f"Accepted {action} on {socket.gethostname()}; the connection may close.", file=out, flush=True)
     if action == "wipe":
         return subprocess.run(["/usr/bin/sudo", "-n", "/bin/sh", "-c", bootstrap(plan)]).returncode
