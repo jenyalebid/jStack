@@ -449,6 +449,29 @@ def test_a_job_event_and_its_reply_do_not_supersede_the_seam(tmp_path):
     assert cod.turn_moved(path, offset, "codex") is False
 
 
+def test_a_reply_to_a_job_event_behind_the_baseline_does_not_supersede(tmp_path):
+    """The settle step moves the baseline up to SETTLE_SECS past Stop. On 2026-10-01 at
+    21:17 an event landed inside that gap; only its reply sat past the baseline, and the
+    seam was lost on the build that already carried the fix above."""
+    path, offset = _after_park(
+        tmp_path, task_started(10),
+        user("[job-monitor:9f4f413464484135a526f6eee0f055ba] Background job failed; "
+             "exit_code=70.", ordinal=11))
+    offset = os.path.getsize(path)
+    with open(path, "a") as fh:
+        fh.write(json.dumps(assistant("The builder couldn't fetch the toolchain.",
+                                      ordinal=12)) + "\n")
+    assert cod.turn_moved(path, offset, "codex") is False
+
+
+def test_a_reply_to_a_person_behind_the_baseline_still_supersedes(tmp_path):
+    path, _ = _after_park(tmp_path, task_started(10), user("stop, wrong VM", ordinal=11))
+    offset = os.path.getsize(path)
+    with open(path, "a") as fh:
+        fh.write(json.dumps(assistant("Stopping.", ordinal=12)) + "\n")
+    assert cod.turn_moved(path, offset, "codex") is True
+
+
 def test_a_person_speaking_after_a_job_event_still_supersedes(tmp_path):
     path, offset = _after_park(
         tmp_path, user("[job-monitor:8117285eb6ce4729ae18870d469edc37] Background job "
