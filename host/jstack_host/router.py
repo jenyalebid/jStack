@@ -226,6 +226,13 @@ def _probe(name: str) -> bool:
         return False
 
 
+@router.get("/host/loop")
+def get_host_loop(device_id: str = Depends(current_device)):
+    """This hub's loop stalls — the freezes every attached terminal feels."""
+    from . import loop_watch
+    return loop_watch.stats()
+
+
 @router.get("/host")
 def get_host(request: Request):
     """Which machine this is, and what it can do — one call, before any screen.
