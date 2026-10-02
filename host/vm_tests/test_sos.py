@@ -551,6 +551,62 @@ def test_concurrent_settings_edit_is_not_overwritten(tmp_path):
     assert not list(path.parent.glob(".sos-*"))
 
 
+@pytest.mark.parametrize("absolute", [False, True])
+def test_shell_alias_cleans_selected_target_and_preserves_link(tmp_path, absolute):
+    home = tmp_path.resolve()
+    target = home / ".zprofile"
+    target.write_text("export UNRELATED=keep\nexport JSTACK_ROOT=/owned\n")
+    target.chmod(0o640)
+    link = home / ".profile"
+    link.symlink_to(target if absolute else ".zprofile")
+    (home / ".bash_profile").symlink_to(".profile")
+    before = os.readlink(link)
+    sos_user_cleanup.clean_shell_settings(home)
+    assert target.read_text() == "export UNRELATED=keep\n"
+    assert target.stat().st_mode & 0o777 == 0o640
+    assert link.is_symlink() and os.readlink(link) == before
+    sos_user_cleanup.clean_shell_settings(home)
+    assert target.read_text() == "export UNRELATED=keep\n"
+
+
+@pytest.mark.parametrize("trap", ["outside", "dangling", "cycle"])
+def test_shell_alias_traps_refused_before_any_settings_change(tmp_path, trap):
+    home = tmp_path.resolve()
+    selected = home / ".zprofile"
+    original = "export JSTACK_ROOT=/owned\n"
+    selected.write_text(original)
+    outside = home / "unrelated"
+    if trap == "outside":
+        outside.write_text(original)
+    (home / ".profile").symlink_to(".profile" if trap == "cycle" else outside)
+    with pytest.raises(ValueError, match="cycle|leaves selected"):
+        sos_user_cleanup.clean_shell_settings(home)
+    assert selected.read_text() == original
+    if trap == "outside":
+        assert outside.read_text() == original
+
+
+def test_shell_alias_destination_swapped_to_symlink_is_not_followed(monkeypatch, tmp_path):
+    home = tmp_path.resolve()
+    target = home / ".zprofile"
+    target.write_text("export JSTACK_ROOT=/owned\n")
+    outside = home / "unrelated"
+    outside.write_text("must survive")
+    (home / ".profile").symlink_to(target)
+    real_rewrite = sos_user_cleanup.rewrite
+
+    def swap(path, transform):
+        if path == target:
+            target.unlink()
+            target.symlink_to(outside)
+        return real_rewrite(path, transform)
+
+    monkeypatch.setattr(sos_user_cleanup, "rewrite", swap)
+    with pytest.raises(OSError):
+        sos_user_cleanup.clean_shell_settings(home)
+    assert outside.read_text() == "must survive"
+
+
 @pytest.mark.parametrize("action", ["reboot", "shutdown", "lock", "wipe"])
 @pytest.mark.parametrize("interrupt", [EOFError, KeyboardInterrupt])
 def test_confirmation_interrupted(monkeypatch, action, interrupt):

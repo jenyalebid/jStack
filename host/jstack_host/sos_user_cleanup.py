@@ -60,6 +60,31 @@ def rewrite(path: Path, transform) -> None:
             os.unlink(temporary)
 
 
+def clean_shell_settings(home: Path) -> None:
+    selected = {home / name for name in (".zshrc", ".zprofile", ".bash_profile", ".bashrc", ".profile")}
+    owned = re.compile(r"^\s*export\s+(?:PATH=.*# jstack\s*$|JSTACK_ROOT=)")
+
+    def destination(path):
+        seen = set()
+        while path.is_symlink():
+            if path in seen:
+                raise ValueError("cycle in shell settings aliases")
+            seen.add(path)
+            path = Path(os.path.abspath(path.parent / os.readlink(path)))
+            if path not in selected:
+                raise ValueError("shell settings alias leaves selected files")
+        return path
+
+    # The macOS seed aliases .profile to .zprofile. Only already-selected
+    # settings may be alias targets; rewrite still opens them with O_NOFOLLOW.
+    targets = {path: destination(path) for path in selected}
+    for path in sorted(set(targets.values())):
+        rewrite(path, lambda text: "".join(line for line in text.splitlines(keepends=True)
+                                         if not owned.match(line)))
+    if any(destination(path) != target for path, target in targets.items()):
+        raise ValueError("shell settings alias changed during cleanup")
+
+
 def run() -> int:
     if os.geteuid() == 0 or not Path("/private/var/db/live.jstack.sos").exists():
         raise ValueError("user cleanup requires an active approved wipe")
@@ -67,8 +92,5 @@ def run() -> int:
     for name, kind in (("authorized_keys", "keys"), ("config", "hosts")):
         begin, end = f"# >>> jremote managed {kind} >>>", f"# <<< jremote managed {kind} <<<"
         rewrite(home / ".ssh" / name, lambda text: strip_blocks(text, begin, end))
-    owned = re.compile(r"^\s*export\s+(?:PATH=.*# jstack\s*$|JSTACK_ROOT=)")
-    for name in (".zshrc", ".zprofile", ".bash_profile", ".bashrc", ".profile"):
-        rewrite(home / name, lambda text: "".join(line for line in text.splitlines(keepends=True)
-                                                 if not owned.match(line)))
+    clean_shell_settings(home)
     return 0
