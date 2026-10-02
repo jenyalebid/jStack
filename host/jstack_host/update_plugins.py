@@ -118,8 +118,13 @@ def advance(root: str, sha: str) -> None:
     """
     from .update_macos import command
     git = ["git", "-C", root]
-    if command([*git, "status", "--porcelain", "--untracked-files=no"]).strip():
-        raise ReleaseError(f"the jStack checkout at {root} has uncommitted changes; it was "
+    dirty = command([*git, "status", "--porcelain", "--untracked-files=no"]).split("\n")
+    dirty = [line[3:] for line in dirty if line.strip()]
+    if dirty:
+        # Named, because the refusal outlives the edit: by the time anyone
+        # reads the log the tree is clean again and nothing says who wrote.
+        raise ReleaseError(f"the jStack checkout at {root} has uncommitted changes "
+                           f"({', '.join(dirty[:5])}{' …' if len(dirty) > 5 else ''}); it was "
                            f"not moved to {sha[:8]} and the plugin stays where it is")
     if command([*git, "rev-parse", "HEAD"]).strip() == sha:
         return

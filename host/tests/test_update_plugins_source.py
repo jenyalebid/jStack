@@ -333,8 +333,9 @@ def test_an_uncommitted_change_refuses_the_move_by_name(tmp_path, monkeypatch):
     (clone / "plugins/jstack/.claude-plugin/plugin.json").write_text('{"version": "hand-edited"}')
     asked = []
     monkeypatch.setattr(update_plugins, "run", lambda argv: asked.append(argv) or "[]")
-    with pytest.raises(update_plugins.ReleaseError, match="uncommitted changes"):
+    with pytest.raises(update_plugins.ReleaseError, match="uncommitted changes") as refused:
         update_plugins.install([_provider(clone)], tmp_path / "stack", second)
+    assert "plugins/jstack/.claude-plugin/plugin.json" in str(refused.value)
     assert _git("rev-parse", "HEAD", cwd=clone) == first and asked == []
 
 
