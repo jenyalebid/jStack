@@ -491,3 +491,67 @@ def test_the_job_event_prefix_is_the_one_job_monitor_writes():
     source = (Path(__file__).resolve().parents[1] / "tools/job_monitor.py").read_text()
     assert 'f"[job-monitor:{job_id}] ' in source
     assert cod.JOB_NOTICE == "[job-monitor:"
+
+
+def _rollout(tmp_path, *entries):
+    path = tmp_path / "rollout.jsonl"
+    path.write_text("".join(json.dumps(e) + "\n" for e in (meta(),) + entries))
+    return str(path)
+
+
+def test_nudges_count_since_the_last_person_and_job_notices_do_not_reset(tmp_path):
+    """2026-10-01: 36 nudges in one unattended run, every one kept by every compaction."""
+    nudge = cod.CONTINUE
+    path = _rollout(tmp_path, user("do the thing", ordinal=1), user(nudge, ordinal=2),
+                    user("[job-monitor:ab] succeeded, exit 0. Read it with status; do not rerun.",
+                         ordinal=3),
+                    user(nudge, ordinal=4), user(cod.CONTINUE_IN_PLACE, ordinal=5))
+    assert cod.nudge_streak(path, "codex") == 3
+    path = _rollout(tmp_path, user(nudge, ordinal=1), user("keep going", ordinal=2))
+    assert cod.nudge_streak(path, "codex") == 0
+
+
+def test_the_cap_stops_an_unattended_codex_loop(tmp_path, monkeypatch):
+    path = _rollout(tmp_path, *(user(cod.CONTINUE, ordinal=i) for i in range(cod.CONTINUE_CAP)))
+    monkeypatch.setattr(cod, "reading", lambda *a, **k: 50_000)
+    monkeypatch.setattr(cod, "freshly_compacted", lambda *a: False)
+    monkeypatch.setattr(cod, "pane", lambda name: "screen")
+    name, reason = cod.decide(path, "01a0ef3f-7447-79f3-9559-05feaa7a2824", "codex", "a", True)
+    assert name is None and "cap" in reason
+    monkeypatch.setattr(cod, "CONTINUE_CAP", cod.CONTINUE_CAP + 1)
+    assert cod.decide(path, "01a0ef3f-7447-79f3-9559-05feaa7a2824", "codex", "a", True)[0]
+
+
+def test_the_cap_never_reads_a_claude_transcript():
+    assert cod.nudge_streak("/nonexistent", "claude") == 0
+
+
+def test_every_nudge_is_short_because_codex_keeps_it_forever():
+    for text in (cod.CONTINUE, cod.CONTINUE_IN_PLACE):
+        assert text.startswith(cod.HOOK_NUDGE) and len(text) <= 300, len(text)
+
+
+def _grown(tmp_path, post):
+    """The 2026-10-01 shape: a 28,510 fresh call, a compaction, Codex's zero reset, then
+    the first real call after it."""
+    return _rollout(tmp_path, token_count(28_510, ordinal=1), user("go", ordinal=2),
+                    token_count(240_000, ordinal=3), compacted(ordinal=4),
+                    token_count(0, ordinal=5), token_count(post, ordinal=6),
+                    token_count(post + 9_000, ordinal=7))
+
+
+def test_the_weight_after_compaction_skips_codexs_zero_reset(tmp_path):
+    assert cod.after_compaction(_grown(tmp_path, 67_568), "codex") == 67_568
+    assert cod.after_compaction(_rollout(tmp_path, token_count(30_000)), "codex") == 0
+    assert cod.after_compaction("/nonexistent", "claude") == 0
+
+
+def test_a_compaction_that_left_the_thread_heavy_stops_the_hook(tmp_path, monkeypatch):
+    """18 compactions took the 2026-10-01 thread from 28,510 to 67,568 a call; each one
+    the hook followed with a continue paid that floor again."""
+    monkeypatch.setattr(cod, "freshly_compacted", lambda *a: False)
+    monkeypatch.setattr(cod, "pane", lambda name: "screen")
+    sid = "01a0ef3f-7447-79f3-9559-05feaa7a2824"
+    name, reason = cod.decide(_grown(tmp_path, 67_568), sid, "codex", "a", True)
+    assert name is None and reason.startswith("compaction-heavy"), reason
+    assert cod.decide(_grown(tmp_path, 37_063), sid, "codex", "a", True)[0]

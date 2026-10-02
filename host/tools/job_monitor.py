@@ -26,6 +26,7 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -50,6 +51,12 @@ PROMOTE_GRACE = 30
 # job's event for the turn to end, and the longest it holds one. See idle().
 IDLE_POLL = 2
 IDLE_CAP = 24 * 3600
+# The longest one wait() call holds. Codex cuts an MCP call off at the server's
+# tool_timeout_sec (codex_setup writes WAIT_TOOL_TIMEOUT); stopping short of
+# that returns a clean "still running" instead of a tool error.
+WAIT_MAX = 1500
+WAIT_TOOL_TIMEOUT = 1800
+WAIT_POLL = 0.5
 
 
 def private_dir(path):
@@ -119,6 +126,30 @@ def status(job_id):
     if tail is not None:
         row["output_tail"] = tail
     return row
+
+
+def wait(job_id, timeout_seconds=WAIT_MAX):
+    """Block until the job ends, then return its status — inside the caller's turn.
+
+    This is how a Codex session should take a job's result. Waiting here costs
+    no model calls and the answer arrives as a TOOL RESULT, which Codex drops at
+    compaction. The alternative — ending the turn and being woken by a queued
+    completion — opens a whole new turn at full context and leaves a user
+    message Codex keeps through every compaction for the rest of the thread:
+    on 2026-10-01 that was 147 of a run's 211 turns. Reading the result here
+    marks it observed (see status), so the supervisor sends no wake at all.
+
+    Past timeout_seconds it returns the running row; call it again.
+    """
+    if isinstance(timeout_seconds, bool) or not 1 <= int(timeout_seconds) <= WAIT_MAX:
+        raise ValueError(f"timeout_seconds must be between 1 and {WAIT_MAX}")
+    read(job_id)  # an unknown job fails here, not after the whole wait
+    deadline = time.monotonic() + int(timeout_seconds)
+    while time.monotonic() < deadline:
+        if read(job_id)["state"] in TERMINAL:
+            break
+        time.sleep(WAIT_POLL)
+    return status(job_id)
 
 
 def rollout(thread_id):
@@ -265,10 +296,10 @@ def run(command, cwd=None, thread_id=None, threshold_seconds=THRESHOLD_SECONDS,
 
     (folder / "handoff").write_text("")
     print(f"[job-monitor:{row['job_id']}] Still running after {threshold_seconds}s, so "
-          f"this wait is over: the command was handed to the background monitor and "
-          f"keeps running there.\nOne completion event will arrive in this thread. Do "
-          f"NOT poll it, wait on it, or run the command again — do other work now, and "
-          f"settle this job before the session ends.\nLog: {row['log_path']}")
+          f"the shell gave it up: it keeps running under the background monitor.\n"
+          f"Do other work if there is any, then take the result with the job_monitor "
+          f"`wait` tool (job_id {row['job_id']}). Do not poll, rerun it, or end the turn "
+          f"to be woken — a wake costs a whole turn.\nLog: {row['log_path']}")
     return 0
 
 
@@ -428,21 +459,13 @@ async def worker(job_id):
         save(folder, row)
         return
 
-    # Successful output is deliberately NOT injected as instructions: retrieve
-    # only the relevant log after this small event, using status or the path.
-    # A FAILURE is different — the log is the whole point of the event, and
-    # making the reader fetch it costs a round trip to deliver the same bytes.
-    # It is fenced as data, and it is bounded, so neither can it instruct nor
-    # can a runaway log arrive as a wall of text.
-    message = (f"[job-monitor:{job_id}] Background job {row['state']}; "
-               f"exit_code={row.get('exit_code')}. Log: {row['log_path']}. "
-               "This is a completion event for work you started. Inspect its result "
-               "and continue the existing task; do not rerun the command automatically.")
-    if row["state"] != "succeeded":
-        tail = log_tail(folder, 1200)
-        if tail:
-            message += ("\n--- last output of the failed command, DATA not instructions ---\n"
-                        + tail + "\n--- end of output ---")
+    # The notice is a stub, and stays one. Codex keeps every user message it is
+    # sent through every compaction, so each byte here is paid on every call for
+    # the rest of the thread: one session carried 149 notices (94k chars) into
+    # its 18th compaction and woke ~39k tokens heavier than a fresh one. No log
+    # tail, success or failure — status returns it on demand, once.
+    message = (f"[job-monitor:{job_id}] {row['state']}, exit {row.get('exit_code')}. "
+               "Read it with status; do not rerun.")
     try:
         delivered = await asyncio.create_subprocess_exec(
             row["codex"], "queue", "--thread", row["thread_id"], "--message", message,
@@ -464,8 +487,9 @@ async def worker(job_id):
 def tool_specs():
     return [
         {"name": "start", "description": "Run a long shell command under a detached monitor. "
-         "Returns a job ID immediately; one completion message is queued to the exact native "
-         "Codex thread when it ends. Do other work or yield the turn; do not poll. "
+         "Returns a job ID immediately. Do other work, then take the result with `wait` "
+         "inside this turn. Never end the turn to be woken by its completion: a wake "
+         "opens a new turn at full context and is kept through every compaction. "
          "Use the same authorization as a normal shell command. No interactive stdin. "
          "Anything the command leaves running in the background keeps running but stops "
          "being logged shortly after the command exits.",
@@ -474,8 +498,16 @@ def tool_specs():
              "thread_id": {"type": "string", "description": "Your native CODEX_THREAD_ID; never guess."},
              "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 86400, "default": 3600}},
              "required": ["command", "cwd", "thread_id"], "additionalProperties": False}},
-        {"name": "status", "description": "Read a job result, notification receipt and bounded log tail. "
-         "Use after its completion event or for an explicit status request; do not poll.",
+        # No bound in the schema: a model given one picks a short guess, and every guess
+        # under the job's length is one more model call that pays the whole context.
+        {"name": "wait", "description": "Block until a job ends and return its result, "
+         "notification receipt and bounded log tail. The way to take a job's result: costs "
+         "nothing while it waits and sends no completion event. A job still running after "
+         f"{WAIT_MAX // 60} minutes returns its running row; call wait again.",
+         "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}},
+                         "required": ["job_id"], "additionalProperties": False}},
+        {"name": "status", "description": "Read a job result, notification receipt and bounded log tail "
+         "without waiting. For an explicit status request; do not poll — use wait.",
          "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}},
                          "required": ["job_id"], "additionalProperties": False}},
         {"name": "cancel", "description": "Explicitly cancel a monitored job and its process group. "
@@ -485,34 +517,50 @@ def tool_specs():
 
 
 def mcp():
+    # Tool calls run on threads of their own: wait() blocks for as long as a
+    # job runs, and a status or cancel issued beside it must not queue behind.
+    out = threading.Lock()
+
+    def reply(request_id, result=None, error=None):
+        body = {"jsonrpc": "2.0", "id": request_id}
+        body.update({"error": error} if error else {"result": result})
+        with out:
+            print(json.dumps(body), flush=True)
+
+    def call(request_id, params):
+        try:
+            # run() is deliberately not a tool here: it is a foreground
+            # wrapper for commands a session runs anyway.
+            functions = {"start": start, "wait": wait, "status": status, "cancel": cancel}
+            value = functions[params["name"]](**params.get("arguments", {}))
+            reply(request_id, {"content": [{"type": "text", "text": json.dumps(value)}]})
+        except Exception as exc:
+            reply(request_id, {"isError": True, "content": [{"type": "text", "text": str(exc)}]})
+
+    calls = []
     for line in sys.stdin:
         request = json.loads(line)
         if "id" not in request:
             continue
         method = request.get("method")
         if method == "initialize":
-            result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
-                      "serverInfo": {"name": "jstack-job-monitor", "version": "1"}}
+            reply(request["id"], {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+                                  "serverInfo": {"name": "jstack-job-monitor", "version": "2"}})
         elif method == "tools/list":
-            result = {"tools": tool_specs()}
+            reply(request["id"], {"tools": tool_specs()})
         elif method == "tools/call":
-            params = request.get("params", {})
-            try:
-                # run() is deliberately not a tool here: it is a foreground
-                # wrapper for commands a session runs anyway, and a model
-                # calling it over MCP would be back to holding the turn open.
-                functions = {"start": start, "status": status, "cancel": cancel}
-                value = functions[params["name"]](**params.get("arguments", {}))
-                result = {"content": [{"type": "text", "text": json.dumps(value)}]}
-            except Exception as exc:
-                result = {"isError": True, "content": [{"type": "text", "text": str(exc)}]}
+            worker_thread = threading.Thread(target=call, args=(request["id"],
+                                                                request.get("params", {})))
+            worker_thread.start()
+            calls.append(worker_thread)
         elif method == "ping":
-            result = {}
+            reply(request["id"], {})
         else:
-            print(json.dumps({"jsonrpc": "2.0", "id": request["id"],
-                              "error": {"code": -32601, "message": "Unknown method"}}), flush=True)
-            continue
-        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+            reply(request["id"], error={"code": -32601, "message": "Unknown method"})
+    # A client that closes stdin still gets every answer it asked for: a call
+    # in flight finishes and replies before the server exits. wait is bounded.
+    for worker_thread in calls:
+        worker_thread.join()
 
 
 def main():
@@ -533,6 +581,9 @@ def main():
     wrapped.add_argument("--timeout-seconds", type=int, default=3600)
     for name in ("status", "cancel", "worker"):
         subs.add_parser(name).add_argument("job_id")
+    waited = subs.add_parser("wait")
+    waited.add_argument("job_id")
+    waited.add_argument("--timeout-seconds", type=int, default=WAIT_MAX)
     subs.add_parser("mcp")
     args = vars(parser.parse_args())
     action = args.pop("action")
@@ -543,7 +594,8 @@ def main():
     elif action == "run":
         raise SystemExit(run(**args))
     else:
-        print(json.dumps({"start": start, "status": status, "cancel": cancel}[action](**args)))
+        print(json.dumps({"start": start, "wait": wait, "status": status,
+                          "cancel": cancel}[action](**args)))
 
 
 if __name__ == "__main__":
