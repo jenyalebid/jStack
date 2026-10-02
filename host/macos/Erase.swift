@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 import Darwin
 
 let workspace = "/private/var/db/live.jstack.sos"
@@ -184,9 +185,79 @@ func removeTarget(_ path: String, copiesOnly: Bool) throws {
     try erase(parent, components.last!, metadata.st_dev, copiesOnly: copiesOnly)
 }
 
+func preferences(verifyOnly: Bool) throws {
+    guard getuid() == 0, geteuid() == 0,
+          let manifest = try JSONSerialization.jsonObject(with: protectedFile("manifest.json")) as? [String: Any],
+          manifest["schema"] as? Int == 1,
+          let value = manifest["uid"] as? Int, let uid = uid_t(exactly: value), uid != 0,
+          let home = manifest["home"] as? String, canonical(home),
+          let domains = manifest["preferences"] as? [String], !domains.isEmpty,
+          domains.allSatisfy({ $0.range(of: #"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$"#,
+                                       options: .regularExpression) != nil }),
+          let account = getpwuid(uid), String(cString: account.pointee.pw_dir) == home else {
+        throw POSIXError(.EPERM)
+    }
+    let name = String(cString: account.pointee.pw_name)
+    let gid = account.pointee.pw_gid
+    // The executable and authorization stay root-only. Load both before
+    // dropping identity; CFPreferences must never use the root account.
+    guard let group = Int32(exactly: gid), chdir("/") == 0,
+          initgroups(name, group) == 0, setgid(gid) == 0, setuid(uid) == 0,
+          getuid() == uid, geteuid() == uid,
+          setenv("HOME", home, 1) == 0, setenv("USER", name, 1) == 0,
+          setenv("LOGNAME", name, 1) == 0 else { throw POSIXError(.EPERM) }
+    // Refuse redirected stores before asking cfprefsd to touch them. A failed
+    // or unreadable store is not evidence of an empty preference domain.
+    let base = home + "/Library/Preferences"
+    for path in [home, home + "/Library", base, base + "/ByHost"] {
+        var metadata = stat()
+        if lstat(path, &metadata) != 0 {
+            guard errno == ENOENT else { throw POSIXError(.EIO) }
+        } else {
+            guard metadata.st_mode & S_IFMT == S_IFDIR else { throw POSIXError(.EPERM) }
+        }
+    }
+    let byHost = base + "/ByHost"
+    let names = FileManager.default.fileExists(atPath: byHost)
+        ? try FileManager.default.contentsOfDirectory(atPath: byHost) : []
+    for domain in domains {
+        let paths = [base + "/" + domain + ".plist"] + names.filter {
+            $0.hasPrefix(domain + ".") && $0.hasSuffix(".plist")
+        }.map { byHost + "/" + $0 }
+        for path in paths {
+            var metadata = stat()
+            if lstat(path, &metadata) != 0 {
+                guard errno == ENOENT else { throw POSIXError(.EIO) }
+            } else {
+                guard metadata.st_mode & S_IFMT == S_IFREG, metadata.st_uid == uid,
+                      metadata.st_flags & UInt32(UF_IMMUTABLE | SF_IMMUTABLE) == 0,
+                      access(path, R_OK | W_OK) == 0 else { throw POSIXError(.EPERM) }
+            }
+        }
+    }
+    for domain in domains {
+        for host in [kCFPreferencesAnyHost, kCFPreferencesCurrentHost] {
+            guard CFPreferencesSynchronize(domain as CFString, kCFPreferencesCurrentUser, host) else {
+                throw POSIXError(.EIO)
+            }
+            if !verifyOnly {
+                let keys = CFPreferencesCopyKeyList(domain as CFString, kCFPreferencesCurrentUser, host)
+                CFPreferencesSetMultiple(nil, keys, domain as CFString, kCFPreferencesCurrentUser, host)
+                guard CFPreferencesSynchronize(domain as CFString, kCFPreferencesCurrentUser, host) else {
+                    throw POSIXError(.EIO)
+                }
+            }
+            let keys = CFPreferencesCopyKeyList(domain as CFString, kCFPreferencesCurrentUser, host) as? [String]
+            guard keys?.isEmpty ?? true else { throw POSIXError(.EEXIST) }
+        }
+    }
+}
+
 do {
     let arguments = Array(CommandLine.arguments.dropFirst())
-    if arguments.first == "--history-copies" {
+    if arguments == ["--preferences"] || arguments == ["--verify-preferences"] {
+        try preferences(verifyOnly: arguments[0] == "--verify-preferences")
+    } else if arguments.first == "--history-copies" {
         guard arguments.count >= 2 else { throw POSIXError(.EINVAL) }
         // Validate every exact target before changing the first one.
         for path in arguments.dropFirst() { try authorize(path) }

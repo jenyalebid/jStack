@@ -30,6 +30,9 @@ PROVIDERS = {"claude": (".claude", "CLAUDE_CONFIG_DIR"),
              "codex": (".codex", "CODEX_HOME")}
 TREE_DIRS = ("Agents", "Projects", "Systems", "Config", "State", "Logs", "Credentials")
 KEYCHAIN_SERVICES = ("Claude Code-credentials", "Claude", "Codex Auth", "jRemote")
+PREFERENCE_DOMAINS = ("com.anthropic.claudefordesktop", "com.openai.codex",
+                      "com.openai.codex.installer", "live.jstack.hub", "com.jremote.menubar",
+                      "com.p5sys.jump.connect", "com.p5sys.jump.mac.viewer.web")
 
 
 def volume_uuid(path: Path) -> str:
@@ -146,7 +149,7 @@ def inventory() -> dict:
               "root": str(root), "history": [], "data": [], "apps": [], "services": [],
               "registrations": [], "history_sources": [], "network_transaction": config.get("network_transaction"),
               "tmux_socket": environment.get("JREMOTE_TMUX_SOCK", "jremote"),
-              "shares": {},
+              "shares": {}, "preferences": list(PREFERENCE_DOMAINS),
               "app": config.get("app", "/Applications/jStack Hub.app")}
 
     def add(phase, path):
@@ -213,6 +216,14 @@ def inventory() -> dict:
         add("data", home / relative)
     for name in ("jStack", "jRemote-Code"):
         add("data", root / name)
+    for domain in result["preferences"]:
+        add("data", home / "Library/Preferences" / (domain + ".plist"))
+        for path in (home / "Library/Preferences/ByHost").glob(domain + ".*.plist"):
+            add("data", path)
+    for relative in ("Library/Caches/com.p5sys.jump.mac.viewer.web", "Library/Caches/Jump Desktop",
+                     "Library/Caches/com.p5sys.jump.connect", "Library/Containers/com.p5sys.jump.mac.viewer",
+                     "Library/Application Support/com.p5sys.jump.connect"):
+        add("data", home / relative)
     for relative in (".config/claude", ".config/codex", ".config/jremote", ".local/share/jstack",
                      ".cache/claude", ".cache/codex", ".cache/codex-runtimes",
                      "Library/Caches/claude-cli-nodejs", "Library/Caches/Codex",
@@ -360,6 +371,9 @@ def worker(plan: dict) -> str:
             lines.append(shlex.join([str(WORK / "Erase"), "--history-copies",
                                      *plan["history_sources"]]) + ' || { fail "history copies"; exit 1; }')
         if phase == "data":
+            if plan.get("preferences"):
+                lines.append(shlex.join([str(WORK / "Erase"), "--preferences"])
+                             + ' || { fail "preferences cleanup"; exit 1; }')
             for name, path in plan.get("shares", {}).items():
                 node = "/SharePoints/" + name
                 lines += [f"if /usr/bin/dscl . -read {q(node)} >/dev/null 2>&1; then",
@@ -402,6 +416,9 @@ def worker(plan: dict) -> str:
               'phase verify', *[f'test ! -e {q(path)} && test ! -L {q(path)} || fail {q("remains: " + path)}'
                                 for phase in ("history", "data", "apps") for path in plan[phase]],
               *keychain_commands(plan, user, delete=False),
+              *([shlex.join([str(WORK / "Erase"), "--verify-preferences"])
+                 + ' || { fail "preferences remain or cannot be inspected"; exit 1; }']
+                if plan.get("preferences") else []),
               '[ "$failed" = 0 ] || exit 1', 'phase complete',
               f"/usr/bin/plutil -replace SOSComplete -bool YES {q(str(PLIST))} || exit 1"]
     return "\n".join(lines) + "\n"

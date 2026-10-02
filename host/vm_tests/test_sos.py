@@ -362,10 +362,10 @@ def authorization(guest_only, tmp_path):
     assert not work.exists(), "never replace an existing wipe's state"
     subprocess.run(["sudo", "-n", "mkdir", "-m", "700", str(work)], check=True)
 
-    def approve(*paths):
+    def approve(*paths, **extra):
         manifest = tmp_path / "manifest.json"
         manifest.write_text(json.dumps({"schema": 1, "home": str(Path.home()),
-                                       "history": [str(p) for p in paths], "data": [], "apps": []}))
+                                       "history": [str(p) for p in paths], "data": [], "apps": [], **extra}))
         subprocess.run(["sudo", "-n", "install", "-o", "root", "-g", "wheel", "-m", "600",
                         str(manifest), str(work / "manifest.json")], check=True)
         return work / "manifest.json"
@@ -378,6 +378,74 @@ def authorization(guest_only, tmp_path):
 
 def erase(eraser, target):
     return subprocess.run(["sudo", "-n", str(eraser), str(target)], capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("condition", ["normal", "symlink", "immutable", "unreadable", "wrong-user"])
+def test_native_preferences_from_launchd_preserve_other_domains_and_root(
+        eraser, authorization, tmp_path, condition):
+    domain = "com.example.sos-preferences-" + uuid.uuid4().hex
+    other = domain + ".unrelated"
+    selected = Path.home() / "Library/Preferences" / (domain + ".plist")
+    outside = tmp_path / "preserved.plist"
+    outside.write_bytes(plistlib.dumps({"sos-sentinel": "must survive"}))
+    outside_bytes = outside.read_bytes()
+
+    def defaults(target, *args, root=False, host=False, check=True):
+        return subprocess.run((["sudo", "-n", "-H"] if root else [])
+                              + ["/usr/bin/defaults", *(["-currentHost"] if host else []),
+                                 args[0], target, *args[1:]], capture_output=True, text=True, check=check)
+
+    seeded = []
+    try:
+        for target, root in ((domain, False), (other, False), (domain, True)):
+            for host in (False, True):
+                defaults(target, "write", "sos-sentinel", "-string", "synthetic-value", root=root, host=host)
+                seeded.append((target, root, host))
+                assert defaults(target, "read", "sos-sentinel", root=root, host=host).stdout.strip() == "synthetic-value"
+        assert selected.is_file()
+        selected_bytes = selected.read_bytes()
+        authorization(preferences=[domain], uid=0 if condition == "wrong-user" else os.getuid())
+        retained = sos.WORK / "PreferenceErase"
+        subprocess.run(["sudo", "-n", "install", "-o", "root", "-g", "wheel", "-m", "700",
+                        str(eraser), str(retained)], check=True)
+        assert erase(retained, "--verify-preferences").returncode != 0
+        if condition == "symlink":
+            selected.unlink()
+            selected.symlink_to(outside)
+        elif condition == "immutable":
+            subprocess.run(["chflags", "uchg", str(selected)], check=True)
+        elif condition == "unreadable":
+            selected.chmod(0)
+        command = shlex.join([str(retained), "--preferences"])
+        script = "\n".join([
+            "set -eu", 'trap \'printf "SOS-KEYCHAIN-EXIT=%s\\n" "$?"\' EXIT',
+            "cd /", command, command,
+            shlex.join([str(retained), "--verify-preferences"])])
+        output, error = launch_keychain_script(script, tmp_path)
+        refused = condition != "normal"
+        assert f"SOS-KEYCHAIN-EXIT={1 if refused else 0}" in output, (output, error)
+        if not refused:
+            for host in (False, True):
+                result = defaults(domain, "read", "sos-sentinel", host=host, check=False)
+                assert result.returncode == 1 and "does not exist" in result.stderr, result
+            # A fresh write must also make the independent verification fail.
+            defaults(domain, "write", "new-key", "-string", "recreated")
+            assert erase(retained, "--verify-preferences").returncode != 0
+        for target, root in ((other, False), (domain, True)):
+            for host in (False, True):
+                assert defaults(target, "read", "sos-sentinel", root=root, host=host).stdout.strip() == "synthetic-value"
+        assert outside.read_bytes() == outside_bytes
+        if condition in ("immutable", "wrong-user"):
+            assert selected.read_bytes() == selected_bytes
+    finally:
+        if condition == "symlink" and selected.is_symlink():
+            selected.unlink()
+        elif condition == "immutable" and selected.exists():
+            subprocess.run(["chflags", "nouchg", str(selected)], check=True)
+        elif condition == "unreadable" and selected.exists():
+            selected.chmod(0o600)
+        for target, root, host in seeded:
+            defaults(target, "delete", root=root, host=host, check=False)
 
 
 def test_native_removal_preserves_symlink_destination(eraser, authorization, tmp_path):
