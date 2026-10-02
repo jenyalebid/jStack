@@ -82,8 +82,8 @@ def launch_keychain_script(script, directory):
         subprocess.run(["sudo", "-n", "unlink", str(destination)], check=True)
 
 
-@pytest.mark.parametrize("changed", [False, True])
-def test_launchd_deletes_explicit_keychains_and_preserves_unrelated(changed):
+@pytest.mark.parametrize("condition", ["normal", "changed-directory", "locked"])
+def test_launchd_deletes_explicit_keychains_and_preserves_unrelated(condition):
     security = "/usr/bin/security"
     original = shlex.split(subprocess.check_output([security, "list-keychains", "-d", "user"], text=True))
     with tempfile.TemporaryDirectory(prefix="sos-keychain-test-", dir=Path.home()) as name:
@@ -100,9 +100,12 @@ def test_launchd_deletes_explicit_keychains_and_preserves_unrelated(changed):
                         subprocess.run([security, "add-generic-password", "-s", service, "-a", account,
                                         "-w", "synthetic-sos-value", "-T", security, str(path)], check=True)
             records = [{"path": str(p), "device": p.stat().st_dev,
-                        "inode": p.stat().st_ino, "uid": os.getuid()} for p in paths]
-            if changed:
-                records[0]["inode"] += 1
+                        "parent_inode": p.parent.stat().st_ino, "uid": os.getuid()} for p in paths]
+            if condition == "changed-directory":
+                records[0]["parent_inode"] += 1
+            if condition == "locked":
+                for path in paths:
+                    subprocess.run([security, "lock-keychain", str(path)], check=True)
             user = ["/usr/bin/sudo", "-n", "-H", "-u", "#" + str(os.getuid()),
                     "/bin/sh", "-c", 'cd / && exec "$@"', "sos-user"]
             plan = {"keychains": records}
@@ -111,15 +114,19 @@ def test_launchd_deletes_explicit_keychains_and_preserves_unrelated(changed):
                 'trap \'printf "SOS-KEYCHAIN-EXIT=%s\\n" "$?"\' EXIT',
                 'fail() { echo "INCOMPLETE: $*"; }',
                 *sos.keychain_commands(plan, user, delete=True),
+                *sos.keychain_commands(plan, user, delete=False),
+                *sos.keychain_commands(plan, user, delete=True),
                 *sos.keychain_commands(plan, user, delete=False)])
             output, error = launch_keychain_script(script, directory)
-            assert f"SOS-KEYCHAIN-EXIT={1 if changed else 0}" in output, (output, error)
+            assert f'SOS-KEYCHAIN-EXIT={0 if condition == "normal" else 1}' in output, (output, error)
             for path in paths:
+                if condition == "locked":
+                    subprocess.run([security, "unlock-keychain", "-p", "sos-fixture", str(path)], check=True)
                 for service in (*sos.KEYCHAIN_SERVICES, "unrelated-sos-sentinel"):
                     for account in ("first", "second"):
                         result = subprocess.run([security, "find-generic-password", "-s", service,
                                                  "-a", account, str(path)], capture_output=True)
-                        expected = 0 if changed or service == "unrelated-sos-sentinel" else 44
+                        expected = 0 if condition != "normal" or service == "unrelated-sos-sentinel" else 44
                         assert result.returncode == expected, (service, account, result.returncode)
         finally:
             for path in created:

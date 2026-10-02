@@ -54,7 +54,7 @@ def keychain_inventory(home: Path, uid: int) -> list[dict]:
         if not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
             raise ValueError(f"keychain ownership cannot be established: {path}")
         records.append({"path": str(path), "device": info.st_dev,
-                        "inode": info.st_ino, "uid": info.st_uid})
+                        "parent_inode": path.parent.stat().st_ino, "uid": info.st_uid})
     return records
 
 
@@ -66,9 +66,13 @@ def keychain_commands(plan: dict, user: list[str], *, delete: bool) -> list[str]
     for record in plan["keychains"]:
         path = Path(record["path"])
         checks = [f"test ! -L {shlex.quote(str(p))}" for p in (path, *path.parents)]
+        # The real launchd regression observes a new database inode after
+        # each successful security delete; the directory identity survives it.
         checks += [f"test -f {shlex.quote(str(path))}",
-                   f'test "$(/usr/bin/stat -f %d:%i:%u {shlex.quote(str(path))})" = '
-                   + shlex.quote(f'{record["device"]}:{record["inode"]}:{record["uid"]}')]
+                   f'test "$(/usr/bin/stat -f %d:%u {shlex.quote(str(path))})" = '
+                   + shlex.quote(f'{record["device"]}:{record["uid"]}'),
+                   f'test "$(/usr/bin/stat -f %i {shlex.quote(str(path.parent))})" = '
+                   + shlex.quote(str(record["parent_inode"]))]
         guard = " && ".join(checks) + ' || { fail "keychain identity changed"; exit 1; }'
         for service in KEYCHAIN_SERVICES:
             query = shlex.join(user + ["/usr/bin/security", "find-generic-password",
