@@ -290,9 +290,9 @@ pass "cosmetic-allowed"
 #     nothing is printed, exit 0.
 printf 'not a directory' > "$TMP/brokenstate"
 G=broken-$$
-out="$(JREMOTE_STATE_DIR="$TMP/brokenstate" bash -c "$(declare -f exiting); PY='$PY'; EXIT_HOOK='$EXIT_HOOK'; CLAUDE_T='$CLAUDE_T'; exiting $G '$TMP/good.md'"; echo "rc=$?")"
+out="$(JREMOTE_STATE_DIR="$TMP/brokenstate" exiting "$G" "$TMP/good.md"; echo "rc=$?")"
 [[ "$out" == "rc=0" ]] || fail "fail-open" "a broken store did not let the tool through: $out"
-out="$(JREMOTE_STATE_DIR="$TMP/brokenstate" bash -c "$(declare -f prompt); PY='$PY'; WATCH='$WATCH'; prompt $G plan '$CLAUDE_T'"; echo "rc=$?")"
+out="$(JREMOTE_STATE_DIR="$TMP/brokenstate" prompt "$G" plan "$CLAUDE_T"; echo "rc=$?")"
 [[ "$out" == "rc=0" ]] || fail "fail-open" "the watch hook did not survive a broken store: $out"
 pass "fail-open-on-own-error"
 
