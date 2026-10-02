@@ -131,6 +131,36 @@ def plan_statusline(settings: dict, command: str) -> tuple[dict, str]:
     return settings, "status line now samples the Claude allowance (prints nothing)"
 
 
+#: Claude Code's built-in AGENTS.md loader and the mode jStack needs from it.
+#: A seat is an AGENTS.md walk-up, and the loader's default ("claude-md-or-
+#: agents-md") drops every AGENTS.md in a session whose ancestors hold a single
+#: CLAUDE.md — a cloned repo parked in a pad, or the user's own ~/CLAUDE.md —
+#: so the seat would open with no identity and nothing would say so. Loading
+#: both keeps the walk-up whatever else sits in the chain.
+AGENTS_MD_PLUGIN = "agents-md@builtin"
+INSTRUCTION_FILES = "claude-md-and-agents-md"
+
+
+def plan_instruction_files(settings: dict) -> tuple[dict, str]:
+    """Set the loader mode unless the user already chose one."""
+    configs = settings.get("pluginConfigs")
+    if configs is not None and not isinstance(configs, dict):
+        return settings, f"left an unrecognised pluginConfigs alone: {configs!r}"
+    entry = (configs or {}).get(AGENTS_MD_PLUGIN)
+    if entry is not None and not isinstance(entry, dict):
+        return settings, f"left an unrecognised {AGENTS_MD_PLUGIN} entry alone: {entry!r}"
+    current = (entry or {}).get("options", {}).get("instructionFiles")
+    if current == INSTRUCTION_FILES:
+        return settings, "AGENTS.md loads beside CLAUDE.md"
+    if current is not None:
+        return settings, (f"left your instructionFiles={current!r} alone — a seat's "
+                          "AGENTS.md walk-up drops wherever a CLAUDE.md sits above it")
+    configs = settings.setdefault("pluginConfigs", {})
+    entry = configs.setdefault(AGENTS_MD_PLUGIN, {})
+    entry.setdefault("options", {})["instructionFiles"] = INSTRUCTION_FILES
+    return settings, "AGENTS.md now loads beside CLAUDE.md"
+
+
 def install(path: Path | None = None, checkout: Path | None = None,
             state_dir: str | None = None, dry_run: bool = False) -> str:
     """Bring the settings file to where it should be. Returns the note."""
@@ -139,6 +169,8 @@ def install(path: Path | None = None, checkout: Path | None = None,
     before = json.dumps(settings, sort_keys=True)
     settings, note = plan_statusline(
         settings, statusline_command(checkout, state_dir))
+    settings, instructions = plan_instruction_files(settings)
+    note = f"{note}; {instructions}"
     if dry_run or json.dumps(settings, sort_keys=True) == before:
         return note
     path.parent.mkdir(parents=True, exist_ok=True)

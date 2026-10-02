@@ -21,7 +21,7 @@ def test_native_startup_preserves_local_overrides_nested_rules_and_memory(tmp_pa
     seat.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(home / "repo")], check=True)
     (seat / "AGENTS.md").write_text("Native shared instructions")
-    (seat / "CLAUDE.md").write_text("Replaced shared instructions")
+    (seat / "CLAUDE.md").write_text("Claude-only instructions")
     (seat / "CLAUDE.local.md").write_text("Local override <!-- hidden comment -->")
     rules = home / ".claude/rules/nested"
     rules.mkdir(parents=True)
@@ -40,13 +40,17 @@ def test_native_startup_preserves_local_overrides_nested_rules_and_memory(tmp_pa
     payload = json.dumps({"cwd": str(seat), "transcript_path": "rollout-preview.jsonl"})
     result = subprocess.run(command, input=payload, capture_output=True, text=True, check=True)
     context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-    assert "Local override" in context and "Always loaded" in context
-    assert "hidden comment" not in context and "Replaced shared" not in context
+    # Instruction files are Codex's own to load (AGENTS.md); the hook carries
+    # only what Codex has no loader for.
+    assert "Always loaded" in context
+    assert "Native shared" not in context and "Claude-only" not in context
+    assert "Local override" not in context
     assert "On demand only" not in context
     assert "Fact 199" in context and "Fact 200" not in context
     preview = subprocess.run([sys.executable, str(PLUGIN / "bin/pict"), str(seat),
                               "--engine", "codex", "--bare"], capture_output=True, text=True, check=True)
-    assert "Local override" in preview.stdout and "Fact 199" in preview.stdout
+    assert "Native shared" in preview.stdout and "Fact 199" in preview.stdout
+    assert "Claude-only" not in preview.stdout
     disabled = subprocess.run([sys.executable, str(PLUGIN / "bin/pict"), str(seat),
                                "--engine", "codex", "--bare", "--no-memory"],
                               capture_output=True, text=True, check=True)

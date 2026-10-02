@@ -58,8 +58,8 @@ def agent_tree(tmp_path, monkeypatch):
     encoded root as a string and macOS tmp paths sit behind `/private`."""
     root = (tmp_path / "Agents").resolve()
     (root / "Ops" / "chat").mkdir(parents=True)
-    (root / "Ops" / "CLAUDE.md").write_text("# Ops\n")
-    (root / "Ops" / "chat" / "CLAUDE.md").write_text("# Ops · chat\n")
+    (root / "Ops" / "AGENTS.md").write_text("# Ops\n")
+    (root / "Ops" / "chat" / "AGENTS.md").write_text("# Ops · chat\n")
     monkeypatch.setattr(hostenv, "_profile", hostenv.DefaultProfile(root))
     return root
 

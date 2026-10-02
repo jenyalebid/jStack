@@ -196,7 +196,7 @@ def home(tmp_path):
     # One agent workspace is enough for `root.resolve` to accept the tree; the
     # seat's name is arbitrary and deliberately not anyone's.
     (tmp_path / "root/Agents/Scout").mkdir(parents=True)
-    (tmp_path / "root/Agents/Scout/CLAUDE.md").write_text("# Scout\n")
+    (tmp_path / "root/Agents/Scout/AGENTS.md").write_text("# Scout\n")
     (tmp_path / "Library/LaunchAgents").mkdir(parents=True)
     return tmp_path
 

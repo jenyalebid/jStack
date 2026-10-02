@@ -219,13 +219,13 @@ def check_agents() -> dict:
     d = root.agents_dir()
     if not d.is_dir():
         return _check("agents", FAIL, f"no agents dir at {d}",
-                      f"create {d}/<Name>/CLAUDE.md, or point `agent_root` at the "
+                      f"create {d}/<Name>/AGENTS.md, or point `agent_root` at the "
                       f"directory that already holds your workspaces")
     found = root.agents()
     if not found:
         return _check("agents", FAIL, f"{d} exists but holds no agents",
-                      "an agent is a directory here with a CLAUDE.md, or with one "
-                      "immediate subdirectory that has one (Agents/<id>/<seat>/CLAUDE.md)")
+                      "an agent is a directory here with a AGENTS.md, or with one "
+                      "immediate subdirectory that has one (Agents/<id>/<seat>/AGENTS.md)")
     return _check("agents", OK, f"{len(found)} in {d}: {', '.join(sorted(found))}")
 
 

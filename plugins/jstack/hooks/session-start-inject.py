@@ -97,7 +97,7 @@ def resolve(cwd: Path, root: Path) -> tuple[str | None, str | None]:
     submode is the session dir's full path under {root}/{Name} ("/"-joined —
     per-dir seats: social/chat is its own seat, distinct from chat and from
     social), or "chat" at the agent root. Recognized when {Name} is an agent:
-    a CLAUDE.md at its top, or a seat below it carrying one."""
+    a AGENTS.md at its top, or a seat below it carrying one."""
     if _root is not None:
         return _root.seat_of(cwd, base=root)
     # Older install without root.py: the literal gate this shipped with.
@@ -108,7 +108,7 @@ def resolve(cwd: Path, root: Path) -> tuple[str | None, str | None]:
     if not rel.parts:
         return None, None
     agent_dir = root / rel.parts[0]
-    if not (agent_dir / "CLAUDE.md").is_file():
+    if not any((agent_dir / _n).is_file() for _n in ("AGENTS.md", "CLAUDE.md")):
         return None, None
     submode = "/".join(p.lower() for p in rel.parts[1:]) or "chat"
     return agent_dir.name.lower(), submode
@@ -458,7 +458,7 @@ def build_tag_context(tag: str, seat: str, entries: str, n: int) -> str:
 def build_identity(agent: str, submode: str, root: Path, registry: dict) -> str:
     """The agent's role file, for a session that reached its seat through a repo.
 
-    A cockpit session loads its role by standing in it — CLAUDE.md walk-up
+    A cockpit session loads its role by standing in it — AGENTS.md walk-up
     climbs from cwd to the workspace and picks it up. A session in a repo can't:
     the workspace is a sibling of the checkout, not an ancestor, so walk-up
     passes it by and the session gets the repo's docs and none of its own
@@ -477,7 +477,10 @@ def build_identity(agent: str, submode: str, root: Path, registry: dict) -> str:
 
     parts = []
     seen = set()
-    for path in (root / "CLAUDE.md", agent_dir / "CLAUDE.md", seat_dir / "CLAUDE.md"):
+    # AGENTS.md is the name; CLAUDE.md is what a seat not yet migrated carries.
+    role_files = [next((d / n for n in ("AGENTS.md", "CLAUDE.md") if (d / n).is_file()),
+                       d / "AGENTS.md") for d in (root, agent_dir, seat_dir)]
+    for path in role_files:
         try:
             rp = path.resolve()
         except OSError:
@@ -566,7 +569,7 @@ def main() -> int:
     blocks = []
 
     # Identity first, and only for a session that reached its seat through a
-    # repo: CLAUDE.md walk-up already gave a cockpit session its role, but a
+    # repo: AGENTS.md walk-up already gave a cockpit session its role, but a
     # session standing in a checkout never passes its workspace.
     if via_repo and cfg.get("inject_identity", True):
         identity = build_identity(

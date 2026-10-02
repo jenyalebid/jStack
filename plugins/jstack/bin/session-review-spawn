@@ -33,7 +33,7 @@ with no config it runs portable defaults.
 Stack requirements (conventions this engine assumes exist):
   - Agent workspaces under agent_root, one per {Name}/ — an agent is
     reviewable iff {agent_root}/{Name}/ is an agent by root.is_agent: a
-    CLAUDE.md at its top, or in at least one of its seat subdirs.
+    AGENTS.md at its top, or in at least one of its seat subdirs.
   - The jstack `log_event` tool (self-write) and the review skill (default
     /jstack:post-session-review, "review" action) are installed. This engine
     puts its own bin/ on the spawned PATH.
@@ -384,7 +384,7 @@ def reviewable_agents(agent_root: Path) -> dict[str, str]:
 
     The gate is root.is_agent — the same one bin/msg, the SessionStart injector
     and the Stop guard ask. It was a fourth private copy here, requiring a
-    CLAUDE.md at the workspace top. On a layout of Agents/<id>/<seat>/CLAUDE.md
+    AGENTS.md at the workspace top. On a layout of Agents/<id>/<seat>/AGENTS.md
     with nothing at the top that copy found no agents at all, so every session
     on such a machine resolved to nobody and no seat ever got its running
     memory written — mail and injection worked, review silently did not.
@@ -402,7 +402,7 @@ def reviewable_agents(agent_root: Path) -> dict[str, str]:
     for d in sorted(agent_root.iterdir()):
         if not d.is_dir() or d.name.startswith("."):
             continue
-        if _root.is_agent(d) if _root is not None else (d / "CLAUDE.md").is_file():
+        if _root.is_agent(d) if _root is not None else any((d / _n).is_file() for _n in ("AGENTS.md", "CLAUDE.md")):
             out[d.name.lower()] = d.name
     return out
 

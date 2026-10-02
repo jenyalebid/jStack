@@ -1,7 +1,7 @@
 """Which files on this machine a connected client is allowed to read.
 
 The host hands the app absolute paths — a rule, a skill, a SYSTEM.md, a seat's
-CLAUDE.md — and the app asks for them back. Without a fence that round trip is
+AGENTS.md — and the app asks for them back. Without a fence that round trip is
 "any file on this Mac, over the network", on a machine that also stores
 credentials. So every read of a document goes through `fenced_path()`, and the
 answer is checked on the *resolved* path: half of what the inventory lists is a

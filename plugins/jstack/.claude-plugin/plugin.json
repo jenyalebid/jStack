@@ -9,7 +9,7 @@
     "agent_root": {
       "type": "directory",
       "title": "Agent workspaces root",
-      "description": "Directory that contains your per-agent workspaces \u2014 each as {Name}/ with a CLAUDE.md. jStack resolves every agent path under here. Example: ~/Agents or /Users/you/Projects/Agents.",
+      "description": "Directory that contains your per-agent workspaces \u2014 each as {Name}/ with a AGENTS.md. jStack resolves every agent path under here. Example: ~/Agents or /Users/you/Projects/Agents.",
       "default": "~/Agents"
     },
     "repo_root": {

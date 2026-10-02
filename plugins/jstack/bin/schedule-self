@@ -99,9 +99,9 @@ def _identity(cfg: dict) -> "tuple[str, Path]":
     nowhere — so that is an error naming what was looked for.
 
     `root.enclosing_seat` is what walks it, and the depth matters: a seat can
-    be nested (`alice/social/threads` carries its own CLAUDE.md). Reading only
+    be nested (`alice/social/threads` carries its own AGENTS.md). Reading only
     the first component below the agent booked the threads seat's wake into
-    `social/`, which boots a different CLAUDE.md under different path rules.
+    `social/`, which boots a different AGENTS.md under different path rules.
     """
     base = root.agents_dir(cfg)
     cwd = Path.cwd()
@@ -123,7 +123,7 @@ def _identity(cfg: dict) -> "tuple[str, Path]":
     name = rel.parts[0]
     ws = root.resolve_agent(name, cfg)
     if ws is None:
-        _fail(f"{base / name} is not an agent (no CLAUDE.md there or in any "
+        _fail(f"{base / name} is not an agent (no AGENTS.md there or in any "
               f"seat below it) — nothing would boot for this wake.")
     seat = root.enclosing_seat(cwd, cfg) if hasattr(root, "enclosing_seat") \
         else None

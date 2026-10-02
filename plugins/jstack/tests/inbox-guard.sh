@@ -45,7 +45,7 @@ pass() { echo "ok: $1"; }
 
 AR="$TMP/agents"
 for seat in Alice Alice/chat Bob Bob/chat; do
-  mkdir -p "$AR/$seat"; echo "# $seat" > "$AR/$seat/CLAUDE.md"
+  mkdir -p "$AR/$seat"; echo "# $seat" > "$AR/$seat/AGENTS.md"
 done
 export JSTACK_REVIEW_CONFIG="$TMP/review.json"
 echo "{\"agent_root\": \"$AR\"}" > "$JSTACK_REVIEW_CONFIG"

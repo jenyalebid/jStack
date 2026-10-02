@@ -149,10 +149,10 @@ mkdir -p "$AGROOT/Agents/alpha" \
          "$AGROOT/Agents/notes" \
          "$AGROOT/Agents/.hidden" \
          "$AGROOT/Agents/Work-Ops"
-touch "$AGROOT/Agents/alpha/CLAUDE.md" \
-      "$AGROOT/Agents/bravo/chat/CLAUDE.md" \
-      "$AGROOT/Agents/.hidden/CLAUDE.md" \
-      "$AGROOT/Agents/Work-Ops/CLAUDE.md" \
+touch "$AGROOT/Agents/alpha/AGENTS.md" \
+      "$AGROOT/Agents/bravo/chat/AGENTS.md" \
+      "$AGROOT/Agents/.hidden/AGENTS.md" \
+      "$AGROOT/Agents/Work-Ops/AGENTS.md" \
       "$AGROOT/Agents/notes/readme.txt"
 
 out=$(HOME="$FAKEHOME" JSTACK_ROOT="$AGROOT" "$PY" - <<'EOF' 2>&1
@@ -175,7 +175,7 @@ assert root.resolve_agent(".hidden") is None                  # dotdirs never re
 ws = root.resolve_agent("bravo")
 assert ws is not None and ws.is_dir(), ws                     # never a nonexistent path
 
-assert root.seats("bravo") == ["chat"], root.seats("bravo")   # pad/ has no CLAUDE.md
+assert root.seats("bravo") == ["chat"], root.seats("bravo")   # pad/ has no AGENTS.md
 assert root.seats("alpha") == [], root.seats("alpha")
 assert root.seats("ghost") == [], root.seats("ghost")
 print("OK")
@@ -201,14 +201,14 @@ mkdir -p "$ADDR/Agents/alice/chat" "$ADDR/Agents/alice/social/chat" \
          "$ADDR/Agents/alice/pad/checkout" \
          "$ADDR/Agents/work-ops/chat" \
          "$ADDR/Agents/bare"
-touch "$ADDR/Agents/alice/CLAUDE.md" "$ADDR/Agents/alice/chat/CLAUDE.md" \
-      "$ADDR/Agents/alice/social/CLAUDE.md" \
-      "$ADDR/Agents/alice/social/chat/CLAUDE.md" \
-      "$ADDR/Agents/alice/social/threads/CLAUDE.md" \
-      "$ADDR/Agents/alice/service-call/CLAUDE.md" \
-      "$ADDR/Agents/alice/pad/checkout/CLAUDE.md" \
-      "$ADDR/Agents/work-ops/chat/CLAUDE.md" \
-      "$ADDR/Agents/bare/CLAUDE.md"
+touch "$ADDR/Agents/alice/AGENTS.md" "$ADDR/Agents/alice/chat/AGENTS.md" \
+      "$ADDR/Agents/alice/social/AGENTS.md" \
+      "$ADDR/Agents/alice/social/chat/AGENTS.md" \
+      "$ADDR/Agents/alice/social/threads/AGENTS.md" \
+      "$ADDR/Agents/alice/service-call/AGENTS.md" \
+      "$ADDR/Agents/alice/pad/checkout/AGENTS.md" \
+      "$ADDR/Agents/work-ops/chat/AGENTS.md" \
+      "$ADDR/Agents/bare/AGENTS.md"
 
 out=$(HOME="$FAKEHOME" JSTACK_ROOT="$ADDR" "$PY" - <<'EOF' 2>&1
 import os, root
@@ -220,7 +220,7 @@ R = root.resolve_seat
 assert R("alice").path == A / "alice/chat", R("alice")
 assert R("@alice").path == A / "alice/chat"
 assert R("ALICE").path == A / "alice/chat"
-# a bare agent — CLAUDE.md on top, no chat/ — keeps its cockpit at the root
+# a bare agent — AGENTS.md on top, no chat/ — keeps its cockpit at the root
 assert R("bare").path == A / "bare", R("bare")
 assert R("bare").id == "bare", R("bare").id   # no seat dir to name
 
@@ -234,7 +234,7 @@ assert R("work-ops-chat").path == A / "work-ops/chat", R("work-ops-chat")
 assert R("work-ops").path == A / "work-ops/chat"
 
 # a pad is never a seat and is never walked through to find one — what lands
-# in one is checkouts, and a checkout carries a CLAUDE.md of its own
+# in one is checkouts, and a checkout carries a AGENTS.md of its own
 for miss in ("alice-pad", "alice-pad-checkout"):
     try:
         R(miss); raise SystemExit(f"{miss} resolved; a pad is not a seat")
@@ -290,14 +290,14 @@ else
 fi
 
 # --- bare-root proof ---------------------------------------------------------
-# A root containing ONLY Agents/alice/CLAUDE.md, and HOME pointed at an empty
+# A root containing ONLY Agents/alice/AGENTS.md, and HOME pointed at an empty
 # dir so a fallback to the real home tree finds nothing to hide behind. Every
 # answer must come from inside the declared tmpdir — a run that passes because
 # it silently found the machine's own ~/Agents proves nothing.
 
 BARE="$TMP/bare"; BAREHOME="$TMP/bare-home"
 mkdir -p "$BARE/Agents/alice" "$BAREHOME"
-touch "$BARE/Agents/alice/CLAUDE.md"
+touch "$BARE/Agents/alice/AGENTS.md"
 
 out=$(HOME="$BAREHOME" JSTACK_ROOT="$BARE" "$PY" - <<'EOF' 2>&1
 import os, root
@@ -320,12 +320,12 @@ else
 fi
 
 # The gate three callers used to each carry a copy of: on a machine laid out
-# as Agents/<id>/<seat>/CLAUDE.md with nothing at the agent's top, every one of
+# as Agents/<id>/<seat>/AGENTS.md with nothing at the agent's top, every one of
 # them refused to name the seat the session was in — msg could not say who was
 # sending. seat_of is now the single answer.
 BR="$TMP/seatroot"
 mkdir -p "$BR/Agents/seatonly/chat" "$BR/Agents/topped/social/chat" "$BR/Agents/notanagent/sub"
-touch "$BR/Agents/seatonly/chat/CLAUDE.md" "$BR/Agents/topped/CLAUDE.md"
+touch "$BR/Agents/seatonly/chat/AGENTS.md" "$BR/Agents/topped/AGENTS.md"
 if out=$(env JSTACK_ROOT="$BR" HOME="$TMP/emptyhome" "$PY" -c '
 import root
 assert root.seat_of("'"$BR"'/Agents/seatonly/chat") == ("seatonly", "chat"), root.seat_of("'"$BR"'/Agents/seatonly/chat")
@@ -344,7 +344,7 @@ if out=$(env JSTACK_ROOT="$BR" HOME="$TMP/emptyhome" "$PY" -c '
 import root
 from pathlib import Path
 b = Path("'"$BR"'/Agents")
-assert root.is_agent(b / "topped") is True          # CLAUDE.md at the top
+assert root.is_agent(b / "topped") is True          # AGENTS.md at the top
 assert root.is_agent(b / "seatonly") is True        # only a seat carries one
 assert root.is_agent(b / "notanagent") is False     # neither
 assert root.is_agent(b / "nope") is False           # not there at all

@@ -74,7 +74,7 @@ def test_review_resolver_reads_native_metadata_and_quotes_paths(tmp_path, monkey
     agents = tmp_path / "agents with spaces"
     seat = agents / "Alpha/chat"
     seat.mkdir(parents=True)
-    (seat / "CLAUDE.md").touch()
+    (seat / "AGENTS.md").touch()
     codex = tmp_path / "codex"
     folder = codex / "sessions"
     folder.mkdir(parents=True)
@@ -172,7 +172,7 @@ def test_review_offset_is_recorded_only_after_success(native, tmp_path, monkeypa
     assert stamps == ([(NATIVE, native.stat().st_size)] if completed else [])
 
 
-def test_pict_native_preview_uses_agents_precedence_and_instruction_bridge(tmp_path, monkeypatch):
+def test_pict_native_preview_uses_agents_precedence_and_no_claude_md(tmp_path, monkeypatch):
     home = tmp_path / "home"
     native_home = home / ".codex"
     native_home.mkdir(parents=True)
@@ -184,8 +184,8 @@ def test_pict_native_preview_uses_agents_precedence_and_instruction_bridge(tmp_p
     (project / "AGENTS.md").write_text("NATIVE_PROJECT")
     (seat / "AGENTS.md").write_text("IGNORED_NATIVE")
     (seat / "AGENTS.override.md").write_text("NATIVE_OVERRIDE")
-    (project / "CLAUDE.md").write_text("IGNORED_BRIDGE")
-    (home / "CLAUDE.md").write_text("BRIDGED_ORG")
+    (project / "CLAUDE.md").write_text("IGNORED_CLAUDE_PROJECT")
+    (home / "CLAUDE.md").write_text("IGNORED_CLAUDE_ORG")
     config = tmp_path / "review.json"
     config.write_text('{"timeline_inject": {}}')
     monkeypatch.setenv("HOME", str(home))
@@ -196,7 +196,7 @@ def test_pict_native_preview_uses_agents_precedence_and_instruction_bridge(tmp_p
                             capture_output=True, text=True, check=True)
     assert "NATIVE_GLOBAL" in result.stdout
     assert result.stdout.index("NATIVE_PROJECT") < result.stdout.index("NATIVE_OVERRIDE")
-    assert "BRIDGED_ORG" in result.stdout
+    assert "IGNORED_CLAUDE_ORG" not in result.stdout
     assert "IGNORED_NATIVE" not in result.stdout
-    assert "IGNORED_BRIDGE" not in result.stdout
+    assert "IGNORED_CLAUDE_PROJECT" not in result.stdout
     assert "auto-memory" not in result.stdout

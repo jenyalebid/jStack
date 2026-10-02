@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Load a Claude-configured workspace's instructions in Codex as well."""
+"""Give a Codex session the context Claude Code loads and Codex does not.
+
+Instruction files are not here: a seat's walk-up is AGENTS.md, which Codex
+reads natively from the project root down to cwd. What Codex has no loader for
+is the always-on rules in ~/.claude/rules and the auto-memory index.
+"""
 import json
 import os
 import re
@@ -12,14 +17,9 @@ from session_runtime import engine
 
 
 def instruction_context(cwd):
-    """Read existing Claude instructions and memory without running injectors."""
+    """Read always-on rules and memory without running injectors."""
     claude = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))).expanduser()
-    files = [claude / "CLAUDE.md"]
-    for directory in [*reversed(cwd.parents), cwd]:
-        if not any((directory / name).is_file() for name in ("AGENTS.md", "AGENTS.override.md")):
-            files.append(directory / "CLAUDE.md")
-        # Local overrides remain additive even after the shared file migrates.
-        files.append(directory / "CLAUDE.local.md")
+    files = []
     rules = Path(os.environ.get("JSTACK_RULES_DIR", str(claude / "rules"))).expanduser()
     for rule in sorted(rules.glob("**/*.md")):
         try:

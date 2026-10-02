@@ -115,7 +115,7 @@ def _deepest(seats: "list[Path]", holds) -> "Path|None":
     """The longest-pathed seat `holds` says contains the session, or None.
 
     Longest, because seats nest: `Ada/social/threads` and `Ada/social` both
-    contain a session working under threads, and the one whose CLAUDE.md that
+    contain a session working under threads, and the one whose AGENTS.md that
     session is actually running under is the deeper of the two.
     """
     winner = None

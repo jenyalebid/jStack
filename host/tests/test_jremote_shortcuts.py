@@ -9,7 +9,7 @@ picks a directory and keeps it as a card:
   `config` is the app's launch settings, carried and never read here. Deleting
   a card must never touch the directory — that is the whole reason the table
   exists rather than a folder move.
-* **A seat is a directory holding a CLAUDE.md.** The same rule `bin/msg`, the
+* **A seat is a directory holding a AGENTS.md.** The same rule `bin/msg`, the
   session-start injector and the review engine already run on. Pinned here
   because the older answer (`submode_dirs`, direct children against a name
   blocklist) is blind to `code/go` and wrongly prunes `missions/`.
@@ -43,7 +43,7 @@ def tree(tmp_path, monkeypatch):
     """A two-agent host under the portable profile — the real seam, not a stub.
 
     Iris:  root seat, chat, code (seat) → code/go (seat), a non-seat `notes`
-            dir with a seat under it, plus `pad/` and `git/` holding CLAUDE.md
+            dir with a seat under it, plus `pad/` and `git/` holding AGENTS.md
             files that must NOT read as seats.
     Atlas:  root seat only.
     """
@@ -54,7 +54,7 @@ def tree(tmp_path, monkeypatch):
                 "Atlas"):
         d = root / rel
         d.mkdir(parents=True)
-        (d / "CLAUDE.md").write_text(f"# {rel}\n")
+        (d / "AGENTS.md").write_text(f"# {rel}\n")
     (root / "Iris" / "notes").mkdir(exist_ok=True)      # non-seat, has a seat under it
     monkeypatch.setenv("JREMOTE_HOST_PROFILE", "default")
     monkeypatch.setenv("JREMOTE_INSTANCE_ROOT", str(root))
@@ -130,7 +130,7 @@ def test_delete_is_a_tombstone_that_still_ships(store, tree):
     assert store.shortcuts() == []                       # gone from the board
     shipped = store.changes_since(cursor)["shortcuts"]   # but not from the wire
     assert [(r["id"], r["deleted"]) for r in shipped] == [("a", 1)]
-    assert (tree / "Iris" / "code" / "go" / "CLAUDE.md").is_file()
+    assert (tree / "Iris" / "code" / "go" / "AGENTS.md").is_file()
 
 
 def test_changes_since_returns_only_rows_past_the_cursor(store):
@@ -299,7 +299,7 @@ def test_walk_finds_nested_seats_and_the_root(tree):
 
 
 def test_pad_and_git_are_never_seats(tree):
-    """Both hold a CLAUDE.md here. The Law reserves them: `git/` is what the
+    """Both hold a AGENTS.md here. The Law reserves them: `git/` is what the
     seat saves and `pad/` is the shared shelf, and work under a pad carries its
     own instructions — which is exactly why `Nova/chat/pad/issue-6` on the
     real machine has one."""
@@ -319,7 +319,7 @@ def test_walk_is_cached_until_invalidated(tree):
     assert "later" not in seats.walk("iris")
     new = tree / "Iris" / "later"
     new.mkdir()
-    (new / "CLAUDE.md").write_text("# later\n")
+    (new / "AGENTS.md").write_text("# later\n")
     assert "later" not in seats.walk("iris")     # TTL still holding
     seats.invalidate("iris")
     assert "later" in seats.walk("iris")

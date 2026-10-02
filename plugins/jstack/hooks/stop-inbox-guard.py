@@ -94,7 +94,7 @@ def resolve_seat(cwd: str) -> "str|None":
         rel = Path(cwd).resolve().relative_to(root.resolve())
     except (ValueError, OSError):
         return None
-    if not rel.parts or not (root / rel.parts[0] / "CLAUDE.md").is_file():
+    if not rel.parts or not any((root / rel.parts[0] / _n).is_file() for _n in ("AGENTS.md", "CLAUDE.md")):
         return None
     submode = "/".join(p.lower() for p in rel.parts[1:]) or "chat"
     return f"{rel.parts[0].lower()}/{submode}"

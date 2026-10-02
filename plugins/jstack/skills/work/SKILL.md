@@ -8,7 +8,7 @@ argument-hint: "[@project] <topic>"
 
 Preparation, not execution: load the right tools, read what recently changed, read the core files, and form a grounded read of the state. End ready to execute, having changed no code and opened no PR.
 
-Who you are, what you own and your stack come from the CLAUDE.md walk-up already loaded. Nothing here is looked up in a project registry.
+Who you are, what you own and your stack come from the AGENTS.md walk-up already loaded. Nothing here is looked up in a project registry.
 
 `$ARGUMENTS` is `[@project] <topic>`. An `@`-prefixed first token targets a project explicitly: match it case-insensitively against the repo directories under `${user_config.repo_root}` (default: the parent of `${user_config.agent_root}`), and list the candidates and stop if nothing matches. Without it, use your own project — the one your identity establishes; where you own several and the topic does not settle which, infer from the topic and ask one short question only if it stays genuinely unclear. Everything after that is the **topic**, free text naming the area, and it drives both which skills you load and which code you survey.
 
@@ -34,7 +34,7 @@ Then find and grep for the topic's keywords, and read the recent commits that to
 
 ## 5. Read the core files
 
-Open what the survey surfaced as central, plus the project's `CLAUDE.md` or any nearby design doc for the area.
+Open what the survey surfaced as central, plus the project's `AGENTS.md` or any nearby design doc for the area.
 
 ## 6. Report
 

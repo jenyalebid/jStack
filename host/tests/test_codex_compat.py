@@ -229,7 +229,7 @@ def test_setup_bridges_commands_scoped_to_nested_seats(tmp_path):
     command.write_text("Build and distribute the selected app.\n")
     seat = agents / "Ada/code"
     (seat / ".claude").mkdir(parents=True)
-    (seat / "CLAUDE.md").write_text("# Code seat\n")
+    (seat / "AGENTS.md").write_text("# Code seat\n")
     (seat / ".claude/commands").symlink_to(profile, target_is_directory=True)
 
     module.share_workspace(agents)
@@ -248,7 +248,7 @@ def test_setup_does_not_bridge_checkout_commands_from_a_seat_pad(tmp_path):
     agents = tmp_path / "Agents"
     checkout = agents / "Alice/chat/pad/copied-repo"
     (checkout / ".claude/commands").mkdir(parents=True)
-    (checkout / "CLAUDE.md").write_text("# Not a seat\n")
+    (checkout / "AGENTS.md").write_text("# Not a seat\n")
     (checkout / ".claude/commands/foreign.md").write_text("Do foreign work.\n")
 
     module.share_workspace(agents)
@@ -290,13 +290,12 @@ def _codex_setup():
     return module
 
 
-def test_setup_points_codex_at_the_claude_walkup():
-    """Without this key Codex reads AGENTS.md and nothing else, so a machine
-    jStack installed gave a session no org, no agent and no seat."""
+def test_setup_leaves_codex_on_its_native_agents_md():
+    """The walk-up is AGENTS.md, Codex's own name; only the budget is ours."""
     import tomllib
     module = _codex_setup()
     parsed = tomllib.loads(module.doc_config('[marketplaces.jstack]\nsource = "/x"\n'))
-    assert parsed["project_doc_fallback_filenames"] == ["CLAUDE.md"]
+    assert "project_doc_fallback_filenames" not in parsed
     assert parsed["project_doc_max_bytes"] == 262144
     assert parsed["marketplaces"]["jstack"]["source"] == "/x"
 
@@ -306,12 +305,26 @@ def test_walkup_keys_land_above_the_first_table():
     that table's members, and Codex never sees them."""
     module = _codex_setup()
     written = module.doc_config('[marketplaces.jstack]\nsource = "/x"\n')
-    assert written.index("project_doc_fallback_filenames") < written.index("[marketplaces.jstack]")
+    assert written.index("project_doc_max_bytes") < written.index("[marketplaces.jstack]")
 
 
-def test_a_users_own_walkup_answer_is_left_alone():
+def test_a_users_own_budget_is_left_alone():
     module = _codex_setup()
-    mine = 'project_doc_fallback_filenames = ["AGENTS.md", "CLAUDE.md"]\n[tui]\n'
+    mine = 'project_doc_max_bytes = 1000\n[tui]\n'
+    assert module.doc_config(mine) == mine
+
+
+def test_a_previous_installs_claude_md_fallback_is_dropped():
+    module = _codex_setup()
+    old = ('# BEGIN jstack docs\nproject_doc_fallback_filenames = ["CLAUDE.md"]\n'
+           'project_doc_max_bytes = 262144\n# END jstack docs\n[tui]\n')
+    assert module.doc_config(old) == (
+        '# BEGIN jstack docs\nproject_doc_max_bytes = 262144\n# END jstack docs\n[tui]\n')
+
+
+def test_a_users_own_fallback_is_not_ours_to_drop():
+    module = _codex_setup()
+    mine = 'project_doc_fallback_filenames = ["CLAUDE.md"]\nproject_doc_max_bytes = 9\n'
     assert module.doc_config(mine) == mine
 
 

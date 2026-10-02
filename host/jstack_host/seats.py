@@ -1,6 +1,6 @@
 """Seats — every directory a session can boot in, and the browse that finds one.
 
-**A seat is a directory holding a CLAUDE.md.** That is not a new rule invented
+**A seat is a directory holding a AGENTS.md.** That is not a new rule invented
 here: `bin/msg` resolves `@ada-code-go` by it, the session-start injector
 recognises an agent by it, and the review engine decides what it reviews by it.
 Reading the same marker is the whole point — a second definition of "seat" is a
@@ -38,13 +38,13 @@ from .hostenv import split_id, workspace
 #
 #   pad, git   the Law reserves both — `git/` is what the seat saves, `pad/`
 #              is the shared shelf. Neither is spawnable, and `pad/` is where
-#              the only CLAUDE.md false positives on this Mac live
+#              the only AGENTS.md false positives on this Mac live
 #              (`Ops/chat/pad/issue-6`), because work under a pad carries
 #              its own instructions.
 #   scratch    volatile by contract.
 #
 # `missions`, `memory`, `active` and `concepts` are deliberately NOT here.
-# They are how an agent organises its own work, and if one holds a CLAUDE.md
+# They are how an agent organises its own work, and if one holds a AGENTS.md
 # then it IS a seat — `Ada/missions/200-dau` already is one.
 _RESERVED = {"pad", "git", "scratch"}
 
@@ -54,8 +54,8 @@ _MACHINE = {"node_modules", "__pycache__", ".venv", "venv", "build",
 
 
 def is_seat(path: Path) -> bool:
-    """The stack's own test, verbatim: a directory holding a CLAUDE.md."""
-    return (path / "CLAUDE.md").is_file()
+    """The stack's own test, verbatim: a directory holding a AGENTS.md."""
+    return any((path / _n).is_file() for _n in ("AGENTS.md", "CLAUDE.md"))
 
 
 def _listable(child: Path) -> bool:
@@ -99,7 +99,7 @@ def agent_root(agent_id: str) -> Path:
     return workspace(base)
 
 
-# The walk is a `CLAUDE.md` stat per directory, so it costs whatever is checked
+# The walk is a `AGENTS.md` stat per directory, so it costs whatever is checked
 # out inside a seat, not what the seat count suggests: 2393 directories and
 # ~120ms across the eight agents here, and the widest tree alone is half of it.
 #
@@ -126,7 +126,7 @@ def invalidate(base: str | None = None) -> None:
 def walk(base: str) -> list[str]:
     """Every seat under an agent, as `/`-joined paths relative to its root.
 
-    The root itself is `""` when it carries a CLAUDE.md. Reserved and machine
+    The root itself is `""` when it carries a AGENTS.md. Reserved and machine
     subtrees are pruned whole — a seat cannot be inside one.
     """
     import time
@@ -231,7 +231,7 @@ def browse(agent_id: str, rel: str = "") -> dict:
         "base": base,
         "path": rel,
         "root": str(root),
-        # The directory standing here — pickable when it carries a CLAUDE.md,
+        # The directory standing here — pickable when it carries a AGENTS.md,
         # which is also true of the agent root itself.
         "is_seat": is_seat(here),
         "seat_id": seat_id(base, rel),

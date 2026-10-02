@@ -18,4 +18,4 @@ cp "$TARGET_CWD/audit-brief.md" "$AUDIT_TMP"
 Nonzero exit means no auditor started. Give the user the brief's absolute path
 and launch error. Do not report an independent verdict before an auditor runs.
 
-The brief lives in the target workspace, so each agent keeps its own and the new session loads the CLAUDE.md walk-up from there.
+The brief lives in the target workspace, so each agent keeps its own and the new session loads the AGENTS.md walk-up from there.

@@ -5,7 +5,7 @@ paths:
 
 # iOS Code Review Checklist
 
-Auto-loaded when reviewing iOS code. Combines with `ios-design-ethos.md` (the principles being checked) and project-specific CLAUDE.md files (the architecture).
+Auto-loaded when reviewing iOS code. Combines with `ios-design-ethos.md` (the principles being checked) and project-specific AGENTS.md files (the architecture).
 
 ## Per-file checklist
 
@@ -30,7 +30,7 @@ Auto-loaded when reviewing iOS code. Combines with `ios-design-ethos.md` (the pr
 - No imperative UI hacks (manual refresh, force-unwraps, notification-driven updates)?
 - Extensions in separate files, not bloating existing ones?
 - Modifier ordering: Layout → Appearance → Effects → Interaction → Environment?
-- Correct data stack for this project (project CLAUDE.md is canonical)?
+- Correct data stack for this project (project AGENTS.md is canonical)?
 - No `AnyView` — use generic `Content`/`Card` or `@ViewBuilder` switch dispatch?
 
 ### Package awareness

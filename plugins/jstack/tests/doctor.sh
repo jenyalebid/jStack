@@ -100,11 +100,11 @@ g=$(grade_of "$TMP/empty.json" timeline)
 # ── one agent flips it, and gets named ──────────────────────────────────────
 
 mkdir -p "$TMP/root/Agents/Testbed"
-printf '# Testbed\n' > "$TMP/root/Agents/Testbed/CLAUDE.md"
+printf '# Testbed\n' > "$TMP/root/Agents/Testbed/AGENTS.md"
 run_doctor --json > "$TMP/one.json" 2>/dev/null
 g=$(grade_of "$TMP/one.json" agents)
 [ "$g" = "ok" ] || fail "one agent should grade ok, got '$g'"
-[ "$g" = "ok" ] && pass "a directory with a CLAUDE.md is an agent"
+[ "$g" = "ok" ] && pass "a directory with a AGENTS.md is an agent"
 
 if grep -q "Testbed" "$TMP/one.json"; then
     pass "the agent is named in the detail, not just counted"

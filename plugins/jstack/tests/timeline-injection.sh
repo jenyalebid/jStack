@@ -53,8 +53,8 @@ unset JSTACK_TIMELINE_ORIGIN
 
 ROOT="$TMP/Agents"
 mkdir -p "$ROOT/Gamma/review" "$ROOT/Gamma/chat" "$ROOT/Gamma/pm" "$ROOT/Loner"
-printf '# Gamma\n' > "$ROOT/Gamma/CLAUDE.md"
-printf '# Loner — no CLAUDE.md dir\n' > "$ROOT/Loner/notes.md"
+printf '# Gamma\n' > "$ROOT/Gamma/AGENTS.md"
+printf '# Loner — no AGENTS.md dir\n' > "$ROOT/Loner/notes.md"
 
 export JSTACK_TIMELINE_DIR="$TMP/Timeline"
 CFG="$TMP/review.json"
@@ -108,7 +108,7 @@ echo "$out" | grep -q "Chat entry two" && pass "N window correct (two..four)" \
 # window would show only its last entry and drop the two older sessions.
 CFG_S="$TMP/review-sessions.json"
 printf '{ "agent_root": "%s", "timeline_inject": {"delta/chat": 3} }' "$ROOT" > "$CFG_S"
-mkdir -p "$ROOT/Delta/chat"; printf '# Delta\n' > "$ROOT/Delta/CLAUDE.md"
+mkdir -p "$ROOT/Delta/chat"; printf '# Delta\n' > "$ROOT/Delta/AGENTS.md"
 "$LOG_EVENT" delta/chat --at 09:00 --date "$DAY" --session sess-old-a "Delta oldest" >/dev/null
 "$LOG_EVENT" delta/chat --at 09:30 --date "$DAY" --session sess-old-b "Delta older" >/dev/null
 "$LOG_EVENT" delta/chat --at 10:00 --date "$DAY" --session sess-multi "Delta multi first" >/dev/null
@@ -336,7 +336,7 @@ fi
 #     spans every agent that worked the tag, and the session is tagged at its
 #     first instant so its own work continues that thread instead of falling
 #     out of it.
-mkdir -p "$ROOT/Zeta/chat"; printf '# Zeta\n' > "$ROOT/Zeta/CLAUDE.md"
+mkdir -p "$ROOT/Zeta/chat"; printf '# Zeta\n' > "$ROOT/Zeta/AGENTS.md"
 "$LOG_EVENT" tag new remote --description "the phone app and its host" >/dev/null
 "$LOG_EVENT" gamma/chat --at 07:00 --date "$DAY" --session pin-s1 "Gamma worked the remote" >/dev/null
 "$LOG_EVENT" zeta/chat  --at 07:30 --date "$DAY" --session pin-s2 "Zeta worked the remote too" >/dev/null
@@ -410,7 +410,7 @@ echo "$new_out" | grep -q "first sitting" \
 #     behind: the answer must come from the declared root.
 OROOT="$TMP/declared-root"; OHOME="$TMP/declared-home"
 mkdir -p "$OROOT/Agents/Omega/chat" "$OHOME"
-printf '# Omega\n' > "$OROOT/Agents/Omega/CLAUDE.md"
+printf '# Omega\n' > "$OROOT/Agents/Omega/AGENTS.md"
 CFG_O="$TMP/review-root.json"
 printf '{ "timeline_inject": {"*/*": 5} }' > "$CFG_O"
 "$LOG_EVENT" omega/chat --at 09:00 --date "$DAY" "Omega under the declared root" >/dev/null

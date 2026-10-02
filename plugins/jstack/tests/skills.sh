@@ -78,7 +78,7 @@ PY
 }
 
 # SKILL.md is read whole on every invocation. Ceiling is the one stated in
-# ~/.claude/rules/claude-md-editing.md: under 1,000 tokens (~4,000 chars).
+# ~/.claude/rules/agents-md-editing.md: under 1,000 tokens (~4,000 chars).
 # Overflow belongs in a sibling reference file the skill names, or in a script
 # it invokes by path.
 SIZE_CEILING=4000

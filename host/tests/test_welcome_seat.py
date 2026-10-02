@@ -16,10 +16,10 @@ def tree(tmp_path, monkeypatch):
     """An agents root with one seated agent and one bare one."""
     agents = tmp_path / "Agents"
     (agents / "Kate" / "chat").mkdir(parents=True)
-    (agents / "Kate" / "CLAUDE.md").write_text("# Kate\n")
-    (agents / "Kate" / "chat" / "CLAUDE.md").write_text("# Kate · chat\n")
+    (agents / "Kate" / "AGENTS.md").write_text("# Kate\n")
+    (agents / "Kate" / "chat" / "AGENTS.md").write_text("# Kate · chat\n")
     (agents / "Jerry").mkdir(parents=True)
-    (agents / "Jerry" / "CLAUDE.md").write_text("# Jerry\n")
+    (agents / "Jerry" / "AGENTS.md").write_text("# Jerry\n")
     monkeypatch.setenv("JREMOTE_INSTANCE_ROOT", str(agents))
     hostenv.reset_profile()
     yield agents

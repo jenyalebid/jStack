@@ -50,7 +50,7 @@ def workspace_directories(workspace):
 
     The installer receives the Agents root, not one leaf seat.  Walking only
     the root's ancestors therefore misses every command scoped to a real seat.
-    A seat is a directory carrying CLAUDE.md; include its ancestor chain so an
+    A seat is a directory carrying AGENTS.md; include its ancestor chain so an
     agent-level .claude also reaches nested seats, while pruning pad/checkouts
     and machine trees by the same boundaries the seat resolver uses.
     """
@@ -61,7 +61,7 @@ def workspace_directories(workspace):
     for current, dirs, files in os.walk(workspace):
         dirs[:] = [name for name in dirs
                    if not name.startswith(".") and name not in _SKIP_TREES]
-        if "CLAUDE.md" not in files:
+        if "AGENTS.md" not in files and "CLAUDE.md" not in files:
             continue
         directory = Path(current)
         while directory == workspace or workspace in directory.parents:
@@ -79,34 +79,37 @@ def share_workspace(workspace):
         link_commands(directory / ".claude/commands", directory / ".agents/skills")
 
 
-# The walk-up, in Codex's words. Codex reads AGENTS.md and nothing else by
-# default, so a machine this script installed handed a Codex session no org, no
-# agent and no seat — the identity chain a Claude session gets for free. Codex
-# concatenates every fallback-named doc from the project root down to cwd,
-# closest wins, which is exactly our walk-up order, so one key buys the whole
-# chain with no second copy of it to rot.
+# The walk-up is AGENTS.md, which Codex reads natively from the project root
+# down to cwd — the same order Claude walks — so no filename needs pointing.
+# What it does need is room: the chain is ~10KB at a chat seat and a product
+# seat adds the app's own doc on top. A half-loaded identity is worse than
+# none, because nothing reports it.
 DOC_SETTINGS = {
-    "project_doc_fallback_filenames": '["CLAUDE.md"]',
-    # The chain is ~10KB at a chat seat and a product seat adds the app's own
-    # doc on top. A half-loaded identity is worse than none, because nothing
-    # reports it.
     "project_doc_max_bytes": "262144",
 }
 
+#: What installs before the AGENTS.md rename wrote inside our block, pointing
+#: Codex at the CLAUDE.md walk-up. Dropped on sight; a user's own is not ours.
+_RETIRED = re.compile(r'^project_doc_fallback_filenames = \["CLAUDE\.md"\]\n', re.M)
+
 
 def doc_config(text):
-    """Point Codex at the CLAUDE.md walk-up, above the first table.
+    """Size Codex's instruction budget for the walk-up, above the first table.
 
     These are bare keys: TOML only reads them before the first table header, so
     this block goes at the top of the file and not, like the shell policy, at
     the end. A value the user has already chosen is left alone — including our
     own from a previous install, which is what makes this idempotent.
     """
+    begin, end = "# BEGIN jstack docs\n", "# END jstack docs\n"
+    if begin in text and end in text:
+        start, stop = text.index(begin), text.index(end)
+        text = text[:start] + _RETIRED.sub("", text[start:stop]) + text[stop:]
     if any(re.search(r"^\s*" + key + r"\s*=", text, flags=re.M) for key in DOC_SETTINGS):
         return text
-    block = "# BEGIN jstack docs\n"
+    block = begin
     block += "".join(f"{key} = {value}\n" for key, value in DOC_SETTINGS.items())
-    block += "# END jstack docs\n"
+    block += end
     table = re.search(r"^\[", text, flags=re.M)
     cut = table.start() if table else len(text)
     return text[:cut] + block + ("\n" if text[cut:cut + 1] not in ("", "\n") else "") + text[cut:]

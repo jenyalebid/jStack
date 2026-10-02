@@ -341,9 +341,9 @@ def get_agent_tree(agent_id: str, path: str = ""):
     """One directory of an agent's tree, for the shortcut picker.
 
     Always rooted at the agent's own umbrella dir and confined to it. Each row
-    says `is_seat` — whether it holds a CLAUDE.md — because that is the only
+    says `is_seat` — whether it holds a AGENTS.md — because that is the only
     thing that makes a directory pickable: a card minted onto a directory with
-    no CLAUDE.md would spawn a session with no identity, no rules and no seat
+    no AGENTS.md would spawn a session with no identity, no rules and no seat
     timeline. `has_children` is what makes a non-seat row still worth entering.
     """
     from . import seats
@@ -434,7 +434,7 @@ def get_context():
 
 @router.get("/context/file")
 def get_context_file(path: str):
-    """The text behind one row — a rule, a skill, a SYSTEM.md, a CLAUDE.md.
+    """The text behind one row — a rule, a skill, a SYSTEM.md, a AGENTS.md.
 
     Fenced to the roots in `docfence`, and to markdown. The screen only ever
     asks for a path the same payload just handed it, but this is a
@@ -3047,7 +3047,7 @@ class OpenNewBody(BaseModel):
     # comment as the opening turn. Empty/None = spawn waiting, unchanged.
     text: str | None = None
     # Which agent CLI runs this seat — "claude" or "codex". Both read the same
-    # CLAUDE.md walk-up, rules, skills and seat timeline, so this picks the
+    # AGENTS.md walk-up, rules, skills and seat timeline, so this picks the
     # engine, never the identity.
     #
     # Omitted (None) = **this agent's default**, not a hardcoded claude. That

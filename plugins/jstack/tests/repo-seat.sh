@@ -42,11 +42,11 @@ trap 'rm -rf "$TMP"' EXIT
 ROOT="$TMP/Agents"
 CODE="$TMP/code"
 mkdir -p "$ROOT/Gamma/chat" "$ROOT/Delta/pm/ios" "$ROOT/Zombie/chat" "$CODE"
-printf '# Gamma\nROLE-MARKER-GAMMA\n' > "$ROOT/Gamma/CLAUDE.md"
-printf '# Shared protocol\nPROTOCOL-MARKER\n' > "$ROOT/CLAUDE.md"
-printf '# Gamma chat seat\nSEAT-MARKER\n' > "$ROOT/Gamma/chat/CLAUDE.md"
-printf '# Delta\n' > "$ROOT/Delta/CLAUDE.md"
-printf '# Zombie\n' > "$ROOT/Zombie/CLAUDE.md"
+printf '# Gamma\nROLE-MARKER-GAMMA\n' > "$ROOT/Gamma/AGENTS.md"
+printf '# Shared protocol\nPROTOCOL-MARKER\n' > "$ROOT/AGENTS.md"
+printf '# Gamma chat seat\nSEAT-MARKER\n' > "$ROOT/Gamma/chat/AGENTS.md"
+printf '# Delta\n' > "$ROOT/Delta/AGENTS.md"
+printf '# Zombie\n' > "$ROOT/Zombie/AGENTS.md"
 
 mkrepo() {  # mkrepo <dir> [origin-url]
   mkdir -p "$CODE/$1" && git -C "$CODE/$1" init -q 2>/dev/null
@@ -120,7 +120,7 @@ case "$(inject "$CODE/Unowned-iOS")" in
 esac
 
 # The role file a repo session can't reach on its own: the workspace is a
-# sibling of the checkout, so CLAUDE.md walk-up never climbs into it.
+# sibling of the checkout, so AGENTS.md walk-up never climbs into it.
 OUT="$(inject "$CODE/Widget-iOS")"
 for marker in PROTOCOL-MARKER ROLE-MARKER-GAMMA SEAT-MARKER; do
   case "$OUT" in

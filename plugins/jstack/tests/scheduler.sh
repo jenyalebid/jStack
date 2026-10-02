@@ -123,16 +123,16 @@ import os
 from scheduler import spawn
 from pathlib import Path
 root = Path(os.environ["SCHEDULER_HOME"]) / "agents" / "demo-social"
-(root / "chat" / "CLAUDE.md").write_text("## Machine\n")
+(root / "chat" / "AGENTS.md").write_text("## Machine\n")
 assert spawn.resolve_workspace({"agent_id": "demo-social"}) == root / "chat"
 '
 
-check "seat rule ignored when the seat has no CLAUDE.md" '
+check "seat rule ignored when the seat has no AGENTS.md" '
 import os
 from scheduler import spawn
 from pathlib import Path
 root = Path(os.environ["SCHEDULER_HOME"]) / "agents" / "demo-social"
-(root / "chat" / "CLAUDE.md").unlink()
+(root / "chat" / "AGENTS.md").unlink()
 assert spawn.resolve_workspace({"agent_id": "demo-social"}) == root
 '
 
@@ -157,7 +157,7 @@ finally:
 # whatever the machine running this file happens to export.
 
 mkdir -p "$TMP/agents/CasedAgent" "$TMP/agents/snake_agent"
-touch "$TMP/agents/CasedAgent/CLAUDE.md" "$TMP/agents/snake_agent/CLAUDE.md"
+touch "$TMP/agents/CasedAgent/AGENTS.md" "$TMP/agents/snake_agent/AGENTS.md"
 
 if out=$(env -u JSTACK_ROOT -u JSTACK_AGENTS_DIR "$PY" -c '
 import os
@@ -177,7 +177,7 @@ import os
 from pathlib import Path
 from scheduler import spawn
 base = Path(os.environ["SCHEDULER_HOME"]) / "agents"
-# `plain` has no CLAUDE.md, so it is not an agent — and still resolves. A
+# `plain` has no AGENTS.md, so it is not an agent — and still resolves. A
 # workspace only has to exist; requiring a declaration would refuse to run a
 # job in a directory that is sitting right there.
 assert spawn.resolve_workspace({"agent_id": "plain"}) == base / "plain"
