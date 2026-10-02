@@ -132,14 +132,19 @@ class Supervisor:
             raise releases.ReleaseError("machine was detached; queued update authority cancelled")
         return self.config["local_url"], Path(self.config["token_path"]).read_text().strip(), "/updates"
 
-    def heartbeat(self) -> dict:
-        base, token, prefix = self.connection()
-        if not token or not base:
-            raise releases.ReleaseError("no update authority connection")
+    def observe(self) -> dict:
+        """Publish local service health without waiting for an external peer."""
         observed = self.backend.observe(self.current)
         observed.update(supervisor=1, updater_error=self.last_error or self.channel_error,
                         phase=self.build_phase.get("state", "idle"), build=self.build_phase)
         atomic_json(self.root / "observed.json", observed)
+        return observed
+
+    def heartbeat(self) -> dict:
+        base, token, prefix = self.connection()
+        if not token or not base:
+            raise releases.ReleaseError("no update authority connection")
+        observed = self.observe()
         body = {"observation": observed}
         if self.current:
             body.update(job_id=self.current["id"], state=self.current["state"],
@@ -251,6 +256,10 @@ class Supervisor:
         try:
             from . import build_source
             self.build_phase = build_source.phase(self.root)
+            # Installation verifies the local services through this record.
+            # A blocked DNS/GitHub request must not hide a healthy host for
+            # the entire HTTP timeout on an offline machine.
+            self.observe()
             if self.build_phase.get("state") != "building":
                 # This daemon's own client: one connection pool, and a test
                 # that stubs the supervisor's transport stubs this too.
