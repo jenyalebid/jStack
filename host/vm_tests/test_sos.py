@@ -303,6 +303,44 @@ def test_process_stop_preserves_an_unrelated_name_and_verifies_exit(tmp_path):
             process.wait(timeout=5)
 
 
+@pytest.mark.parametrize("name,phase", [("codex", "quiesce"), ("JumpConnect", "apps")])
+@pytest.mark.parametrize("status", [0, 2, 3, 127])
+def test_worker_retains_deletion_targets_when_process_checks_fail(monkeypatch, tmp_path, name, phase, status):
+    tmp_path = tmp_path.resolve()
+    work = tmp_path / "worker"
+    work.mkdir()
+    history, application = tmp_path / "history", tmp_path / "application"
+    history.write_text("private fixture history")
+    application.write_text("fixture installation")
+    helper = work / "Erase"
+    helper.write_text("#!/bin/sh\ncase \"$1\" in\n"
+                      + shlex.quote(str(history)) + "|" + shlex.quote(str(application))
+                      + ') /bin/rm -- "$1" ;;\n*) exit 1 ;;\nesac\n')
+    helper.chmod(0o700)
+    probe = tmp_path / "probe"
+    probe.write_text('#!/bin/sh\nfor last; do :; done\nif test "$last" = '
+                     + shlex.quote(name) + f"; then exit {status}; fi\nexit 1\n")
+    probe.chmod(0o700)
+    (work / "user-cleanup-done").touch()
+    monkeypatch.setattr(sos, "WORK", work)
+    monkeypatch.setattr(sos, "PLIST", tmp_path / "job.plist")
+    monkeypatch.setattr(sos, "keychain_commands", lambda *a, **k: [])
+    plan = {"home": str(Path.home()), "uid": os.getuid(), "root": str(tmp_path / "root"),
+            "app": str(tmp_path / "absent.app"), "services": [], "history": [str(history)],
+            "data": [], "apps": [str(application)]}
+    script = sos.worker(plan).replace("/usr/bin/pkill", "/usr/bin/true")
+    script = script.replace("/usr/bin/pgrep", shlex.quote(str(probe)))
+    script = script.replace("/bin/sleep 0.1", "/usr/bin/true")
+    result = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 1, result
+    assert (work / "phase").read_text().strip() == phase
+    message = "process remains" if status == 0 else "cannot observe process"
+    assert f"INCOMPLETE: {message}: {name}" in (work / "progress.log").read_text()
+    assert history.exists() == (phase == "quiesce")
+    assert application.read_text() == "fixture installation"
+    assert not (tmp_path / "job.plist").exists()
+
+
 def test_user_cleanup_can_read_cwd_after_leaving_root_only_worker(tmp_path):
     protected = tmp_path / "root-only"
     protected.mkdir(mode=0o700)
