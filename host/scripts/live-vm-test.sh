@@ -64,7 +64,9 @@ fi
 # lines later as a bare "no address".
 UP_OUT="$("$VM_SH" up "$VM_NAME" 2>&1)" || true
 
-IP="$("$VM_SH" ip "$VM_NAME" | tail -1 | tr -d '[:space:]')"
+# `ip` dies on an unbooted guest, and under pipefail that kills this script
+# on the assignment — before the die below can name what up said.
+IP="$("$VM_SH" ip "$VM_NAME" 2>/dev/null | tail -1 | tr -d '[:space:]')" || true
 [ -n "$IP" ] || die "$VM_NAME has no address — up said: $(printf '%s\n' "$UP_OUT" | tail -1)"
 say "guest $VM_NAME at $IP"
 
