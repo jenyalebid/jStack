@@ -337,6 +337,47 @@ def compose_shim() -> Path:
     return Path(__file__).resolve().parent / "bin" / "jremote-compose-editor"
 
 
+def _compose_visual() -> Path | None:
+    """The path `VISUAL` names: the shim, at a path with no whitespace in it.
+
+    The CLIs read `VISUAL` as a command line, not a path. claude splits it on
+    whitespace and honours no quoting; codex honours shell quotes. A shim
+    inside `/Applications/jStack Hub.app` therefore launched as
+    `/Applications/jStack` — codex said "Failed to open editor", claude said
+    nothing — and every lift on every session came back refused, so compose
+    opened empty over text the user had just moved into the CLI. Quoting
+    fixes one engine and not the other; a path with nothing to split fixes
+    both.
+
+    So a shim whose own path has whitespace is linked into the host's state
+    dir and VISUAL names the link. A link, not a copy: a Hub update replaces
+    the shim and the link follows it. None when no clean path exists — the
+    pane then carries no JREMOTE_SID, and a lift refuses honestly instead of
+    pressing ctrl+G at an editor that will not start.
+    """
+    shim = compose_shim()
+    if not shim.exists():
+        return None
+    if not any(c.isspace() for c in str(shim)):
+        return shim
+    link = hostenv.state_dir() / "bin" / shim.name
+    if any(c.isspace() for c in str(link)):
+        return None
+    try:
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink() and link.resolve() == shim:
+            return link
+        # Built beside and renamed over, so a pane spawning concurrently never
+        # finds the name missing between an unlink and a create.
+        tmp = link.with_name(f"{link.name}.{os.getpid()}.tmp")
+        tmp.unlink(missing_ok=True)
+        tmp.symlink_to(shim)
+        os.replace(tmp, link)
+    except OSError:
+        return None
+    return link
+
+
 def _compose_exports(sid: str) -> str:
     """The env that lets compose lift the input box out whole (`composer.py`).
 
@@ -347,8 +388,8 @@ def _compose_exports(sid: str) -> str:
     not an agent prompt, so `git commit` in this pane is unaffected.
     """
     from .composer import compose_dir
-    shim = compose_shim()
-    if not shim.exists():
+    shim = _compose_visual()
+    if shim is None:
         return ""
     return (f"export VISUAL={shlex.quote(str(shim))}; "
             f"export JREMOTE_SID={shlex.quote(sid)}; "

@@ -31,6 +31,64 @@ def test_managed_sessions_are_spawned_with_the_shim_as_visual():
     assert "EDITOR=" not in exports.replace("JREMOTE_EDITOR", "")
 
 
+def test_visual_never_names_a_path_the_cli_would_split(tmp_path, monkeypatch):
+    """claude splits VISUAL on whitespace and ignores quoting. The host ships
+    inside `/Applications/jStack Hub.app`, so the shim's own path launched as
+    `/Applications/jStack` and every lift on every session was refused —
+    compose opened empty over the words the user had just moved into the CLI
+    (2026-10-01). VISUAL names a clean link that leads to the real shim."""
+    bundled = tmp_path / "jStack Hub.app" / "bin" / SHIM.name
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text(SHIM.read_text())
+    bundled.chmod(0o755)
+    monkeypatch.setattr(managed, "compose_shim", lambda: bundled)
+    monkeypatch.setattr(managed.hostenv, "state_dir", lambda: tmp_path / "state")
+
+    exports = managed._compose_exports("sid-1234")
+    visual = exports.split("export VISUAL=", 1)[1].split(";", 1)[0]
+    assert not any(c.isspace() for c in visual), visual
+    assert Path(visual).resolve() == bundled.resolve()
+    # Respawning finds the link already right and leaves it be.
+    assert managed._compose_exports("sid-5678").count(visual) == 1
+
+
+def test_no_clean_path_means_no_handoff(tmp_path, monkeypatch):
+    """With nowhere clean to link, the pane gets no JREMOTE_SID — so a lift
+    refuses honestly instead of pressing ctrl+G at an editor that won't start."""
+    bundled = tmp_path / "jStack Hub.app" / SHIM.name
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text(SHIM.read_text())
+    monkeypatch.setattr(managed, "compose_shim", lambda: bundled)
+    monkeypatch.setattr(managed.hostenv, "state_dir", lambda: tmp_path / "state dir")
+    assert managed._compose_exports("sid-1234") == ""
+
+
+def test_the_shim_parks_codexs_prompt_file_too(tmp_path):
+    """codex hands its buffer over as `$CODEX_HOME/editor/.tmp<rand>.md`. A
+    name only claude uses sent codex's prompt to the fallback editor — a
+    window on the desk or a vi in the pane, holding the CLI."""
+    prompt = tmp_path / ".codex" / "editor" / ".tmpAbC123.md"
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text("codex words")
+    park_dir = tmp_path / "park"
+    env = {**os.environ, "JREMOTE_COMPOSE_DIR": str(park_dir),
+           "JREMOTE_SID": "sid-cx", "JREMOTE_EDITOR_FALLBACK": "/usr/bin/false"}
+    proc = subprocess.Popen([str(SHIM), str(prompt)], env=env,
+                            stdout=subprocess.DEVNULL)
+    try:
+        park = park_dir / "sid-cx.park"
+        for _ in range(100):
+            if park.exists():
+                break
+            time.sleep(0.05)
+        assert park.read_text().strip() == str(prompt)
+        (park_dir / "sid-cx.release").touch()
+        assert proc.wait(timeout=10) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
 def test_the_shim_only_parks_the_agents_prompt_file(tmp_path):
     """VISUAL is inherited by everything else in that pane. A `git commit`
     there must reach a real editor, not block forever on a host that is not

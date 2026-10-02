@@ -22,8 +22,14 @@ f="$1"
 # Only the agent's prompt file parks. VISUAL is inherited by everything else
 # that runs in this pane — `git commit` most of all — and a shell waiting
 # forever on a file no host is watching is its own kind of broken.
-case "${f##*/}" in
-    claude-prompt-*) ;;
+#
+# Each engine names its handoff its own way: claude writes
+# `claude-prompt-<uuid>.md`, codex writes `$CODEX_HOME/editor/.tmp<rand>.md`.
+# A codex prompt that missed this list fell through to the fallback — a
+# CotEditor window or a vi in the pane, holding the CLI until a hand closed it.
+case "$f" in
+    */claude-prompt-*|claude-prompt-*) ;;
+    */editor/.tmp*.md) ;;
     *) exec ${JREMOTE_EDITOR_FALLBACK:-${EDITOR:-vi}} "$@" ;;
 esac
 
