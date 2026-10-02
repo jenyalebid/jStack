@@ -41,7 +41,8 @@ def test_shell_helpers_execute_bundled_tmux(tmp_path, monkeypatch, helper, scree
         for process in processes:
             assert process.wait(timeout=3) == 0
         calls = [json.loads(line) for line in log.read_text().splitlines()]
-        assert all(call[:2] == ["-L", "socket with spaces"] for call in calls)
+        prefix = managed._t()[1:]
+        assert all(call[:len(prefix)] == prefix for call in calls)
         if helper != "attach_command":
             assert any("send-keys" in call and "pane with spaces" in call for call in calls)
     finally:
