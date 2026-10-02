@@ -1,7 +1,7 @@
 """Confirmed machine actions and dependency-ordered local removal.
 
-The wipe executor is a root-owned shell program using only macOS tools. It
-does not import Python or execute anything from a tree it removes.
+The wipe retains its native removal helper independently of the application.
+Python-based user cleanup completes before application removal begins.
 """
 from __future__ import annotations
 

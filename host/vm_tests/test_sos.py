@@ -417,6 +417,9 @@ def test_native_preferences_from_launchd_preserve_other_domains_and_root(
                 assert defaults(target, "read", "sos-sentinel", root=root, host=host).stdout.strip() == "synthetic-value"
         assert selected.is_file()
         selected_bytes = selected.read_bytes()
+        by_host = Path.home() / "Library/Preferences/ByHost"
+        archived = by_host / (domain + "." + str(uuid.uuid4()) + ".plist")
+        archived.write_bytes(plistlib.dumps({"archived-host": "synthetic-value"}))
         authorization(preferences=[domain], uid=0 if condition == "wrong-user" else os.getuid())
         retained = sos.WORK / "PreferenceErase"
         subprocess.run(["sudo", "-n", "install", "-o", "root", "-g", "wheel", "-m", "700",
@@ -438,6 +441,9 @@ def test_native_preferences_from_launchd_preserve_other_domains_and_root(
         refused = condition != "normal"
         assert f"SOS-KEYCHAIN-EXIT={1 if refused else 0}" in output, (output, error)
         if not refused:
+            assert not selected.exists()
+            assert not archived.exists()
+            assert not list(by_host.glob(domain + ".????????-????-????-????-????????????.plist"))
             for host in (False, True):
                 result = defaults(domain, "read", "sos-sentinel", host=host, check=False)
                 assert result.returncode == 1 and "does not exist" in result.stderr, result
@@ -459,6 +465,8 @@ def test_native_preferences_from_launchd_preserve_other_domains_and_root(
             selected.chmod(0o600)
         for target, root, host in seeded:
             defaults(target, "delete", root=root, host=host, check=False)
+        if "archived" in locals():
+            archived.unlink(missing_ok=True)
 
 
 def test_native_removal_preserves_symlink_destination(eraser, authorization, tmp_path):

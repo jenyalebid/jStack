@@ -218,25 +218,75 @@ func preferences(verifyOnly: Bool) throws {
         }
     }
     let byHost = base + "/ByHost"
-    let names = FileManager.default.fileExists(atPath: byHost)
-        ? try FileManager.default.contentsOfDirectory(atPath: byHost) : []
-    for domain in domains {
-        let paths = [base + "/" + domain + ".plist"] + names.filter {
-            guard $0.hasPrefix(domain + "."), $0.hasSuffix(".plist") else { return false }
-            let suffix = String($0.dropFirst(domain.count + 1).dropLast(".plist".count))
-            return UUID(uuidString: suffix) != nil
-        }.map { byHost + "/" + $0 }
-        for path in paths {
-            var metadata = stat()
-            if lstat(path, &metadata) != 0 {
-                guard errno == ENOENT else { throw POSIXError(.EIO) }
-            } else {
-                guard metadata.st_mode & S_IFMT == S_IFREG, metadata.st_uid == uid,
-                      metadata.st_flags & UInt32(UF_IMMUTABLE | SF_IMMUTABLE) == 0,
-                      access(path, R_OK | W_OK) == 0 else { throw POSIXError(.EPERM) }
+    func openStore(_ path: String) throws -> Int32 {
+        var descriptor = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw POSIXError(.EIO) }
+        for component in path.split(separator: "/") {
+            let next = openat(descriptor, String(component), O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+            let failure = errno
+            close(descriptor)
+            if next < 0 && failure == ENOENT { return -1 }
+            guard next >= 0 else { throw POSIXError(.EIO) }
+            descriptor = next
+        }
+        return descriptor
+    }
+    func entryNames(_ descriptor: Int32) throws -> [String] {
+        let copy = dup(descriptor)
+        guard copy >= 0 else { throw POSIXError(.EIO) }
+        guard let stream = fdopendir(copy) else {
+            close(copy)
+            throw POSIXError(.EIO)
+        }
+        defer { closedir(stream) }
+        var names: [String] = []
+        while true {
+            errno = 0
+            guard let entry = readdir(stream) else {
+                guard errno == 0 else { throw POSIXError(.EIO) }
+                return names
+            }
+            names.append(withUnsafePointer(to: entry.pointee.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(entry.pointee.d_namlen) + 1) {
+                    String(cString: $0)
+                }
+            })
+        }
+    }
+    func stores(remove: Bool, requireAbsent: Bool) throws {
+        for directory in [base, byHost] {
+            let descriptor = try openStore(directory)
+            if descriptor < 0 { continue }
+            defer { close(descriptor) }
+            let names = directory == base ? domains.map { $0 + ".plist" }
+                : try entryNames(descriptor).filter { name in
+                    domains.contains { domain in
+                        guard name.hasPrefix(domain + "."), name.hasSuffix(".plist") else { return false }
+                        let suffix = String(name.dropFirst(domain.count + 1).dropLast(".plist".count))
+                        return UUID(uuidString: suffix) != nil
+                    }
+                }
+            for name in names {
+                var metadata = stat()
+                if fstatat(descriptor, name, &metadata, AT_SYMLINK_NOFOLLOW) != 0 {
+                    guard errno == ENOENT else { throw POSIXError(.EIO) }
+                } else {
+                    guard metadata.st_mode & S_IFMT == S_IFREG, metadata.st_uid == uid,
+                          metadata.st_flags & UInt32(UF_IMMUTABLE | SF_IMMUTABLE) == 0,
+                          faccessat(descriptor, name, R_OK | W_OK, 0) == 0 else { throw POSIXError(.EPERM) }
+                    guard !requireAbsent else { throw POSIXError(.EEXIST) }
+                    if remove {
+                        // unlinkat cannot recurse into a substituted directory or
+                        // follow a substituted symlink out of the preference store.
+                        guard unlinkat(descriptor, name, 0) == 0 || errno == ENOENT else {
+                            throw POSIXError(.EIO)
+                        }
+                    }
+                }
             }
         }
     }
+    try stores(remove: false, requireAbsent: verifyOnly)
     for domain in domains {
         for host in [kCFPreferencesAnyHost, kCFPreferencesCurrentHost] {
             guard CFPreferencesSynchronize(domain as CFString, kCFPreferencesCurrentUser, host) else {
@@ -253,6 +303,10 @@ func preferences(verifyOnly: Bool) throws {
             guard keys?.isEmpty ?? true else { throw POSIXError(.EEXIST) }
         }
     }
+    // cfprefsd can flush a file absent at planning time. Clear its cache before
+    // unlinking files; then inspect disk again, including previously absent ones.
+    try stores(remove: !verifyOnly, requireAbsent: verifyOnly)
+    try stores(remove: false, requireAbsent: true)
 }
 
 do {
