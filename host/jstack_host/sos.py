@@ -91,22 +91,25 @@ def inventory() -> dict:
     for declared in locations:
         for variable in ("JREMOTE_STATE_DIR", "JREMOTE_CACHE_DIR", "JREMOTE_ATTENTION_DIR",
                          "JREMOTE_TURN_DIR", "JSTACK_LOGS_DIR", "JSTACK_TIMELINE_DIR",
-                         "JSTACK_STATE_DIR", "SCHEDULER_HOME", "SCHEDULER_STATE_DIR"):
+                         "JSTACK_STATE_DIR", "SCHEDULER_HOME", "SCHEDULER_STATE_DIR",
+                         "JSTACK_AGENTS_DIR", "JREMOTE_INSTANCE_ROOT"):
             if declared.get(variable):
                 add("history", declared[variable])
         for variable in ("JREMOTE_CREDENTIALS_DIR", "JREMOTE_RELEASES_DIR", "JREMOTE_TOKEN_PATH",
                          "JSTACK_CONFIG_DIR", "JSTACK_CREDENTIALS_DIR", "JSTACK_SYSTEMS_DIR",
-                         "JSTACK_AGENTS_DIR", "JREMOTE_INSTANCE_ROOT", "SCHEDULER_CONFIG_DIR",
-                         "WG_PEER_DIR"):
+                         "SCHEDULER_CONFIG_DIR", "WG_PEER_DIR"):
             if declared.get(variable):
                 add("data", declared[variable])
     for key in ("migration_dir", "automation_settings"):
         if config.get(key):
             add("history" if key == "migration_dir" else "data", config[key])
     add("history", home / ".scheduler")
+    # Agent and project trees can hold transcript exports under arbitrary names.
+    # They are already selected for removal; searching filenames cannot prove
+    # that all those copies disappeared before the data phase.
     for name in TREE_DIRS:
-        add("history" if name in {"Logs", "State"} else "data", root / name)
-    add("data", hostenv.instance_root())
+        add("history" if name in {"Agents", "Projects", "Logs", "State"} else "data", root / name)
+    add("history", hostenv.instance_root())
     for relative in (".claude.json", ".claude.json.backup", ".config/jstack", ".agents",
                      ".local/share/claude", ".local/bin/claude", ".local/bin/codex",
                      ".local/bin/jstack-host", "jStack", "jRemote-Code",
@@ -155,6 +158,9 @@ def inventory() -> dict:
                 result["services"].append({"domain": domain, "label": label})
                 add("apps", path)
     app = Path(config.get("app", "/Applications/jStack Hub.app"))
+    for target in result["history"] + result["data"]:
+        if app == Path(target) or app.is_relative_to(target):
+            raise ValueError(f"removal target contains the required Hub executor: {target}")
     definitions = app / "Contents/Library/LaunchAgents"
     if definitions.is_dir():
         catalog = json.loads((app / "Contents/Resources/services.json").read_text())

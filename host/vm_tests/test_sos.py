@@ -49,7 +49,8 @@ def test_root_is_never_a_recursive_target(monkeypatch, tmp_path):
     monkeypatch.setattr(sos.hostenv, "instance_root", lambda: Path.home() / "Agents")
     plan = sos.inventory()
     assert str(Path.home()) not in sum((plan[p] for p in ("history", "data", "apps")), [])
-    assert str(Path.home() / "Agents") in plan["data"]
+    assert str(Path.home() / "Agents") in plan["history"]
+    assert str(Path.home() / "Projects") in plan["history"]
 
 
 def test_inventory_retains_service_and_shell_history_locations(monkeypatch):
@@ -72,6 +73,34 @@ def test_inventory_retains_service_and_shell_history_locations(monkeypatch):
     assert str(base / "credentials") in plan["data"]
     assert str(Path.home() / "jRemote-Code") in plan["data"]
     assert str(Path.home() / ".scheduler") in plan["history"]
+
+
+def test_agent_and_project_copies_precede_configuration_removal(monkeypatch):
+    root = Path.home() / "sos-inventory-fixture"
+    custom = Path.home() / "sos-custom-agents"
+    monkeypatch.setattr(sos.service_settings, "read", lambda: {
+        "environment": {"JSTACK_AGENTS_DIR": str(custom)}})
+    monkeypatch.setattr(sos.hostenv, "stack_root", lambda: root)
+    monkeypatch.setattr(sos.hostenv, "instance_root", lambda: custom)
+    monkeypatch.setenv("JREMOTE_INSTANCE_ROOT", str(root / "other-instances"))
+    plan = sos.inventory()
+    for path in (root / "Agents", root / "Projects", custom, root / "other-instances"):
+        assert str(path) in plan["history"]
+        assert str(path) not in plan["data"]
+    script = sos.worker(plan)
+    assert script.index("phase history") < script.index("phase data")
+    assert str(root / "Config") in plan["data"]
+    assert str(root / "Credentials") in plan["data"]
+
+
+def test_inventory_refuses_to_delete_execution_dependency_early(monkeypatch):
+    root = Path.home() / "sos-inventory-fixture"
+    monkeypatch.setattr(sos.hostenv, "stack_root", lambda: root)
+    monkeypatch.setattr(sos.hostenv, "instance_root", lambda: root / "Agents")
+    monkeypatch.setattr(sos.service_settings, "read", lambda: {
+        "app": str(root / "Projects/jStack Hub.app")})
+    with pytest.raises(ValueError, match="contains the required Hub executor"):
+        sos.inventory()
 
 
 def test_worker_prioritizes_history_and_removes_itself_last():
