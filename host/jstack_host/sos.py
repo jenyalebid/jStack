@@ -149,6 +149,28 @@ def safe_target(path: Path, home: Path) -> Path:
     return path
 
 
+def client_identifiers(environment: dict, home: Path) -> list[str]:
+    """Bundle identifiers of the managed client, from its install record and app."""
+    found = []
+    state = environment.get("JREMOTE_STATE_DIR")
+    if state:
+        try:
+            found.append(json.loads((Path(state) / "updates/config.json").read_text()).get("client_bundle_id"))
+        except (OSError, ValueError, AttributeError):
+            pass
+    for app in (Path("/Applications/jRemote.app"), home / "Applications/jRemote.app"):
+        try:
+            found.append(plistlib.loads((app / "Contents/Info.plist").read_bytes()).get("CFBundleIdentifier"))
+        except (OSError, ValueError, AttributeError, plistlib.InvalidFileException):
+            pass
+    result = []
+    for identifier in found:
+        if (isinstance(identifier, str) and re.fullmatch(r"[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+", identifier)
+                and identifier not in result):
+            result.append(identifier)
+    return result
+
+
 def inventory() -> dict:
     home = Path.home()
     config = service_settings.read()
@@ -180,7 +202,6 @@ def inventory() -> dict:
             if declared.get(variable):
                 add("history", declared[variable])
     for relative in (".cache/jremote", ".local/state/jremote", ".local/share/jremote",
-                     "Library/Containers/dev.jenya.jRemote",
                      "Library/Application Support/Claude", "Library/Application Support/Codex"):
         add("history", home / relative)
     # The installed services and the invoking shell can name different
@@ -222,12 +243,16 @@ def inventory() -> dict:
     for relative in (".claude.json", ".claude.json.backup", ".config/jstack", ".agents",
                      ".local/share/claude", ".local/bin/claude", ".local/bin/codex",
                      ".local/bin/jstack-host", "jStack", "jRemote-Code",
-                     "Library/Containers/dev.jenya.jRemote.Share",
-                     "Library/Containers/dev.jenya.jRemote.tunnel",
                      "Library/Application Support/Jump Desktop", "Library/Application Support/Jump Desktop Connect"):
         add("data", home / relative)
     for name in ("jStack", "jRemote-Code"):
         add("data", root / name)
+    # The client's sandbox containers hold its cached sessions; the identifier
+    # is whatever the installed client declares, never one spelled here.
+    for identifier in client_identifiers(environment, home):
+        add("history", home / "Library/Containers" / identifier)
+        for extension in ("Share", "tunnel"):
+            add("data", home / "Library/Containers" / f"{identifier}.{extension}")
     for path in preference_files(home, result["preferences"]):
         add("data", path)
     for relative in ("Library/Caches/com.p5sys.jump.mac.viewer.web", "Library/Caches/Jump Desktop",
