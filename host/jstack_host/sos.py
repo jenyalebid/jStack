@@ -32,6 +32,20 @@ TREE_DIRS = ("Agents", "Projects", "Systems", "Config", "State", "Logs", "Creden
 KEYCHAIN_SERVICES = ("Claude Code-credentials", "Claude", "Codex Auth", "jRemote")
 
 
+def volume_uuid(path: Path) -> str:
+    filesystem = subprocess.run(["/bin/df", "-P", str(path)],
+                                capture_output=True, text=True, check=True).stdout.splitlines()
+    if len(filesystem) != 2 or not filesystem[1].startswith("/dev/disk"):
+        raise ValueError(f"cannot establish a local volume identity: {path}")
+    device = filesystem[1].split()[0]
+    result = subprocess.run(["/usr/sbin/diskutil", "info", "-plist", device],
+                            capture_output=True, check=True)
+    identity = plistlib.loads(result.stdout).get("VolumeUUID")
+    if not isinstance(identity, str):
+        raise ValueError(f"volume has no persistent identity: {path}")
+    return str(uuid.UUID(identity)).upper()
+
+
 def keychain_inventory(home: Path, uid: int) -> list[dict]:
     """Pin the invoking account's explicit file keychains before elevation."""
     result = subprocess.run(["/usr/bin/security", "list-keychains", "-d", "user"],
@@ -53,7 +67,7 @@ def keychain_inventory(home: Path, uid: int) -> list[dict]:
         info = path.stat()
         if not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
             raise ValueError(f"keychain ownership cannot be established: {path}")
-        records.append({"path": str(path), "device": info.st_dev,
+        records.append({"path": str(path), "volume_uuid": volume_uuid(path),
                         "parent_inode": path.parent.stat().st_ino, "uid": info.st_uid})
     return records
 
@@ -66,11 +80,15 @@ def keychain_commands(plan: dict, user: list[str], *, delete: bool) -> list[str]
     for record in plan["keychains"]:
         path = Path(record["path"])
         checks = [f"test ! -L {shlex.quote(str(p))}" for p in (path, *path.parents)]
-        # The real launchd regression observes a new database inode after
-        # each successful security delete; the directory identity survives it.
+        # security delete replaces the database inode; reboot renumbers st_dev.
+        # The directory inode and volume UUID survive both operations.
+        volume = (f'/usr/sbin/diskutil info -plist "$(/bin/df -P {shlex.quote(str(path))}'
+                  " | /usr/bin/awk 'NR == 2 {print $1}')\""
+                  " | /usr/bin/plutil -extract VolumeUUID raw -o - -")
         checks += [f"test -f {shlex.quote(str(path))}",
-                   f'test "$(/usr/bin/stat -f %d:%u {shlex.quote(str(path))})" = '
-                   + shlex.quote(f'{record["device"]}:{record["uid"]}'),
+                   f'test "$({volume})" = ' + shlex.quote(record["volume_uuid"]),
+                   f'test "$(/usr/bin/stat -f %u {shlex.quote(str(path))})" = '
+                   + shlex.quote(str(record["uid"])),
                    f'test "$(/usr/bin/stat -f %i {shlex.quote(str(path.parent))})" = '
                    + shlex.quote(str(record["parent_inode"]))]
         guard = " && ".join(checks) + ' || { fail "keychain identity changed"; exit 1; }'
