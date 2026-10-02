@@ -253,6 +253,26 @@ def test_a_failed_check_reaches_the_window_without_stranding_the_tick(tmp_path, 
     assert daemon.channel_error == "Source check failed: no such ref"
 
 
+def test_local_observation_exists_before_external_source_request(tmp_path, publisher):
+    root, _, config = setup(tmp_path, publisher)
+    daemon, _ = supervisor(tmp_path, config)
+    observed_during_request = []
+
+    def transport(request):
+        if request.url.host == "api.github.com":
+            path = root / "observed.json"
+            observed_during_request.append(json.loads(path.read_text()) if path.exists() else None)
+            raise httpx.ConnectTimeout("isolated guest cannot reach GitHub", request=request)
+        return httpx.Response(200, json={"job": None})
+
+    daemon.client = httpx.Client(transport=httpx.MockTransport(transport))
+    daemon.tick()
+    assert len(observed_during_request) == 1
+    assert observed_during_request[0] is not None
+    assert observed_during_request[0]["supervisor"] == 1
+    assert "isolated guest" in json.loads((root / "observed.json").read_text())["updater_error"]
+
+
 def test_a_build_in_flight_is_reported_and_suspends_checking(tmp_path, publisher):
     root, _, config = setup(tmp_path, publisher)
     atomic_json(root / "build.json", {"state": "building", "ref": "main", "started": time.time()})

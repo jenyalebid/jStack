@@ -16,7 +16,6 @@ import sys
 
 import pytest
 
-from conftest import destructive
 
 from jstack_host import app_services, build_hub, install_signed, migrate_host, service_settings
 
@@ -90,17 +89,13 @@ def test_the_scheduler_environment_cannot_smuggle_an_import_path():
             service_settings.validate(value)
 
 
-# NEVER RUN ON THE HOME MACHINE. This test drives the real `install_signed.uninstall`,
-# which runs `launchctl bootout` on every live.jstack.hub role and unlinks
-# ~/.local/bin/jstack-host. On 2026-09-24 17:31 it did exactly that to the
-# production Hub. It is refused wherever the Hub is installed; its real proof
-# is the hub/uninstall journey, in a lab guest.
-@destructive
 def test_uninstall_stops_and_boots_out_every_sealed_role(monkeypatch, tmp_path):
+    import subprocess
+
     app = tmp_path / "Hub.app"
     app.mkdir()
     statuses = dict.fromkeys(build_hub.ROLES, "enabled")
-    unregistered, booted = [], []
+    unregistered, booted, commands = [], [], []
 
     def control(owner, action, role=None):
         if action == "status":
@@ -110,6 +105,11 @@ def test_uninstall_stops_and_boots_out_every_sealed_role(monkeypatch, tmp_path):
         return {"status": "not_registered"}
 
     monkeypatch.setattr(install_signed, "control", control)
+    def run(argv, **kwargs):
+        commands.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(service_settings, "path", lambda: tmp_path / "state/service-settings.json")
     monkeypatch.setattr(install_signed.install_host, "wait_unloaded",
                         lambda label, seconds=10: booted.append(label) or True)
@@ -120,6 +120,8 @@ def test_uninstall_stops_and_boots_out_every_sealed_role(monkeypatch, tmp_path):
     # A label left out of the bootout sweep is a service still loaded after its
     # bundle is gone, which the next install then refuses over.
     assert booted == [f"live.jstack.hub.{role}" for role in install_signed.ROLES]
+    assert commands == [["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{label}"]
+                        for label in booted]
 
 
 # ------------------------------------------- an install that predates the role

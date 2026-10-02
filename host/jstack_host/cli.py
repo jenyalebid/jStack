@@ -162,6 +162,17 @@ def _cmd_emergency_stop(args) -> int:
     return emergency_stop.stop(out=sys.stdout)
 
 
+def _cmd_sos(args) -> int:
+    _adopt(args)
+    from . import sos
+    return sos.run(args.cmd, dry_run=getattr(args, "dry_run", False))
+
+
+def _cmd_sos_user_cleanup(args) -> int:
+    from . import sos_user_cleanup
+    return sos_user_cleanup.run()
+
+
 def _cmd_pair(args) -> int:
     """Mint an enrolment code, the way the app expects to be introduced.
 
@@ -1729,6 +1740,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("emergency-stop", help="stop all jStack services and reset their macOS permissions")
     p.set_defaults(fn=_cmd_emergency_stop)
+
+    for action in ("reboot", "shutdown", "lock", "wipe"):
+        p = sub.add_parser(action, help=f"confirm and {action} this Mac")
+        if action == "wipe":
+            p.add_argument("--dry-run", action="store_true", help="print the removal inventory without changing anything")
+        p.set_defaults(fn=_cmd_sos)
+
+    p = sub.add_parser("_wipe-user-cleanup", help=argparse.SUPPRESS)
+    p.set_defaults(fn=_cmd_sos_user_cleanup)
 
     def _serving_args(p, *, bind_default, bind_help):
         p.add_argument("--port", type=int, default=install_host.DEFAULT_PORT)

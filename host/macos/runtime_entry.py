@@ -13,6 +13,8 @@ def main():
     if not cli and len(sys.argv) < 2:
         raise SystemExit("expected host, updater, scheduler, cli or self-test")
     role, arguments = ("cli", sys.argv[1:]) if cli else (sys.argv[1], sys.argv[2:])
+    if role != "cli" and Path("/private/var/db/live.jstack.sos").exists():
+        raise SystemExit("jStack wipe is in progress")
     if role == "local":
         if len(arguments) != 1:
             raise SystemExit("local service requires exactly one catalog identifier")
