@@ -214,9 +214,16 @@ def inventory() -> dict:
     for name in ("jStack", "jRemote-Code"):
         add("data", root / name)
     for relative in (".config/claude", ".config/codex", ".config/jremote", ".local/share/jstack",
-                     ".cache/claude", ".cache/codex",
+                     ".cache/claude", ".cache/codex", ".cache/codex-runtimes",
+                     "Library/Caches/claude-cli-nodejs", "Library/Caches/Codex",
                      "Library/Caches/com.anthropic.claudefordesktop", "Library/Caches/com.openai.codex",
+                     "Library/Caches/com.anthropic.claudefordesktop.ShipIt",
+                     "Library/Application Support/com.openai.codex",
+                     "Library/Application Support/com.openai.codex.installer",
+                     "Library/Application Support/jStack", "Library/Application Support/jRemote",
                      "Library/Logs/Claude", "Library/Logs/Codex", "Library/Logs/jRemote",
+                     "Library/Logs/com.openai.codex", "Library/Logs/jstack-scheduler",
+                     "Library/Logs/jremote-one-app.log", "Library/Logs/jremote-updater.log",
                      "Library/Logs/jStack", "Library/Saved Application State/com.anthropic.claudefordesktop.savedState",
                      "Library/Saved Application State/com.openai.codex.savedState"):
         add("history", home / relative)
