@@ -123,8 +123,8 @@ def rank(statuses: list[dict]) -> list[dict]:
     return sorted(statuses, key=key)
 
 
-def survey(image: str, recipe: str | None, conf: dict,
-           only: str | None = None) -> tuple[list[dict], list[str]]:
+def survey(image: str, recipe: str | None, conf: dict, only: str | None = None,
+           kind: str = "seat") -> tuple[list[dict], list[str]]:
     me = tenant()
     cands = [c for c in reach.candidates(me) if only in (None, c["name"])]
     if only and not cands:
@@ -145,6 +145,12 @@ def survey(image: str, recipe: str | None, conf: dict,
             why.append(f"{name}: unreachable ({s['error']})")
         elif s["refusal"]:
             why.append(f"{name}: {s['refusal']}")
+        elif kind == "direct":
+            if s.get("direct", "no direct work here"):
+                why.append(f"{name}: {s.get('direct') or 'it runs no direct work'}")
+            else:
+                usable.append({**s, "free_slots": s.get("direct_free", 0),
+                               "free_seats": 0, "warm": []})
         elif s["images"].get(image, f"image {image} is not on {s['host']}"):
             why.append(f"{name}: {s['images'].get(image) or f'image {image} is not on it'}")
         else:
@@ -154,7 +160,7 @@ def survey(image: str, recipe: str | None, conf: dict,
 
 def get(image: str, kind: str = "seat", wait: float | None = None,
         recipe: str | None = None, say=print, who: dict | None = None,
-        net: str = "", near: str | None = None) -> dict:
+        near: str | None = None) -> dict:
     """`near` is a held lease: the new one lands on that lease's host or waits."""
     conf = settings.load()
     only = held(near)["host"] if near else None
@@ -165,7 +171,7 @@ def get(image: str, kind: str = "seat", wait: float | None = None,
     last = ""
     try:
         while True:
-            ranked, why = survey(image, recipe, conf, only)
+            ranked, why = survey(image, recipe, conf, only, kind)
             if not ranked:
                 raise SandboxError("no host can take this job:\n  " + "\n  ".join(why))
             reasons, refused = [], 0
@@ -174,7 +180,7 @@ def get(image: str, kind: str = "seat", wait: float | None = None,
                     asked.append(s["target"])
                 out = call(s["target"], "admit", {
                     "ticket": ticket, "tenant": tenant(), "image": image,
-                    "kind": kind, "net": net, "owner": who, "client": tenant(),
+                    "kind": kind, "owner": who, "client": tenant(),
                     "recipe": recipe}, conf)
                 if out["state"] == "admitted":
                     lease = out["lease"]
@@ -205,7 +211,6 @@ def _hold(lease: dict, target: dict) -> None:
         data[lease["id"]] = {"host": target["name"], "ssh": target.get("ssh"),
                              "tenant": lease["tenant"], "image": lease["image"],
                              "kind": lease["kind"], "guest": lease["guest"],
-                             "net": lease.get("net", ""),
                              "seat": lease.get("seat", ""), "owner": lease["owner"],
                              "state": "active"}
     start_keeper(lease["id"])
@@ -286,6 +291,16 @@ def release(lease_id: str) -> dict:
     out = call(target_of(entry), "release", {"lease": lease_id, "tenant": entry["tenant"]})
     _forget(lease_id)
     return out
+
+
+def link(lease_id: str, to: str, port: int) -> dict:
+    """`to`'s port, reachable from inside `lease_id` at the address returned."""
+    entry, other = held(lease_id), held(to)
+    if entry["host"] != other["host"]:
+        raise SandboxError(f"{lease_id} is on {entry['host']} and {to} on {other['host']}: "
+                           f"a link joins two leases on one host (get the second --near)")
+    return call(target_of(entry), "link", {"lease": lease_id, "to": to, "port": port,
+                                           "tenant": entry["tenant"]})
 
 
 def lease_verb(verb: str, lease_id: str) -> dict:

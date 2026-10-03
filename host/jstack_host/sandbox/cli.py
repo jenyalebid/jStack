@@ -21,9 +21,10 @@ def _lease_line(lease: dict) -> str:
 
 def cmd_get(a) -> int:
     say = (lambda line: print(line, file=sys.stderr))
-    lease = client.get(a.image, kind="own" if a.own else "seat", wait=a.wait,
-                       recipe=images.sha(a.image), say=say,
-                       net=a.net or "", near=a.near)
+    kind = "direct" if a.direct else "own" if a.own else "seat"
+    lease = client.get(a.image, kind=kind, wait=a.wait,
+                       recipe=None if a.direct else images.sha(a.image), say=say,
+                       near=a.near)
     if a.json:
         _print(lease)
     else:
@@ -35,6 +36,11 @@ def cmd_get(a) -> int:
 def _entry_target(lease_id):
     entry = client.held(lease_id)
     return entry, client.target_of(entry)
+
+
+def cmd_link(a) -> int:
+    _print(client.link(a.lease, a.to, a.port))
+    return 0
 
 
 def cmd_exec(a) -> int:
@@ -219,12 +225,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("image")
     p.add_argument("--own", action="store_true", help="a whole guest, not a seat")
     p.add_argument("--wait", type=float, default=None, help="give up after N seconds")
-    p.add_argument("--net", choices=[n for n in host.NETS if n],
-                   help="guests that reach each other (with --own)")
+    p.add_argument("--direct", action="store_true",
+                   help="on the host itself, no guest, where its settings allow it")
     p.add_argument("--near", metavar="LEASE",
                    help="on the same host as this held lease")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_get)
+
+    p = sub.add_parser("link", help="reach another lease's port from this one, TCP and UDP")
+    p.add_argument("lease")
+    p.add_argument("to")
+    p.add_argument("port", type=int)
+    p.set_defaults(fn=cmd_link)
 
     p = sub.add_parser("exec", help="run a command in the lease")
     p.add_argument("lease")
@@ -314,6 +326,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("lease", nargs="?")
     p.add_argument("rest", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_host)
+
+    p = sub.add_parser("_relay", help=argparse.SUPPRESS)
+    for name in ("listen", "port", "allow", "to", "to_port"):
+        p.add_argument(name)
+    p.set_defaults(fn=lambda a: __import__("jstack_host.sandbox.relay", fromlist=["serve"])
+                   .serve(a.listen, int(a.port), a.allow, a.to, int(a.to_port)))
 
     p = sub.add_parser("_keep", help=argparse.SUPPRESS)
     p.add_argument("lease")

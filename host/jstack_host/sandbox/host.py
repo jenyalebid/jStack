@@ -7,6 +7,7 @@ only ever answers for itself.
 """
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
@@ -147,6 +148,9 @@ def status(req: dict) -> dict:
         "warm": [g["image"] for g in guests if g["role"] == "warm"
                  and g["tenant"] == tenant],
         "headroom": _headroom(conf), "waiting": waiting,
+        "direct": _direct_refusal(conf, tenant) if tenant else "",
+        "direct_free": max(conf["direct_slots"] -
+                           sum(1 for l in leases if l["kind"] == "direct"), 0),
         "leases": len(leases), "images": images,
     }
 
@@ -199,17 +203,13 @@ def admit(req: dict) -> dict:
     """Admit the ticket now, or keep it queued and say why."""
     conf = settings.load()
     tenant, image, kind = req["tenant"], req["image"], req.get("kind", "seat")
-    net = req.get("net", "")
-    if kind not in ("own", "seat"):
-        raise Refused(f"kind is own or seat, not {kind!r}")
-    if net not in NETS:
-        raise Refused(f"net is one of {', '.join(n or 'default' for n in NETS)}, not {net!r}")
-    if net and kind != "own":
-        raise Refused("a shared network is a whole guest's: ask --own")
-    refusal = _admits(conf["mode"], tenant) or (net and _net_missing(conf))
+    if kind not in KINDS:
+        raise Refused(f"kind is one of {', '.join(KINDS)}, not {kind!r}")
+    refusal = _admits(conf["mode"], tenant) or (
+        kind == "direct" and _direct_refusal(conf, tenant))
     if refusal:
         return {"state": "refused", "reason": refusal}
-    stale = _image_state(conf, tenant, image, req.get("recipe"))
+    stale = kind != "direct" and _image_state(conf, tenant, image, req.get("recipe"))
     if stale:
         return {"state": "refused", "reason": stale}
     ticket = req.get("ticket") or uuid.uuid4().hex
@@ -228,7 +228,7 @@ def admit(req: dict) -> dict:
                                (ticket,)).fetchone()[0]
             return {"state": "queued", "ticket": ticket,
                     "reason": f"{ahead} job(s) ahead on {host_name()}"}
-        plan = _place(db, conf, tenant, image, kind, net)
+        plan = _place(db, conf, tenant, image, kind)
         if "reason" in plan:
             return {"state": "queued", "ticket": ticket, "reason": plan["reason"]}
         db.execute("DELETE FROM tickets WHERE id=?", (ticket,))
@@ -236,12 +236,12 @@ def admit(req: dict) -> dict:
             db.execute("DELETE FROM guests WHERE name=?", (victim,))
         if plan.get("boot"):
             ledger.add_guest(db, plan["guest"], tenant, image,
-                             "own" if kind == "own" else "shared", net)
+                             "own" if kind == "own" else "shared")
         elif plan.get("adopt_warm"):
             db.execute("UPDATE guests SET role=? WHERE name=?",
                        ("own" if kind == "own" else "shared", plan["guest"]))
         lease = {"id": "L" + uuid.uuid4().hex[:10], "tenant": tenant,
-                 "image": image, "kind": kind, "net": net, "guest": plan["guest"],
+                 "image": image, "kind": kind, "guest": plan["guest"],
                  "seat": "", "owner": req["owner"], "client": req["client"]}
         if kind == "seat":
             lease["seat"] = _seat_name(db, plan["guest"])
@@ -250,11 +250,12 @@ def admit(req: dict) -> dict:
     try:
         for victim in plan.get("evict", []):
             _guest_tart(conf, victim).delete(victim)
-        if plan.get("boot"):
+        if kind == "direct":
+            _direct_dir(conf, lease).mkdir(parents=True, exist_ok=True)
+        elif plan.get("boot"):
             t.clone(image_vm(image), plan["guest"])
             t.configure(plan["guest"], conf["guest_cpu"], conf["guest_mem_gb"])
-            t.boot(plan["guest"], conf["boot_seconds"], _net_args(conf, net),
-                   _net_env(conf, net))
+            t.boot(plan["guest"], conf["boot_seconds"])
         elif not t.running(plan["guest"]):
             t.boot(plan["guest"], conf["boot_seconds"])
         if kind == "seat":
@@ -269,33 +270,14 @@ def admit(req: dict) -> dict:
                                            "state": "active"}}
 
 
-NETS = ("", "shared")
+KINDS = ("own", "seat", "direct")
 
 
-def _net_args(conf: dict, net: str) -> list[str]:
-    return list(conf["shared_net_args"]) if net == "shared" else []
-
-
-def _net_env(conf: dict, net: str) -> dict:
-    """tart finds softnet on its PATH, and `open` hands it launchd's, which
-    holds no install place softnet uses."""
-    path = settings.softnet_bin(conf) if net == "shared" else ""
-    return {"PATH": f"{Path(path).parent}:/usr/bin:/bin:/usr/sbin:/sbin"} if path else {}
-
-
-def _net_missing(conf: dict) -> str:
-    """Why this host cannot start a shared network, or empty when it can.
-    Without it tart's boot fails every try, and the ticket would wait forever."""
-    path = settings.softnet_bin(conf)
-    if not path:
-        return f"{host_name()} has no softnet for a shared network"
-    st = os.stat(path)
-    if st.st_uid == 0 and st.st_mode & 0o4000:
-        return ""
-    if subprocess.run(["sudo", "-n", "-l", path], capture_output=True).returncode == 0:
-        return ""
-    return (f"{host_name()}: softnet at {path} runs neither setuid root "
-            "nor under passwordless sudo")
+def _direct_refusal(conf: dict, tenant: str) -> str:
+    """Why this host will not run a tenant's work on itself, or empty."""
+    if tenant not in conf["direct_tenants"]:
+        return f"{host_name()} runs no direct work for {tenant} (direct_tenants)"
+    return ""
 
 
 def _running(guests: list[dict]) -> list[dict]:
@@ -303,16 +285,15 @@ def _running(guests: list[dict]) -> list[dict]:
     return [g for g in guests if g["role"] != "warm" and not g.get("parked")]
 
 
-def _place(db, conf, tenant, image, kind, net="") -> dict:
+def _place(db, conf, tenant, image, kind) -> dict:
     guests = ledger.guests(db)
     leases = ledger.leases(db)
-    if net:
-        # Guests on one shared network reach each other: it is one tenant's.
-        other = next((g["tenant"] for g in guests if g.get("net") == net
-                      and g["tenant"] != tenant), None)
-        if other:
-            return {"reason": f"the {net} network on {host_name()} is held by "
-                              f"another tenant"}
+    if kind == "direct":
+        held = sum(1 for l in leases if l["kind"] == "direct")
+        if held >= conf["direct_slots"]:
+            return {"reason": f"all {conf['direct_slots']} direct slot(s) on "
+                              f"{host_name()} are in use"}
+        return {"guest": f"d-{tenant}-{uuid.uuid4().hex[:6]}"}
     if kind == "seat":
         for g in guests:
             if g["role"] == "shared" and g["tenant"] == tenant and g["image"] == image:
@@ -324,8 +305,7 @@ def _place(db, conf, tenant, image, kind, net="") -> dict:
     if cap is not None and len(mine) >= cap:
         return {"reason": f"tenant {tenant} is at its cap of {cap} guest(s)"}
     for g in guests:
-        if (g["role"] == "warm" and g["tenant"] == tenant and g["image"] == image
-                and not net):
+        if g["role"] == "warm" and g["tenant"] == tenant and g["image"] == image:
             return {"guest": g["name"], "adopt_warm": True}
     busy = _running(guests)
     if len(busy) >= conf["max_guests"]:
@@ -435,6 +415,9 @@ def _reap_lease(conf: dict, lease_id: str) -> dict:
         others = ledger.leases(db, guest=lease["guest"])
         if not others:
             db.execute("DELETE FROM guests WHERE name=?", (lease["guest"],))
+    _drop_links(conf, lease_id)
+    if lease["kind"] == "direct":
+        return {"lease": lease_id, **_close_direct(conf, lease)}
     t = tart_for(conf, lease["tenant"])
     if others:
         if lease["seat"]:
@@ -449,6 +432,10 @@ def reset(req: dict) -> dict:
     conf = settings.load()
     with ledger.open_db(settings.root(conf)) as db:
         lease = _lease(db, req["lease"])
+    if lease["kind"] == "direct":
+        _close_direct(conf, lease)
+        _direct_dir(conf, lease).mkdir(parents=True, exist_ok=True)
+        return {"reset": lease["id"], "direct": str(_direct_dir(conf, lease))}
     t = tart_for(conf, lease["tenant"])
     if lease["kind"] == "seat":
         _drop_seat(t, lease["guest"], lease["seat"])
@@ -459,22 +446,16 @@ def reset(req: dict) -> dict:
     t.delete(lease["guest"])
     t.clone(image_vm(lease["image"]), lease["guest"])
     t.configure(lease["guest"], conf["guest_cpu"], conf["guest_mem_gb"])
-    net = _guest_net(lease)
-    t.boot(lease["guest"], conf["boot_seconds"], _net_args(conf, net), _net_env(conf, net))
+    t.boot(lease["guest"], conf["boot_seconds"])
     return {"reset": lease["id"], "guest": lease["guest"]}
 
 
-def _guest_net(lease: dict) -> str:
-    conf = settings.load()
-    with ledger.open_db(settings.root(conf)) as db:
-        rows = ledger.guests(db, name=lease["guest"])
-    return rows[0]["net"] if rows else ""
-
-
-def _own_lease(db, req: dict) -> dict:
-    lease = _lease(db, req["lease"])
+def _own_lease(db, req: dict, key: str = "lease", guest: bool = True) -> dict:
+    lease = _lease(db, req[key])
     if req.get("tenant") and lease["tenant"] != req["tenant"]:
         raise Refused(f"{lease['id']} belongs to tenant {lease['tenant']}")
+    if guest and lease["kind"] == "direct":
+        raise Refused(f"{lease['id']} runs directly on {host_name()}: it has no guest")
     return lease
 
 
@@ -522,7 +503,6 @@ def resume(req: dict) -> dict:
         evict = warm[:max(len(_running(guests)) + len(warm) + 1 - conf["max_guests"], 0)]
         for victim in evict:
             db.execute("DELETE FROM guests WHERE name=?", (victim,))
-        guest = ledger.guests(db, name=lease["guest"])[0]
         db.execute("UPDATE guests SET parked=0 WHERE name=?", (lease["guest"],))
         db.execute("UPDATE leases SET state='booting', renewed=? WHERE id=?",
                    (time.time(), lease["id"]))
@@ -530,8 +510,7 @@ def resume(req: dict) -> dict:
         _guest_tart(conf, victim).delete(victim)
     try:
         tart_for(conf, lease["tenant"]).boot(lease["guest"], conf["boot_seconds"],
-                                             _net_args(conf, guest["net"]),
-                                             _net_env(conf, guest["net"]))
+                                             )
     except BaseException:
         with ledger.open_db(settings.root(conf), write=True) as db:
             db.execute("UPDATE guests SET parked=1 WHERE name=?", (lease["guest"],))
@@ -584,7 +563,7 @@ def _tick(conf: dict) -> dict:
                  if l["created"] < now - 2 * conf["boot_seconds"]]
     for lease_id in expired + stuck:
         done["reaped"].append(_reap_lease(conf, lease_id))
-    done["strays"] = _reap_strays(conf)
+    done["strays"] = _reap_strays(conf) + _drop_links(conf)
     with ledger.open_db(settings.root(conf)) as db:
         waiting = db.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]
         warm = ledger.guests(db, role="warm")
@@ -734,6 +713,139 @@ def image_tag_lease(req: dict) -> dict:
     return {"image": req["image"], "tag": tag}
 
 
+# ---------------------------------------------------------------- direct
+
+def _direct_dir(conf: dict, lease: dict) -> Path:
+    """A direct lease's own folder on the host: its commands start here and
+    what it pushes lands here."""
+    return tenant_root(conf, lease["tenant"]) / "direct" / lease["id"]
+
+
+def _groups_file(conf: dict, lease: dict) -> Path:
+    return _direct_dir(conf, lease).with_suffix(".groups")
+
+
+def _lease_procs(conf: dict, lease: dict) -> list[int]:
+    """Processes still in the process groups the lease's commands started."""
+    try:
+        groups = {int(g) for g in _groups_file(conf, lease).read_text().split()}
+    except (OSError, ValueError):
+        return []
+    out = subprocess.run(["ps", "-A", "-o", "pid=,pgid="], capture_output=True,
+                         text=True).stdout
+    return [int(pid) for pid, pgid in (line.split() for line in out.splitlines())
+            if int(pgid) in groups and int(pid) != os.getpid()]
+
+
+def _sims_named(lease_id: str) -> list[str]:
+    out = subprocess.run(["xcrun", "simctl", "list", "devices", "-j"],
+                         capture_output=True, text=True).stdout
+    try:
+        devices = json.loads(out).get("devices", {})
+    except ValueError:
+        return []
+    return [d["udid"] for group in devices.values() for d in group
+            if lease_id in d.get("name", "")]
+
+
+def _close_direct(conf: dict, lease: dict) -> dict:
+    """End what a direct lease started on the host, and prove it: its processes,
+    the simulators named with its id, its folder. Nothing else is touched."""
+    killed = _lease_procs(conf, lease)
+    for sig in (15, 9):
+        for pid in _lease_procs(conf, lease):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, sig)
+        deadline = time.time() + 5
+        while _lease_procs(conf, lease) and time.time() < deadline:
+            time.sleep(0.2)
+    sims = _sims_named(lease["id"])
+    for udid in sims:
+        subprocess.run(["xcrun", "simctl", "shutdown", udid], capture_output=True)
+        subprocess.run(["xcrun", "simctl", "delete", udid], capture_output=True)
+    work = _direct_dir(conf, lease)
+    shutil.rmtree(work, ignore_errors=True)
+    left = _lease_procs(conf, lease) + _sims_named(lease["id"])
+    _groups_file(conf, lease).unlink(missing_ok=True)
+    return {"gone": not work.exists() and not left, "killed": killed, "sims": sims,
+            "left": left}
+
+
+# ---------------------------------------------------------------- link
+
+def _links_dir(conf: dict) -> Path:
+    return settings.root(conf) / "links"
+
+
+def _gateway(t: Tart, guest: str) -> str:
+    """The host's address on the guest's own network: the guest's default route."""
+    out = t.exec(guest, ["sh", "-c", "route -n get default | awk '/gateway:/{print $2}'"],
+                 timeout=30)
+    return out.stdout.strip()
+
+
+def link(req: dict) -> dict:
+    """Make `to`'s port reachable from `lease`'s guest, TCP and UDP, at the
+    host's address on that guest's network. A relay on this host carries it,
+    bound to that address alone and answering only that guest; nothing is
+    opened on the host's own network, and it ends with either lease."""
+    conf = settings.load()
+    port = int(req["port"])
+    with ledger.open_db(settings.root(conf)) as db:
+        lease = _own_lease(db, req)
+        to = _own_lease(db, req, key="to")
+    for l in (lease, to):
+        if l["state"] not in ("active", "orphan"):
+            raise Refused(f"{l['id']} is {l['state']}")
+    t = tart_for(conf, lease["tenant"])
+    src = t.ip(lease["guest"], conf["boot_seconds"])
+    dst = tart_for(conf, to["tenant"]).ip(to["guest"], conf["boot_seconds"])
+    gw = _gateway(t, lease["guest"])
+    if not gw:
+        raise Refused(f"{lease['id']}: the guest names no default route")
+    from .client import self_command
+    folder = _links_dir(conf)
+    folder.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen([*self_command(), "_relay", gw, str(port), src, dst, str(port)],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=open(folder / "relay.log", "a"), text=True,
+                            start_new_session=True)
+    first = proc.stdout.readline().strip()
+    proc.stdout.close()
+    if first != "ready":
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        raise Refused(f"the link could not open {gw}:{port}: {first or 'relay exited'}")
+    row = {"pid": proc.pid, "lease": lease["id"], "to": to["id"],
+           "address": f"{gw}:{port}", "target": f"{dst}:{port}"}
+    (folder / f"{lease['id']}-{port}.json").write_text(json.dumps(row))
+    return row
+
+
+def _drop_links(conf: dict, lease_id: str | None = None) -> list[str]:
+    """End the links a lease is either end of; with no lease, every link whose
+    leases are gone."""
+    folder = _links_dir(conf)
+    if not folder.exists():
+        return []
+    if lease_id is None:
+        with ledger.open_db(settings.root(conf)) as db:
+            live = {l["id"] for l in ledger.leases(db)}
+    dropped = []
+    for f in folder.glob("*.json"):
+        try:
+            row = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        ends = {row.get("lease"), row.get("to")}
+        if (lease_id in ends) if lease_id else not ends <= live:
+            with contextlib.suppress(ProcessLookupError, PermissionError, TypeError):
+                os.kill(row.get("pid"), 15)
+            f.unlink(missing_ok=True)
+            dropped.append(row.get("address", f.stem))
+    return dropped
+
+
 # ---------------------------------------------------------------- in the guest
 
 def _guest_argv(lease: dict, argv: list[str]) -> list[str]:
@@ -756,6 +868,17 @@ def run_in(lease_id: str, argv: list[str], tty: bool = False,
         raise Refused(f"{lease_id} belongs to tenant {lease['tenant']}")
     if lease["state"] not in ("active", "orphan"):
         raise Refused(f"{lease_id} is {lease['state']}")
+    if lease["kind"] == "direct":
+        work = _direct_dir(conf, lease)
+        env = {**os.environ, "JSTACK_SANDBOX_LEASE": lease["id"],
+               "JSTACK_SANDBOX_WORK": str(work)}
+        # Its own process group, recorded, so a release ends all it started.
+        proc = subprocess.Popen(["zsh", "-lc", 'cd "$JSTACK_SANDBOX_WORK" && exec "$@"',
+                                 "_", *(argv or ["zsh", "-l"])], env=env, stdin=stdin,
+                                stdout=stdout, process_group=0)
+        with _groups_file(conf, lease).open("a") as f:
+            f.write(f"{proc.pid}\n")
+        return proc.wait()
     t = tart_for(conf, lease["tenant"])
     proc = t.exec(lease["guest"], _guest_argv(lease, argv or ["zsh", "-l"]),
                   interactive=interactive or tty, tty=tty, capture=False,
@@ -784,7 +907,7 @@ VERBS = {
     "assign": assign, "release": release, "reset": reset, "ls": ls,
     "tick": tick, "mode": mode, "purge": purge, "image-pull": image_pull,
     "image-tag": image_tag_lease, "cancel": cancel, "ip": ip,
-    "park": park, "resume": resume,
+    "park": park, "resume": resume, "link": link,
 }
 
 
