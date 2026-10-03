@@ -1,9 +1,11 @@
-"""Run a command in a guest's own Terminal window, visibly, and bring back its exit.
+"""Run a command in a guest's own Terminal window, visibly, and bring back its exit; or
+bring back what the guest's screen shows.
 
 The command travels as its own file and the runner never interpolates it. The
-runner is opened through LaunchServices (`open -a Terminal`), never an Apple
-Event, closes its own window so pseudo-ttys are not spent, and a window that ran
-nothing is repaired by reaping tty holders and opening again. The deadline is
+runner is opened through LaunchServices (`open -a Terminal`, which also brings
+Terminal forward), never an Apple Event, closes its own window so pseudo-ttys
+are not spent, and a window that ran nothing is repaired by reaping tty holders
+and opening again. The deadline is
 wall clock. Consent rows let the guest's Terminal drive System Events, so a
 payload's osascript runs without a click. System doc: ~/Systems/sandbox/SYSTEM.md.
 """
@@ -13,6 +15,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from pathlib import Path
 
 from . import client, settings
 
@@ -102,8 +105,6 @@ def term(lease_id: str, command: str, say=print) -> int:
         if not launched(conf["term_launch_seconds"] + 30):
             raise client.SandboxError("the guest cannot open a working Terminal window; "
                                       "`sandbox reset` it")
-    _in(lease_id, 'sleep 1; osascript -e "tell application \\"System Events\\" to '
-                  'tell process \\"Terminal\\" to set frontmost to true"')
     deadline = time.time() + conf["term_seconds"]
     while time.time() < deadline:
         if _in(lease_id, f'[ -f "{base}.exit" ]')[0] == 0:
@@ -115,3 +116,19 @@ def term(lease_id: str, command: str, say=print) -> int:
     print(_in(lease_id, f'cat "{base}.log"')[1], end="")
     code = _in(lease_id, f'cat "{base}.exit"; rm -f "{base}".*')[1].strip()
     return int(code) if code.isdigit() else 1
+
+
+def shot(lease_id: str, dest: str = ".") -> str:
+    """The guest's screen as a PNG under `dest`; its path."""
+    entry = client.held(lease_id)
+    if entry["kind"] == "seat":
+        raise client.SandboxError("a seat has no screen of its own; take a guest with `get --own`")
+    name = f"shot-{lease_id}-{time.strftime('%H%M%S')}.png"
+    code, out = _in(lease_id, f'screencapture -x "/tmp/{name}"')
+    if code:
+        raise client.SandboxError(f"the guest could not capture its screen: {out.strip()}")
+    from . import images
+    if images.pull(lease_id, f"/tmp/{name}", dest):
+        raise client.SandboxError("the capture did not come back")
+    _in(lease_id, f'rm -f "/tmp/{name}"')
+    return str(Path(dest).expanduser().resolve() / name)

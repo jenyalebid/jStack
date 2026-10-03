@@ -56,6 +56,12 @@ def cmd_term(a) -> int:
                      say=lambda line: print(line, file=sys.stderr))
 
 
+def cmd_shot(a) -> int:
+    from . import term
+    print(term.shot(a.lease, a.dest))
+    return 0
+
+
 def cmd_push(a) -> int:
     return images.push(a.lease, a.src, a.dest, a.exclude)
 
@@ -213,6 +219,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("lease")
     p.add_argument("argv", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_term)
+
+    p = sub.add_parser("shot", help="the guest's screen, as a PNG here")
+    p.add_argument("lease")
+    p.add_argument("dest", nargs="?", default=".")
+    p.set_defaults(fn=cmd_shot)
 
     p = sub.add_parser("push", help="copy a local directory into the lease")
     p.add_argument("lease")
