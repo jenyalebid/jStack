@@ -299,10 +299,13 @@ def _seat_name(db, guest: str) -> str:
 
 
 def _make_seat(t: Tart, guest: str, seat: str) -> None:
-    """A seat is its own macOS user: own home, simulators and DerivedData."""
+    """A seat is its own macOS user: own home, simulators and DerivedData.
+
+    A home is made 700: every seat is in `staff`, which macOS lets read a home."""
     script = (f"id {seat} >/dev/null 2>&1 || sudo sysadminctl -addUser {seat} "
               f"-password {uuid.uuid4().hex} -home /Users/{seat} >/dev/null 2>&1; "
-              f"sudo createhomedir -c -u {seat} >/dev/null 2>&1; id {seat}")
+              f"sudo createhomedir -c -u {seat} >/dev/null 2>&1; "
+              f"sudo chmod 700 /Users/{seat}; id {seat}")
     t.exec(guest, ["sh", "-c", script], timeout=120)
 
 
