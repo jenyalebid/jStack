@@ -88,7 +88,20 @@ def _agent_engine(name: str | None, cmdline: list) -> str | None:
 #: Codex subcommands that run a server, never a session. The app-server daemon
 #: outlives whatever started it — one lingered for a day as two permanent
 #: Headless cards, with Kill on them wired to Codex's own server (#344).
-_CODEX_SERVERS = frozenset({"app-server", "mcp-server"})
+#: `exec-server` is the ChatGPT desktop app's bridge to a cloud environment;
+#: the app respawns it and its app-server the moment either is killed, so a
+#: Kill on their cards brought them straight back.
+_CODEX_SERVERS = frozenset({"app-server", "exec-server", "mcp-server"})
+
+#: Codex global flags that take a separate value. The ChatGPT app launches
+#: `codex -c features.code_mode_host=true app-server`; without knowing `-c`
+#: consumes the next word, the subcommand read as that config pair and the
+#: server walked past `_CODEX_SERVERS` onto the board.
+_CODEX_VALUE_FLAGS = frozenset({
+    "-c", "--config", "--enable", "--disable", "--remote",
+    "--remote-auth-token-env", "-i", "--image", "-m", "--model",
+    "--local-provider", "-p", "--profile", "-s", "--sandbox", "--add-dir",
+    "-a", "--ask-for-approval", "-C", "--cd"})
 
 
 #: A Codex thread id, as it appears bare in argv — `codex exec resume <id>`
@@ -103,7 +116,11 @@ def _subcommand(cmdline: list) -> str:
     Scanned rather than indexed at [1] because a global flag may sit in front
     of the subcommand, and `--flag value` must not have its value read as one.
     """
-    for arg in cmdline[1:]:
+    args = iter(cmdline[1:])
+    for arg in args:
+        if arg in _CODEX_VALUE_FLAGS:
+            next(args, None)
+            continue
         if arg.startswith("-"):
             continue
         return arg
