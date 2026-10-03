@@ -79,7 +79,7 @@ class Tart:
         deadline = time.time() + wait
         while time.time() < deadline:
             if self.running(name):
-                ip = self.run("ip", name, "--wait", "30", check=False)
+                ip = self._address(name)
                 if ip.returncode == 0 and ip.stdout.strip():
                     if self.exec(name, ["true"], check=False,
                                  timeout=30).returncode == 0:
@@ -99,13 +99,21 @@ class Tart:
         return self.run("exec", *flags, name, *argv, check=check,
                         timeout=timeout, input=input)
 
+    def _address(self, name: str) -> subprocess.CompletedProcess:
+        """A softnet guest takes no lease from the host's DHCP, so `tart ip`
+        never finds it there; ARP does (proven on Dev-Bench 2026-10-03)."""
+        out = self.run("ip", name, "--wait", "10", check=False)
+        if out.returncode == 0 and out.stdout.strip():
+            return out
+        return self.run("ip", name, "--resolver", "arp", "--wait", "10", check=False)
+
     def ip(self, name: str, wait: float) -> str:
         """The guest's address now. A shared-network guest's lease can move
         across boots and is read stale just after one, so this asks again
         until the address answers."""
         deadline = time.time() + wait
         while True:
-            out = self.run("ip", name, "--wait", "30", check=False)
+            out = self._address(name)
             addr = out.stdout.strip()
             # Full path: tart exec's PATH carries no /sbin.
             if out.returncode == 0 and addr and self.exec(
