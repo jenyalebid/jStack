@@ -6,10 +6,11 @@ simulator boot, a UI test run or a Simulator launch outside a lease: that work
 goes through a lease.
 
 Only a command in command position counts — after a separator or a pass-through
-prefix (nohup, sudo, env, timeout…). Inside the payload of an exec wrapper (ssh,
-machine run, tmux, sh -c, eval) a quote is a separator too, since the payload is
-a command by construction. Reading about a command is not running it: a grep for
-`tart run` passes. Heredoc bodies are data unless the heredoc feeds a shell.
+prefix (nohup, sudo, env, timeout…). The quoted payload of an exec wrapper (ssh,
+machine run, tmux, sh -c, eval) is a command by construction, so it is checked
+as one; quotes inside it are data again. Reading about a command is not running
+it: a grep for `tart run` passes, here or over ssh. Heredoc bodies are data
+unless the heredoc feeds a shell.
 """
 from __future__ import annotations
 
@@ -25,7 +26,8 @@ BOOT = r"(?:\S*/)?(?:tart\s+run\b|qemu-system-\S+|VBoxHeadless\b)"
 LOCAL_WORK = (r"(?:(?:\S*/)?xcrun\s+)?(?:\S*/)?simctl\s+boot\b"
               r"|(?:\S*/)?xcodebuild\b[^\n;&|]*\btest(?:-without-building)?\b"
               r"|open\s+(?:-\S+\s+)*-a\s+\"?Simulator\b")
-WRAPPER = re.compile(r"\b(ssh|machine\s+run|tmux|eval|watch|(?:ba|z)?sh\s+-c)\b")
+PAYLOAD = re.compile(r"\b(?:ssh|machine\s+run|tmux|eval|watch|(?:ba|z)?sh\s+-c)\b"
+                     r"[^'\"\n]*?(['\"])(.*?)(?<!\\)\1")
 THROUGH_SANDBOX = re.compile(r"\bsandbox\s+(exec|shell)\b")
 HEREDOC = re.compile(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)")
 SHELLS = re.compile(r"\b(ssh|sh|bash|zsh|machine\s+run|tmux|eval)\b")
@@ -45,9 +47,11 @@ def live_lines(command: str) -> list[str]:
     return out
 
 
-def _at_command(pattern: str, line: str) -> bool:
-    seps = r"[;&|(\n'\"]" if WRAPPER.search(line) else r"[;&|(\n]"
-    return re.search(rf"(?:^|{seps})\s*{PREFIX}(?:{pattern})", line) is not None
+def _at_command(pattern: str, line: str, depth: int = 0) -> bool:
+    if re.search(rf"(?:^|[;&|(\n])\s*{PREFIX}(?:{pattern})", line):
+        return True
+    return depth < 4 and any(_at_command(pattern, m.group(2), depth + 1)
+                             for m in PAYLOAD.finditer(line))
 
 
 def verdict(command: str, mode: str) -> str:
