@@ -22,7 +22,8 @@ def _lease_line(lease: dict) -> str:
 def cmd_get(a) -> int:
     say = (lambda line: print(line, file=sys.stderr))
     lease = client.get(a.image, kind="own" if a.own else "seat", wait=a.wait,
-                       recipe=images.sha(a.image), say=say)
+                       recipe=images.sha(a.image), say=say,
+                       net=a.net or "", near=a.near)
     if a.json:
         _print(lease)
     else:
@@ -73,6 +74,21 @@ def cmd_pull(a) -> int:
 def cmd_reset(a) -> int:
     entry, target = _entry_target(a.lease)
     _print(client.call(target, "reset", {"lease": a.lease}))
+    return 0
+
+
+def cmd_ip(a) -> int:
+    print(client.lease_verb("ip", a.lease)["ip"])
+    return 0
+
+
+def cmd_park(a) -> int:
+    _print(client.lease_verb("park", a.lease))
+    return 0
+
+
+def cmd_resume(a) -> int:
+    _print(client.lease_verb("resume", a.lease))
     return 0
 
 
@@ -203,6 +219,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("image")
     p.add_argument("--own", action="store_true", help="a whole guest, not a seat")
     p.add_argument("--wait", type=float, default=None, help="give up after N seconds")
+    p.add_argument("--net", choices=[n for n in host.NETS if n],
+                   help="guests that reach each other (with --own)")
+    p.add_argument("--near", metavar="LEASE",
+                   help="on the same host as this held lease")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_get)
 
@@ -239,7 +259,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_pull)
 
     for name, fn, text in (("reset", cmd_reset, "a fresh guest, or a fresh seat"),
-                           ("release", cmd_release, "reap now")):
+                           ("release", cmd_release, "reap now"),
+                           ("ip", cmd_ip, "the guest's address now"),
+                           ("park", cmd_park, "stop a whole guest, keeping it and the lease"),
+                           ("resume", cmd_resume, "boot a parked guest again")):
         p = sub.add_parser(name, help=text)
         p.add_argument("lease")
         p.set_defaults(fn=fn)

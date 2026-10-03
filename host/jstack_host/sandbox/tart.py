@@ -68,10 +68,13 @@ class Tart:
             raise TartError(f"cannot find tart.app behind {self.binary}")
         return os.path.expandvars(found.group(1))
 
-    def boot(self, name: str, wait: float) -> str:
+    def boot(self, name: str, wait: float, args: list[str] = (),
+             env: dict | None = None) -> str:
         """Start `name` in a GUI window and return its address once it answers."""
-        subprocess.run(["open", "-n", "-a", self.app(), "--env",
-                        f"TART_HOME={self.home}", "--args", "run", name],
+        envs = [f for k, v in {"TART_HOME": self.home, **(env or {})}.items()
+                for f in ("--env", f"{k}={v}")]
+        subprocess.run(["open", "-n", "-a", self.app(), *envs,
+                        "--args", "run", name, *args],
                        check=True, capture_output=True, text=True)
         deadline = time.time() + wait
         while time.time() < deadline:
@@ -95,6 +98,24 @@ class Tart:
                                   stdin=stdin, stdout=stdout)
         return self.run("exec", *flags, name, *argv, check=check,
                         timeout=timeout, input=input)
+
+    def ip(self, name: str, wait: float) -> str:
+        """The guest's address now. A shared-network guest's lease can move
+        across boots and is read stale just after one, so this asks again
+        until the address answers."""
+        deadline = time.time() + wait
+        while True:
+            out = self.run("ip", name, "--wait", "30", check=False)
+            addr = out.stdout.strip()
+            # Full path: tart exec's PATH carries no /sbin.
+            if out.returncode == 0 and addr and self.exec(
+                    name, ["sh", "-c", f"/sbin/ifconfig | grep -qw {addr}"],
+                    check=False, timeout=30).returncode == 0:
+                return addr
+            if time.time() > deadline:
+                raise TartError(f"{name} has no address: "
+                                f"{(out.stderr or out.stdout).strip()}")
+            time.sleep(3)
 
     def stop(self, name: str) -> None:
         self.run("stop", name, "--timeout", "30", check=False)
