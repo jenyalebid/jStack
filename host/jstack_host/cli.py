@@ -2178,6 +2178,12 @@ def main(argv: list[str] | None = None) -> int:
         install_host.adopt_installed_environment(install_host.plist_path())
         from . import triggers
         return triggers.cli(argv[1:])
+    if argv and argv[0] == "sandbox":
+        # Stdlib only and no audit wrapper: peers drive it over ssh, and the
+        # keeper it spawns must start in milliseconds.
+        install_host.adopt_installed_environment(install_host.plist_path())
+        from .sandbox import cli as sandbox_cli
+        return sandbox_cli.main(argv[1:])
     if argv and argv[0] in ("spawn", "compact-delivery"):
         install_host.adopt_installed_environment(install_host.plist_path())
         if argv[0] == "compact-delivery":

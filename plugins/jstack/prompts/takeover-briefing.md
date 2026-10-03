@@ -78,6 +78,16 @@ contradicts the transcript is the first thing you report.
 What the USER decided in that session stands and is not yours to relitigate.
 What the SESSION concluded on its own holds only once you have checked it.
 
+## Then — take its machines
+
+Sandbox leases the source holds stay its own until you claim them; when it
+ends they are orphaned and, after the grace window, reaped with their work.
+Claim them now, guest state intact:
+
+```bash
+jstack-host sandbox assign --from {sid}
+```
+
 ## Then — continue
 
 {continue_line}
