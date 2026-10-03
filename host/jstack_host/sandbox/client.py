@@ -123,9 +123,12 @@ def rank(statuses: list[dict]) -> list[dict]:
     return sorted(statuses, key=key)
 
 
-def survey(image: str, recipe: str | None, conf: dict) -> tuple[list[dict], list[str]]:
+def survey(image: str, recipe: str | None, conf: dict,
+           only: str | None = None) -> tuple[list[dict], list[str]]:
     me = tenant()
-    cands = reach.candidates(me)
+    cands = [c for c in reach.candidates(me) if only in (None, c["name"])]
+    if only and not cands:
+        return [], [f"{only}: not reachable from this instance"]
     req = {"tenant": me, "image": image, "recipes": {image: recipe} if recipe else {}}
 
     def one(c):
@@ -150,8 +153,11 @@ def survey(image: str, recipe: str | None, conf: dict) -> tuple[list[dict], list
 
 
 def get(image: str, kind: str = "seat", wait: float | None = None,
-        recipe: str | None = None, say=print, who: dict | None = None) -> dict:
+        recipe: str | None = None, say=print, who: dict | None = None,
+        net: str = "", near: str | None = None) -> dict:
+    """`near` is a held lease: the new one lands on that lease's host or waits."""
     conf = settings.load()
+    only = held(near)["host"] if near else None
     who = who or owner.current()
     ticket = uuid.uuid4().hex
     deadline = time.time() + wait if wait else None
@@ -159,7 +165,7 @@ def get(image: str, kind: str = "seat", wait: float | None = None,
     last = ""
     try:
         while True:
-            ranked, why = survey(image, recipe, conf)
+            ranked, why = survey(image, recipe, conf, only)
             if not ranked:
                 raise SandboxError("no host can take this job:\n  " + "\n  ".join(why))
             reasons = []
@@ -168,7 +174,7 @@ def get(image: str, kind: str = "seat", wait: float | None = None,
                     asked.append(s["target"])
                 out = call(s["target"], "admit", {
                     "ticket": ticket, "tenant": tenant(), "image": image,
-                    "kind": kind, "owner": who, "client": tenant(),
+                    "kind": kind, "net": net, "owner": who, "client": tenant(),
                     "recipe": recipe}, conf)
                 if out["state"] == "admitted":
                     lease = out["lease"]
@@ -194,6 +200,7 @@ def _hold(lease: dict, target: dict) -> None:
         data[lease["id"]] = {"host": target["name"], "ssh": target.get("ssh"),
                              "tenant": lease["tenant"], "image": lease["image"],
                              "kind": lease["kind"], "guest": lease["guest"],
+                             "net": lease.get("net", ""),
                              "seat": lease.get("seat", ""), "owner": lease["owner"],
                              "state": "active"}
     start_keeper(lease["id"])
@@ -273,6 +280,17 @@ def release(lease_id: str) -> dict:
     entry = held(lease_id)
     out = call(target_of(entry), "release", {"lease": lease_id, "tenant": entry["tenant"]})
     _forget(lease_id)
+    return out
+
+
+def lease_verb(verb: str, lease_id: str) -> dict:
+    """A host verb on one held lease: ip, park, resume."""
+    entry = held(lease_id)
+    out = call(target_of(entry), verb, {"lease": lease_id, "tenant": entry["tenant"]})
+    if verb in ("park", "resume"):
+        with registry(write=True) as data:
+            if lease_id in data:
+                data[lease_id]["state"] = out.get("state", "parked")
     return out
 
 

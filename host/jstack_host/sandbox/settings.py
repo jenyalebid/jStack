@@ -44,6 +44,10 @@ DEFAULTS: dict = {
     # Images a purge leaves in place unless asked for everything. Reaps only
     # ever delete guests, never images.
     "keep_images": [],
+    # tart run's flags for a lease asked with `--net shared`: guests that reach
+    # one another and are reached from the host, UDP included. One tenant at a
+    # time holds a host's shared network.
+    "shared_net_args": ["--net-softnet", "--net-softnet-allow=0.0.0.0/0"],
     # `term`: how long a window may take to start its shell, and to finish.
     "term_launch_seconds": 60,
     "term_seconds": 1800,

@@ -15,7 +15,8 @@ from pathlib import Path
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS guests (
   name TEXT PRIMARY KEY, tenant TEXT NOT NULL, image TEXT NOT NULL,
-  role TEXT NOT NULL, created REAL NOT NULL, ip TEXT DEFAULT '');
+  role TEXT NOT NULL, created REAL NOT NULL, ip TEXT DEFAULT '',
+  net TEXT DEFAULT '', parked INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS leases (
   id TEXT PRIMARY KEY, tenant TEXT NOT NULL, image TEXT NOT NULL,
   kind TEXT NOT NULL, guest TEXT NOT NULL, seat TEXT DEFAULT '',
@@ -25,6 +26,17 @@ CREATE TABLE IF NOT EXISTS tickets (
   id TEXT PRIMARY KEY, tenant TEXT NOT NULL, image TEXT NOT NULL,
   kind TEXT NOT NULL, created REAL NOT NULL, polled REAL NOT NULL);
 """
+
+
+# Columns a ledger written before them lacks; added in place on open.
+COLUMNS = (("guests", "net", "TEXT DEFAULT ''"), ("guests", "parked", "INTEGER DEFAULT 0"))
+
+
+def _migrate(db) -> None:
+    for table, col, decl in COLUMNS:
+        have = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+        if col not in have:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
 
 def path(root: Path) -> Path:
@@ -38,6 +50,7 @@ def open_db(root: Path, write: bool = False):
     db.row_factory = sqlite3.Row
     try:
         db.executescript(SCHEMA)
+        _migrate(db)
         if write:
             db.execute("BEGIN IMMEDIATE")
         yield db
@@ -83,6 +96,7 @@ def add_lease(db, lease: dict) -> None:
          lease["client"], now, now))
 
 
-def add_guest(db, name: str, tenant: str, image: str, role: str) -> None:
-    db.execute("INSERT INTO guests (name,tenant,image,role,created) "
-               "VALUES (?,?,?,?,?)", (name, tenant, image, role, time.time()))
+def add_guest(db, name: str, tenant: str, image: str, role: str,
+              net: str = "") -> None:
+    db.execute("INSERT INTO guests (name,tenant,image,role,created,net) "
+               "VALUES (?,?,?,?,?,?)", (name, tenant, image, role, time.time(), net))

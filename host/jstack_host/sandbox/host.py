@@ -132,7 +132,7 @@ def status(req: dict) -> dict:
         guests = ledger.guests(db)
         leases = ledger.leases(db)
         waiting = db.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]
-    busy = [g for g in guests if g["role"] != "warm"]
+    busy = _running(guests)
     images = {}
     if tenant:
         asked = {req["image"]} if req.get("image") else set()
@@ -199,8 +199,13 @@ def admit(req: dict) -> dict:
     """Admit the ticket now, or keep it queued and say why."""
     conf = settings.load()
     tenant, image, kind = req["tenant"], req["image"], req.get("kind", "seat")
+    net = req.get("net", "")
     if kind not in ("own", "seat"):
         raise Refused(f"kind is own or seat, not {kind!r}")
+    if net not in NETS:
+        raise Refused(f"net is one of {', '.join(n or 'default' for n in NETS)}, not {net!r}")
+    if net and kind != "own":
+        raise Refused("a shared network is a whole guest's: ask --own")
     refusal = _admits(conf["mode"], tenant)
     if refusal:
         return {"state": "refused", "reason": refusal}
@@ -223,7 +228,7 @@ def admit(req: dict) -> dict:
                                (ticket,)).fetchone()[0]
             return {"state": "queued", "ticket": ticket,
                     "reason": f"{ahead} job(s) ahead on {host_name()}"}
-        plan = _place(db, conf, tenant, image, kind)
+        plan = _place(db, conf, tenant, image, kind, net)
         if "reason" in plan:
             return {"state": "queued", "ticket": ticket, "reason": plan["reason"]}
         db.execute("DELETE FROM tickets WHERE id=?", (ticket,))
@@ -231,12 +236,12 @@ def admit(req: dict) -> dict:
             db.execute("DELETE FROM guests WHERE name=?", (victim,))
         if plan.get("boot"):
             ledger.add_guest(db, plan["guest"], tenant, image,
-                             "own" if kind == "own" else "shared")
+                             "own" if kind == "own" else "shared", net)
         elif plan.get("adopt_warm"):
             db.execute("UPDATE guests SET role=? WHERE name=?",
                        ("own" if kind == "own" else "shared", plan["guest"]))
         lease = {"id": "L" + uuid.uuid4().hex[:10], "tenant": tenant,
-                 "image": image, "kind": kind, "guest": plan["guest"],
+                 "image": image, "kind": kind, "net": net, "guest": plan["guest"],
                  "seat": "", "owner": req["owner"], "client": req["client"]}
         if kind == "seat":
             lease["seat"] = _seat_name(db, plan["guest"])
@@ -248,7 +253,7 @@ def admit(req: dict) -> dict:
         if plan.get("boot"):
             t.clone(image_vm(image), plan["guest"])
             t.configure(plan["guest"], conf["guest_cpu"], conf["guest_mem_gb"])
-            t.boot(plan["guest"], conf["boot_seconds"])
+            t.boot(plan["guest"], conf["boot_seconds"], _net_args(conf, net))
         elif not t.running(plan["guest"]):
             t.boot(plan["guest"], conf["boot_seconds"])
         if kind == "seat":
@@ -263,9 +268,28 @@ def admit(req: dict) -> dict:
                                            "state": "active"}}
 
 
-def _place(db, conf, tenant, image, kind) -> dict:
+NETS = ("", "shared")
+
+
+def _net_args(conf: dict, net: str) -> list[str]:
+    return list(conf["shared_net_args"]) if net == "shared" else []
+
+
+def _running(guests: list[dict]) -> list[dict]:
+    """The guests that hold a slot: booted for a lease, not parked."""
+    return [g for g in guests if g["role"] != "warm" and not g.get("parked")]
+
+
+def _place(db, conf, tenant, image, kind, net="") -> dict:
     guests = ledger.guests(db)
     leases = ledger.leases(db)
+    if net:
+        # Guests on one shared network reach each other: it is one tenant's.
+        other = next((g["tenant"] for g in guests if g.get("net") == net
+                      and g["tenant"] != tenant), None)
+        if other:
+            return {"reason": f"the {net} network on {host_name()} is held by "
+                              f"another tenant"}
     if kind == "seat":
         for g in guests:
             if g["role"] == "shared" and g["tenant"] == tenant and g["image"] == image:
@@ -277,14 +301,15 @@ def _place(db, conf, tenant, image, kind) -> dict:
     if cap is not None and len(mine) >= cap:
         return {"reason": f"tenant {tenant} is at its cap of {cap} guest(s)"}
     for g in guests:
-        if g["role"] == "warm" and g["tenant"] == tenant and g["image"] == image:
+        if (g["role"] == "warm" and g["tenant"] == tenant and g["image"] == image
+                and not net):
             return {"guest": g["name"], "adopt_warm": True}
-    busy = [g for g in guests if g["role"] != "warm"]
+    busy = _running(guests)
     if len(busy) >= conf["max_guests"]:
         return {"reason": f"all {conf['max_guests']} guest slot(s) on "
                           f"{host_name()} are in use"}
     evict = []
-    if len(guests) >= conf["max_guests"]:
+    if len(busy) + sum(g["role"] == "warm" for g in guests) >= conf["max_guests"]:
         evict = [next(g["name"] for g in guests if g["role"] == "warm")]
     return {"guest": f"g-{tenant}-{uuid.uuid4().hex[:6]}", "boot": True,
             "evict": evict}
@@ -358,9 +383,11 @@ def assign(req: dict) -> dict:
         lease = _lease(db, req["lease"])
         if lease["tenant"] != req["tenant"]:
             raise Refused(f"{lease['id']} belongs to tenant {lease['tenant']}")
-        db.execute("UPDATE leases SET owner=?, client=?, state='active', "
+        parked = any(g["parked"] for g in ledger.guests(db, name=lease["guest"]))
+        db.execute("UPDATE leases SET owner=?, client=?, state=?, "
                    "orphaned=0, renewed=? WHERE id=?",
-                   (json.dumps(req["owner"]), req["client"], time.time(), lease["id"]))
+                   (json.dumps(req["owner"]), req["client"],
+                    "parked" if parked else "active", time.time(), lease["id"]))
         lease = _lease(db, req["lease"])
     return {"lease": {**lease, "host": host_name()}}
 
@@ -404,11 +431,91 @@ def reset(req: dict) -> dict:
         _drop_seat(t, lease["guest"], lease["seat"])
         _make_seat(t, lease["guest"], lease["seat"])
         return {"reset": lease["id"], "seat": lease["seat"]}
+    if lease["state"] == "parked":
+        raise Refused(f"{lease['id']} is parked; resume it first")
     t.delete(lease["guest"])
     t.clone(image_vm(lease["image"]), lease["guest"])
     t.configure(lease["guest"], conf["guest_cpu"], conf["guest_mem_gb"])
-    t.boot(lease["guest"], conf["boot_seconds"])
+    t.boot(lease["guest"], conf["boot_seconds"], _net_args(conf, _guest_net(lease)))
     return {"reset": lease["id"], "guest": lease["guest"]}
+
+
+def _guest_net(lease: dict) -> str:
+    conf = settings.load()
+    with ledger.open_db(settings.root(conf)) as db:
+        rows = ledger.guests(db, name=lease["guest"])
+    return rows[0]["net"] if rows else ""
+
+
+def _own_lease(db, req: dict) -> dict:
+    lease = _lease(db, req["lease"])
+    if req.get("tenant") and lease["tenant"] != req["tenant"]:
+        raise Refused(f"{lease['id']} belongs to tenant {lease['tenant']}")
+    return lease
+
+
+def ip(req: dict) -> dict:
+    """The lease's guest address, asked of the guest each time."""
+    conf = settings.load()
+    with ledger.open_db(settings.root(conf)) as db:
+        lease = _own_lease(db, req)
+    if lease["state"] not in ("active", "orphan"):
+        raise Refused(f"{lease['id']} is {lease['state']}")
+    addr = tart_for(conf, lease["tenant"]).ip(lease["guest"], conf["boot_seconds"])
+    with ledger.open_db(settings.root(conf), write=True) as db:
+        db.execute("UPDATE guests SET ip=? WHERE name=?", (addr, lease["guest"]))
+    return {"lease": lease["id"], "ip": addr}
+
+
+def park(req: dict) -> dict:
+    """Stop a whole guest and keep it, lease and all; it frees its slot."""
+    conf = settings.load()
+    with ledger.open_db(settings.root(conf), write=True) as db:
+        lease = _own_lease(db, req)
+        if lease["kind"] != "own":
+            raise Refused("only a whole guest parks; a seat shares its guest")
+        if lease["state"] not in ("active", "parked"):
+            raise Refused(f"{lease['id']} is {lease['state']}")
+        db.execute("UPDATE guests SET parked=1 WHERE name=?", (lease["guest"],))
+        db.execute("UPDATE leases SET state='parked', renewed=? WHERE id=?",
+                   (time.time(), lease["id"]))
+    tart_for(conf, lease["tenant"]).stop(lease["guest"])
+    return {"parked": lease["id"], "guest": lease["guest"]}
+
+
+def resume(req: dict) -> dict:
+    """Boot a parked guest again, as it was left, when a slot is free."""
+    conf = settings.load()
+    with ledger.open_db(settings.root(conf), write=True) as db:
+        lease = _own_lease(db, req)
+        if lease["state"] != "parked":
+            return {"resumed": lease["id"], "state": lease["state"]}
+        guests = ledger.guests(db)
+        if len(_running(guests)) >= conf["max_guests"]:
+            raise Refused(f"all {conf['max_guests']} guest slot(s) on "
+                          f"{host_name()} are in use")
+        warm = [g["name"] for g in guests if g["role"] == "warm"]
+        evict = warm[:max(len(_running(guests)) + len(warm) + 1 - conf["max_guests"], 0)]
+        for victim in evict:
+            db.execute("DELETE FROM guests WHERE name=?", (victim,))
+        guest = ledger.guests(db, name=lease["guest"])[0]
+        db.execute("UPDATE guests SET parked=0 WHERE name=?", (lease["guest"],))
+        db.execute("UPDATE leases SET state='booting', renewed=? WHERE id=?",
+                   (time.time(), lease["id"]))
+    for victim in evict:
+        _guest_tart(conf, victim).delete(victim)
+    try:
+        tart_for(conf, lease["tenant"]).boot(lease["guest"], conf["boot_seconds"],
+                                             _net_args(conf, guest["net"]))
+    except BaseException:
+        with ledger.open_db(settings.root(conf), write=True) as db:
+            db.execute("UPDATE guests SET parked=1 WHERE name=?", (lease["guest"],))
+            db.execute("UPDATE leases SET state='parked' WHERE id=?", (lease["id"],))
+        raise
+    with ledger.open_db(settings.root(conf), write=True) as db:
+        db.execute("UPDATE leases SET state='active', renewed=? WHERE id=?",
+                   (time.time(), lease["id"]))
+    return {"resumed": lease["id"], "state": "active"}
 
 
 def ls(req: dict) -> dict:
@@ -439,7 +546,8 @@ def _tick(conf: dict) -> dict:
     now, done = time.time(), {"orphaned": [], "reaped": [], "strays": [],
                                "warmed": [], "cooled": []}
     with ledger.open_db(settings.root(conf), write=True) as db:
-        for lease in ledger.leases(db, state="active"):
+        for lease in (ledger.leases(db, state="active") +
+                      ledger.leases(db, state="parked")):
             if lease["renewed"] < now - conf["expire_seconds"]:
                 db.execute("UPDATE leases SET state='orphan', orphaned=? WHERE id=?",
                            (now, lease["id"]))
@@ -499,7 +607,8 @@ def _warm(conf: dict) -> list[str]:
             guests = ledger.guests(db)
             have = sum(1 for g in guests if g["role"] == "warm"
                        and g["tenant"] == tenant and g["image"] == image)
-            if have >= want or len(guests) >= conf["max_guests"]:
+            booted = len(_running(guests)) + sum(g["role"] == "warm" for g in guests)
+            if have >= want or booted >= conf["max_guests"]:
                 continue
             name = f"g-{tenant}-{uuid.uuid4().hex[:6]}"
             ledger.add_guest(db, name, tenant, image, "warm")
@@ -649,7 +758,8 @@ VERBS = {
     "status": status, "admit": admit, "renew": renew, "orphan": orphan,
     "assign": assign, "release": release, "reset": reset, "ls": ls,
     "tick": tick, "mode": mode, "purge": purge, "image-pull": image_pull,
-    "image-tag": image_tag_lease, "cancel": cancel,
+    "image-tag": image_tag_lease, "cancel": cancel, "ip": ip,
+    "park": park, "resume": resume,
 }
 
 
