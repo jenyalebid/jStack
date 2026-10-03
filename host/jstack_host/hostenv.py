@@ -802,6 +802,20 @@ def control_module() -> str:
     return fn() if fn else ""
 
 
+def shortcuts_dir() -> Path:
+    """Where the run shortcuts live — one folder per shortcut (`run_shortcuts.py`).
+
+    `JSTACK_SHORTCUTS_DIR` first, then the profile's answer, then `Shortcuts/`
+    under the install root. Answers a path and does not create it: a host
+    whose operator never made the folder has no shortcuts, which is a state
+    the app shows, not an error."""
+    env = os.environ.get("JSTACK_SHORTCUTS_DIR", "").strip()
+    if env:
+        return Path(env).expanduser()
+    fn = getattr(profile(), "shortcuts_dir", None)
+    return fn() if fn else stack_root() / "Shortcuts"
+
+
 def scheduler_dir() -> Path:
     return profile().scheduler_dir()
 

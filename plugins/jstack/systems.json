@@ -1087,6 +1087,21 @@
       },
       "subsystems": [],
       "notes": "Kill switch for the gate: JSTACK_PLAN_GATE_DISABLED=1. plan-exit.py blocks only a plan that parses to >=2 stages AND holds a stage the writer would refuse, and it fails OPEN on its own exception — a traceback out of a PreToolUse hook reads as a broken tool, not a broken plan. The refusal carries the format contract inline because plan mode does not author through Edit, so the path-scoped rule in rules-stage/execution-gates.md never injected and the model being blocked has never seen it. hooks.json is APPEND-ONLY: Codex keys hook trust by ordinal. plan-mode-watch.py reads its marker and returns BEFORE importing the host, which is what keeps a turn that is not in plan mode at +14ms rather than +58ms. The journey (plugin/plan-gate, kept outside this repo): a real authed guest with the Hub installed from the ref under test (JSTACK_VERIFY_REF, default dev — a default-branch install carries no harness), a real `claude --permission-mode plan` session authoring a two-stage fixture project's plan, both Verify: gates refused on the untouched project, a hand-filed proof retired by a re-approval that tightens stage 2, the session's own edits turning each gate green, and each plan hook proved by its side effect (plan-mode.json, stage rows, stage_tasks rows plus the stage id stamped into ~/.claude/tasks/<sid>/, env markers) and read back through /sessions/{sid}/work and /plans/{id} — every surface tests/plan-hooks.sh cannot reach, because nothing in it spawns an engine. `plan verify` with no --cwd runs in the plan's `repo`, so a relative Verify: line grades the tree the plan was authored in."
+    },
+    {
+      "id": "shortcuts",
+      "name": "Run Shortcuts",
+      "slug": "Hub/shortcuts",
+      "status": "live",
+      "description": "Operator-authored scripts the app starts with picked options: the Hub owns catalog, validation, the run in its own pane, its output and the push when it ends.",
+      "code": [
+        "../../host/jstack_host/run_shortcuts.py"
+      ],
+      "test": {
+        "type": "script",
+        "path": "tests/run-shortcuts.sh",
+        "description": "Catalog and sources, ownership refusal, option validation, a real run in tmux end to end, cancel and timeout taking the process group, lost runs, one-at-a-time, the push payload, and the routes."
+      }
     }
   ]
 }

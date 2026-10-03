@@ -219,6 +219,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:                                 # noqa: BLE001
         _log(f"notify watch skipped ({type(e).__name__}: {e})")
 
+    try:
+        from . import run_shortcuts
+        run_shortcuts.resume_watch()
+    except Exception as e:                                 # noqa: BLE001
+        _log(f"run shortcuts watch skipped ({type(e).__name__}: {e})")
+
     _log("ready")
     try:
         yield

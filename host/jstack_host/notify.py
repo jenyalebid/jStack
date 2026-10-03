@@ -154,12 +154,12 @@ def _foreground_on(d: dict, session_id: str) -> bool:
 
 def _send_all(tokens: list[str], *, title: str, body: str,
               badge: int | None, session_id: str,
-              collapse_id: str = "") -> None:
+              collapse_id: str = "", extra: dict | None = None) -> None:
     dead = []
     for token in tokens:
         ok, detail = apns.send(token, title=title, body=body,
                                badge=badge, session_id=session_id,
-                               collapse_id=collapse_id)
+                               collapse_id=collapse_id, extra=extra)
         print(f"jremote notify: {detail} [{session_id[:8]}] "
               f"…{token[-8:]} {title}", flush=True)
         # A token APNs will never take again leaves the registry:
@@ -200,6 +200,25 @@ def notify(session_id: str, agent_id: str, *, title: str, body: str) -> bool:
     threading.Thread(
         target=_send_all, kwargs=dict(tokens=tokens, title=title, body=body,
                                       badge=badge, session_id=session_id),
+        daemon=True,
+    ).start()
+    return True
+
+
+def broadcast(*, title: str, body: str, extra: dict | None = None,
+              collapse_id: str = "") -> bool:
+    """A push about no session — a run shortcut ending. Every registered
+    device gets it; there is no thread to be foreground on or agent to mute.
+    Returns whether a push was dispatched."""
+    with _lock:
+        d = _load()
+        if not d["tokens"] or not apns.is_configured():
+            return False
+        tokens = list(d["tokens"])
+    threading.Thread(
+        target=_send_all, kwargs=dict(tokens=tokens, title=title, body=body, badge=None,
+                                      session_id="", collapse_id=collapse_id,
+                                      extra=extra),
         daemon=True,
     ).start()
     return True
