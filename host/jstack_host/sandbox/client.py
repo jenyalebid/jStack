@@ -181,7 +181,9 @@ def get(image: str, kind: str = "seat", wait: float | None = None,
                     _hold(lease, s["target"])
                     return lease
                 reasons.append(f"{s['target']['name']}: {out['reason']}")
-                refused += out["state"] == "refused"
+                # A failed boot is final for this ask: another try boots a
+                # fresh guest the same way, without end when nothing waits.
+                refused += out["state"] in ("refused", "failed")
             if refused == len(ranked):
                 raise SandboxError("no host can take this job:\n  " + "\n  ".join(reasons))
             line = "queued — " + "; ".join(reasons)

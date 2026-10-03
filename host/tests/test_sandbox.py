@@ -495,6 +495,20 @@ def test_a_host_without_a_working_softnet_refuses_a_shared_network(fleet, monkey
         assert host._net_env(host.settings.load(), "shared")["PATH"].startswith(f"{tmp_path}:")
 
 
+def test_a_guest_that_never_comes_up_ends_the_get(fleet, monkeypatch):
+    add_host(fleet, "a", mode="free")
+    seed_image("a", "a")
+    boots = []
+
+    def dead(self, name, wait, args=(), env=None):
+        boots.append(name)
+        raise host.TartError(f"{name} did not come up within 300s")
+    monkeypatch.setattr(FakeTart, "boot", dead)
+    with pytest.raises(client.SandboxError, match="(?s)no host can take.*did not come up"):
+        get_as("a", kind="own", wait=None)
+    assert len(boots) == 1
+
+
 def test_near_lands_beside_the_named_lease_or_waits(fleet):
     add_host(fleet, "a", mode="offload", headroom=0.1, peers=["b"])
     add_host(fleet, "b", mode="free", headroom=9.0, max_guests=1)
