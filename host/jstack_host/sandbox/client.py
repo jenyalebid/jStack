@@ -32,6 +32,11 @@ def remote_words(conf: dict | None = None) -> list[str]:
     return shlex.split((conf or settings.load())["remote_command"]) + ["sandbox", "host"]
 
 
+def ssh_argv(conf: dict | None = None) -> list[str]:
+    conf = conf or settings.load()
+    return ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={int(conf['connect_seconds'])}"]
+
+
 def call(target: dict, verb: str, req: dict, conf: dict | None = None) -> dict:
     if target.get("ssh") is None:
         try:
@@ -39,7 +44,7 @@ def call(target: dict, verb: str, req: dict, conf: dict | None = None) -> dict:
         except host.Refused as exc:
             raise SandboxError(str(exc)) from None
     words = " ".join(remote_words(conf) + [verb])
-    proc = subprocess.run(["ssh", "-o", "BatchMode=yes", target["ssh"], words],
+    proc = subprocess.run(ssh_argv(conf) + [target["ssh"], words],
                           input=json.dumps(req), capture_output=True, text=True)
     lines = proc.stdout.strip().splitlines()
     try:
@@ -63,7 +68,7 @@ def run(target: dict, lease_id: str, argv: list[str], tty: bool = False,
     words = remote_words() + ["run", lease_id, "--tenant", tenant]
     words += (["--tty"] if tty else []) + (["-i"] if interactive else [])
     words += ["--", *argv]
-    ssh = ["ssh", "-o", "BatchMode=yes"] + (["-t"] if tty else []) + [target["ssh"]]
+    ssh = ssh_argv() + (["-t"] if tty else []) + [target["ssh"]]
     return subprocess.run(ssh + [" ".join(shlex.quote(w) if not w.startswith("~/")
                                           else w for w in words)],
                           stdin=stdin, stdout=stdout).returncode

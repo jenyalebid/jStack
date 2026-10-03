@@ -37,6 +37,8 @@ DEFAULTS: dict = {
     "boot_seconds": 300,
     # How a peer's sandbox is driven over ssh: the words before `sandbox host`.
     "remote_command": "~/.local/bin/jstack-host",
+    # How long a peer may take to answer ssh before it counts as unreachable.
+    "connect_seconds": 5,
     # Empty means: found on PATH, then the usual install places.
     "tart": "",
     # Images a purge leaves in place unless asked for everything. Reaps only
