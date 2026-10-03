@@ -18,6 +18,8 @@ Sections: **Current Work** (the immediate task) · **In Progress** (partial impl
 
 With `@agent`, write it *for that agent*: address their role and what they own, name who is handing off and why, mark which decisions came from the user and are not open to relitigation, and drop what only mattered to your own duties.
 
+Sandbox leases end with this session. If `jstack-host sandbox ls` lists any, the doc opens with `jstack-host sandbox assign --from <this session id>`.
+
 ## 2. Stage it outside the tree
 
 The doc is a one-shot payload — it must not land in any workspace:

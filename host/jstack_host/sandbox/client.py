@@ -294,6 +294,13 @@ def assign(lease_id: str, session: str | None = None, at: str | None = None) -> 
     return lease
 
 
+def assign_from(source_sid: str, session: str | None = None) -> list[dict]:
+    """Move every lease a session holds from this instance, as a handoff does."""
+    with registry() as data:
+        ids = [k for k, v in data.items() if v["owner"].get("sid") == source_sid]
+    return [assign(lease_id, session) for lease_id in ids]
+
+
 def mine(everyone: bool = False) -> list[dict]:
     with registry() as data:
         rows = [{"id": k, **v} for k, v in data.items()]

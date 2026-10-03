@@ -357,6 +357,21 @@ def test_assign_takes_over_an_orphan_with_its_guest(fleet, monkeypatch):
         assert host.ls({})["leases"][0]["owner"] == heir
 
 
+def test_a_handoff_takes_every_lease_of_the_source_session(fleet, monkeypatch):
+    add_host(fleet, "a", mode="free")
+    seed_image("a", "a")
+    source = {"pid": 1, "start": "early", "sid": "s-1", "engine": "claude"}
+    mine = [get_as("a", who=source) for _ in range(2)]
+    get_as("a", who={**source, "sid": "s-other"})
+    with on("a"):
+        heir = {"pid": 2, "start": "later", "sid": "s-2", "engine": "claude"}
+        monkeypatch.setattr(owner, "current", lambda *a: heir)
+        moved = client.assign_from("s-1")
+        assert sorted(l["id"] for l in moved) == sorted(l["id"] for l in mine)
+        owners = {l["id"]: l["owner"]["sid"] for l in host.ls({})["leases"]}
+        assert sorted(owners.values()) == ["s-2", "s-2", "s-other"]
+
+
 def test_another_tenant_cannot_touch_a_lease(fleet):
     add_host(fleet, "a", mode="free")
     seed_image("a", "a")

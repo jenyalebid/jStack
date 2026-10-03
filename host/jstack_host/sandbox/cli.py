@@ -69,6 +69,12 @@ def cmd_release(a) -> int:
 
 
 def cmd_assign(a) -> int:
+    if a.source:
+        for lease in client.assign_from(a.source):
+            print(_lease_line(lease))
+        return 0
+    if not a.lease:
+        raise client.SandboxError("name a lease, or --from <session> for all of one session's")
     lease = client.assign(a.lease, a.session, at=a.host)
     print(_lease_line({**lease, "host": lease.get("host")}))
     return 0
@@ -208,9 +214,11 @@ def build_parser() -> argparse.ArgumentParser:
         p.set_defaults(fn=fn)
 
     p = sub.add_parser("assign", help="move a lease to a session (default: this one)")
-    p.add_argument("lease")
+    p.add_argument("lease", nargs="?")
     p.add_argument("session", nargs="?", default=None)
     p.add_argument("--host", default=None, help="the lease's host, when not held from here")
+    p.add_argument("--from", dest="source", default=None,
+                   help="take every lease this session id holds from this instance")
     p.set_defaults(fn=cmd_assign)
 
     p = sub.add_parser("ls", help="this session's leases")
