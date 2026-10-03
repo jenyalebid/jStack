@@ -2133,6 +2133,16 @@ def test_codex_servers_are_not_sessions():
         "codex", [base, "app-server", "--listen", "unix://",
                   "--managed-daemon"]) is None
     assert procscan._agent_engine("codex", ["codex", "mcp-server"]) is None
+    # The ChatGPT desktop app's pair, argv as observed on this Mac: a config
+    # override in front of the subcommand, and the cloud exec bridge.
+    app = ("/Applications/ChatGPT.app/Contents/Resources/codex-cli/"
+           "CodexCLI.app/Contents/MacOS/codex")
+    assert procscan._agent_engine(
+        "codex", [app, "-c", "features.code_mode_host=true", "app-server",
+                  "--analytics-default-enabled"]) is None
+    assert procscan._agent_engine(
+        "codex", [app, "exec-server", "--remote", "https://x/api"]) is None
+    assert procscan._subcommand(["codex", "-m", "gpt-5", "exec"]) == "exec"
     assert procscan._agent_engine(
         "codex", ["codex", "--dangerously-bypass-hook-trust", "-m", "m"]) == "codex"
     assert procscan._agent_engine("codex", ["codex", "exec", "resume", "x"]) == "codex"
