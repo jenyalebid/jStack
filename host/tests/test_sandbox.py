@@ -748,6 +748,8 @@ ORDINARY = [
     "ssh admin@192.168.64.5 'echo hi'", "scp -r admin@192.168.64.5:/tmp/out .",
     "machine run bench 'sw_vers'", "machine get bench:/tmp/log .",
     'grep -rn "tart run" .', 'grep -rn -- "--no-graphics" scripts/',
+    "ssh bench 'ps ax | grep -E \"tart run|softnet\"'",
+    "machine run bench 'grep -n \"tart run\" ~/x.log'",
     "grep -n 'simctl boot' notes.md", "cat ~/.tart/probe.run.log",
     "tmux new-session -d -s t 'pytest tests/ | tee /tmp/x'", "bash -c 'echo hi'",
     "cat > /tmp/note.md <<'EOF'\ntart run --no-graphics is what we removed\nEOF",
