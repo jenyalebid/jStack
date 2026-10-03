@@ -48,12 +48,16 @@ DEFAULTS: dict = {
     # one another and are reached from the host, UDP included. One tenant at a
     # time holds a host's shared network.
     "shared_net_args": ["--net-softnet", "--net-softnet-allow=0.0.0.0/0"],
+    # The softnet those flags start; empty means found on PATH, then the
+    # usual install places. It runs as root: setuid, or passwordless sudo.
+    "softnet": "",
     # `term`: how long a window may take to start its shell, and to finish.
     "term_launch_seconds": 60,
     "term_seconds": 1800,
 }
 
 _TART_PLACES = ("~/.local/bin/tart", "/opt/homebrew/bin/tart", "/usr/local/bin/tart")
+_SOFTNET_PLACES = ("/opt/homebrew/bin/softnet", "/usr/local/bin/softnet")
 
 
 def state_dir() -> Path:
@@ -121,3 +125,15 @@ def tart_bin(conf: dict | None = None) -> str:
         if Path(place).expanduser().exists():
             return str(Path(place).expanduser())
     return "tart"
+
+
+def softnet_bin(conf: dict | None = None) -> str:
+    """softnet's path, or empty when this host has none."""
+    named = (conf or load()).get("softnet") or ""
+    if named:
+        path = Path(named).expanduser()
+        return str(path) if path.exists() else ""
+    found = shutil.which("softnet")
+    if found:
+        return found
+    return next((p for p in _SOFTNET_PLACES if Path(p).exists()), "")

@@ -168,7 +168,7 @@ def get(image: str, kind: str = "seat", wait: float | None = None,
             ranked, why = survey(image, recipe, conf, only)
             if not ranked:
                 raise SandboxError("no host can take this job:\n  " + "\n  ".join(why))
-            reasons = []
+            reasons, refused = [], 0
             for s in ranked:
                 if s["target"] not in asked:
                     asked.append(s["target"])
@@ -181,6 +181,9 @@ def get(image: str, kind: str = "seat", wait: float | None = None,
                     _hold(lease, s["target"])
                     return lease
                 reasons.append(f"{s['target']['name']}: {out['reason']}")
+                refused += out["state"] == "refused"
+            if refused == len(ranked):
+                raise SandboxError("no host can take this job:\n  " + "\n  ".join(reasons))
             line = "queued — " + "; ".join(reasons)
             if line != last:
                 say(line)

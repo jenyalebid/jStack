@@ -206,7 +206,7 @@ def admit(req: dict) -> dict:
         raise Refused(f"net is one of {', '.join(n or 'default' for n in NETS)}, not {net!r}")
     if net and kind != "own":
         raise Refused("a shared network is a whole guest's: ask --own")
-    refusal = _admits(conf["mode"], tenant)
+    refusal = _admits(conf["mode"], tenant) or (net and _net_missing(conf))
     if refusal:
         return {"state": "refused", "reason": refusal}
     stale = _image_state(conf, tenant, image, req.get("recipe"))
@@ -253,7 +253,8 @@ def admit(req: dict) -> dict:
         if plan.get("boot"):
             t.clone(image_vm(image), plan["guest"])
             t.configure(plan["guest"], conf["guest_cpu"], conf["guest_mem_gb"])
-            t.boot(plan["guest"], conf["boot_seconds"], _net_args(conf, net))
+            t.boot(plan["guest"], conf["boot_seconds"], _net_args(conf, net),
+                   _net_env(conf, net))
         elif not t.running(plan["guest"]):
             t.boot(plan["guest"], conf["boot_seconds"])
         if kind == "seat":
@@ -273,6 +274,28 @@ NETS = ("", "shared")
 
 def _net_args(conf: dict, net: str) -> list[str]:
     return list(conf["shared_net_args"]) if net == "shared" else []
+
+
+def _net_env(conf: dict, net: str) -> dict:
+    """tart finds softnet on its PATH, and `open` hands it launchd's, which
+    holds no install place softnet uses."""
+    path = settings.softnet_bin(conf) if net == "shared" else ""
+    return {"PATH": f"{Path(path).parent}:/usr/bin:/bin:/usr/sbin:/sbin"} if path else {}
+
+
+def _net_missing(conf: dict) -> str:
+    """Why this host cannot start a shared network, or empty when it can.
+    Without it tart's boot fails every try, and the ticket would wait forever."""
+    path = settings.softnet_bin(conf)
+    if not path:
+        return f"{host_name()} has no softnet for a shared network"
+    st = os.stat(path)
+    if st.st_uid == 0 and st.st_mode & 0o4000:
+        return ""
+    if subprocess.run(["sudo", "-n", "-l", path], capture_output=True).returncode == 0:
+        return ""
+    return (f"{host_name()}: softnet at {path} runs neither setuid root "
+            "nor under passwordless sudo")
 
 
 def _running(guests: list[dict]) -> list[dict]:
@@ -436,7 +459,8 @@ def reset(req: dict) -> dict:
     t.delete(lease["guest"])
     t.clone(image_vm(lease["image"]), lease["guest"])
     t.configure(lease["guest"], conf["guest_cpu"], conf["guest_mem_gb"])
-    t.boot(lease["guest"], conf["boot_seconds"], _net_args(conf, _guest_net(lease)))
+    net = _guest_net(lease)
+    t.boot(lease["guest"], conf["boot_seconds"], _net_args(conf, net), _net_env(conf, net))
     return {"reset": lease["id"], "guest": lease["guest"]}
 
 
@@ -506,7 +530,8 @@ def resume(req: dict) -> dict:
         _guest_tart(conf, victim).delete(victim)
     try:
         tart_for(conf, lease["tenant"]).boot(lease["guest"], conf["boot_seconds"],
-                                             _net_args(conf, guest["net"]))
+                                             _net_args(conf, guest["net"]),
+                                             _net_env(conf, guest["net"]))
     except BaseException:
         with ledger.open_db(settings.root(conf), write=True) as db:
             db.execute("UPDATE guests SET parked=1 WHERE name=?", (lease["guest"],))

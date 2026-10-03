@@ -17,6 +17,9 @@ import pytest
 from jstack_host.sandbox import client, guard, host, images, owner, reach, settings
 
 
+REAL_NET_MISSING = host._net_missing
+
+
 class FakeTart:
     vms: dict = {}
 
@@ -44,9 +47,10 @@ class FakeTart:
 
     booted: dict = {}
 
-    def boot(self, name, wait, args=()):
+    def boot(self, name, wait, args=(), env=None):
         self._mine()[name] = "running"
         FakeTart.booted[name] = list(args)
+        FakeTart.booted_env[name] = dict(env or {})
         return "192.168.64.2"
 
     def ip(self, name, wait):
@@ -132,8 +136,10 @@ def seed_image(host_name, tenant, image="ios"):
 def fleet(monkeypatch, tmp_path):
     FakeTart.vms = {}
     FakeTart.booted = {}
+    FakeTart.booted_env = {}
     HOSTS.clear()
     monkeypatch.setattr(host, "Tart", FakeTart)
+    monkeypatch.setattr(host, "_net_missing", lambda conf: "")
     monkeypatch.setattr(host, "_headroom",
                         lambda conf: HOSTS[host.host_name()]["headroom"])
     monkeypatch.setattr(client, "start_keeper", lambda lease_id: None)
@@ -444,16 +450,19 @@ def test_tenant_cap_holds(fleet):
 
 
 def test_a_shared_network_boots_with_its_setting_and_holds_one_tenant(fleet):
+    (fleet / "softnet").write_text("")
     add_host(fleet, "a", mode="free", max_guests=3,
-             shared_net_args=["--net-x", "--allow=all"])
+             shared_net_args=["--net-x", "--allow=all"], softnet=str(fleet / "softnet"))
     for tenant in ("a", "b"):
         seed_image("a", tenant)
     hub = get_as("a", kind="own", net="shared")
     assert FakeTart.booted[hub["guest"]] == ["--net-x", "--allow=all"]
     leaf = get_as("a", kind="own", net="shared")
     assert FakeTart.booted[leaf["guest"]] == ["--net-x", "--allow=all"]
+    assert FakeTart.booted_env[hub["guest"]]["PATH"].startswith(f"{fleet}:")
     plain = get_as("a", kind="own")
     assert FakeTart.booted[plain["guest"]] == []
+    assert FakeTart.booted_env[plain["guest"]] == {}
     with on("a"):
         assert client.lease_verb("ip", hub["id"])["ip"] == "192.168.2.7"
         out = host.admit({"tenant": "b", "image": "ios", "kind": "own",
@@ -462,6 +471,28 @@ def test_a_shared_network_boots_with_its_setting_and_holds_one_tenant(fleet):
         with pytest.raises(host.Refused, match="--own"):
             host.admit({"tenant": "a", "image": "ios", "kind": "seat",
                         "net": "shared", "owner": ME, "client": "a"})
+
+
+def test_a_host_without_a_working_softnet_refuses_a_shared_network(fleet, monkeypatch, tmp_path):
+    add_host(fleet, "a", mode="free", softnet=str(tmp_path / "absent"))
+    seed_image("a", "a")
+    monkeypatch.setattr(host, "_net_missing", REAL_NET_MISSING)
+    ask = {"tenant": "a", "image": "ios", "kind": "own", "net": "shared",
+           "owner": ME, "client": "a"}
+    with on("a"):
+        out = host.admit(ask)
+        assert out["state"] == "refused" and "no softnet" in out["reason"]
+    with pytest.raises(client.SandboxError, match="(?s)no host can take.*no softnet"):
+        get_as("a", kind="own", net="shared", wait=60)
+    softnet = tmp_path / "softnet"
+    softnet.write_text("")
+    add_host(fleet, "a", mode="free", softnet=str(softnet))
+    no_sudo = type("R", (), {"returncode": 1})()
+    monkeypatch.setattr(host.subprocess, "run", lambda *a, **k: no_sudo)
+    with on("a"):
+        out = host.admit(ask)
+        assert out["state"] == "refused" and "passwordless sudo" in out["reason"]
+        assert host._net_env(host.settings.load(), "shared")["PATH"].startswith(f"{tmp_path}:")
 
 
 def test_near_lands_beside_the_named_lease_or_waits(fleet):
