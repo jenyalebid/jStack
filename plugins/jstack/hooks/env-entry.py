@@ -37,7 +37,7 @@ def main() -> int:
     # SessionStart there is no row yet. Session id stays first so a value set
     # on a session that DOES exist — a resume, a compact — still wins.
     line = env.state_line(env.resolve(
-        str(payload.get("session_id") or ""),
+        _env.session_of(payload),
         _env.seat_agent(str(payload.get("cwd") or ""))))
     if not line:
         return 0

@@ -204,6 +204,29 @@ got="$(ctx "$(prompt $S)")"
 [[ -z "$(prompt $S)" ]] || fail "delta-settled" "an unchanged prompt spoke"
 pass "delta-one-line"
 
+# (3a) A CODEX SESSION HEARS THE APP. Codex reports its own thread id; the app
+#      sets the value on the managed session's id. The registry ties the two by
+#      transcript, and the hooks must ask under the managed id or a Codex session
+#      never hears a change.
+S=managed-$$
+codex_prompt() {
+  printf '{"hook_event_name":"UserPromptSubmit","session_id":"thread-%s","cwd":"%s","prompt":"go on","transcript_path":"%s"}' "$1" "$TMP" "$TRANSCRIPT" \
+    | "$PY" -c '
+import runpy, sys
+sys.path.insert(0, sys.argv[1])
+from jstack_host import managed
+sid, transcript, hook = sys.argv[2:5]
+managed.open_registry = lambda: {sid: {"agent": "", "transcript": transcript}}
+sys.argv = [hook]
+runpy.run_path(sys.argv[0], run_name="__main__")' "$HOST" "$1" "$TRANSCRIPT" "$DELTA"
+}
+[[ -z "$(codex_prompt $S)" ]] || fail "codex-delta" "the first prompt deltaed"
+seed "$S" sim_verify off
+got="$(ctx "$(codex_prompt $S)")"
+[[ "$got" == "SIM VERIFY TURNED OFF"* ]] \
+  || fail "codex-delta" "a value set on the managed id never reached the Codex thread: '$got'"
+pass "codex-hears-the-app"
+
 # (3b) THE LATE HOOKS REACH THE AGENT TOO. The same unindexed session as the
 #      cold start, one prompt later: an agent value flipped between prompts is
 #      a delta, and the value in force is reinforced at its trigger. Resolved

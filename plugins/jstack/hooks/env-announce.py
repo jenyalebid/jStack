@@ -74,7 +74,7 @@ def main() -> int:
         tool_input = {}
 
     env = _env.host_environment()
-    session_id = str(payload.get("session_id") or "")
+    session_id = _env.session_of(payload)
     in_force = _env.moved(env, session_id, str(payload.get("cwd") or ""))
     if not in_force:
         return 0
