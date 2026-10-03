@@ -265,6 +265,12 @@ assert E(A / "alice/chat").id == "alice-chat"
 assert E(Path("/tmp")) is None
 # seat_of stays the two-value shim its existing callers unpack
 assert root.seat_of(A / "alice/social/threads") == ("alice", "social/threads")
+# a pad is never a seat, even as the plain per-dir answer: a session standing
+# in a pad, or a checkout parked in one, is in the seat that owns the pad
+assert root.seat_of(A / "alice/chat/pad/checkout") == ("alice", "chat"), root.seat_of(A / "alice/chat/pad/checkout")
+assert root.seat_of(A / "alice/pad/checkout/sub") == ("alice", "chat")
+assert root.seat_at(A / "alice/social/threads/pad/x").id == "alice-social-threads"
+assert root.seat_at(A / "alice/pad").id == "alice"
 print("OK")
 EOF
 )

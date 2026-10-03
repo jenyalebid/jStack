@@ -144,6 +144,14 @@ mkdir -p "$ROOT/Gamma/social"
 echo "$(ctx "$ROOT/Gamma/social")" | grep -q "Social entry" \
   && pass "new seat inherits fleet default" || fail "new seat inherits fleet default"
 
+# (h2) a shell that wandered into a pad still reads its seat: resume and
+#      compact hand the hook the shell's cwd, not the seat the session booted in
+"$LOG_EVENT" gamma/chat --at 14:05 --date "$DAY" "Cockpit before the pad" >/dev/null
+mkdir -p "$ROOT/Gamma/chat/pad/checkout/sub"
+printf '# checkout\n' > "$ROOT/Gamma/chat/pad/checkout/AGENTS.md"
+echo "$(ctx "$ROOT/Gamma/chat/pad/checkout/sub")" | grep -q "Cockpit before the pad" \
+  && pass "a pad reads its seat's history" || fail "a pad reads its seat's history"
+
 # (i) kill switch
 out_killed=$(printf '{"cwd":"%s"}' "$ROOT/Gamma" \
   | JSTACK_REVIEW_CONFIG="$CFG" JSTACK_TIMELINE_INJECT_DISABLED=1 python3 "$HOOK")

@@ -49,7 +49,9 @@ unknown tag falls back to the seat's history and says so in the injection.
 Seat resolution (MUST match the engine's resolve_submode and the Stop hook):
 the session dir's full path under {agent_root}/{Name}, "/"-joined — seats are
 directories, and each dir is its own seat (chat ≠ social/chat ≠ social); empty
-(cwd == the agent root) → "chat", the default cockpit mode. Cockpit sessions
+(cwd == the agent root) → "chat", the default cockpit mode. A pad is never a
+seat: the path is cut at the first pad, so a shell that wandered into
+`chat/pad/<checkout>` before a resume or compact still reads `chat`. Cockpit sessions
 run at the agent root — they are NOT required to cd into chat/, so the
 project-dir key (transcripts + memory) is never disturbed. The tail a seat
 injects is its own dir plus ancestor dirs, never siblings (log_event tail
