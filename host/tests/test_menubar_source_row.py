@@ -106,7 +106,7 @@ window.render(HostInfoForm(machine: "Lab Mac", status: "Running", version: "26.0
     release: "2026-09-22-abcdef12", hubSource: current, sourceBusy: false,
     follow: { picked.append($0) }, rebuild: { rebuilds += 1 },
     app: InfoAppSnapshot(), updateStatus: nil, error: nil,
-    localCommand: nil, machines: [], commands: [:],
+    localCommand: nil,
     open: {}, download: {}))
 let hosting = window.contentView as! NSHostingView<HostInfoForm>
 assert(hosting.rootView.hubSource?.ref == "dev")
