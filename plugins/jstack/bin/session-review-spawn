@@ -530,6 +530,12 @@ def resolve_submode(jsonl_path: Path, agent_root: Path, agent_title: str) -> str
     cwd = _session_cwd(jsonl_path)
     if not cwd:
         return None
+    if _root is not None:
+        # The one resolver the injector and the Stop hook also ask, so a seat
+        # reads back exactly what it wrote — a pad is never a seat of its own.
+        seat = _root.seat_at(cwd, base=agent_root)
+        if seat is not None:
+            return seat.submode
     try:
         rel = Path(cwd).relative_to(agent_root / agent_title)
     except ValueError:

@@ -676,10 +676,20 @@ def seat_at(path, cfg: "dict|None" = None, base=None) -> "Seat|None":
     if not rel.parts or not is_agent(base / rel.parts[0]):
         return None
     agent_dir = base / rel.parts[0]
-    submode = "/".join(p.lower() for p in rel.parts[1:]) or "chat"
+    # A pad is never a seat: a session standing in one, or in a checkout
+    # parked under it, is sitting in the seat that owns the pad. Read as a
+    # seat of its own, a resumed or compacted session whose shell had wandered
+    # into `chat/pad/<checkout>` was handed that checkout's empty history in
+    # place of its seat's, and filed its own entries where its seat never
+    # reads them.
+    parts = list(rel.parts[1:])
+    for i, part in enumerate(parts):
+        if part.lower() in _RESERVED_DIRS:
+            parts = parts[:i]
+            break
+    submode = "/".join(p.lower() for p in parts) or "chat"
     return Seat(rel.parts[0].lower(), submode,
-                agent_dir / "/".join(rel.parts[1:]) if rel.parts[1:]
-                else agent_dir,
+                agent_dir / "/".join(parts) if parts else agent_dir,
                 agent_dir)
 
 
