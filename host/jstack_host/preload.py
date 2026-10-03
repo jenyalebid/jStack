@@ -43,6 +43,8 @@ MODULES = (
     "jstack_host.migrate_services",
     "jstack_host.devices",
     "jstack_host.managed_access",
+    "jstack_host.leaf_policy",
+    "jstack_host.usage_reporting",
     "jstack_host.compact_delivery",
     "jstack_host.triggers",
     "jstack_host.embed",

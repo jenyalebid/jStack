@@ -224,6 +224,12 @@ CREATE TABLE IF NOT EXISTS hosts (
   -- Mac's visibility is its hub's word; `usage_reporting.py` is the half that
   -- reads it, and the leaf caches it rather than asking on every /host.
   usage_reporting TEXT NOT NULL DEFAULT 'client',
+  -- The rest of the leaf contract (`leaf_policy.py`, jStack-Project
+  -- docs/leaf.md): 'standard' | 'headless'; whether a Headless client shows
+  -- Agents; the line home picked, empty while the leaf's own choice stands.
+  mode TEXT NOT NULL DEFAULT 'standard',
+  agents_tab INTEGER NOT NULL DEFAULT 1,
+  line TEXT NOT NULL DEFAULT '',
   -- The machine's SSH public key and enrolled account, presented at adoption.
   -- Public material only: the private key never leaves the machine that
   -- minted it, so like the rest of this table there is no column a secret
@@ -1613,6 +1619,23 @@ class SessionStore:
                 "UPDATE hosts SET usage_reporting=?, updated_at=?, seq=? "
                 "WHERE key=? AND deleted=0",
                 (state, time.time(), seq, key))
+            return cur.rowcount > 0
+
+    def set_host_policy(self, key: str, fields: dict) -> bool:
+        """Write any subset of a leaf's policy columns, already validated by
+        `leaf_policy.normalise`. A forgotten row is refused."""
+        allowed = ("mode", "agents_tab", "sees_home", "sees_leaves",
+                   "usage_reporting", "line")
+        cols = [c for c in allowed if c in fields]
+        with self._write_lock, self._conn() as db:
+            if not cols:
+                return db.execute("SELECT 1 FROM hosts WHERE key=? AND deleted=0",
+                                  (key,)).fetchone() is not None
+            seq = self._bump_seq(db)
+            cur = db.execute(
+                "UPDATE hosts SET " + ", ".join(f"{c}=?" for c in cols)
+                + ", updated_at=?, seq=? WHERE key=? AND deleted=0",
+                (*[fields[c] for c in cols], time.time(), seq, key))
             return cur.rowcount > 0
 
     def set_host_shell(self, key: str, pubkey: str, user: str) -> bool:

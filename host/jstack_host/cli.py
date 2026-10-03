@@ -110,6 +110,12 @@ def _cmd_updates_channel(args) -> int:
     if args.name is None:
         print(build_source.channel_ref(config))
         return 0
+    from . import leaf_policy
+    try:
+        leaf_policy.refuse_local_line()
+    except leaf_policy.LocalLineRefused as exc:
+        print(exc, file=sys.stderr)
+        return 1
     try:
         name = build_source.channel_ref({"channel": args.name})
     except release_manifest.ReleaseError as exc:

@@ -87,7 +87,9 @@ def test_a_host_row_carries_no_column_a_credential_could_sit_in(store):
                        # Whether that machine's own client draws Home's Usage
                        # section — a visibility switch like the two above, and
                        # a word from a fixed set, never a value a device sends.
-                       "usage_reporting", "shell_pubkey", "shell_user"}
+                       "usage_reporting", "shell_pubkey", "shell_user",
+                       # The rest of the leaf contract: words from fixed sets.
+                       "mode", "agents_tab", "line"}
     assert not any(c in columns for c in ("token", "token_hash", "secret",
                                           "password", "key_hash"))
 

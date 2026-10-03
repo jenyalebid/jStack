@@ -78,9 +78,11 @@ def may_reach(device_id: str, target: str) -> bool:
         return not get_store().is_host_credential(device_id)
     if leaf["deleted"]:
         return False
+    from . import leaf_policy
+    reach = leaf_policy.resolve(leaf)
     if target == hostenv.host_id():
-        return bool(leaf["sees_home"])
-    return target == leaf["key"] or bool(leaf["sees_leaves"])
+        return reach["sees_home"]
+    return target == leaf["key"] or reach["sees_leaves"]
 
 
 def _post_parent(route: str, body: dict) -> dict:
