@@ -200,6 +200,14 @@ def keeper_pidfile(lease_id: str):
     return settings.state_dir() / "keepers" / f"{lease_id}.pid"
 
 
+def self_command() -> list[str]:
+    """How to run this package again: the sealed app's CLI takes `sandbox`, not `-m`."""
+    launched = os.path.basename(sys.argv[0] or "")
+    if launched == "JStackCLI":
+        return [os.path.abspath(sys.argv[0]), "sandbox"]
+    return [sys.executable, "-m", "jstack_host.sandbox"]
+
+
 def start_keeper(lease_id: str) -> None:
     pidfile = keeper_pidfile(lease_id)
     with contextlib.suppress(OSError, ValueError):
@@ -208,7 +216,7 @@ def start_keeper(lease_id: str) -> None:
         return
     pidfile.parent.mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen(
-        [sys.executable, "-m", "jstack_host.sandbox", "_keep", lease_id],
+        [*self_command(), "_keep", lease_id],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
         stderr=open(settings.state_dir() / "keepers" / f"{lease_id}.log", "a"),
         start_new_session=True, env=os.environ.copy())
