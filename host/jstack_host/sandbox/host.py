@@ -600,7 +600,9 @@ def image_tag_lease(req: dict) -> dict:
 # ---------------------------------------------------------------- in the guest
 
 def _guest_argv(lease: dict, argv: list[str]) -> list[str]:
-    home = ["zsh", "-lc", 'cd ~ && exec "$@"', "_", *argv]
+    # Anything run in a lease can tell it is in one, and which.
+    home = ["env", f"JSTACK_SANDBOX_LEASE={lease['id']}",
+            "zsh", "-lc", 'cd ~ && exec "$@"', "_", *argv]
     if lease["kind"] != "seat":
         return home
     return ["sudo", "-H", "-u", lease["seat"], *home]

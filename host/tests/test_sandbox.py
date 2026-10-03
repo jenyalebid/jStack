@@ -630,3 +630,10 @@ def test_guard_lets_ordinary_work_through(command):
 ])
 def test_guard(command, mode, blocked):
     assert bool(guard.verdict(command, mode)) is blocked
+
+
+def test_a_command_in_a_lease_knows_its_lease():
+    own = host._guest_argv({"id": "L1", "kind": "own"}, ["true"])
+    seat = host._guest_argv({"id": "L2", "kind": "seat", "seat": "s1"}, ["true"])
+    assert own[:2] == ["env", "JSTACK_SANDBOX_LEASE=L1"]
+    assert seat[:6] == ["sudo", "-H", "-u", "s1", "env", "JSTACK_SANDBOX_LEASE=L2"]
