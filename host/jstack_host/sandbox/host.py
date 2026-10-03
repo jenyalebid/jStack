@@ -870,8 +870,10 @@ def run_in(lease_id: str, argv: list[str], tty: bool = False,
         raise Refused(f"{lease_id} is {lease['state']}")
     if lease["kind"] == "direct":
         work = _direct_dir(conf, lease)
+        # HOME is the lease's folder: callers spell the lease's home `~`, and
+        # on the host itself that must never reach the machine's own home.
         env = {**os.environ, "JSTACK_SANDBOX_LEASE": lease["id"],
-               "JSTACK_SANDBOX_WORK": str(work)}
+               "JSTACK_SANDBOX_WORK": str(work), "HOME": str(work)}
         # Its own process group, recorded, so a release ends all it started.
         proc = subprocess.Popen(["zsh", "-lc", 'cd "$JSTACK_SANDBOX_WORK" && exec "$@"',
                                  "_", *(argv or ["zsh", "-l"])], env=env, stdin=stdin,

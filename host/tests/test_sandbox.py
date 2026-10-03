@@ -493,7 +493,7 @@ def test_direct_runs_on_the_host_only_where_its_settings_allow(fleet, monkeypatc
         work = host._direct_dir(settings.load(), lease)
         assert work.is_dir()
         assert client.run(target, lease["id"], ["sh", "-c",
-                          'test "$PWD" = "$JSTACK_SANDBOX_WORK" && touch made'],
+                          'test "$PWD" = "$JSTACK_SANDBOX_WORK" && test ~ = "$PWD" && touch made'],
                           tenant="a") == 0
         assert (work / "made").exists()
         with pytest.raises(client.SandboxError, match="no guest"):
