@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import os
 import shlex
+import subprocess
 import time
 
 import pytest
@@ -788,3 +789,22 @@ def test_a_command_in_a_lease_knows_its_lease():
     seat = host._guest_argv({"id": "L2", "kind": "seat", "seat": "s1"}, ["true"])
     assert own[:2] == ["env", "JSTACK_SANDBOX_LEASE=L1"]
     assert seat[:6] == ["sudo", "-H", "-u", "s1", "env", "JSTACK_SANDBOX_LEASE=L2"]
+
+
+def test_a_softnet_guest_is_found_by_arp(tmp_path):
+    from jstack_host.sandbox import tart as tart_mod
+    asked = []
+
+    class Probe(tart_mod.Tart):
+        def run(self, *args, check=True, timeout=None, **kw):
+            asked.append(args)
+            arp = "--resolver" in args
+            return subprocess.CompletedProcess(args, 0 if arp else 1,
+                                               "10.8.180.54\n" if arp else "", "" if arp else "no IP address found")
+
+        def exec(self, name, argv, **kw):
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+    assert Probe("tart", tmp_path).ip("g", 5) == "10.8.180.54"
+    assert asked[0][:2] == ("ip", "g") and "--resolver" not in asked[0]
+    assert asked[1][asked[1].index("--resolver") + 1] == "arp"
