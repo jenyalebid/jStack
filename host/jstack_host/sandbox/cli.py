@@ -49,6 +49,13 @@ def cmd_shell(a) -> int:
                       interactive=True, tenant=entry["tenant"])
 
 
+def cmd_term(a) -> int:
+    from . import term
+    argv = a.argv[1:] if a.argv and a.argv[0] == "--" else a.argv
+    return term.term(a.lease, " ".join(argv) if len(argv) != 1 else argv[0],
+                     say=lambda line: print(line, file=sys.stderr))
+
+
 def cmd_push(a) -> int:
     return images.push(a.lease, a.src, a.dest, a.exclude)
 
@@ -193,6 +200,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("shell", help="an interactive shell in the lease")
     p.add_argument("lease")
     p.set_defaults(fn=cmd_shell)
+
+    p = sub.add_parser("term", help="run a command in the guest's own Terminal, visibly")
+    p.add_argument("lease")
+    p.add_argument("argv", nargs=argparse.REMAINDER)
+    p.set_defaults(fn=cmd_term)
 
     p = sub.add_parser("push", help="copy a local directory into the lease")
     p.add_argument("lease")

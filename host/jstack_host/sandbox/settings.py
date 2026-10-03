@@ -42,6 +42,9 @@ DEFAULTS: dict = {
     # Images a purge leaves in place unless asked for everything. Reaps only
     # ever delete guests, never images.
     "keep_images": [],
+    # `term`: how long a window may take to start its shell, and to finish.
+    "term_launch_seconds": 60,
+    "term_seconds": 1800,
 }
 
 _TART_PLACES = ("~/.local/bin/tart", "/opt/homebrew/bin/tart", "/usr/local/bin/tart")
