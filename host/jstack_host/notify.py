@@ -156,10 +156,13 @@ def _send_all(tokens: list[str], *, title: str, body: str,
               badge: int | None, session_id: str,
               collapse_id: str = "", extra: dict | None = None) -> None:
     dead = []
+    # Only a payload that carries more than a session names `extra`, so a
+    # session push calls apns.send exactly as it always has.
+    more = {"extra": extra} if extra else {}
     for token in tokens:
         ok, detail = apns.send(token, title=title, body=body,
                                badge=badge, session_id=session_id,
-                               collapse_id=collapse_id, extra=extra)
+                               collapse_id=collapse_id, **more)
         print(f"jremote notify: {detail} [{session_id[:8]}] "
               f"…{token[-8:]} {title}", flush=True)
         # A token APNs will never take again leaves the registry:

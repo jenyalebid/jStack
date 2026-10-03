@@ -11,7 +11,7 @@ Named outside `jr-` so `managed.reconcile()` never reaps it.
 
 Integrity is ownership: a manifest, script or source that is not owned by this
 user, or is writable by anyone else, is refused — the same bar `ssh` holds.
-Protocol and authoring: `docs/run-shortcuts.md` in jStack-Project.
+Contract and authoring: the `Hub/shortcuts` system (`systems.json`).
 """
 from __future__ import annotations
 
