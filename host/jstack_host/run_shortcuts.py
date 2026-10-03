@@ -280,7 +280,8 @@ def _read(path: Path) -> dict:
 
 
 def _write(path: Path, data: dict) -> None:
-    tmp = path.with_suffix(".tmp")
+    # A temp name per writer: the watcher thread and a poll can write at once.
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(data, indent=2))
     tmp.replace(path)
 
@@ -318,6 +319,12 @@ def _settle(rd: Path, rec: dict) -> dict:
                    summary="The run ended without recording an exit code")
     else:
         return rec
+    # Every reader settles, so the watcher, a poll and another process can all
+    # reach here for one run; the exclusive marker lets exactly one finalise.
+    try:
+        os.close(os.open(rd / "settled", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except FileExistsError:
+        return _read(rd / "run.json") or rec
     _write(rd / "run.json", rec)
     _announce(rec)
     return rec

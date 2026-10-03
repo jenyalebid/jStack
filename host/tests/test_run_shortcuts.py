@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -198,6 +199,34 @@ def test_a_failing_run_reads_failed_and_pushes_once(shelf, pushes):
     run_shortcuts.get_run(run["id"])
     run_shortcuts.runs("s")
     assert len(pushes) == 1 and pushes[0]["body"] == "Failed (exit 4)"
+
+
+def test_readers_settling_at_once_finalise_and_push_once(shelf, pushes, monkeypatch):
+    """The watcher, a poll and a second process all settle; seen live as a
+    crash when two of them replaced run.json through one temp file."""
+    monkeypatch.setattr(run_shortcuts, "_ensure_watch", lambda: None)
+    make(shelf, "s", {}, script="#!/bin/bash\nexit 3\n")
+    run = run_shortcuts.start("s", {}, {})
+    rd = run_shortcuts.runs_dir() / run["id"]
+    deadline = time.time() + 20
+    while not (rd / "exit").exists() and time.time() < deadline:
+        time.sleep(0.1)
+    errors = []
+
+    def settle():
+        try:
+            run_shortcuts.get_run(run["id"])
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=settle) for _ in range(12)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert errors == []
+    assert run_shortcuts.get_run(run["id"])["state"] == "failed"
+    assert len(pushes) == 1
 
 
 def test_output_is_ansi_stripped(shelf):
