@@ -92,6 +92,16 @@ def screen(composer="", body="⏺ Building it."):
 WORKING_PANE = screen(body="✳ Pollinating… (5s · ↓ 274 tokens · thinking with xhigh effort)")
 COMPACTING_PANE = screen(body="· Compacting conversation…\n  ▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ 11%")
 
+#: Background agents drawn under the box, and the two hints that replace the footer once ↓
+#: walks the keyboard into their list — captured live from claude 2.1.287, 2026-10-02.
+AGENT_ROWS = ["  ◯ general-purpose  Sleep 10 minutes then report   7s · ↓ 28.2k tokens"]
+LIST_ON_MAIN = "\n".join(["✻ Waiting for 2 background agents to finish", "", RULE, "❯ ",
+                          RULE, "", "  ↑/↓ to select", "", "❯ ⏺ main", *AGENT_ROWS])
+LIST_ON_AGENT = "\n".join(["⏺ done", "", RULE, "❯ ", RULE, "",
+                           "  Enter to view · x to stop · ctrl+x ctrl+k to stop all agents",
+                           "", "  ⏺ main", "❯" + AGENT_ROWS[0][1:]])
+LIST_UNFOCUSED = "\n".join([screen(), "", "  ⏺ main", *AGENT_ROWS])
+
 #: What a send into a busy pane actually produces: the line does not run, it QUEUES —
 #: rendered as an indented `❯` row above the box, armed to fire on the next Enter.
 QUEUED_PANE = "\n".join(["· Compacting conversation…", "", "  ❯ /compact", RULE,
@@ -451,6 +461,49 @@ def test_never_types_into_a_message_somebody_is_writing(near_ceiling, spy, monke
     size = os.path.getsize(near_ceiling)
     assert cod.wait_and_send("jr-x", near_ceiling, 1000, size, "claude") == "busy"
     assert spy == []
+
+
+@pytest.fixture
+def escapes(monkeypatch):
+    """Every Escape `reclaim_focus` sends, and the pane it hands back once one has."""
+    sent = []
+
+    def run(argv, **kw):
+        assert argv[-1] == "Escape", argv
+        sent.append(argv)
+    monkeypatch.setattr(cod.subprocess, "run", run)
+    monkeypatch.setattr(cod, "FOCUS_GRACE_SECS", 0.02)
+    return sent
+
+
+def test_an_agent_list_left_holding_focus_is_escaped_then_compacted(near_ceiling, spy,
+                                                                   escapes, monkeypatch):
+    """ae0f78c5 parked twice with focus on `⏺ main`; every key typed there goes to the list,
+    so the gate was right to refuse — and nothing ever gave the box its keyboard back."""
+    monkeypatch.setattr(cod, "pane", lambda name: screen() if escapes else LIST_ON_MAIN)
+    size = os.path.getsize(near_ceiling)
+    assert cod.wait_and_send("jr-x", near_ceiling, 1000, size, "claude") == "sent"
+    assert len(escapes) == 1 and spy == ["jr-x"]
+
+
+def test_a_person_looking_at_their_agents_gets_the_grace(near_ceiling, spy, escapes,
+                                                         monkeypatch):
+    monkeypatch.setattr(cod, "FOCUS_GRACE_SECS", 60)
+    monkeypatch.setattr(cod, "pane", lambda name: LIST_ON_AGENT)
+    size = os.path.getsize(near_ceiling)
+    assert cod.wait_and_send("jr-x", near_ceiling, 1000, size, "claude") == "busy"
+    assert escapes == [] and spy == []
+
+
+def test_escape_is_never_sent_without_the_list_on_screen(near_ceiling, spy, escapes,
+                                                          monkeypatch):
+    """The other refusals are a person's box or a running turn — an Escape there would
+    interrupt the turn or eat their draft."""
+    for busy in (WORKING_PANE, screen("half a sentence"), "\n".join(["⏺ done", RULE, "❯ ", RULE])):
+        monkeypatch.setattr(cod, "pane", lambda name, b=busy: b)
+        size = os.path.getsize(near_ceiling)
+        assert cod.wait_and_send("jr-x", near_ceiling, 1000, size, "claude") == "busy"
+    assert escapes == [] and spy == []
 
 
 def test_a_new_turn_supersedes_the_decision(near_ceiling, spy, monkeypatch):
@@ -1609,6 +1662,9 @@ def test_the_patience_is_the_promise_the_decision_made(near_ceiling, monkeypatch
     pytest.param(screen("half a sentence"),
                  f"composer-holds: {len('half a sentence')} chars", id="somebody-typing"),
     pytest.param("\n".join(["⏺ done", RULE, "❯ ", RULE]), "no-footer", id="no-live-tui"),
+    pytest.param(LIST_ON_MAIN, "agent-list-focused", id="agent-list-holds-focus-on-main"),
+    pytest.param(LIST_ON_AGENT, "agent-list-focused", id="agent-list-holds-focus-on-an-agent"),
+    pytest.param(LIST_UNFOCUSED, "", id="agents-listed-but-the-box-has-focus"),
     pytest.param(None, "no-pane", id="no-session"),
 ])
 def test_why_not_ready_names_the_gate_that_refused(captured, gate):

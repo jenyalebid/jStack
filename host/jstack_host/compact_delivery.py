@@ -158,6 +158,18 @@ MAX_WAIT_SECS = 20  # one look at the pane; `persist` decides whether there is a
 #: long before their own Stop could find this session's lock still held.
 RETRY_WINDOWS = (20, 40, 60, 120, 240, 420)
 
+#: How long the agent list may hold the keyboard before an Escape hands it back to the box.
+#:
+#: While background agents run, claude draws them in a list under the composer, and ↓
+#: walks focus into it. From then on the footer is replaced by the list's own hints and
+#: every key typed goes to the list — "x" stops an agent, Enter opens one — and nothing in
+#: the TUI ever gives focus back. Session ae0f78c5 parked twice on 2026-10-02 at 165k and
+#: 169k with focus left on `⏺ main`; both seams ran the whole retry schedule and logged
+#: `gave-up` against `no-footer`. Measured on claude 2.1.287: one Escape returns focus from
+#: any row of the list, and the footer comes straight back. The grace is for a person who
+#: is looking at their agents right now; a list still focused after it is one nobody is.
+FOCUS_GRACE_SECS = 10
+
 #: One lock PER SESSION, and the per-session part is load-bearing. The invariant is
 #: narrower than the machine: `run` must not have two children half-deciding for ONE
 #: session, because the compaction and the continue that steps across it are a single
@@ -355,6 +367,9 @@ ENGINES = {
             r"|\? for shortcuts"),
         "working": re.compile(r"…\s*\("),
         "busy": ("Compacting conversation", "Press up to edit queued messages"),
+        # The hints the agent list draws in the footer's place while it holds focus — on
+        # `⏺ main`, and on an agent's row. See FOCUS_GRACE_SECS.
+        "focus_away": re.compile(r"↑/↓ to select|Enter to view · x to stop"),
         "placeholder": (),
         "screen_idle": True,
         "boxed": True,
@@ -365,6 +380,7 @@ ENGINES = {
         "footer": None,
         "working": None,
         "busy": ("Compacting conversation",),
+        "focus_away": None,
         # On screen, never typed: an empty codex box draws its own invitation.
         "placeholder": ("Ask Codex to do anything",),
         "screen_idle": False,
@@ -984,6 +1000,12 @@ def pane_idle(screen, engine="claude", turn=""):
     return True
 
 
+def focus_away(screen, engine="claude"):
+    """True when the agent list, not the composer, holds this pane's keyboard."""
+    mark = grammar(engine).get("focus_away")
+    return bool(screen and mark and mark.search(_ANSI.sub("", screen)))
+
+
 def pane_is_ready(screen, engine="claude", turn=""):
     """True only when the CLI is idle at an empty box and a command typed now would RUN.
 
@@ -1014,7 +1036,7 @@ def why_not_ready(screen, engine="claude", turn=""):
     plain = _ANSI.sub("", screen)
     if spec["footer"] is not None:
         if not spec["footer"].search(plain):
-            return "no-footer"
+            return "agent-list-focused" if focus_away(screen, engine) else "no-footer"
     elif composer_line(screen, engine) is None:
         return "no-composer"
     for mark in spec["busy"]:
@@ -1119,6 +1141,25 @@ def send_text(name, text, pre_enter_delay=0.0):
 def clear_line(name):
     """^U — wipe the input box. What the app's `clear` key sends."""
     subprocess.run(managed._t("send-keys", "-t", name, "C-u"), check=True, timeout=5)
+
+
+def reclaim_focus(name, engine, screen, since):
+    """Escape out of the agent list once it has held focus past FOCUS_GRACE_SECS.
+
+    Returns when the focus was first seen away, None once it is back — the caller keeps
+    it across polls. The Escape is sent only off a capture that shows the list focused;
+    the next poll re-reads the pane, so nothing is typed on the strength of this key.
+    """
+    if not focus_away(screen, engine):
+        return None
+    now = time.time()
+    if since is None:
+        return now
+    if now - since >= FOCUS_GRACE_SECS:
+        subprocess.run(managed._t("send-keys", "-t", name, "Escape"), check=True, timeout=5)
+        record(pane=name, stage="focus", outcome="reclaimed", held=int(now - since))
+        return None
+    return since
 
 
 def still_ours(screen, text, engine="claude"):
@@ -1390,17 +1431,20 @@ def wait_and_send(name, path, threshold, size_at_stop, engine, window=None):
     """Poll until it is provably safe, then compact. Silence on every other outcome."""
     started = time.time()
     deadline = started + (window or MAX_WAIT_SECS)
+    away = None
     while time.time() < deadline:
         keepalive()
         if not os.path.exists(path):
             return "gone"
         if turn_moved(path, size_at_stop, engine):
             return "superseded"  # a new turn started; this decision is stale
-        if pane_is_ready(pane(name), engine, turn_state(path, engine)):
+        screen = pane(name)
+        if pane_is_ready(screen, engine, turn_state(path, engine)):
             cur = reading(path, engine)
             if cur is None or cur < threshold:
                 return "already-compacted"
             return "sent" if send_compact(name, engine, path) else "not-taken"
+        away = reclaim_focus(name, engine, screen, away)
         time.sleep(POLL_SECS)
     note_block(name, engine, turn_state(path, engine), time.time() - started)
     return "busy"
@@ -1477,15 +1521,18 @@ def continue_in_place(name, path, sid, offset, has_rows=False, engine="claude"):
     def attempt(window):
         started = time.time()
         deadline = started + window
+        away = None
         while time.time() < deadline:
             keepalive()
             if not os.path.exists(path):
                 return "gone"
             if turn_moved(path, offset, engine):
                 return "taken"  # a person is driving; this is no longer ours
-            if pane_is_ready(pane(name), engine, turn_state(path, engine)):
+            screen = pane(name)
+            if pane_is_ready(screen, engine, turn_state(path, engine)):
                 text = CONTINUE_IN_PLACE + (DOCKET_LINE if has_rows else "")
                 return "continued" if submit(name, text, engine, path) else "not-taken"
+            away = reclaim_focus(name, engine, screen, away)
             time.sleep(POLL_SECS)
         note_block(name, engine, turn_state(path, engine), time.time() - started)
         return "busy"
