@@ -1,7 +1,8 @@
 """The image library: a recipe per purpose, baked into a verified, tagged guest.
 
 A recipe is JSON under `<state>/sandbox/recipes/<name>.json`: the base it
-starts from, steps that run or copy in, secrets read from this instance's
+starts from, steps that run or copy in (a copy may name tar patterns to
+`exclude`), secrets read from this instance's
 credentials at bake time, and a verify command. The tag records the recipe's
 hash, so an edited recipe makes every bake of the old one stale.
 """
@@ -73,7 +74,7 @@ def bake(name: str, say=print) -> dict:
         for i, step in enumerate(recipe.get("steps", []), 1):
             if "copy" in step:
                 say(f"step {i}: copy {step['copy']} -> {step['to']}")
-                code = push(lease["id"], step["copy"], step["to"])
+                code = push(lease["id"], step["copy"], step["to"], step.get("exclude", []))
             else:
                 say(f"step {i}: {step['run']}")
                 code = _run_script(target, lease, _script([step["run"]], env))
