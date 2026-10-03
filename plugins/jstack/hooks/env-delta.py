@@ -36,8 +36,8 @@ def main() -> int:
     if _env.disabled():
         return 0
     payload = json.loads(_host.read_stdin())
-    session_id = str(payload.get("session_id") or "")
     env = _env.host_environment()
+    session_id = _env.session_of(payload)
     after = _env.moved(env, session_id, str(payload.get("cwd") or ""))
     snapshot = _env.session_dir(session_id) / SNAPSHOT
 

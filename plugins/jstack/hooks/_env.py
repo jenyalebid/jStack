@@ -132,6 +132,26 @@ def seat_agent(cwd: str) -> str:
     return (agent or "").lower()
 
 
+def session_of(payload: dict) -> str:
+    """The id the app files this session's settings under.
+
+    Claude reports the managed session's own id. Codex mints a thread id of its
+    own, so a value set on the session from the app sat under one id while the
+    hooks asked under the other, and a Codex session never heard a change. The
+    managed registry maps the transcript back to the session, the same lookup
+    the trigger dispatcher makes. Call after `host_environment()`, which points
+    the host at this machine's state.
+    """
+    sid = str(payload.get("session_id") or "")
+    path = str(payload.get("transcript_path") or "")
+    if not path:
+        return sid
+    try:
+        return _host.load("compact_delivery").session_row(sid, path)[0] or sid
+    except Exception:
+        return sid
+
+
 def moved(env, session_id: str, cwd: str = "") -> dict[str, str]:
     """`{key: value}` for the settings this session holds off their default.
 
