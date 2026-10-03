@@ -3577,3 +3577,5 @@ def review_session(sid: str):
 # Same bearer and managed-access gate as every other product route.
 from .update_routes import router as update_router
 router.include_router(update_router)
+from .run_shortcuts import router as run_shortcuts_router
+router.include_router(run_shortcuts_router)

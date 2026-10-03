@@ -72,7 +72,7 @@ def _provider_token(cfg: dict) -> str:
 
 def send(device_token: str, *, title: str, body: str,
          badge: int | None = None, session_id: str = "",
-         collapse_id: str = "") -> tuple[bool, str]:
+         collapse_id: str = "", extra: dict | None = None) -> tuple[bool, str]:
     """Send one push. Returns (ok, detail).
 
     `collapse_id`: pushes sharing one replace each other in Notification
@@ -83,7 +83,9 @@ def send(device_token: str, *, title: str, body: str,
     aps: dict = {"alert": {"title": title, "body": body}, "sound": "default"}
     if badge is not None:
         aps["badge"] = badge
-    payload = {"aps": aps, "session_id": session_id}
+    # `extra` carries what a tap opens when it is not a thread — a run
+    # shortcut's `shortcut_run`; it never overrides `aps` or `session_id`.
+    payload = {**(extra or {}), "aps": aps, "session_id": session_id}
     default = _SANDBOX if cfg.get("sandbox", True) else _PROD
     first = _env_cache.get(device_token, default)
     headers = {
