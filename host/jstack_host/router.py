@@ -255,7 +255,7 @@ def get_host(request: Request):
     screen in turn learns the same thing four round trips later, and has to
     render four spinners to find out one of them was never coming.
     """
-    from . import addresses, mode, sourcestamp, usage_reporting
+    from . import addresses, leaf_policy, mode, sourcestamp, usage_reporting
     # The port the caller actually reached, not a constant: a host moved off
     # 9090 would otherwise hand out an address list that is wrong in the one
     # detail nobody checks, on the screen whose whole job is that address.
@@ -295,6 +295,11 @@ def get_host(request: Request):
         # own setting decides", so a host predating the field hides nothing.
         **({"usage_reporting": usage_reporting.effective()}
            if _is_loopback(request.client.host if request.client else "") else {}),
+        # The leaf contract's word for the client on this Mac, same loopback
+        # rule as the line above (`leaf_policy.py`).
+        **({"leaf": leaf_policy.host_block()}
+           if leaf_policy.host_block() is not None
+           and _is_loopback(request.client.host if request.client else "") else {}),
     }
 
 
@@ -1180,14 +1185,12 @@ def _serve_host(row: dict, delegated: bool = False, *, policy: bool = False) -> 
     # public halves, but devices have no use for them and the console does.
     public = {k: v for k, v in row.items()
               if k not in ("device_id", "sees_home", "sees_leaves",
-                           "usage_reporting", "shell_pubkey", "shell_user")}
+                           "usage_reporting", "mode", "agents_tab", "line",
+                           "shell_pubkey", "shell_user")}
     if policy:
-        from . import usage_reporting
+        from . import leaf_policy
         from .store import get_store
-        public.update(sees_home=bool(row.get("sees_home", True)),
-                      sees_leaves=bool(row.get("sees_leaves", True)),
-                      usage_reporting=(row.get("usage_reporting")
-                                       or usage_reporting.CLIENT),
+        public.update(**leaf_policy.console_view(row),
                       shell_user=row.get("shell_user", ""),
                       shell_sources=get_store().shell_sources_for(row["key"]))
     return {**public, "deleted": bool(row["deleted"]), "delegated": delegated,
@@ -1239,12 +1242,12 @@ def list_hosts(request: Request, device_id: str = Depends(current_device)):
     if managed_access.is_leaf():
         if not _is_loopback(request.client.host if request.client else ""):
             return {"hosts": []}
-        from . import usage_reporting
+        from . import leaf_policy
         answer = managed_access.visible_hosts()
-        # The roster pull is also how this leaf learns its own Usage policy —
+        # The roster pull is also how this leaf learns its own policy —
         # `/host` answers out of this cache rather than spending a round trip
         # to the hub on the one call that must work before any screen.
-        usage_reporting.note_parent((answer.get("self") or {}).get("usage_reporting"))
+        leaf_policy.note_parent(answer)
         return answer
     live = {h["host_key"] for h in grants.holdings() if h["revoked_at"] is None}
     rows = [_serve_host(r, r["key"] in live, policy=_hub_console(request))
@@ -1398,10 +1401,50 @@ def usage_refresh(device_id: str = Depends(current_device)):
     from . import usage_reporting
     if not managed_access.is_leaf():
         raise HTTPException(409, "only a managed machine pulls its Usage policy")
+    from . import leaf_policy
     answer = managed_access.visible_hosts()
-    state = usage_reporting.note_parent(
-        (answer.get("self") or {}).get("usage_reporting"))
-    return {"usage_reporting": state}
+    leaf_policy.note_parent(answer)
+    return {"usage_reporting": usage_reporting.cached_parent()}
+
+
+class LeafPolicyRequest(BaseModel):
+    mode: str | None = None
+    agents_tab: bool | None = None
+    sees_home: bool | None = None
+    sees_leaves: bool | None = None
+    usage_reporting: str | None = None
+    line: str | None = None
+
+
+@router.post("/hosts/{key}/policy")
+def set_leaf_policy(key: str, body: LeafPolicyRequest, request: Request):
+    """Any subset of a leaf's policy, from home's Leaf Settings window.
+
+    The row is written first and is the authority; the poke only decides
+    whether the leaf learns now or at its next roster pull (`leaf_policy`).
+    """
+    managed_access.require_console(request)
+    from . import leaf_policy
+    from .store import get_store
+    try:
+        fields = leaf_policy.normalise(body.model_dump(exclude_none=True))
+    except leaf_policy.PolicyError as exc:
+        raise HTTPException(400, str(exc))
+    store = get_store()
+    if not store.set_host_policy(key, fields):
+        raise HTTPException(404, "unknown machine")
+    return {"key": key, **leaf_policy.console_view(store.host_row(key)),
+            "steps": [leaf_policy.poke(key)]}
+
+
+@router.post("/leaf/refresh")
+def leaf_refresh(device_id: str = Depends(current_device)):
+    """The poke's landing, on the leaf: pull this machine's own policy
+    through its parent credential. Same shape as `/usage/refresh`."""
+    from . import leaf_policy
+    if not managed_access.is_leaf():
+        raise HTTPException(409, "only a managed machine pulls its policy")
+    return leaf_policy.note_parent(managed_access.visible_hosts())
 
 
 class LeafShellGrantRequest(BaseModel):
@@ -1432,23 +1475,24 @@ def _managed_leaf(device_id: str) -> dict:
 def managed_hosts(request: Request, device_id: str = Depends(current_device)):
     from . import grants, enrolment
     from .store import get_store
+    from . import leaf_policy
     leaf = _managed_leaf(device_id)
+    reach = leaf_policy.resolve(leaf)
     rows = []
-    if leaf["sees_home"]:
+    if reach["sees_home"]:
         rows.append({"key": hostenv.host_id(), "name": hostenv.host_name(),
                      "address": enrolment._own_mesh_address(), "port": request.url.port or 9090,
                      "deleted": False, "delegated": True, "managed_access": True})
-    if leaf["sees_leaves"]:
+    if reach["sees_leaves"]:
         rows.extend(_serve_host(row, bool(grants.held(row["key"])))
                     for row in get_store().list_hosts() if row["key"] != leaf["key"])
     # The asking machine's OWN row travels with the roster it asked for: the
     # leaf has no other way to learn what its hub decided about it, and this is
     # the call its client already makes. One field, so a poke is a nicety and
     # not the mechanism — see usage_reporting.py.
-    from . import usage_reporting
     return {"hosts": rows,
-            "self": {"usage_reporting": (leaf.get("usage_reporting")
-                                         or usage_reporting.CLIENT)}}
+            "self": {k: reach[k] for k in ("mode", "agents_tab",
+                                           "usage_reporting", "line")}}
 
 
 class ManagedGrantRequest(BaseModel):

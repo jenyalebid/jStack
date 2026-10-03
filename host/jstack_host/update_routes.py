@@ -198,6 +198,11 @@ def set_source(body: SourceRef, request: Request, device_id: str = Depends(curre
         name = build_source.channel_ref({"channel": body.ref})
     except ReleaseError as exc:
         raise HTTPException(400, f"{exc}: {body.ref!r}") from exc
+    from . import leaf_policy
+    try:
+        leaf_policy.refuse_local_line()
+    except leaf_policy.LocalLineRefused as exc:
+        raise HTTPException(409, str(exc)) from exc
     if managed_access.is_leaf() and name not in LINES:
         # A leaf picks its line — which of its parent's offers it takes. It
         # never builds, so a branch that is not a line names nothing it could

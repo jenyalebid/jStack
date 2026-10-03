@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from jstack_host import devices, managed_access, router, usage_reporting
+from jstack_host import devices, leaf_policy, managed_access, router, usage_reporting
 from jstack_host.store import SessionStore
 
 API = "/api/jremote/v1"
@@ -23,6 +23,7 @@ API = "/api/jremote/v1"
 def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(usage_reporting, "_STATE",
                         tmp_path / "jremote_usage_reporting.json")
+    monkeypatch.setattr(leaf_policy, "_STATE", tmp_path / "jremote_leaf_policy.json")
     # Default to a hub. A leaf is the exception each test that needs one asks for.
     monkeypatch.setattr(managed_access, "is_leaf", lambda: False)
 
@@ -277,6 +278,6 @@ def test_the_roster_a_leaf_pulls_carries_that_leafs_own_verdict(store, monkeypat
         url = type("U", (), {"port": 9090})()
 
     answer = router.managed_hosts(_Req(), device_id="dev")
-    assert answer["self"] == {"usage_reporting": "available"}
+    assert answer["self"]["usage_reporting"] == "available"
     # Its own row is not in the roster it is handed — it is in `self`, once.
     assert "leaf-one" not in [r["key"] for r in answer["hosts"]]

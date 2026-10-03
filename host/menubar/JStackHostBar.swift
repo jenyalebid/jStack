@@ -526,6 +526,28 @@ enum UsagePolicy: String, CaseIterable {
     }
 }
 
+/// The two things a leaf can be (jStack-Project `docs/leaf.md`). A word this
+/// menu does not know is Standard, the mode that takes nothing away.
+enum LeafMode: String, CaseIterable {
+    case standard, headless
+
+    static func read(_ wire: String?) -> LeafMode {
+        LeafMode(rawValue: wire ?? "") ?? .standard
+    }
+
+    var title: String {
+        switch self {
+        case .standard: return "Standard"
+        case .headless: return "Headless"
+        }
+    }
+}
+
+struct LeafBlock: Decodable {
+    var mode: String?
+    var agentsTab: Bool?
+}
+
 struct HostIdentity: Decodable {
     var hostId: String?
     var name: String?
@@ -538,6 +560,12 @@ struct HostIdentity: Decodable {
     /// older host predates the field; the headline falls back to the coarser
     /// hub/leaf read below rather than drawing nothing.
     var mode: HostMode?
+
+    /// What this Mac's hub said it may do, on a leaf and nowhere else — `/host`
+    /// hands it only to loopback, which this menu is. Nil reads as Standard.
+    var leaf: LeafBlock?
+
+    var isHeadless: Bool { LeafMode.read(leaf?.mode) == .headless }
 
     /// Hub or leaf, taken from the host's own answer rather than inferred.
     ///
@@ -602,6 +630,14 @@ struct AdoptedHost: Decodable {
     /// refusal: a machine that never answered has not taken the choice away
     /// from the device, it has said nothing at all.
     var usageReporting: String?
+
+    /// The rest of the leaf's policy, as stored on this hub's row — the
+    /// Standard switches survive a trip through Headless, so they are read
+    /// here unresolved. Nil where the hub predates the field.
+    var mode: String?
+    var agentsTab: Bool?
+    /// `main`, `dev`, or empty where this hub has not picked one.
+    var line: String?
 
     /// What to call it: the name given at adoption, else the key, which is the
     /// machine's own host id and always there.
@@ -1142,23 +1178,12 @@ final class HostProbe {
         post("/hosts/\(escaped(hostKey))/forget", token: token, timeout: 10, done)
     }
 
-    func visibility(hostKey: String, seesHome: Bool, seesLeaves: Bool, token: String,
+    /// Any part of a leaf's policy, through the one route that owns all of
+    /// it. The hub writes its row, then pokes the leaf to pull.
+    func leafPolicy(hostKey: String, fields: [String: Any], token: String,
                     _ done: @escaping (Bool, String) -> Void) {
-        post("/hosts/\(escaped(hostKey))/visibility", token: token, timeout: 10,
-             body: ["sees_home": seesHome, "sees_leaves": seesLeaves], done)
-    }
-
-    /// A leaf's Usage policy, set on this hub — the one machine that owns it.
-    ///
-    /// The state word travels to *this* hub, not to the leaf: the hub's row is
-    /// the authority, and the poke the route sends afterwards is the leaf being
-    /// told to come and read it. A leaf that is asleep or off the mesh misses
-    /// the poke and still picks the answer up on its next roster pull, which is
-    /// why an unreachable machine is not a failed flip.
-    func leafUsage(hostKey: String, state: UsagePolicy, token: String,
-                   _ done: @escaping (Bool, String) -> Void) {
-        post("/hosts/\(escaped(hostKey))/usage", token: token, timeout: 10,
-             payload: try? JSONEncoder().encode(["state": state.rawValue]), done)
+        post("/hosts/\(escaped(hostKey))/policy", token: token, timeout: 10,
+             payload: try? JSONSerialization.data(withJSONObject: fields), done)
     }
 
     private func escaped(_ component: String) -> String {
@@ -1792,8 +1817,9 @@ struct InfoClientSection: View {
 struct InfoMachineSection: View {
     let machine: UpdateMachine
     let command: NSMenuItem?
+    var title: String? = nil
     var body: some View {
-        Section(machine.name) {
+        Section(title ?? machine.name) {
             LabeledContent("Updates", value: machine.summary)
             if let line = machine.line {
                 LabeledContent("Line", value: HubSource.label(line))
@@ -1912,8 +1938,9 @@ struct HostInfoForm: View {
     let updateStatus: String?
     let error: String?
     let localCommand: NSMenuItem?
-    let machines: [UpdateMachine]
-    let commands: [String: NSMenuItem]
+    /// A Headless leaf: its hub decides the source, the line and every
+    /// install, so this window is About and jRemote and nothing else.
+    var headless = false
     let open: () -> Void
     let download: () -> Void
 
@@ -1924,18 +1951,14 @@ struct HostInfoForm: View {
             InfoAboutSection(name: machine, status: status, version: version, release: release)
             InfoClientSection(app: app, open: open, download: download)
             // Nothing on any machine installs by itself: a build is an offer,
-            // and only a press here or on a machine's own row turns an offer
-            // into a job. Every machine is its own press — there is no
-            // fleet-wide one; the release procedure's deploy is that.
-            if source != nil || localCommand != nil || updateStatus != nil
+            // and only a press here turns an offer into a job. Each adopted
+            // Mac's press is in its own Leaf Settings window.
+            if !headless, source != nil || localCommand != nil || updateStatus != nil
                 || !(error ?? "").isEmpty {
                 InfoSourceSection(source: source, busy: sourceBusy,
                                   follow: follow, rebuild: rebuild,
                                   update: updateStatus, detail: error,
                                   install: localCommand)
-            }
-            ForEach(machines, id: \.machine) { machine in
-                InfoMachineSection(machine: machine, command: commands[machine.machine])
             }
         }
         .formStyle(.grouped)
@@ -1943,6 +1966,115 @@ struct HostInfoForm: View {
         // from their labels, and under it the labels wrap.
         .frame(minWidth: 460, idealWidth: 520, maxWidth: 640, minHeight: 400)
         .accessibilityIdentifier("host_info_form")
+    }
+}
+
+/// One adopted Mac's settings, as this hub holds them — every word about what
+/// that Mac and the client on it may do (jStack-Project `docs/leaf.md`).
+///
+/// What a mode turns off is not drawn: Headless shows no Standard switch, and
+/// Standard shows no Agents Tab.
+struct LeafSettingsForm: View {
+    let leaf: AdoptedHost
+    let update: UpdateMachine?
+    let install: NSMenuItem?
+    let busy: Bool
+    let set: ([String: Any]) -> Void
+    let forget: () -> Void
+
+    private var mode: LeafMode { LeafMode.read(leaf.mode) }
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("Machine", value: leaf.title)
+                if let update { LabeledContent("Status", value: update.summary) }
+                LabeledContent("Address", value: leaf.route.isEmpty ? "None on the mesh" : leaf.route)
+                    .textSelection(.enabled)
+                if let delegated = leaf.delegated {
+                    LabeledContent("Access", value: delegated ? "Every device on this hub" : "Pair by hand")
+                }
+            } header: {
+                Label("About", systemImage: "info.circle").font(.headline)
+            }
+            Section {
+                Picker("Mode", selection: Binding(get: { mode },
+                                                  set: { set(["mode": $0.rawValue]) })) {
+                    ForEach(LeafMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("leaf_mode")
+                switch mode {
+                case .standard:
+                    Toggle("Sees Home Instance", isOn: Binding(
+                        get: { leaf.seesHome ?? true }, set: { set(["sees_home": $0]) }))
+                        .accessibilityIdentifier("leaf_sees_home")
+                    Toggle("Sees Other Leaf Instances", isOn: Binding(
+                        get: { leaf.seesLeaves ?? true }, set: { set(["sees_leaves": $0]) }))
+                        .accessibilityIdentifier("leaf_sees_leaves")
+                    Picker("Usage on Home", selection: Binding(
+                        get: { UsagePolicy.read(leaf.usageReporting) },
+                        set: { set(["usage_reporting": $0.rawValue]) })) {
+                        ForEach(UsagePolicy.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    .accessibilityIdentifier("leaf_usage")
+                case .headless:
+                    Toggle("Agents Tab", isOn: Binding(
+                        get: { leaf.agentsTab ?? true }, set: { set(["agents_tab": $0]) }))
+                        .accessibilityIdentifier("leaf_agents_tab")
+                }
+            } header: {
+                Label("Client", systemImage: "macwindow").font(.headline)
+            }
+            .disabled(busy)
+            Section {
+                Picker("Line", selection: Binding(
+                    get: { HubSource.label(leaf.line.flatMap { $0.isEmpty ? nil : $0 }
+                                           ?? update?.line ?? "main") },
+                    set: { set(["line": $0]) })) {
+                    ForEach(HubSource.offered, id: \.self) { Text($0).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .disabled(busy)
+                .accessibilityIdentifier("leaf_line")
+            } header: {
+                Label("Updates", systemImage: "arrow.triangle.2.circlepath").font(.headline)
+            }
+            if let update {
+                InfoMachineSection(machine: update, command: install, title: "Installed")
+            }
+            Section {
+                Button("Forget \(leaf.title)…", role: .destructive, action: forget)
+                    .accessibilityIdentifier("leaf_forget")
+            }
+        }
+        .formStyle(.grouped)
+        .frame(minWidth: 460, idealWidth: 520, maxWidth: 640, minHeight: 360)
+        .accessibilityIdentifier("leaf_settings_form")
+    }
+}
+
+final class LeafSettingsWindow: NSWindow {
+    let key: String
+    private var hosting: NSHostingView<LeafSettingsForm>?
+    init(key: String) {
+        self.key = key
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
+                   styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                   backing: .buffered, defer: false)
+        isReleasedWhenClosed = false
+        setAccessibilityIdentifier("leaf_settings_window")
+        center()
+    }
+
+    func render(_ form: LeafSettingsForm) {
+        title = "\(form.leaf.title) Settings"
+        if let hosting { hosting.rootView = form }
+        else {
+            let view = NSHostingView(rootView: form)
+            hosting = view
+            contentView = view
+        }
     }
 }
 
@@ -1987,6 +2119,9 @@ final class StatusController: NSObject {
     private var updateActionStatus: String?
     private var menuIsOpen = false
     private var infoWindow: HostInfoWindow?
+    /// One window per adopted Mac, by its key, opened off its Managed Macs row.
+    private var leafWindows: [String: LeafSettingsWindow] = [:]
+    private var leafBusy: Set<String> = []
     private var hubSource: HubSource?
     private var sourceBusy = false
 
@@ -2075,6 +2210,12 @@ final class StatusController: NSObject {
     private func build() {
         let menu = NSMenu()
         menu.autoenablesItems = false
+        if state.identity?.isHeadless == true {
+            headless(menu)
+            menu.delegate = self
+            item.menu = menu
+            return
+        }
 
         // ── The machine, and what it is running ─────────────────────────────
         //
@@ -2141,6 +2282,29 @@ final class StatusController: NSObject {
 
         menu.delegate = self
         item.menu = menu
+    }
+
+    /// A Headless leaf's whole menu: which Mac this is, Restart, Settings.
+    /// Its hub manages everything else, so nothing else is drawn.
+    private func headless(_ menu: NSMenu) {
+        let machine = NSMenuItem(title: Machine.name, action: nil, keyEquivalent: "")
+        machine.image = Self.glyph(Machine.symbol, size: 26)
+        machine.attributedTitle = Self.twoLine(Machine.name, state.headline)
+        machine.isEnabled = false
+        menu.addItem(machine)
+        menu.addItem(.separator())
+        if state.installed {
+            // Restart brings a hub that is down back too: kickstart alone does
+            // not load a job that was booted out.
+            let restart = Self.action("Restart Hub",
+                                      state.isUp ? #selector(doRestart) : #selector(doStart),
+                                      self, symbol: "arrow.clockwise")
+            restart.setAccessibilityIdentifier("hub_restart")
+            menu.addItem(restart)
+        }
+        let settings = Self.action("Settings…", #selector(doSettings), self, symbol: "gearshape")
+        settings.setAccessibilityIdentifier("hub_settings")
+        menu.addItem(settings)
     }
 
     private func updateDetails() -> NSMenu {
@@ -2263,6 +2427,7 @@ final class StatusController: NSObject {
     @objc private func doSettings() { showSettings() }
 
     private func refreshInfoWindow() {
+        refreshLeafWindows()
         guard let infoWindow else { return }
         let local = updateInventory?.machines.first { $0.machine == state.identity?.hostId }
         let source = state.identity?.source ?? local?.observed?.hostSource
@@ -2286,10 +2451,62 @@ final class StatusController: NSObject {
                 : local.flatMap { ["current", "not_published", "unknown"].contains($0.state) ? nil : $0.summary }),
             error: updateError ?? local?.job?.detail,
             localCommand: commands[localID],
-            machines: updateInventory?.machines.filter { $0.machine != localID } ?? [],
-            commands: commands,
+            headless: state.identity?.isHeadless == true,
             open: { [weak self] in self?.doOpenApp() },
             download: { [weak self] in self?.downloadClient() }))
+    }
+
+    /// Each open Leaf Settings window, redrawn from the same poll as the menu.
+    /// A machine forgotten since it opened closes with it.
+    private func refreshLeafWindows() {
+        guard !leafWindows.isEmpty else { return }
+        var commands: [String: NSMenuItem] = [:]
+        for item in updateDetails().items where item.action != nil {
+            if let target = item.representedObject as? String { commands[target] = item }
+        }
+        for (key, window) in leafWindows {
+            guard let leaf = state.leaves.first(where: { $0.key == key }) else {
+                if state.isUp { window.close(); leafWindows[key] = nil }
+                continue
+            }
+            window.render(LeafSettingsForm(
+                leaf: leaf,
+                update: updateInventory?.machines.first { $0.machine == key },
+                install: commands[key],
+                busy: leafBusy.contains(key),
+                set: { [weak self] fields in self?.setLeafPolicy(key, fields) },
+                forget: { [weak self] in self?.forgetMachine(leaf) }))
+        }
+    }
+
+    @objc private func doOpenLeafSettings(_ sender: NSMenuItem) {
+        guard let machine = sender.representedObject as? AdoptedHost else { return }
+        let window = leafWindows[machine.key] ?? LeafSettingsWindow(key: machine.key)
+        leafWindows[machine.key] = window
+        refreshLeafWindows()
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        refresh()
+    }
+
+    /// One write to a leaf's policy. The window holds the press until the hub
+    /// answers, so the next poll cannot snap a control back mid-request.
+    private func setLeafPolicy(_ key: String, _ fields: [String: Any]) {
+        guard state.identity?.canManageDevices == true, !leafBusy.contains(key),
+              let token = HostAgent.token() else { return }
+        leafBusy.insert(key)
+        refreshLeafWindows()
+        probe.leafPolicy(hostKey: key, fields: fields, token: token) { [weak self] ok, detail in
+            guard let self else { return }
+            self.leafBusy.remove(key)
+            if !ok {
+                let alert = NSAlert()
+                alert.messageText = "Could Not Change Leaf Settings"
+                alert.informativeText = HostProbe.reason(detail)
+                alert.runModal()
+            }
+            self.refresh()
+        }
     }
 
     /// Follow another ref. This writes a name; it pulls nothing and builds
@@ -2641,47 +2858,10 @@ final class StatusController: NSObject {
                                  idle: machine.delegated != nil)
             row.attributedTitle = Self.twoLine(machine.title, Self.access(machine))
 
-            let actions = NSMenu()
-            actions.autoenablesItems = false
-            let home = Self.check("Sees Home Instance", on: machine.seesHome ?? true,
-                                  #selector(doToggleLeafVisibility), self)
-            home.tag = 0
-            home.setAccessibilityIdentifier("leaf_toggle_home_\(machine.key)")
-            home.representedObject = machine
-            actions.addItem(home)
-            let siblings = Self.check("Sees Other Leaf Instances", on: machine.seesLeaves ?? true,
-                                      #selector(doToggleLeafVisibility), self)
-            siblings.tag = 1
-            siblings.setAccessibilityIdentifier("leaf_toggle_siblings_\(machine.key)")
-            siblings.representedObject = machine
-            actions.addItem(siblings)
-            actions.addItem(.separator())
-            // The Usage section of the client running on *that* Mac, and only
-            // that one. It sits with the other two because it is the same kind
-            // of fact — what a machine lets the app in front of it show — and
-            // it is offered here because a leaf's answer is its hub's word,
-            // which is this menu.
-            let usage = Self.caption("Usage on Home")
-            usage.toolTip = "Whether the client on \(machine.title) shows "
-                + "Home's Usage section — the headroom meters and the day's "
-                + "spend. Controlled by Client leaves it to that app's setting."
-            actions.addItem(usage)
-            let policy = UsagePolicy.read(machine.usageReporting)
-            for (index, option) in UsagePolicy.allCases.enumerated() {
-                let pick = Self.check(option.title, on: option == policy,
-                                      #selector(doSetLeafUsage), self)
-                pick.tag = index
-                pick.indentationLevel = 1
-                pick.setAccessibilityIdentifier("leaf_usage_\(option.rawValue)_\(machine.key)")
-                pick.representedObject = machine
-                actions.addItem(pick)
-            }
-            actions.addItem(.separator())
-            let forget = Self.action("Forget", #selector(doForgetMachine), self,
-                                     symbol: "minus.circle")
-            forget.representedObject = machine
-            actions.addItem(forget)
-            row.submenu = actions
+            row.action = #selector(doOpenLeafSettings)
+            row.target = self
+            row.representedObject = machine
+            row.setAccessibilityIdentifier("leaf_row_\(machine.key)")
             sub.addItem(row)
         }
 
@@ -3021,45 +3201,6 @@ final class StatusController: NSObject {
                 failed.runModal()
             }
             self.refresh()
-        }
-    }
-
-    @objc private func doToggleLeafVisibility(_ sender: NSMenuItem) {
-        guard state.identity?.canManageDevices == true,
-              let machine = sender.representedObject as? AdoptedHost,
-              let token = HostAgent.token() else { return }
-        let home = machine.seesHome ?? true
-        let siblings = machine.seesLeaves ?? true
-        probe.visibility(hostKey: machine.key, seesHome: sender.tag == 0 ? !home : home,
-                         seesLeaves: sender.tag == 1 ? !siblings : siblings, token: token) {
-            [weak self] ok, detail in
-            if !ok {
-                let alert = NSAlert()
-                alert.messageText = "Could Not Update Leaf Visibility"
-                alert.informativeText = detail
-                alert.runModal()
-            }
-            self?.refresh()
-        }
-    }
-
-    /// A leaf's Usage policy. The tag is the index into the three states, so
-    /// the one item the operator clicked is the whole request — no toggle
-    /// arithmetic, because this is a choice of three and not a switch.
-    @objc private func doSetLeafUsage(_ sender: NSMenuItem) {
-        guard state.identity?.canManageDevices == true,
-              let machine = sender.representedObject as? AdoptedHost,
-              let token = HostAgent.token(),
-              sender.tag >= 0, sender.tag < UsagePolicy.allCases.count else { return }
-        probe.leafUsage(hostKey: machine.key, state: UsagePolicy.allCases[sender.tag],
-                        token: token) { [weak self] ok, detail in
-            if !ok {
-                let alert = NSAlert()
-                alert.messageText = "Could Not Set Usage Reporting"
-                alert.informativeText = detail
-                alert.runModal()
-            }
-            self?.refresh()
         }
     }
 
@@ -3490,9 +3631,8 @@ final class StatusController: NSObject {
     /// credentials that machine already holds or the tunnel it dialled out on.
     /// Claiming a lockout this hub cannot perform would be the more comforting
     /// sentence and the false one.
-    @objc private func doForgetMachine(_ sender: NSMenuItem) {
-        guard let machine = sender.representedObject as? AdoptedHost,
-              !machine.key.isEmpty, let token = HostAgent.token() else { return }
+    private func forgetMachine(_ machine: AdoptedHost) {
+        guard !machine.key.isEmpty, let token = HostAgent.token() else { return }
 
         let alert = NSAlert()
         alert.alertStyle = .warning

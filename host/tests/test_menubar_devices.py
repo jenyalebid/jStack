@@ -119,7 +119,7 @@ let window = HostInfoWindow()
 let form = HostInfoForm(machine: "Lab Mac", status: "Running", version: "0.70.0",
     hubSource: nil, sourceBusy: false, follow: { _ in }, rebuild: {},
     app: InfoAppSnapshot(), updateStatus: "Update available",
-    error: nil, localCommand: update, machines: [], commands: [:],
+    error: nil, localCommand: update,
     open: {}, download: {})
 window.render(form)
 let hosting = window.contentView as! NSHostingView<HostInfoForm>
