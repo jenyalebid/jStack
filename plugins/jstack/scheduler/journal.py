@@ -27,8 +27,12 @@ def append(job_id: str, record: dict) -> None:
 
 
 def started_record(*, job_id: str, run_id: str, session_id: str, run_at_ms: int,
-                   spawned_at_ms: int, pid: int, pgid: int) -> dict:
-    return {
+                   spawned_at_ms: int, pid: int, pgid: int,
+                   job_name: str = "", booked_by: "dict|None" = None) -> dict:
+    # `jobName` and `bookedBy` are copied off the job at spawn: a one-shot is
+    # deleted from the registry once it fires, and this row is then the only
+    # place that still links the run's session to the session that booked it.
+    rec = {
         "ts": _now_ms(),
         "jobId": job_id,
         "action": "started",
@@ -39,6 +43,11 @@ def started_record(*, job_id: str, run_id: str, session_id: str, run_at_ms: int,
         "pid": pid,
         "pgid": pgid,
     }
+    if job_name:
+        rec["jobName"] = job_name
+    if booked_by:
+        rec["bookedBy"] = booked_by
+    return rec
 
 
 def finished_record(*, job_id: str, agent_id: str, status: str, summary: str,

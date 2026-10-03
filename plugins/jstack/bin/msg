@@ -777,6 +777,8 @@ def _sched_argv(sub: list) -> "tuple|None":
     plugin_root = Path(__file__).resolve().parent.parent
     env = os.environ.copy()
     env["PYTHONPATH"] = f"{plugin_root}:{env.get('PYTHONPATH', '')}".rstrip(":")
+    # The CLI stamps the sending session as the booker; this names the tool.
+    env["JSTACK_BOOKED_VIA"] = "msg"
     home = mail.get("scheduler_home")
     if home:
         env["SCHEDULER_HOME"] = str(Path(home).expanduser())

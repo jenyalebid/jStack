@@ -346,6 +346,19 @@ def retry_banner(retry_of: str, reason: str = "") -> str:
         retry_of=retry_of, reason=reason or "a transient fault").strip()
 
 
+def booked_by_line(booker: "dict|None") -> str:
+    """The provenance line a run is handed: which session booked it and where
+    that session's transcript is, so the woken session can go back for the
+    context a one-paragraph wake message leaves out. '' when the job carries
+    no booker (booked from a shell, or before bookings were stamped)."""
+    if not booker or not booker.get("session_id"):
+        return ""
+    from hooks._prompts import load
+    where = f" — transcript {booker['transcript']}" if booker.get("transcript") else ""
+    return load("scheduler-booked-by.md").format(
+        session_id=booker["session_id"], where=where).strip() + "\n\n"
+
+
 def build_argv(claude_bin: str, model: str, session_id: str, message: str,
                resume_session_id: "str|None" = None,
                permission_mode: str = "bypassPermissions") -> list:
@@ -467,6 +480,7 @@ class Run:
         banner = (retry_banner(self.retry_of, self.retry_reason) + "\n\n"
                   if self.retry_of else "")
         message = (f"[cron:{self.job_id} {self.job.get('name', '')}] "
+                   f"{booked_by_line(self.job.get('booked_by'))}"
                    f"{banner}{self.job['payload']['message']}")
         claude_bin = self.job.get("claude_bin") or self.defaults.get("claude_bin", "claude")
         # Install-owned: the marker env a run carries (autonomy gates, timeline
@@ -552,6 +566,8 @@ class Run:
             spawned_at_ms=self.spawned_at_ms,
             pid=self.pid,
             pgid=self.pgid,
+            job_name=self.job.get("name", ""),
+            booked_by=self.job.get("booked_by"),
         ))
         threading.Thread(target=self._watch, daemon=True, name=f"run-{self.run_id}").start()
         return self

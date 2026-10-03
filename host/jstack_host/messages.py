@@ -33,12 +33,18 @@ _NOISE_PREFIXES = ("<", "Caveat:", "# AGENTS.md instructions for ")
 # The marker is noise; the body is the reason the session exists — strip one,
 # surface the other, everywhere the session presents itself.
 _SPAWN_MARKER = re.compile(r"^\[(?:cron:|POST-SESSION-REVIEW)[^\]]*\]\s*")
+# A scheduled run then names the session that booked it — provenance for the
+# session to read, not part of the task.
+_BOOKED_BY_LINE = re.compile(r"^\[booked by session [^\]]*\][^\n]*\n+")
 
 
 def spawn_task(text: str) -> str:
     """The injected task behind a spawn marker; '' when text isn't one."""
     m = _SPAWN_MARKER.match(text or "")
-    return text[m.end():].strip() if m else ""
+    if not m:
+        return ""
+    rest = text[m.end():]
+    return _BOOKED_BY_LINE.sub("", rest, count=1).strip()
 
 _CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 

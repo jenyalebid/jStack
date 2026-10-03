@@ -348,8 +348,10 @@ def main() -> int:
     if sid:
         argv += ["--resume-session", sid]
     try:
+        # The CLI stamps the booking session itself; this names the tool.
         r = subprocess.run(argv, capture_output=True, text=True, timeout=30,
-                           cwd=str(PLUGIN_ROOT))
+                           cwd=str(PLUGIN_ROOT),
+                           env={**os.environ, "JSTACK_BOOKED_VIA": "schedule-self"})
     except (OSError, subprocess.SubprocessError) as e:
         _fail(f"the wake was NOT booked ({e}) — do not report a check-back "
               f"you do not have.", code=1)

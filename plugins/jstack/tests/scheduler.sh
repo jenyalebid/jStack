@@ -723,6 +723,35 @@ assert msg.index("[RETRY") < msg.index("publish the queued post"), msg
 assert msg.rstrip().endswith("publish the queued post"), msg
 '
 
+check "a real spawn names the session that booked it, and the journal keeps the booker" '
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from scheduler import config, runner
+HOME = Path(os.environ["SCHEDULER_HOME"])
+BOOKER = {"session_id": "b00ced00-1111", "engine": "codex", "via": "msg",
+          "transcript": "/t/rollout-b00ced00-1111.jsonl"}
+JOB = {"id": "booked-spawn", "agent_id": "plain", "name": "Follow-up",
+       "payload": {"message": "check the rollout"}, "booked_by": BOOKER,
+       "claude_bin": str(HOME / "tools" / "claude")}
+r = runner.Run(job=JOB, defaults=dict(config.BUILTIN_DEFAULTS),
+               scheduled_for=datetime.now(timezone.utc),
+               on_finish=lambda *a, **k: None).spawn()
+r.proc.wait()
+msg = (HOME / "claude-argv.txt").read_text().split("\n-p\n", 1)[1]
+assert msg.startswith("[cron:booked-spawn Follow-up] [booked by session b00ced00-1111"), msg
+assert "/t/rollout-b00ced00-1111.jsonl" in msg, msg
+assert msg.index("booked by") < msg.index("check the rollout"), msg
+assert msg.rstrip().endswith("check the rollout"), msg
+import json
+rows = [json.loads(l) for l in (config.RUNS_DIR / "booked-spawn.jsonl").read_text().splitlines()]
+rec = [x for x in rows if x["action"] == "started"][-1]
+assert rec["bookedBy"] == BOOKER, rec
+assert rec["jobName"] == "Follow-up", rec
+# a job with no booker hands the session nothing extra
+assert runner.booked_by_line(None) == "" and runner.booked_by_line({"via": "dashboard"}) == ""
+'
+
 # ── failure delivery: a terminal non-ok finish reaches a human (#17) ──
 #
 # The outage that filed it: a daily job died two mornings running, every record

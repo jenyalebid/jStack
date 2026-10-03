@@ -240,6 +240,8 @@ import hashlib, json, os, sys
 argv = sys.argv[1:]
 with open(os.environ["WAKE_ARGV"], "a") as f:
     f.write(" ".join(a.replace("\n", " ") for a in argv) + "\n")
+with open(os.environ["WAKE_ARGV"] + ".env", "a") as f:
+    f.write(f"{os.environ.get('JSTACK_BOOKED_VIA', '')} {os.environ.get('CLAUDE_CODE_SESSION_ID', '')}\n")
 if "add-once" in argv:
     print(json.dumps({"id": hashlib.md5(" ".join(argv).encode()).hexdigest()}))
 EOS
@@ -265,6 +267,11 @@ grep -q "\[inbox:$TID\]" "$TMP/wake.argv" \
   || fail "a task records the session that sent it, and no receiver yet"
 [[ "$(SQL "SELECT wake_job <> '' FROM messages WHERE id=$TID")" == "[(1,)]" ]] \
   && pass "the booked wake is recorded on the task" || fail "the booked wake is recorded on the task"
+# The scheduler stamps the booker off this env: the tool, and the sending
+# session, so the woken session can read who asked and why.
+[[ "$(tail -1 "$TMP/wake.argv.env")" == "msg $ALICE_S" ]] \
+  && pass "the wake is booked as msg, by the sending session" \
+  || fail "the wake is booked as msg, by the sending session (got: $(tail -1 "$TMP/wake.argv.env"))"
 
 # a wake runs in the seat's real DIRECTORY, cased as it is on disk. A seat
 # string is lowercase and the workspace string is what the CLI hashes into a
