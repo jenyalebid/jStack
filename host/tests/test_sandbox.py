@@ -545,16 +545,59 @@ def reload_owner_current(monkeypatch, rows):
 
 # ---------------------------------------------------------------- guard
 
+BOOTS = [
+    "tart run --no-graphics probe", "tart run probe", "/opt/homebrew/bin/tart run probe",
+    "tart run --headless probe", "qemu-system-aarch64 -nographic -m 4096",
+    "VBoxHeadless --startvm probe", "cd /tmp; tart run --no-graphics probe",
+    "x && tart run probe", "x || tart run --no-graphics probe", "echo x | tart run probe",
+    "nohup tart run --no-graphics probe &", "nohup tart run probe >/dev/null 2>&1 & disown",
+    "sudo -u someone tart run --no-graphics probe", "env FOO=1 tart run --no-graphics probe",
+    "timeout 900 tart run --no-graphics probe", "setsid tart run probe",
+    "caffeinate -s tart run --no-graphics probe", "nice -n 5 tart run probe",
+    "machine run bench 'tart run --no-graphics probe'", 'machine run bench "tart run probe"',
+    "ssh bench 'tart run --no-graphics probe'", "ssh -J bench admin@1.2.3.4 'tart run probe'",
+    "ssh bench 'VBoxHeadless --startvm probe'", "tmux new-session -d 'tart run probe'",
+    "tmux new-session -d -s boot 'tart run probe'", "bash -c 'tart run --no-graphics probe'",
+    "sh -c 'tart run probe'", "zsh -c 'tart run --no-graphics probe'",
+    "eval 'tart run --no-graphics probe'", "machine run bench 'cd /tmp; tart run x'",
+    "ssh bench 'bash -c \"tart run probe\"'", "machine run bench 'nohup tart run probe &'",
+    "machine run bench <<'SH'\ntart run --no-graphics probe\nSH",
+]
+ORDINARY = [
+    "tart list", "tart ip probe", "tart clone base probe", "tart delete probe",
+    "ssh admin@192.168.64.5 'echo hi'", "scp -r admin@192.168.64.5:/tmp/out .",
+    "machine run bench 'sw_vers'", "machine get bench:/tmp/log .",
+    'grep -rn "tart run" .', 'grep -rn -- "--no-graphics" scripts/',
+    "grep -n 'simctl boot' notes.md", "cat ~/.tart/probe.run.log",
+    "tmux new-session -d -s t 'pytest tests/ | tee /tmp/x'", "bash -c 'echo hi'",
+    "cat > /tmp/note.md <<'EOF'\ntart run --no-graphics is what we removed\nEOF",
+    "python3 - <<'PY'\nBANNED = 'tart run --no-graphics'\nPY",
+    "chromium --headless --dump-dom https://x", "xcodebuild -scheme App build",
+    "jstack-host sandbox get ios && jstack-host sandbox exec L1 -- xcodebuild -scheme A test",
+]
+
+
+@pytest.mark.parametrize("command", BOOTS)
+def test_guard_refuses_a_hand_boot_in_every_mode(command):
+    for mode in settings.MODES:
+        assert guard.verdict(command, mode), (command, mode)
+
+
+@pytest.mark.parametrize("command", ORDINARY)
+def test_guard_lets_ordinary_work_through(command):
+    for mode in settings.MODES:
+        assert guard.verdict(command, mode) == "", (command, mode)
+
+
 @pytest.mark.parametrize("command,mode,blocked", [
-    ("tart run --no-graphics probe", "free", True),
-    ("ssh bench 'tart run --no-graphics x'", "free", True),
     ("xcrun simctl boot 1234", "off", True),
     ("xcodebuild -scheme App test", "off", True),
-    ("xcodebuild -scheme App build", "off", False),
+    ("cd app && xcodebuild -scheme App test-without-building", "off", True),
+    ("open -a Simulator", "off", True),
+    ("ssh bench 'xcrun simctl boot x'", "off", True),
     ("xcrun simctl boot 1234", "free", False),
-    ("jstack-host sandbox exec L1 -- xcodebuild -scheme App test", "off", False),
+    ("xcodebuild -scheme App test", "local", False),
     ("cat > t.py <<'EOF'\nxcrun simctl boot x\nEOF", "off", False),
-    ("grep -n 'simctl boot' notes.md", "off", True),
 ])
 def test_guard(command, mode, blocked):
     assert bool(guard.verdict(command, mode)) is blocked
