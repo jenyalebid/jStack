@@ -39,7 +39,8 @@ DEFAULTS: dict = {
     "remote_command": "~/.local/bin/jstack-host",
     # Empty means: found on PATH, then the usual install places.
     "tart": "",
-    # Images that must never be deleted by a reap or a purge.
+    # Images a purge leaves in place unless asked for everything. Reaps only
+    # ever delete guests, never images.
     "keep_images": [],
 }
 

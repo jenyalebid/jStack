@@ -490,6 +490,24 @@ def test_tenants_are_apart_and_purge_proves_it(fleet):
         host.tenant_root(conf, "../a")
 
 
+def test_purge_leaves_the_kept_images_unless_asked_for_everything(fleet):
+    add_host(fleet, "a", mode="free", peers=[])
+    seed_image("a", "a", "base")
+    seed_image("a", "a", "scratch")
+    get_as("a", image="base", kind="own")
+    with on("a"):
+        settings.set_value("keep_images", ["base"])
+        conf = settings.load()
+        t = FakeTart(host.tenant_root(conf, "a") / "tart")
+        out = host.purge({"tenant": "a"})
+        assert out["kept"] == ["base"] and not out["root_gone"]
+        assert t.names() == {host.image_vm("base")}
+        assert [p.name for p in (host.tenant_root(conf, "a") / "images").iterdir()] == ["base.json"]
+        assert host.ls({})["guests"] == [] and host.ls({})["leases"] == []
+        out = host.purge({"tenant": "a", "everything": True})
+        assert out["kept"] == [] and out["root_gone"]
+
+
 # ---------------------------------------------------------------- owner
 
 def test_owner_is_the_engine_above_and_a_reused_pid_is_dead(monkeypatch):

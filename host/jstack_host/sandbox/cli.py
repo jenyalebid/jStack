@@ -129,7 +129,7 @@ def cmd_image(a) -> int:
 
 
 def cmd_purge(a) -> int:
-    _print(host.purge({"tenant": a.tenant}))
+    _print(host.purge({"tenant": a.tenant, "everything": a.everything}))
     return 0
 
 
@@ -235,6 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("purge", help="remove a tenant's whole footprint from this host")
     p.add_argument("tenant")
+    p.add_argument("--everything", action="store_true", help="the keep_images too")
     p.set_defaults(fn=cmd_purge)
 
     p = sub.add_parser("tick", help="expire, reap and keep the warm pool now")

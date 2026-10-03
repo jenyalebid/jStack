@@ -493,10 +493,15 @@ def mode(req: dict) -> dict:
 
 
 def purge(req: dict) -> dict:
-    """Remove a tenant's whole footprint from this host and prove it."""
+    """Remove a tenant's whole footprint from this host and prove it.
+
+    Images named in `keep_images` stay, with their tags, unless the caller asks
+    for everything; every other guest, file and process of the tenant goes.
+    """
     conf = settings.load()
     tenant = req["tenant"]
     root = tenant_root(conf, tenant)
+    keep = set() if req.get("everything") else set(conf["keep_images"])
     with ledger.open_db(settings.root(conf), write=True) as db:
         lease_ids = [l["id"] for l in ledger.leases(db, tenant=tenant)]
         guest_names = [g["name"] for g in ledger.guests(db, tenant=tenant)]
@@ -504,18 +509,31 @@ def purge(req: dict) -> dict:
         db.execute("DELETE FROM guests WHERE tenant=?", (tenant,))
         db.execute("DELETE FROM tickets WHERE tenant=?", (tenant,))
     t = tart_for(conf, tenant)
+    kept_vms = {image_vm(i) for i in keep}
     try:
         for vm in t.list():
-            if vm.get("State") == "running":
+            if vm["Name"] in kept_vms:
+                continue
+            if keep:
+                t.delete(vm["Name"])
+            elif vm.get("State") == "running":
                 t.stop(vm["Name"])
     except (TartError, ValueError):
         pass
-    if root.exists():
+    kept = sorted(i for i in keep if image_vm(i) in t.names()) if keep else []
+    if root.exists() and not kept:
         shutil.rmtree(root)
+    elif root.exists():
+        for child in root.iterdir():
+            if child.name not in ("tart", "images"):
+                shutil.rmtree(child) if child.is_dir() else child.unlink()
+        for tag in (root / "images").glob("*.json"):
+            if tag.stem not in kept:
+                tag.unlink()
     left = subprocess.run(["pgrep", "-f", str(root)], capture_output=True,
                           text=True).stdout.split()
     return {"tenant": tenant, "leases": lease_ids, "guests": guest_names,
-            "root_gone": not root.exists(), "processes_left": left}
+            "kept": kept, "root_gone": not root.exists(), "processes_left": left}
 
 
 def image_pull(req: dict) -> dict:
