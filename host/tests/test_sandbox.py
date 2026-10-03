@@ -213,7 +213,7 @@ def test_reach_is_the_managed_block_minus_the_parent(tmp_path, monkeypatch):
     cfg.write_text(BLOCK)
     monkeypatch.setenv("JSTACK_SANDBOX_SSH_CONFIG", str(cfg))
     monkeypatch.setenv("JSTACK_SANDBOX_PARENT", json.dumps(
-        {"parent_name": "jarvis", "parent_address": "10.0.0.1"}))
+        {"parent_name": "home-hub", "parent_address": "10.0.0.1"}))
     from importlib import reload
     fresh = reload(reach)
     names = [c["name"] for c in fresh.candidates("me")]
