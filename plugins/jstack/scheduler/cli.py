@@ -19,6 +19,7 @@ from urllib import request as urlrequest
 from zoneinfo import ZoneInfo
 
 from . import config, journal, occurrences, registry, runner
+from session_runtime import session_id as current_session_id, transcripts
 
 # Wall-clock zone for job times — the install's, not a fixed region. The
 # label beside a printed time is derived from it for the same reason: a
@@ -74,6 +75,32 @@ def _emit(args, payload: dict, human: str) -> None:
 # ------------------------------------------------------------------ add
 
 
+def _booked_by() -> "dict|None":
+    """Who is making this booking: the session, read from the harness env, and
+    the tool it booked through (`JSTACK_BOOKED_VIA`, set by each booking tool).
+
+    Never taken from the caller's arguments, so a booking cannot claim another
+    session. Without it a woken session knows what it was asked and nothing of
+    who asked or why; the booker's transcript is where the rest of that context
+    lives. A tool with no session behind it (the dashboard) still says so by
+    `via`. None when neither is known — a human's shell."""
+    sid = current_session_id().strip()
+    via = os.environ.get("JSTACK_BOOKED_VIA", "").strip()
+    if not sid and not via:
+        return None
+    booker: dict = {}
+    if sid:
+        found = transcripts(sid)
+        booker = {
+            "session_id": sid,
+            "engine": "codex" if os.environ.get("CODEX_THREAD_ID") else "claude",
+            "transcript": str(found[0]) if len(found) == 1 else "",
+        }
+    if via:
+        booker["via"] = via
+    return booker
+
+
 def _base_job(agent: str, name: str, message: str, timeout_seconds: "int|None",
               workspace: "str|None") -> dict:
     job = {
@@ -86,6 +113,9 @@ def _base_job(agent: str, name: str, message: str, timeout_seconds: "int|None",
         "created_at": datetime.now(LOCAL_TZ).isoformat(timespec="seconds"),
         "description": "",
     }
+    booker = _booked_by()
+    if booker:
+        job["booked_by"] = booker
     if workspace:
         job["workspace"] = workspace
     return job

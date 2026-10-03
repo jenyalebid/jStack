@@ -36,6 +36,15 @@ def test_spawn_task_strips_review_marker():
         "Review session abc123 for dropped threads.")
 
 
+def test_spawn_task_strips_the_booked_by_line():
+    # Provenance for the woken session to read; the card shows the task.
+    booked = CRON.replace("PT] ", "PT] [booked by session 1e668fad — transcript "
+                          "/x/1e668fad.jsonl] That session scheduled this run.\n\n", 1)
+    body = messages.spawn_task(booked)
+    assert body.startswith("Verify the board.py seam"), body
+    assert "booked by" not in body
+
+
 def test_spawn_task_ignores_ordinary_text():
     assert messages.spawn_task("fix the login bug") == ""
     assert messages.spawn_task("<system-reminder>x</system-reminder>") == ""

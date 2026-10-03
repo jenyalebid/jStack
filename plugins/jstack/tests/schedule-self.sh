@@ -199,6 +199,37 @@ else
     fail "--resume booking (rc=$rc, check: $res): $out"
 fi
 
+# The booker: the session the booking came from and the tool it used, read off
+# the env by the scheduler — never passed by the agent — so the woken session
+# can go back to that transcript for context. Both engines.
+CXS="dddddddd-4444-4444-4444-444444444444"
+mkdir -p "$TMP/codex/sessions/2099/01/05"
+printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$CXS" "$SEAT" \
+    > "$TMP/codex/sessions/2099/01/05/rollout-2099-01-05T09-00-00-$CXS.jsonl"
+out=$(cd "$SEAT" && CODEX_HOME="$TMP/codex" CODEX_THREAD_ID="$CXS" "$PY" "$SS" "2099-01-05 09:00" "codex follow-up" 2>&1); rc=$?
+[ $rc -eq 0 ] || fail "codex booking failed (rc=$rc): $out"
+res=$("$PY" - "$REG" "$SID" "$HOME" "$CXS" "$TMP/codex" <<'CHECK' 2>&1
+import json, sys
+reg, sid, home, cxs, cxhome = sys.argv[1:6]
+jobs = json.load(open(reg))["jobs"]
+def booker(name):
+    return [j for j in jobs if j["name"] == name][0].get("booked_by") or {}
+b = booker("alice-chat wake 2099-01-04 09:00 (resume)")
+assert b == {"session_id": sid, "engine": "claude", "via": "schedule-self",
+             "transcript": f"{home}/.claude/projects/proj-{sid}/{sid}.jsonl"}, b
+c = booker("alice-chat wake 2099-01-05 09:00")
+assert c == {"session_id": cxs, "engine": "codex", "via": "schedule-self",
+             "transcript": f"{cxhome}/sessions/2099/01/05/rollout-2099-01-05T09-00-00-{cxs}.jsonl"}, c
+assert booker("alice-chat wake 2099-01-01 09:00") == {"via": "schedule-self"}
+print("OK")
+CHECK
+)
+if [ "$res" = "OK" ]; then
+    pass "a booking records its booker on either engine: session, transcript, tool; no session still names the tool"
+else
+    fail "booked_by: $res"
+fi
+
 before=$(COUNT)
 out=$(cd "$SEAT" && "$PY" "$SS" "2099-01-05 09:00" "phantom resume" --resume 2>&1); rc=$?
 if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "CLAUDE_CODE_SESSION_ID" && [ "$(COUNT)" = "$before" ]; then
