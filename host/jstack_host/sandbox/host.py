@@ -779,7 +779,8 @@ def _links_dir(conf: dict) -> Path:
 
 def _gateway(t: Tart, guest: str) -> str:
     """The host's address on the guest's own network: the guest's default route."""
-    out = t.exec(guest, ["sh", "-c", "route -n get default | awk '/gateway:/{print $2}'"],
+    # Full path: tart exec's PATH carries no /sbin.
+    out = t.exec(guest, ["sh", "-c", "/sbin/route -n get default | awk '/gateway:/{print $2}'"],
                  timeout=30)
     return out.stdout.strip()
 

@@ -548,7 +548,11 @@ def test_the_relay_carries_tcp_and_udp_from_its_one_guest_only():
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); udp.bind(("127.0.0.1", target))
 
     def answer():
-        conn, _ = tcp.accept(); conn.sendall(b"tcp-ok"); conn.close()
+        # Reads to the client's end of sending, then answers: nc's shape.
+        conn, _ = tcp.accept(); asked = b""
+        while data := conn.recv(100):
+            asked += data
+        conn.sendall(b"tcp-" + asked); conn.close()
     threading.Thread(target=answer, daemon=True).start()
 
     def echo():
@@ -561,7 +565,8 @@ def test_the_relay_carries_tcp_and_udp_from_its_one_guest_only():
     try:
         assert proc.stdout.readline().strip() == "ready"
         with socket.create_connection(("127.0.0.1", port), timeout=5) as c:
-            assert c.recv(100) == b"tcp-ok"
+            c.sendall(b"hi"); c.shutdown(socket.SHUT_WR)
+            assert c.recv(100) == b"tcp-hi"
         u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); u.settimeout(5)
         u.sendto(b"hi", ("127.0.0.1", port))
         assert u.recv(100) == b"udp-hi"

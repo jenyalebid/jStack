@@ -13,18 +13,27 @@ import sys
 import threading
 
 
-def _pump(a: socket.socket, b: socket.socket) -> None:
+def _pump(a: socket.socket, b: socket.socket, left: list) -> None:
+    """a's bytes to b. a's end of sending passes on as b's, never closing the
+    reply path: a client that sends, then half-closes, still reads its answer."""
     try:
         while data := a.recv(65536):
             b.sendall(data)
+        b.shutdown(socket.SHUT_WR)
     except OSError:
-        pass
-    finally:
         for s in (a, b):
             try:
                 s.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
+    with _lock:
+        left[0] -= 1
+        if not left[0]:
+            a.close()
+            b.close()
+
+
+_lock = threading.Lock()
 
 
 def _tcp(server: socket.socket, allow: str, target: tuple) -> None:
@@ -39,8 +48,9 @@ def _tcp(server: socket.socket, allow: str, target: tuple) -> None:
             conn.close()
             continue
         up.settimeout(None)
+        left = [2]
         for a, b in ((conn, up), (up, conn)):
-            threading.Thread(target=_pump, args=(a, b), daemon=True).start()
+            threading.Thread(target=_pump, args=(a, b, left), daemon=True).start()
 
 
 def _udp(server: socket.socket, allow: str, target: tuple) -> None:
