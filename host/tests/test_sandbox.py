@@ -9,6 +9,7 @@ import contextlib
 import json
 from pathlib import Path
 import os
+import shlex
 import time
 
 import pytest
@@ -379,6 +380,19 @@ def test_another_tenant_cannot_touch_a_lease(fleet):
         host.release({"lease": lease["id"], "tenant": "intruder"})
     with on("a"), pytest.raises(host.Refused):
         host.run_in(lease["id"], ["true"], tenant="intruder")
+
+
+def test_a_run_over_the_wire_arrives_with_its_tenant_and_argv(monkeypatch):
+    from jstack_host.sandbox import cli
+    sent, ran = [], []
+    monkeypatch.setattr(client.subprocess, "run",
+                        lambda argv, **kw: sent.append(argv[-1]) or type("P", (), {"returncode": 0})())
+    monkeypatch.setattr(host, "run_in", lambda lease, argv, **kw: ran.append((lease, argv, kw)) or 0)
+    client.run({"ssh": "far"}, "L1", ["sh", "-c", "echo $X", "--", "-i"], interactive=True, tenant="t")
+    words = shlex.split(sent[0])
+    cli.main(words[words.index("sandbox") + 1:])
+    assert ran == [("L1", ["sh", "-c", "echo $X", "--", "-i"],
+                    {"tty": False, "interactive": True, "tenant": "t"})]
 
 
 def test_ls_shows_only_this_sessions_leases(fleet, monkeypatch):

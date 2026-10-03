@@ -164,10 +164,18 @@ def cmd_guard(a) -> int:
 def cmd_host(a) -> int:
     """The machine-to-machine door: JSON in on stdin, JSON out on stdout."""
     if a.verb == "run":
-        argv = a.rest[1:] if a.rest and a.rest[0] == "--" else a.rest
+        # Its own words up to `--`: argparse's REMAINDER would take the options as argv.
+        words = ([a.lease] if a.lease else []) + a.rest
+        cut = words.index("--") if "--" in words else len(words)
+        rp = argparse.ArgumentParser(prog="jstack-host sandbox host run")
+        rp.add_argument("lease")
+        rp.add_argument("--tenant", default="")
+        rp.add_argument("--tty", action="store_true")
+        rp.add_argument("-i", action="store_true")
+        o = rp.parse_args(words[:cut])
         try:
-            return host.run_in(a.lease, argv, tty=a.tty, interactive=a.i,
-                               tenant=a.tenant)
+            return host.run_in(o.lease, words[cut + 1:], tty=o.tty, interactive=o.i,
+                               tenant=o.tenant)
         except host.Refused as exc:
             print(str(exc), file=sys.stderr)
             return 2
@@ -270,9 +278,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("host", help=argparse.SUPPRESS)
     p.add_argument("verb")
     p.add_argument("lease", nargs="?")
-    p.add_argument("--tenant", default="")
-    p.add_argument("--tty", action="store_true")
-    p.add_argument("-i", action="store_true")
     p.add_argument("rest", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_host)
 
