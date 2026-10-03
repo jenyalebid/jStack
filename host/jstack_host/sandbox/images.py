@@ -92,10 +92,11 @@ def bake(name: str, say=print) -> dict:
         raise
 
 
-def push(lease_id: str, src: str, dest: str) -> int:
+def push(lease_id: str, src: str, dest: str, exclude: list[str] = ()) -> int:
     entry = client.held(lease_id)
     src_path = Path(src).expanduser().resolve()
-    tar = subprocess.Popen(["tar", "-c", "-C", str(src_path.parent), src_path.name],
+    skip = [w for pat in exclude for w in ("--exclude", pat)]
+    tar = subprocess.Popen(["tar", "-c", *skip, "-C", str(src_path.parent), src_path.name],
                            stdout=subprocess.PIPE)
     from .host import push_argv
     code = client.run(client.target_of(entry), lease_id, push_argv(dest),

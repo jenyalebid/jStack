@@ -50,7 +50,7 @@ def cmd_shell(a) -> int:
 
 
 def cmd_push(a) -> int:
-    return images.push(a.lease, a.src, a.dest)
+    return images.push(a.lease, a.src, a.dest, a.exclude)
 
 
 def cmd_pull(a) -> int:
@@ -192,6 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("lease")
     p.add_argument("src")
     p.add_argument("dest", nargs="?", default="work")
+    p.add_argument("--exclude", action="append", default=[], help="a tar pattern to leave out")
     p.set_defaults(fn=cmd_push)
 
     p = sub.add_parser("pull", help="bring a path out of the lease")
