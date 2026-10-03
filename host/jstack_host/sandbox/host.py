@@ -40,8 +40,38 @@ def tenant_root(conf: dict, tenant: str) -> Path:
     return settings.root(conf) / "tenants" / tenant
 
 
+def shared_cache(conf: dict) -> Path:
+    """Registry pulls, once per host: public images hold nothing of any tenant."""
+    return settings.root(conf) / "shared" / "cache"
+
+
+def _share_cache(conf: dict, home: Path) -> None:
+    """Point a tenant's tart cache at the host's shared one.
+
+    A tenant cache that predates sharing moves over whole when the shared one is
+    still empty, and is left alone otherwise; nothing is ever deleted here.
+    """
+    cache, shared = home / "cache", shared_cache(conf)
+    if cache.is_symlink():
+        return
+    shared.parent.mkdir(parents=True, exist_ok=True)
+    if cache.is_dir():
+        if shared.exists():
+            return
+        cache.rename(shared)
+    shared.mkdir(parents=True, exist_ok=True)
+    home.mkdir(parents=True, exist_ok=True)
+    cache.symlink_to(shared)
+
+
+def is_registry_ref(name: str) -> bool:
+    return "/" in name
+
+
 def tart_for(conf: dict, tenant: str) -> Tart:
-    return Tart(settings.tart_bin(conf), tenant_root(conf, tenant) / "tart")
+    home = tenant_root(conf, tenant) / "tart"
+    _share_cache(conf, home)
+    return Tart(settings.tart_bin(conf), home)
 
 
 def image_vm(image: str) -> str:
@@ -496,7 +526,9 @@ def purge(req: dict) -> dict:
     """Remove a tenant's whole footprint from this host and prove it.
 
     Images named in `keep_images` stay, with their tags, unless the caller asks
-    for everything; every other guest, file and process of the tenant goes.
+    for everything; every other guest, file and process of the tenant goes. The
+    host's shared registry cache is never the tenant's to remove: only the
+    tenant's link to it goes.
     """
     conf = settings.load()
     tenant = req["tenant"]
@@ -512,7 +544,7 @@ def purge(req: dict) -> dict:
     kept_vms = {image_vm(i) for i in keep}
     try:
         for vm in t.list():
-            if vm["Name"] in kept_vms:
+            if vm["Name"] in kept_vms or is_registry_ref(vm["Name"]):
                 continue
             if keep:
                 t.delete(vm["Name"])

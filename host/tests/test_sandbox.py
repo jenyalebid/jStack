@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from pathlib import Path
 import os
 import time
 
@@ -18,8 +19,8 @@ from jstack_host.sandbox import client, guard, host, images, owner, reach, setti
 class FakeTart:
     vms: dict = {}
 
-    def __init__(self, home):
-        self.home = str(home)
+    def __init__(self, *args):
+        self.home = str(args[-1])
 
     def _mine(self):
         return FakeTart.vms.setdefault(self.home, {})
@@ -124,8 +125,6 @@ def fleet(monkeypatch, tmp_path):
     FakeTart.vms = {}
     HOSTS.clear()
     monkeypatch.setattr(host, "Tart", FakeTart)
-    monkeypatch.setattr(host, "tart_for",
-                        lambda conf, tenant: FakeTart(host.tenant_root(conf, tenant) / "tart"))
     monkeypatch.setattr(host, "_headroom",
                         lambda conf: HOSTS[host.host_name()]["headroom"])
     monkeypatch.setattr(client, "start_keeper", lambda lease_id: None)
@@ -521,6 +520,36 @@ def test_purge_leaves_the_kept_images_unless_asked_for_everything(fleet):
         assert host.ls({})["guests"] == [] and host.ls({})["leases"] == []
         out = host.purge({"tenant": "a", "everything": True})
         assert out["kept"] == [] and out["root_gone"]
+
+
+def test_registry_bases_are_pulled_once_per_host_and_no_purge_takes_them(fleet):
+    add_host(fleet, "a", mode="free", peers=[])
+    with on("a"):
+        conf = settings.load()
+        shared = host.shared_cache(conf)
+        for tenant in ("a", "b"):
+            cache = host.tart_for(conf, tenant).home
+            assert (Path(cache) / "cache").resolve() == shared.resolve()
+        (shared / "OCIs" / "ghcr.io").mkdir(parents=True)
+        FakeTart(host.tenant_root(conf, "a") / "tart")._mine()["ghcr.io/x/base:1"] = "stopped"
+        settings.set_value("keep_images", ["nothing"])
+        host.purge({"tenant": "a"})
+        assert FakeTart(host.tenant_root(conf, "a") / "tart").names() == {"ghcr.io/x/base:1"}
+        host.purge({"tenant": "a", "everything": True})
+        assert not host.tenant_root(conf, "a").exists()
+        assert (shared / "OCIs" / "ghcr.io").is_dir()
+
+
+def test_a_tenant_cache_from_before_sharing_moves_over_whole(fleet):
+    add_host(fleet, "a", mode="free", peers=[])
+    with on("a"):
+        conf = settings.load()
+        old = host.tenant_root(conf, "a") / "tart" / "cache" / "OCIs"
+        old.mkdir(parents=True)
+        (old / "pulled").write_text("x")
+        host.tart_for(conf, "a")
+        assert (host.shared_cache(conf) / "OCIs" / "pulled").read_text() == "x"
+        assert (host.tenant_root(conf, "a") / "tart" / "cache").is_symlink()
 
 
 # ---------------------------------------------------------------- owner
